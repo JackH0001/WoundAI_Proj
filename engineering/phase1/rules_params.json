@@ -1,0 +1,2 @@
+{ "_note":"臨床可調；嚴重度為規則式分數卡(可解釋)，非黑箱模型。",
+  "area_thresholds_cm2":[4,16], "necrosis_frac":0.2, "slough_frac":0.3, "grade_base":1, "grade_max":4 }

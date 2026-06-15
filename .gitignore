@@ -39,3 +39,7 @@ secrets.*
 # 例外：允許「stub 假模型」進協作 repo（供建置/測試）
 !**/stub/*.onnx
 !**/*_stub.onnx
+
+# python cache
+__pycache__/
+*.pyc

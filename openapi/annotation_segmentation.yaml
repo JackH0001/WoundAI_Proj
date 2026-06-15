@@ -1,0 +1,60 @@
+openapi: 3.1.0
+info:
+  title: WoundAI Annotation & Segmentation API
+  version: 0.1.0
+  description: 半自動分割與標註資料引擎之介面契約（協作端依此開發，不需碰模型內部）。
+paths:
+  /segment:
+    post:
+      summary: 取得 AI 分割初稿（輔助用途，附信心）
+      requestBody:
+        required: true
+        content: { multipart/form-data: { schema: { type: object, properties: { image: { type: string, format: binary }, model_id: { type: string } } } } }
+      responses:
+        "200":
+          description: OK
+          content: { application/json: { schema: { $ref: "#/components/schemas/SegmentationResult" } } }
+        "503": { description: 模型不可用（graceful degrade，請改人工標註） }
+  /annotations:
+    post:
+      summary: 提交醫師修正後遮罩（修邊即標註，進訓練佇列）
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/AnnotationSubmit" } } }
+      responses:
+        "201": { description: 已建立, content: { application/json: { schema: { $ref: "#/components/schemas/AnnotationRecord" } } } }
+  /annotation-tasks:
+    get:
+      summary: 待標註/待品管任務清單
+      responses: { "200": { description: OK } }
+components:
+  schemas:
+    SegmentationResult:
+      type: object
+      properties:
+        mask_png_b64: { type: string }
+        confidence: { type: number }
+        model_id: { type: string }
+        status: { type: string, enum: [ai_assistive, manual_fallback, unavailable] }
+      required: [status]
+    AnnotationSubmit:
+      type: object
+      properties:
+        image_id: { type: string }
+        edited_mask_png_b64: { type: string }
+        editor_id: { type: string }
+        model_id: { type: string }
+        px_per_mm: { type: number }
+      required: [image_id, edited_mask_png_b64, editor_id]
+    AnnotationRecord:
+      type: object
+      properties:
+        schema_version: { type: string }
+        image_id: { type: string }
+        source: { type: string }
+        area_px: { type: integer }
+        area_mm2: { type: number, nullable: true }
+        correction_iou: { type: number }
+        pixels_changed: { type: integer }
+        status: { type: string }
+      required: [schema_version, image_id, area_px, status]
