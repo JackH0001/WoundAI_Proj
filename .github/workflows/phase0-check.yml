@@ -8,7 +8,7 @@ jobs:
         with: { lfs: true }
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-      - run: pip install numpy onnxruntime pillow pyyaml
+      - run: pip install numpy onnxruntime pillow pyyaml jsonschema flask
       - name: Phase 0 workflow simulation (must be 10/10)
         run: python engineering/phase0/workflow_sim.py
       - name: Phase 0 preprocess consistency
@@ -29,6 +29,10 @@ jobs:
         run: python -c "import yaml;yaml.safe_load(open('openapi/annotation_segmentation.yaml',encoding='utf-8'));print('openapi OK')"
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
+      - name: Phase 2 reference API service (OpenAPI schema-validated)
+        run: python engineering/phase2/test_api_service.py
+      - name: Phase 2 Flask service integration test
+        run: python engineering/phase2/test_app.py
       - name: Phase 1 annotation metrics (JS<->Py consistency)
         run: |
           python engineering/phase1/ui/gen_expected.py

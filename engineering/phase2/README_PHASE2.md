@@ -18,3 +18,11 @@
 - `demo_render.py`：目視驗證渲染（原圖｜分割疊圖｜組織分型疊圖｜規則式結論）。
 - `test_wound_classifier.py`：12 項（組織色彩分型、規則式嚴重度/治療、未校正標記、決定性），已納入 CI。
 > 實例圖（真實傷口）：見 WoundAI 資料夾 `WoundAI_TrackB_實例驗證.png`（不進協作 repo）。
+
+## Track A 收尾：參考服務層（讓 OpenAPI 契約可執行）
+- `api_service.py`：框架無關地實作 `/segment`、`/annotations`、`/annotation-tasks`，接 router + 標註管線；維持 graceful degrade（ai_assistive / manual_fallback / unavailable→503）。遮罩以 PNG base64 傳遞。
+- `test_api_service.py`：14 項，回應**對 OpenAPI 元件 schema 驗證**（含 nullable 正規化）+ 缺模型/旗標關閉行為，已納入 CI。
+
+## 可執行服務
+- `app.py`：Flask 包裝 `api_service`（`/segment` multipart、`/annotations` JSON、`/annotation-tasks`）。啟動 `python app.py`；生產可換 FastAPI + 認證。
+- `test_app.py`：10 項整合測試（Flask test_client，不開真實 port），驗證 HTTP 狀態碼 + OpenAPI schema + 缺參數 400。已納入 CI。
