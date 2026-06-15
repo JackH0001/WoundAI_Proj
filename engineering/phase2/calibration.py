@@ -117,6 +117,30 @@ def calibrate_from_two_points(p1, p2, known_mm):
     return {"found": d>1, "px_per_mm": (d/float(known_mm) if d>1 else None),
             "method": "assisted_2pt", "dist_px": d, "known_mm": float(known_mm)}
 
+def detect_checkerboard_sticker(image_rgb, sticker_mm=20.0, pattern=(3,3), n_squares=5, square_mm=None):
+    """最穩健：以棋盤角點偵測方形校正貼紙（黑白格 calibration target）。
+    對雜亂背景/光照/透視遠比輪廓或色塊穩定（findChessboardCornersSB）。
+    比例＝相鄰角點中位間距 / 每格 mm；square_mm 預設 sticker_mm/n_squares（須對印製設計一次性校準）。"""
+    gray = cv2.cvtColor(np.asarray(image_rgb), cv2.COLOR_RGB2GRAY)
+    found, corners = cv2.findChessboardCornersSB(gray, pattern)
+    if not found:
+        g2 = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        found, corners = cv2.findChessboardCornersSB(g2, pattern)
+        if found: corners = corners / 2.0
+    if not found:
+        return {"found": False, "px_per_mm": None, "method": "checkerboard", "reason": "no_checkerboard"}
+    P = corners.reshape(-1, 2)
+    nn = []
+    for i in range(len(P)):
+        d = np.linalg.norm(P - P[i], axis=1); d[i] = np.inf; nn.append(d.min())
+    sp = float(np.median(nn))                       # 一格邊長(px)
+    sq_mm = float(square_mm if square_mm else sticker_mm / float(n_squares))
+    ppm = sp / sq_mm; ok = 1.0 <= ppm <= 80.0
+    cx, cy = float(P[:, 0].mean()), float(P[:, 1].mean())
+    return {"found": bool(ok), "px_per_mm": (float(ppm) if ok else None), "method": "checkerboard",
+            "square_px": sp, "square_mm": sq_mm, "n_corners": int(len(P)), "center": [cx, cy],
+            "score": 3000.0, "sticker_mm": float(sticker_mm), "reason": ("ok" if ok else "low_confidence")}
+
 def calibrate(image_rgb, sticker_mm=20.0, shape="auto", assist_bbox=None, assist_points=None):
     """回傳校正結果。assisted 優先（最可靠）：assist_bbox=(x0,y0,x1,y1) 或 assist_points=(p1,p2,known_mm)。
     否則 auto best-effort：僅接受高信心 color_corner(cv<0.05) 或 circle；信心不足 → found=False，建議改 assisted。"""
@@ -124,10 +148,11 @@ def calibrate(image_rgb, sticker_mm=20.0, shape="auto", assist_bbox=None, assist
         return calibrate_from_bbox(assist_bbox, sticker_mm)
     if assist_points is not None:
         return calibrate_from_two_points(assist_points[0], assist_points[1], assist_points[2])
+    cb = detect_checkerboard_sticker(image_rgb, sticker_mm) if shape in ("square", "auto") else {"found": False, "px_per_mm": None, "score": -1}
     cc = detect_color_corner_sticker(image_rgb, sticker_mm) if shape in ("square", "auto") else {"found": False}
     if not (cc.get("found") and cc.get("cv", 1) < 0.05): cc = {"found": False, "px_per_mm": None, "score": -1}
     ci = detect_circle_sticker(image_rgb, sticker_mm) if shape in ("circle", "auto") else {"found": False, "px_per_mm": None, "score": -1}
-    cands = [d for d in (cc, ci) if d.get("found")]
+    cands = [d for d in (cb, cc, ci) if d.get("found")]
     if not cands:
         return {"found": False, "px_per_mm": None, "method": None, "reason": "auto_low_confidence_use_assisted"}
     return max(cands, key=lambda d: d.get("score", 0))
