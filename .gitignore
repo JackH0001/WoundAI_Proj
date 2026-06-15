@@ -43,3 +43,7 @@ secrets.*
 # python cache
 __pycache__/
 *.pyc
+
+# phase1 ui generated
+engineering/phase1/ui/expected.json
+node_modules/

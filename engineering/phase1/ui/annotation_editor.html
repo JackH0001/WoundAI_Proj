@@ -1,0 +1,67 @@
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
+<title>WoundAI 半自動分割修邊編輯器（修邊即標註）</title>
+<style>
+ body{font-family:system-ui,"Microsoft JhengHei",sans-serif;margin:16px;color:#1F2A37}
+ h2{color:#0B5E63;margin:0 0 4px} .banner{background:#FFF6E5;border-left:4px solid #E6B45A;padding:8px 12px;margin:8px 0;font-size:14px}
+ .row{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start} .ctrl{display:flex;flex-direction:column;gap:6px;font-size:14px;min-width:230px}
+ .ctrl label{font-weight:600;color:#0B5E63} button{padding:6px 10px;border:1px solid #0B5E63;background:#0B5E63;color:#fff;border-radius:5px;cursor:pointer}
+ button.sec{background:#fff;color:#0B5E63} canvas{border:1px solid #CDE0DE;cursor:crosshair;touch-action:none}
+ pre{background:#F2F7F7;border:1px solid #CDE0DE;padding:10px;border-radius:5px;max-width:560px;overflow:auto;font-size:12px}
+ .stat{font-size:13px;color:#5B6670} input[type=text],input[type=number]{padding:4px;border:1px solid #CDE0DE;border-radius:4px}
+</style></head><body>
+<h2>WoundAI 半自動分割修邊編輯器</h2>
+<div class="banner">⚠ AI 初稿為<b>輔助</b>用途（信心 <span id="conf">0.42</span>，需醫師確認）。請修正邊界後送出——<b>修正即標註</b>，回饋為訓練資料。</div>
+<div class="row">
+ <canvas id="cv" width="384" height="384"></canvas>
+ <div class="ctrl">
+   <label>醫師/標註者 ID</label><input type="text" id="editor" value="dr_a">
+   <label>校正 px/mm</label><input type="number" id="ppm" value="3.0" step="0.1">
+   <label>工具</label>
+   <div><label><input type="radio" name="tool" value="add" checked> 畫(加)</label>
+        <label><input type="radio" name="tool" value="erase"> 擦(減)</label></div>
+   <label>筆刷大小 <span id="bsz">8</span></label><input type="range" id="brush" min="2" max="24" value="8">
+   <div class="row"><button class="sec" id="reset">重置為 AI 初稿</button><button class="sec" id="clear">清除</button></div>
+   <button id="submit">送出標註 → /annotations</button>
+   <div class="stat">面積：<b id="area">0</b> px / <b id="areamm">0</b> mm²　|　correction_IoU(vs AI)：<b id="iou">1.0</b></div>
+ </div>
+</div>
+<h4>標註紀錄（POST /annotations 內容）</h4>
+<pre id="out">（送出後顯示）</pre>
+<button class="sec" id="dl">下載 JSON</button>
+<script src="annot_metrics.js"></script>
+<script>
+const W=128,H=128,SC=3, cv=document.getElementById("cv"), ctx=cv.getContext("2d");
+const img=new Uint8ClampedArray(W*H*3);           // 合成「皮膚+傷口」底圖
+const aiMask=new Uint8Array(W*H), ed=new Uint8Array(W*H);
+// 合成底圖：膚色 + 中央偏紅傷口；AI 初稿=中央方塊(模擬 wsm_stub)
+for(let y=0;y<H;y++)for(let x=0;x<W;x++){const i=(y*W+x)*3; const dx=x-64,dy=y-64,d=Math.hypot(dx,dy);
+  let r=222,g=184,b=160; if(d<34){r=170;g=70;b=60;} img[i]=r;img[i+1]=g;img[i+2]=b;
+  if(x>=44&&x<84&&y>=44&&y<84) aiMask[y*W+x]=1;}    // AI 初稿方塊
+ed.set(aiMask);
+function render(){const id=ctx.createImageData(W,H);for(let p=0;p<W*H;p++){id.data[p*4]=img[p*3];id.data[p*4+1]=img[p*3+1];id.data[p*4+2]=img[p*3+2];id.data[p*4+3]=255;
+  if(ed[p]){id.data[p*4]=Math.min(255,id.data[p*4]+0);id.data[p*4+1]=Math.min(255,id.data[p*4+1]+90);id.data[p*4+2]=Math.min(255,id.data[p*4+2]+0);}}
+  const off=document.createElement("canvas");off.width=W;off.height=H;off.getContext("2d").putImageData(id,0,0);
+  ctx.imageSmoothingEnabled=false; ctx.clearRect(0,0,cv.width,cv.height); ctx.drawImage(off,0,0,cv.width,cv.height);
+  const a=AnnotMetrics.countTrue(ed), ppm=parseFloat(document.getElementById("ppm").value)||0;
+  document.getElementById("area").textContent=a;
+  document.getElementById("areamm").textContent=ppm?(a/(ppm*ppm)).toFixed(2):"—";
+  document.getElementById("iou").textContent=AnnotMetrics.round(AnnotMetrics.iou(aiMask,ed),4);}
+let drawing=false;
+function paint(e){const r=cv.getBoundingClientRect();const mx=Math.floor((e.clientX-r.left)/SC),my=Math.floor((e.clientY-r.top)/SC);
+  const tool=document.querySelector("input[name=tool]:checked").value,bs=+document.getElementById("brush").value,v=tool==="add"?1:0;
+  for(let dy=-bs;dy<=bs;dy++)for(let dx=-bs;dx<=bs;dx++){if(dx*dx+dy*dy>bs*bs)continue;const x=mx+dx,y=my+dy;if(x>=0&&x<W&&y>=0&&y<H)ed[y*W+x]=v;}render();}
+cv.addEventListener("pointerdown",e=>{drawing=true;paint(e);});
+cv.addEventListener("pointermove",e=>{if(drawing)paint(e);});
+addEventListener("pointerup",()=>drawing=false);
+document.getElementById("brush").addEventListener("input",e=>document.getElementById("bsz").textContent=e.target.value);
+document.getElementById("reset").onclick=()=>{ed.set(aiMask);render();};
+document.getElementById("clear").onclick=()=>{ed.fill(0);render();};
+let lastRec=null;
+document.getElementById("submit").onclick=()=>{lastRec=AnnotMetrics.buildRecord({imageId:"img_demo_001",aiMask,editedMask:ed,
+   editorId:document.getElementById("editor").value,modelId:"segmentation.wsm",pxPerMm:parseFloat(document.getElementById("ppm").value)||null,
+   createdAt:new Date().toISOString()});
+  document.getElementById("out").textContent=JSON.stringify(lastRec,null,2)+"\n\n// mock: POST /annotations 201 Created（實機改為呼叫後端）";};
+document.getElementById("dl").onclick=()=>{if(!lastRec)return;const b=new Blob([JSON.stringify(lastRec,null,2)],{type:"application/json"});
+  const a=document.createElement("a");a.href=URL.createObjectURL(b);a.download="annotation_"+lastRec.image_id+".json";a.click();};
+render();
+</script></body></html>

@@ -17,3 +17,9 @@ jobs:
         run: python engineering/phase1/test_phase1.py
       - name: OpenAPI YAML parses
         run: python -c "import yaml;yaml.safe_load(open('openapi/annotation_segmentation.yaml',encoding='utf-8'));print('openapi OK')"
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - name: Phase 1 annotation metrics (JS<->Py consistency)
+        run: |
+          python engineering/phase1/ui/gen_expected.py
+          node engineering/phase1/ui/annot_metrics.test.js
