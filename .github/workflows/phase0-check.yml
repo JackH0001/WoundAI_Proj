@@ -21,6 +21,8 @@ jobs:
         run: python engineering/phase0/test_eval_harness.py
       - name: Phase 2 seg inference graceful-degrade tests
         run: python engineering/phase2/test_phase2.py
+      - name: Phase 2 routing + flywheel tests (A3/A4)
+        run: python engineering/phase2/test_phase2_pipeline.py
       - name: OpenAPI YAML parses
         run: python -c "import yaml;yaml.safe_load(open('openapi/annotation_segmentation.yaml',encoding='utf-8'));print('openapi OK')"
       - uses: actions/setup-node@v4

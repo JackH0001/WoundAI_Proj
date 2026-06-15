@@ -47,3 +47,6 @@ __pycache__/
 # phase1 ui generated
 engineering/phase1/ui/expected.json
 node_modules/
+
+# phase2 runtime queue (不進 repo)
+engineering/phase2/*.jsonl
