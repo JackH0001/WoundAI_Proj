@@ -1,0 +1,61 @@
+# 跨平台換行符策略 - 強制 LF
+# 詳見主目錄 CLAUDE.md → 跨平台注意事項 → 路徑與換行
+# 避免 Windows 端編輯器 / OneDrive 同步把 LF 翻成 CRLF 污染 working tree
+
+# 預設：文字檔自動偵測，commit + checkout 一律 LF
+* text=auto eol=lf
+
+# Windows-only 必須 CRLF
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# 通用 binary（明確標記，避免被當文字處理）
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.webp      binary
+*.heic      binary
+*.pdf       binary
+*.gz        binary
+*.tar       binary
+*.bz2       binary
+*.7z        binary
+*.db        binary
+*.sqlite    binary
+*.sqlite3   binary
+*.xlsx      binary
+*.docx      binary
+*.pptx      binary
+*.mp4       binary
+*.mp3       binary
+*.wav       binary
+*.mov       binary
+*.m4a       binary
+
+# 醫療 / 3D 模型 binary
+*.stl       binary
+*.ply       binary
+*.obj       binary
+*.usdz      binary
+*.dcm       binary
+
+# Apple / Android binary
+*.xcframework/** binary
+*.aar       binary
+*.so        binary
+*.dll       binary
+*.exe       binary
+*.ipa       binary
+*.apk       binary
+
+# === Git LFS（放最後，含 -text 屬性，避免被上面通用規則覆蓋）===
+*.onnx filter=lfs diff=lfs merge=lfs -text
+*.pth filter=lfs diff=lfs merge=lfs -text
+*.h5 filter=lfs diff=lfs merge=lfs -text
+*.dylib filter=lfs diff=lfs merge=lfs -text
+*.zip filter=lfs diff=lfs merge=lfs -text
+*.pt filter=lfs diff=lfs merge=lfs -text
+*.ckpt filter=lfs diff=lfs merge=lfs -text

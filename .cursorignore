@@ -1,0 +1,25 @@
+# env & caches
+.venv/
+venv/
+**/.venv/
+**/venv*/
+**/site-packages/**
+**/__pycache__/**
+DerivedData/
+
+# outputs/logs/archives
+**/Outputs_*/
+nohup.out
+server.log
+opencv-*.zip
+
+# iOS frameworks/temp
+iOS/WoundMeasurementApp/opencv2.xcframework/
+iOS/WoundMeasurementApp/temp_opencv/
+iOS/opencv2.framework/
+iOS/temp_xc/
+
+# duplicates & big binaries
+**/* 2
+**/* 2/**
+**/*.dylib

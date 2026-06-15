@@ -1,0 +1,70 @@
+# .github/workflows/windows.yml
+#
+# Builds and tests the WPF/C# Windows client:
+#   - restore/build the full solution
+#   - run WoundMeasurement.Tests (xUnit) with coverage
+#
+# Triggered on any change under Windows/ or to this workflow.
+name: windows-client
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'Windows/**'
+      - '.github/workflows/windows.yml'
+  pull_request:
+    paths:
+      - 'Windows/**'
+      - '.github/workflows/windows.yml'
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: build + xunit
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: Windows
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('Windows/**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore WoundMeasurementSystem.sln
+
+      - name: Build (Release)
+        run: dotnet build WoundMeasurementSystem.sln -c Release --no-restore
+
+      - name: Test with coverage
+        run: |
+          dotnet test Tests/WoundMeasurement.Tests.csproj `
+              -c Release `
+              --no-build `
+              --logger "trx;LogFileName=test-results.trx" `
+              --collect "XPlat Code Coverage" `
+              --results-directory TestResults
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-results
+          path: |
+            Windows/TestResults/**/*.trx
+            Windows/TestResults/**/coverage.cobertura.xml
+          if-no-files-found: warn

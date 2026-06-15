@@ -1,0 +1,12 @@
+# pre-commit：每次 commit 前掃機敏，攔截外洩。安裝：pip install pre-commit && pre-commit install
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+        args: ["protect","--staged","--redact","-c",".gitleaks.toml"]
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=5000"]   # 阻擋 >5MB 大檔（防誤 commit 模型）

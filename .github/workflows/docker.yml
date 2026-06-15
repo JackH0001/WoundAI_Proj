@@ -1,0 +1,116 @@
+# .github/workflows/docker.yml
+#
+# Builds the cloud service Docker image(s) on every main push and
+# every tag that starts with "v". Publishes to GitHub Container
+# Registry (GHCR) under ghcr.io/<owner>/woundai-cloud.
+#
+# Two variants are built via multi-stage targets in the Dockerfile:
+#   - runtime : CPU-only (default)
+#   - gpu     : CUDA 12 / onnxruntime-gpu
+#
+# On PRs the image is built but NOT pushed, so changes to the
+# Dockerfile are still gated by the build itself.
+name: docker-image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - '雲端 AI 模型訓練及分析服務/**'
+      - '.github/workflows/docker.yml'
+  pull_request:
+    paths:
+      - '雲端 AI 模型訓練及分析服務/**'
+      - '.github/workflows/docker.yml'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_BASE: ${{ github.repository_owner }}/woundai-cloud
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: runtime
+            tag-suffix: cpu
+          - target: gpu
+            tag-suffix: gpu
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          version: latest   # 強制最新 buildkit，避開 GHA cache "non-printable ASCII characters" bug
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}
+          tags: |
+            type=ref,event=branch,suffix=-${{ matrix.tag-suffix }}
+            type=ref,event=pr,suffix=-${{ matrix.tag-suffix }}
+            type=semver,pattern={{version}},suffix=-${{ matrix.tag-suffix }}
+            type=semver,pattern={{major}}.{{minor}},suffix=-${{ matrix.tag-suffix }}
+            type=raw,value=latest,suffix=-${{ matrix.tag-suffix }},enable={{is_default_branch}}
+
+      - name: Build${{ github.event_name != 'pull_request' && ' & push' || '' }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ./雲端 AI 模型訓練及分析服務
+          file: ./雲端 AI 模型訓練及分析服務/Dockerfile
+          target: ${{ matrix.target }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # cache-from/cache-to 暫關 — type=gha 觸發 buildx 已知 bug
+          # "x-docker-expose-session-sharedkey non-printable ASCII"
+          # 待 buildx 修復後可改回 type=gha 或切 type=registry
+          # cache-from: type=gha,scope=${{ matrix.target }}
+          # cache-to: type=gha,scope=${{ matrix.target }},mode=max
+
+      - name: Image summary
+        run: |
+          echo "### Built image(s)" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  scan:
+    name: trivy scan
+    runs-on: ubuntu-22.04
+    needs: build
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: '雲端 AI 模型訓練及分析服務'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          exit-code: '0'        # report-only, don't fail the build yet

@@ -1,0 +1,287 @@
+<Window x:Class="WoundMeasurement.WPF.Views.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes"
+        xmlns:viewModels="clr-namespace:WoundMeasurement.WPF.ViewModels"
+        Title="傷口自動化量測系統"
+        Height="900" Width="1400"
+        WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource MaterialDesignPaper}"
+        TextElement.Foreground="{DynamicResource MaterialDesignBody}"
+        FontFamily="{DynamicResource MaterialDesignFont}">
+
+    <Window.DataContext>
+        <viewModels:MainViewModel/>
+    </Window.DataContext>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 標題列 -->
+        <materialDesign:ColorZone Grid.Row="0" Mode="PrimaryMid" Padding="16">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" Orientation="Horizontal">
+                    <materialDesign:PackIcon Kind="MedicalCross" 
+                                           Width="32" Height="32" 
+                                           VerticalAlignment="Center" 
+                                           Margin="0,0,12,0"/>
+                    <TextBlock Text="傷口自動化量測系統" 
+                             Style="{DynamicResource MaterialDesignHeadline6TextBlock}"
+                             VerticalAlignment="Center"/>
+                </StackPanel>
+
+                <StackPanel Grid.Column="2" Orientation="Horizontal">
+                    <Button Style="{DynamicResource MaterialDesignIconButton}"
+                            ToolTip="設定"
+                            Command="{Binding OpenSettingsCommand}">
+                        <materialDesign:PackIcon Kind="Settings"/>
+                    </Button>
+                    <Button Style="{DynamicResource MaterialDesignIconButton}"
+                            ToolTip="說明"
+                            Command="{Binding OpenHelpCommand}">
+                        <materialDesign:PackIcon Kind="HelpCircle"/>
+                    </Button>
+                </StackPanel>
+            </Grid>
+        </materialDesign:ColorZone>
+
+        <!-- 主要內容區域 -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="250"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- 左側導航面板 -->
+            <materialDesign:Card Grid.Column="0" Margin="16" Padding="0">
+                <StackPanel>
+                    <!-- 系統狀態 -->
+                    <Expander Header="系統狀態" IsExpanded="True" Margin="16,8">
+                        <StackPanel Margin="16,8">
+                            <TextBlock Text="系統狀態:" Style="{DynamicResource MaterialDesignBody2TextBlock}"/>
+                            <TextBlock Text="{Binding SystemStatus.IsInitialized, Converter={StaticResource BoolToStatusConverter}}" 
+                                     Foreground="{Binding SystemStatus.IsInitialized, Converter={StaticResource BoolToColorConverter}}"
+                                     Style="{DynamicResource MaterialDesignBody2TextBlock}" Margin="0,4,0,8"/>
+                            
+                            <TextBlock Text="捕捉模組:" Style="{DynamicResource MaterialDesignBody2TextBlock}"/>
+                            <TextBlock Text="{Binding SystemStatus.CaptureModuleStatus, Converter={StaticResource BoolToStatusConverter}}" 
+                                     Foreground="{Binding SystemStatus.CaptureModuleStatus, Converter={StaticResource BoolToColorConverter}}"
+                                     Style="{DynamicResource MaterialDesignBody2TextBlock}" Margin="0,4,0,8"/>
+                            
+                            <TextBlock Text="處理模組:" Style="{DynamicResource MaterialDesignBody2TextBlock}"/>
+                            <TextBlock Text="{Binding SystemStatus.ProcessingModuleStatus, Converter={StaticResource BoolToStatusConverter}}" 
+                                     Foreground="{Binding SystemStatus.ProcessingModuleStatus, Converter={StaticResource BoolToColorConverter}}"
+                                     Style="{DynamicResource MaterialDesignBody2TextBlock}" Margin="0,4,0,8"/>
+                            
+                            <TextBlock Text="AI 模組:" Style="{DynamicResource MaterialDesignBody2TextBlock}"/>
+                            <TextBlock Text="{Binding SystemStatus.AIModuleStatus, Converter={StaticResource BoolToStatusConverter}}" 
+                                     Foreground="{Binding SystemStatus.AIModuleStatus, Converter={StaticResource BoolToColorConverter}}"
+                                     Style="{DynamicResource MaterialDesignBody2TextBlock}" Margin="0,4,0,8"/>
+                            
+                            <TextBlock Text="量測模組:" Style="{DynamicResource MaterialDesignBody2TextBlock}"/>
+                            <TextBlock Text="{Binding SystemStatus.MeasurementModuleStatus, Converter={StaticResource BoolToStatusConverter}}" 
+                                     Foreground="{Binding SystemStatus.MeasurementModuleStatus, Converter={StaticResource BoolToColorConverter}}"
+                                     Style="{DynamicResource MaterialDesignBody2TextBlock}" Margin="0,4,0,8"/>
+                        </StackPanel>
+                    </Expander>
+
+                    <!-- 快速操作 -->
+                    <Expander Header="快速操作" IsExpanded="True" Margin="16,8">
+                        <StackPanel Margin="16,8">
+                            <Button Content="開始捕捉" 
+                                  Style="{DynamicResource MaterialDesignRaisedButton}"
+                                  Command="{Binding StartCaptureCommand}"
+                                  IsEnabled="{Binding CanStartCapture}"
+                                  Margin="0,4"/>
+                            
+                            <Button Content="停止捕捉" 
+                                  Style="{DynamicResource MaterialDesignRaisedButton}"
+                                  Command="{Binding StopCaptureCommand}"
+                                  IsEnabled="{Binding CanStopCapture}"
+                                  Margin="0,4"/>
+                            
+                            <Button Content="單次量測" 
+                                  Style="{DynamicResource MaterialDesignRaisedButton}"
+                                  Command="{Binding SingleMeasurementCommand}"
+                                  IsEnabled="{Binding CanPerformMeasurement}"
+                                  Margin="0,4"/>
+                            
+                            <Button Content="連續量測" 
+                                  Style="{DynamicResource MaterialDesignRaisedButton}"
+                                  Command="{Binding ContinuousMeasurementCommand}"
+                                  IsEnabled="{Binding CanPerformMeasurement}"
+                                  Margin="0,4"/>
+                        </StackPanel>
+                    </Expander>
+
+                    <!-- 最近量測 -->
+                    <Expander Header="最近量測" IsExpanded="True" Margin="16,8">
+                        <ListBox ItemsSource="{Binding RecentMeasurements}" 
+                               MaxHeight="200"
+                               Margin="16,8">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel Margin="8">
+                                        <TextBlock Text="{Binding Timestamp, StringFormat='yyyy/MM/dd HH:mm'}" 
+                                                 Style="{DynamicResource MaterialDesignBody2TextBlock}"/>
+                                        <TextBlock Text="{Binding Area, StringFormat='面積: {0:F2} mm²'}" 
+                                                 Style="{DynamicResource MaterialDesignBody2TextBlock}"/>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </Expander>
+                </StackPanel>
+            </materialDesign:Card>
+
+            <!-- 右側主要內容 -->
+            <Grid Grid.Column="1" Margin="0,16,16,16">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- 影像顯示區域 -->
+                <materialDesign:Card Grid.Row="0" Margin="0,0,0,16">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <!-- 原始影像 -->
+                        <Border Grid.Column="0" BorderBrush="{DynamicResource MaterialDesignDivider}" BorderThickness="0,0,1,0">
+                            <StackPanel Margin="16">
+                                <TextBlock Text="原始影像" 
+                                         Style="{DynamicResource MaterialDesignHeadline6TextBlock}"
+                                         HorizontalAlignment="Center" Margin="0,0,0,16"/>
+                                
+                                <Border Background="{DynamicResource MaterialDesignBackground}" 
+                                      BorderBrush="{DynamicResource MaterialDesignDivider}" 
+                                      BorderThickness="1" 
+                                      Height="300">
+                                    <Image Source="{Binding OriginalImage}" 
+                                         Stretch="Uniform" 
+                                         RenderOptions.BitmapScalingMode="HighQuality"/>
+                                </Border>
+                                
+                                <TextBlock Text="{Binding OriginalImageInfo}" 
+                                         Style="{DynamicResource MaterialDesignBody2TextBlock}"
+                                         HorizontalAlignment="Center" 
+                                         Margin="0,8,0,0"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 處理後影像 -->
+                        <Border Grid.Column="1">
+                            <StackPanel Margin="16">
+                                <TextBlock Text="處理結果" 
+                                         Style="{DynamicResource MaterialDesignHeadline6TextBlock}"
+                                         HorizontalAlignment="Center" Margin="0,0,0,16"/>
+                                
+                                <Border Background="{DynamicResource MaterialDesignBackground}" 
+                                      BorderBrush="{DynamicResource MaterialDesignDivider}" 
+                                      BorderThickness="1" 
+                                      Height="300">
+                                    <Image Source="{Binding ProcessedImage}" 
+                                         Stretch="Uniform" 
+                                         RenderOptions.BitmapScalingMode="HighQuality"/>
+                                </Border>
+                                
+                                <TextBlock Text="{Binding ProcessedImageInfo}" 
+                                         Style="{DynamicResource MaterialDesignBody2TextBlock}"
+                                         HorizontalAlignment="Center" 
+                                         Margin="0,8,0,0"/>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </materialDesign:Card>
+
+                <!-- 量測結果 -->
+                <materialDesign:Card Grid.Row="1">
+                    <Grid Margin="16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <!-- 面積 -->
+                        <StackPanel Grid.Column="0" HorizontalAlignment="Center">
+                            <TextBlock Text="面積" Style="{DynamicResource MaterialDesignBody2TextBlock}" HorizontalAlignment="Center"/>
+                            <TextBlock Text="{Binding MeasurementResult.Area, StringFormat='{0:F2} mm²'}" 
+                                     Style="{DynamicResource MaterialDesignHeadline6TextBlock}" 
+                                     HorizontalAlignment="Center"
+                                     Foreground="{DynamicResource PrimaryHueMidBrush}"/>
+                        </StackPanel>
+
+                        <!-- 周長 -->
+                        <StackPanel Grid.Column="1" HorizontalAlignment="Center">
+                            <TextBlock Text="周長" Style="{DynamicResource MaterialDesignBody2TextBlock}" HorizontalAlignment="Center"/>
+                            <TextBlock Text="{Binding MeasurementResult.Perimeter, StringFormat='{0:F2} mm'}" 
+                                     Style="{DynamicResource MaterialDesignHeadline6TextBlock}" 
+                                     HorizontalAlignment="Center"
+                                     Foreground="{DynamicResource PrimaryHueMidBrush}"/>
+                        </StackPanel>
+
+                        <!-- 深度 -->
+                        <StackPanel Grid.Column="2" HorizontalAlignment="Center">
+                            <TextBlock Text="深度" Style="{DynamicResource MaterialDesignBody2TextBlock}" HorizontalAlignment="Center"/>
+                            <TextBlock Text="{Binding MeasurementResult.Depth, StringFormat='{0:F2} mm'}" 
+                                     Style="{DynamicResource MaterialDesignHeadline6TextBlock}" 
+                                     HorizontalAlignment="Center"
+                                     Foreground="{DynamicResource PrimaryHueMidBrush}"/>
+                        </StackPanel>
+
+                        <!-- 體積 -->
+                        <StackPanel Grid.Column="3" HorizontalAlignment="Center">
+                            <TextBlock Text="體積" Style="{DynamicResource MaterialDesignBody2TextBlock}" HorizontalAlignment="Center"/>
+                            <TextBlock Text="{Binding MeasurementResult.Volume, StringFormat='{0:F2} mm³'}" 
+                                     Style="{DynamicResource MaterialDesignHeadline6TextBlock}" 
+                                     HorizontalAlignment="Center"
+                                     Foreground="{DynamicResource PrimaryHueMidBrush}"/>
+                        </StackPanel>
+                    </Grid>
+                </materialDesign:Card>
+            </Grid>
+        </Grid>
+
+        <!-- 狀態列 -->
+        <materialDesign:ColorZone Grid.Row="2" Mode="PrimaryLight" Padding="16,8">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Column="0" 
+                         Text="{Binding StatusMessage}" 
+                         Style="{DynamicResource MaterialDesignBody2TextBlock}"
+                         VerticalAlignment="Center"/>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <TextBlock Text="{Binding ProcessingTime, StringFormat='處理時間: {0}ms'}" 
+                             Style="{DynamicResource MaterialDesignBody2TextBlock}"
+                             VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    
+                    <ProgressBar Value="{Binding ProgressValue}" 
+                               Maximum="100" 
+                               Width="100" 
+                               Height="4" 
+                               VerticalAlignment="Center"/>
+                </StackPanel>
+            </Grid>
+        </materialDesign:ColorZone>
+    </Grid>
+</Window> 

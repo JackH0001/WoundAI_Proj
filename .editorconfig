@@ -1,0 +1,33 @@
+# 編輯器層強制 LF + UTF-8，跨平台一致
+# 配合 .gitattributes 雙層防護
+# VS Code / Cursor 需要 EditorConfig extension（其他多數 IDE 內建）
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# Windows-only 必須 CRLF
+[*.{bat,cmd,ps1}]
+end_of_line = crlf
+
+# Makefile 必須 tab
+[Makefile]
+indent_style = tab
+
+# Markdown 保留尾隨空白（兩格代表 hard line break）
+[*.md]
+trim_trailing_whitespace = false
+
+# Python 慣例 4-space
+[*.py]
+indent_size = 4
+
+# Swift / Kotlin / Java 慣例 4-space
+[*.{swift,kt,kts,java}]
+indent_size = 4

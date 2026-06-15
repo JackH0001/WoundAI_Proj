@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Core\WoundMeasurement.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="OpenCvSharp4" Version="4.8.0.20230708" />
+    <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.8.0.20230708" />
+    <PackageReference Include="OpenCvSharp4.Extensions" Version="4.8.0.20230708" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.0" />
+    <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      DepthCaptureModule.cs 相依 Intel RealSense SDK，但官方未在 nuget.org 發佈套件，
+      需從 https://github.com/IntelRealSense/librealsense Releases 手動安裝 .NET wrapper。
+      CI 環境無 RealSense 硬體，故從 build 排除；本機開發者啟用 RealSense 時請：
+        1. 安裝 librealsense .NET wrapper DLL
+        2. 移除下方 Compile Remove
+        3. 加 <Reference Include="Intel.RealSense" HintPath="..." /> 或 PackageReference
+    -->
+    <Compile Remove="Modules/DepthCaptureModule.cs" />
+    <None Include="Modules/DepthCaptureModule.cs" />
+  </ItemGroup>
+
+</Project> 

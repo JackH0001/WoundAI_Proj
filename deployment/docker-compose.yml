@@ -1,0 +1,152 @@
+version: "3.9"
+
+# ══════════════════════════════════════════════════════════════════════════
+# WoundAI 全端生產部署
+#
+# 服務架構：
+#   nginx  → 反向代理 / SSL / 速率限制
+#   flask  → Flask REST API（傳統推論 + JWT）
+#   fastapi→ FastAPI 雲端 AI 服務（訓練管理 + 進階分析）
+#   redis  → 任務佇列 broker + result backend
+#   worker → Celery 非同步訓練 worker
+#
+# 啟動方式：
+#   cp .env.example .env   # 填入機密值
+#   docker compose up -d
+# ══════════════════════════════════════════════════════════════════════════
+
+x-common-env: &common-env
+  TZ: Asia/Taipei
+
+services:
+
+  # ── Nginx 反向代理 ────────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: woundai-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ../Backend/Flask/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro          # 正式環境掛載憑證
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      flask:
+        condition: service_healthy
+      fastapi:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [woundai-net]
+    environment:
+      <<: *common-env
+
+  # ── Flask 後端（傳統推論 API）────────────────────────────────────────
+  flask:
+    build:
+      context: ../Backend/Flask
+      dockerfile: Dockerfile
+    container_name: woundai-flask
+    env_file: .env
+    environment:
+      <<: *common-env
+      FLASK_ENV: production
+    volumes:
+      - flask_uploads:/app/uploads
+      - flask_models:/app/models
+    expose:
+      - "5000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    networks: [woundai-net]
+
+  # ── FastAPI 雲端 AI 服務 ──────────────────────────────────────────────
+  fastapi:
+    build:
+      context: "../雲端 AI 模型訓練及分析服務"
+      dockerfile: Dockerfile
+    container_name: woundai-fastapi
+    env_file: .env
+    environment:
+      <<: *common-env
+      DATABASE_URL: sqlite:////app/data/wound_ai.db
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - fastapi_uploads:/app/uploads
+      - fastapi_data:/app/data
+      - fastapi_models:/app/saved_models
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 25s
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [woundai-net]
+
+  # ── Redis（任務佇列 + 快取）──────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: woundai-redis
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb",
+              "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis_data:/data
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks: [woundai-net]
+
+  # ── Celery Worker（非同步訓練任務）──────────────────────────────────
+  worker:
+    build:
+      context: "../雲端 AI 模型訓練及分析服務"
+      dockerfile: Dockerfile
+    container_name: woundai-worker
+    command: ["celery", "-A", "app.worker.celery_app", "worker",
+              "--loglevel=info", "--concurrency=2", "-Q", "training"]
+    env_file: .env
+    environment:
+      <<: *common-env
+      DATABASE_URL: sqlite:////app/data/wound_ai.db
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - fastapi_data:/app/data
+      - fastapi_models:/app/saved_models
+    depends_on:
+      redis:
+        condition: service_healthy
+      fastapi:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [woundai-net]
+
+# ── 持久化 volumes ────────────────────────────────────────────────────────
+volumes:
+  nginx_logs:
+  flask_uploads:
+  flask_models:
+  fastapi_uploads:
+  fastapi_data:
+  fastapi_models:
+  redis_data:
+
+# ── 內部網路 ──────────────────────────────────────────────────────────────
+networks:
+  woundai-net:
+    driver: bridge

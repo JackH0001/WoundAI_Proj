@@ -1,0 +1,20 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    // FAIL_ON_PROJECT_REPOS 強制所有 repository 在此聲明，
+    // 不允許 project-level build.gradle 再加 repositories
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        maven { url 'https://jitpack.io' }   // 移自 root build.gradle allprojects
+    }
+}
+
+rootProject.name = "WoundMeasurementApp"
+include ':app'

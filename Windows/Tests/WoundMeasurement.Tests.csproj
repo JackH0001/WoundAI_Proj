@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Core\WoundMeasurement.Core.csproj" />
+    <ProjectReference Include="..\Capture\WoundMeasurement.Capture.csproj" />
+    <ProjectReference Include="..\Processing\WoundMeasurement.Processing.csproj" />
+    <ProjectReference Include="..\AI\WoundMeasurement.AI.csproj" />
+    <ProjectReference Include="..\Measurement\WoundMeasurement.Measurement.csproj" />
+    <ProjectReference Include="..\Data\WoundMeasurement.Data.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
+    <PackageReference Include="xunit" Version="2.6.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.4" />
+    <PackageReference Include="coverlet.collector" Version="6.0.0" />
+    <PackageReference Include="Moq" Version="4.20.69" />
+    <PackageReference Include="FluentAssertions" Version="6.12.0" />
+  </ItemGroup>
+
+</Project> 

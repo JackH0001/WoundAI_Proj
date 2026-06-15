@@ -1,0 +1,26 @@
+# gitleaks 設定 — 預設規則 + WoundAI 自訂規則（攔截已知硬編碼機敏）
+title = "WoundAI gitleaks config"
+[extend]
+useDefault = true
+
+[[rules]]
+id = "woundai-hardcoded-password-map"
+description = "Hardcoded password literal (e.g. Doctor auth map)"
+regex = '''(?i)to\s+"[^"]*(?:password|passwd|pwd)\w*"'''
+tags = ["password","hardcoded"]
+
+[[rules]]
+id = "woundai-flask-secret-default"
+description = "Hardcoded Flask SECRET_KEY default fallback"
+regex = '''(?i)secret[_-]?key['"]?\s*[,=]\s*['"][\w\-]{8,}['"]'''
+tags = ["secret","flask"]
+
+[[rules]]
+id = "woundai-generic-pw-assign"
+description = "Generic hardcoded password assignment"
+regex = '''(?i)(password|passwd|pwd)\s*[:=]\s*['"][^'"\s]{6,}['"]'''
+tags = ["password"]
+
+[allowlist]
+description = "忽略測試/範例與 stub"
+paths = ['''(.*?)_stub\.onnx''', '''.*/test/.*''', '''.*Test\.kt''']

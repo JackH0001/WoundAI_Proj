@@ -1,0 +1,83 @@
+Windows 平台開發建議
+
+適用於搭載內建或外掛 ToF 深度感測器(例如Intel RealSense, Azure Kinect, 或USB ToF Camera)的 Windows 筆電/平板：
+
+4.1 捕捉模組 (Capture Module)
+
+影像擷取：
+
+使用 Media Foundation 或 OpenCV VideoCapture 介面擷取 RGB 影像（支援 USB 網路攝影機、內建攝影機）。
+
+RAW 或 MJPEG 格式輸入以提升動態範圍。
+
+深度擷取 (可選)：
+
+Intel RealSense SDK：rs2::pipeline → get_depth_frame()，解析度 640×480 @30FPS。
+
+Azure Kinect SDK：k4a_device_get_capture()，解析度 640×576。
+
+外掛 ToF Camera：透過 OpenNI2 或驅動 API 獲取 DepthMap 及 ConfidenceMap。
+
+4.2 前處理與品質評估 (Pre-processing & QA)
+
+標準化：
+
+OpenCV：白平衡 (Gray-World)、Gamma 校正；用深度平面擬合透視校正。
+
+ROI 偵測：Canny 邊緣 + findContours → 最大輪廓。
+
+品質判定：
+
+SNR 計算 (mean/std) ≥20dB。
+
+Depth coverage ≥80%，Confidence ≥0.7。
+
+Motion blur：Laplacian variance ≥100。
+
+4.3 初步分類 (Classification)
+
+TensorFlow .NET / ONNX Runtime：
+
+將輕量化 MobileNetV3 或 PyTorch mobile ONNX 模型部署於 C# / Python。
+
+輸入合併 RGB + Depth Tensor，輸出急性/慢性機率。
+
+4.4 分割與量測 (Segmentation & Measurement)
+
+ImageJ Headless (Fiji)：
+
+使用 CLI ImageJ-win64.exe --headless --run measure.ijm, "input='rgb.png', mask='mask.png'"。
+
+OpenCV/C++：
+
+Otsu 閾值 + morphologyEx → findContours → contourArea()。
+
+缺損體積：sum(pixelArea × (maxDepth–depthMap)).
+
+4.5 應用層 (Application Layer)
+
+GUI：
+
+Electron + React：跨平台桌面應用，可嵌入C++/Python模組。
+
+WPF / WinUI (C#)：本地化UI，使用 ML.NET 或 ONNX Runtime 做推論。
+
+資料存取：
+
+SQLite / LiteDB：本機資料紀錄。
+
+可串接 Azure SQL / CosmosDB 做雲端同步。
+
+4.6 系統整合與安全性
+
+部署方式：
+
+MSI Installer 或 ClickOnce 部署。
+
+Docker Desktop（Windows Containers）部署後端API。
+
+安全：
+
+TLS 加密通訊 (HTTPS)；使用 OAuth2.0 + JWT 做身份驗證。
+
+此 Windows 架構提供純桌面環境下，結合常見 ToF 感測器與 ImageJ/OpenCV 的量測管線；如需範例專案或程式碼範本，請告知

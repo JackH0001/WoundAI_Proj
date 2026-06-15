@@ -1,0 +1,123 @@
+# .github/workflows/ios.yml
+#
+# Builds and tests the WoundMeasurementApp iOS project on every push / PR
+# that touches the iOS directory.
+#
+# Runner: macos-14 (Apple Silicon, Xcode 15+)
+# Scheme: WoundMeasurementApp
+# Targets: build (Release) + XCTest unit tests (iPhone simulator)
+#
+# Code signing
+# ------------
+# CI uses xcodebuild CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO
+# to skip signing during unit-test builds. Distribution signing (for
+# TestFlight / App Store) requires separate secrets and a provisioning
+# profile — see the commented-out "archive" step at the bottom.
+name: ios-client
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'iOS/**'
+      - '.github/workflows/ios.yml'
+  pull_request:
+    paths:
+      - 'iOS/**'
+      - '.github/workflows/ios.yml'
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: xcodebuild (${{ matrix.xcode }})
+    runs-on: macos-14
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        xcode: ['15.4']
+
+    defaults:
+      run:
+        working-directory: iOS
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode ${{ matrix.xcode }}
+        run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app
+
+      - name: Show SDK / Simulator list
+        run: |
+          xcodebuild -version
+          xcrun simctl list devices available --json | \
+              python3 -c "import sys,json; devs=json.load(sys.stdin)['devices']; \
+              [print(k, v[0]['name']) for k,v in devs.items() if v and 'iPhone' in v[0]['name']]" \
+              2>/dev/null | head -10 || true
+
+      - name: Resolve package dependencies
+        run: |
+          xcodebuild -resolvePackageDependencies \
+              -project WoundMeasurementApp.xcodeproj \
+              -scheme WoundMeasurementApp \
+              CODE_SIGN_IDENTITY="" \
+              CODE_SIGNING_REQUIRED=NO
+
+      - name: Build (Release, no signing)
+        run: |
+          xcodebuild build \
+              -project WoundMeasurementApp.xcodeproj \
+              -scheme WoundMeasurementApp \
+              -configuration Release \
+              -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
+              CODE_SIGN_IDENTITY="" \
+              CODE_SIGNING_REQUIRED=NO \
+              ONLY_ACTIVE_ARCH=NO \
+              | xcpretty --color || xcodebuild build \
+                  -project WoundMeasurementApp.xcodeproj \
+                  -scheme WoundMeasurementApp \
+                  -configuration Release \
+                  -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
+                  CODE_SIGN_IDENTITY="" \
+                  CODE_SIGNING_REQUIRED=NO \
+                  ONLY_ACTIVE_ARCH=NO
+
+      - name: Run XCTest unit tests
+        run: |
+          xcodebuild test \
+              -project WoundMeasurementApp.xcodeproj \
+              -scheme WoundMeasurementApp \
+              -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
+              CODE_SIGN_IDENTITY="" \
+              CODE_SIGNING_REQUIRED=NO \
+              -resultBundlePath TestResults.xcresult \
+              | xcpretty --color --report junit \
+                  --output test-results.xml \
+              || xcodebuild test \
+                  -project WoundMeasurementApp.xcodeproj \
+                  -scheme WoundMeasurementApp \
+                  -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
+                  CODE_SIGN_IDENTITY="" \
+                  CODE_SIGNING_REQUIRED=NO \
+                  -resultBundlePath TestResults.xcresult
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-test-results-xcode${{ matrix.xcode }}
+          path: |
+            iOS/TestResults.xcresult
+            iOS/test-results.xml
+          if-no-files-found: warn
+
+      # ── Distribution build (uncomment when code signing is configured) ──
+      # - name: Archive for distribution
+      #   if: github.ref == 'refs/heads/main'
+      #   run: |
+      #     xcodebuild archive \
+      #         -project WoundMeasurementApp.xcodeproj \
+      #         -scheme WoundMeasurementApp \
+      #         -archivePath build/WoundAI.xcarchive \
+      #         CODE_SIGN_IDENTITY="Apple Distribution: ..." \
+      #         PROVISIONING_PROFILE_SPECIFIER="..."

@@ -1,0 +1,54 @@
+{
+  "test_summary": {
+    "total_tests": 6,
+    "successful_tests": 6,
+    "success_rate": 100.0,
+    "average_response_time": 0.031017589569091796,
+    "test_timestamp": "2025-08-02T16:55:45.990400",
+    "base_url": "https://innate-plexus-461807-t3.de.r.appspot.com"
+  },
+  "test_results": [
+    {
+      "test_name": "基本連接測試",
+      "success": true,
+      "message": "連接成功 (狀態碼: 200)",
+      "timestamp": "2025-08-02T16:55:39.808994",
+      "response_time": 0.0570523738861084
+    },
+    {
+      "test_name": "健康檢查端點",
+      "success": true,
+      "message": "服務健康: {'status': 'healthy', 'service': 'wound-ai-service', 'database': 'memory_mode', 'timestamp': '2025-01-15T10:30:00Z'}",
+      "timestamp": "2025-08-02T16:55:40.831061",
+      "response_time": 0.02126932144165039
+    },
+    {
+      "test_name": "醫師認證端點",
+      "success": true,
+      "message": "端點可達 (狀態碼: 200)",
+      "timestamp": "2025-08-02T16:55:41.848785",
+      "response_time": 0.017294645309448242
+    },
+    {
+      "test_name": "標註上傳端點",
+      "success": true,
+      "message": "端點可達 (狀態碼: 200)",
+      "timestamp": "2025-08-02T16:55:42.890964",
+      "response_time": 0.04151582717895508
+    },
+    {
+      "test_name": "影像上傳端點",
+      "success": true,
+      "message": "端點可達 (狀態碼: 200)",
+      "timestamp": "2025-08-02T16:55:43.909794",
+      "response_time": 0.017955780029296875
+    },
+    {
+      "test_name": "網路效能測試",
+      "success": true,
+      "message": "平均回應時間: 0.016秒 (最小: 0.014秒, 最大: 0.018秒)",
+      "timestamp": "2025-08-02T16:55:44.989718",
+      "response_time": null
+    }
+  ]
+}

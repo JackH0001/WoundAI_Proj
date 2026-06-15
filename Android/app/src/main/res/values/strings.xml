@@ -1,0 +1,34 @@
+<resources>
+    <string name="app_name">傷口測量</string>
+    <string name="app_title">傷口自動化測量系統</string>
+    <string name="start_measurement">開始測量</string>
+    <string name="view_history">查看歷史紀錄</string>
+    <string name="settings">設定</string>
+    <string name="doctor_annotation_system">醫師標註系統</string>
+
+    <string name="capture_wound">傷口拍攝</string>
+    <string name="history_records">歷史紀錄</string>
+    <string name="back_to_main">返回主選單</string>
+
+    <string name="camera_loading">相機模組載入中...</string>
+    <string name="camera_ready">進階相機模組已就緒</string>
+    <string name="database_loading">資料庫模組載入中...</string>
+    <string name="settings_loading">設定模組載入中...</string>
+
+    <string name="emulator_mode">📱 模擬器模式</string>
+    <string name="emulator_description">模擬器無法使用真實相機\n請使用實體裝置測試相機功能</string>
+    <string name="simulate_photo">📷 模擬拍照</string>
+    <string name="select_test_image">🖼️ 選擇測試圖片</string>
+    <string name="high_quality_capture">📷 高品質拍攝</string>
+    <string name="capturing">📷 拍攝中...</string>
+    <string name="retake">🔄 重新拍攝</string>
+
+    <string name="doctor_auth_title">醫師身份驗證</string>
+    <string name="doctor_auth_subtitle">僅限合格註冊醫師使用</string>
+    <string name="doctor_license_number">醫師執照號碼</string>
+    <string name="password">密碼</string>
+    <string name="hospital_name">所屬醫院</string>
+    <string name="auth_button">驗證身份</string>
+    <string name="auth_failed">醫師身份驗證失敗，請檢查輸入資訊</string>
+    <string name="doctor_auth_footer">此功能僅供合格註冊醫師使用\n用於傷口影像標註與AI訓練資料建立</string>
+</resources>

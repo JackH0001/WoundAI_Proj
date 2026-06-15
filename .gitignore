@@ -1,0 +1,41 @@
+# ===== WoundAI 協作 repo .gitignore — IP / 機敏 / 資料 防呆 =====
+# 核心 IP：模型與權重（絕不進協作 repo）
+*.onnx
+*.h5
+*.pth
+*.pt
+*.mlmodel
+*.mlpackage
+*.tflite
+*.ckpt
+*.pb
+*.caffemodel
+*.npz
+*.pkl
+weights/
+**/saved_models/
+**/checkpoints/
+restored_onedrive*/
+# 訓練 / 評測產出（IP）
+批次驗證工具/Outputs/
+批次驗證工具/Output_*/
+批次驗證工具/pth/
+批次驗證工具/retrain*/
+**/eval_report.csv
+# 資料集 / 真實傷口影像（可能個資，絕不外流）
+test_images/
+**/datasets/
+**/data/raw/
+*.dcm
+# 機敏
+.env
+.env.*
+*.pem
+*.key
+*.keystore
+*.jks
+secrets.*
+**/local.properties
+# 例外：允許「stub 假模型」進協作 repo（供建置/測試）
+!**/stub/*.onnx
+!**/*_stub.onnx

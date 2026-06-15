@@ -1,0 +1,313 @@
+openapi: "3.1.0"
+
+info:
+  title: WoundAI Cross-Platform API
+  version: "1.0.0"
+  description: |
+    跨平台傷口 AI 分析統一 API 規格。
+    同時適用於 Flask（Backend/Flask/app.py）與 FastAPI（雲端 AI 模型訓練及分析服務）後端。
+    iOS / Android / Windows 用戶端應依此規格產生 HTTP 客戶端或手動實作。
+  contact:
+    name: WoundAI 開發團隊
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:5000
+    description: Flask 本地開發
+  - url: http://localhost:8000/api/v1
+    description: FastAPI 本地開發
+  - url: https://api.woundai.example.com/api/v1
+    description: 雲端正式環境
+
+# ── 安全方案 ──────────────────────────────────────────────────────────────
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 呼叫 /auth/login 取得 token 後，放入 Authorization: Bearer <token>
+
+  # ── 共用 Schema ─────────────────────────────────────────────────────────
+  schemas:
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string, example: clinician }
+        password: { type: string, format: password, example: "***" }
+
+    TokenResponse:
+      type: object
+      required: [access_token, token_type]
+      properties:
+        access_token: { type: string }
+        token_type:   { type: string, example: bearer }
+        role:         { type: string, enum: [admin, clinician], example: clinician }
+
+    ServiceStatus:
+      type: object
+      properties:
+        status:        { type: string, example: ok }
+        version:       { type: string, example: "1.0.0" }
+        uptime_seconds:{ type: number, example: 3600.5 }
+        models_ready:  { type: boolean }
+        training_jobs: { type: integer, example: 0 }
+
+    UploadResponse:
+      type: object
+      properties:
+        image_id:   { type: string, format: uuid }
+        filename:   { type: string, example: wound_20260325.jpg }
+        size_bytes: { type: integer, example: 524288 }
+        message:    { type: string, example: 上傳成功 }
+
+    QualityResponse:
+      type: object
+      properties:
+        image_id:         { type: string, format: uuid }
+        overall_score:    { type: number, minimum: 0, maximum: 100, example: 82.5 }
+        blur_score:       { type: number, minimum: 0, maximum: 100 }
+        snr_score:        { type: number, minimum: 0, maximum: 100 }
+        brightness_score: { type: number, minimum: 0, maximum: 100 }
+        contrast_score:   { type: number, minimum: 0, maximum: 100 }
+        is_acceptable:    { type: boolean }
+        recommendation:   { type: string, example: 影像品質良好 }
+
+    TissueComposition:
+      type: object
+      properties:
+        granulation: { type: number, minimum: 0, maximum: 1, description: 肉芽組織比例 }
+        slough:      { type: number, minimum: 0, maximum: 1, description: 腐肉比例 }
+        necrotic:    { type: number, minimum: 0, maximum: 1, description: 壞死組織比例 }
+
+    AnalysisResponse:
+      type: object
+      required: [image_id, tissue_composition, confidence, model_version]
+      properties:
+        image_id:           { type: string, format: uuid }
+        wound_area_cm2:     { type: number, nullable: true, example: 12.5 }
+        wound_perimeter_cm: { type: number, nullable: true, example: 14.3 }
+        wound_volume_cm3:   { type: number, nullable: true }
+        wound_type:
+          type: string
+          nullable: true
+          enum: [慢性傷口, 壓瘡, 糖尿病足, 靜脈潰瘍, 動脈潰瘍, 燒燙傷, 手術傷口]
+        severity_score:
+          type: integer
+          nullable: true
+          minimum: 1
+          maximum: 4
+          description: 傷口嚴重度（1=輕微, 4=嚴重）
+        tissue_composition: { $ref: "#/components/schemas/TissueComposition" }
+        confidence:    { type: number, minimum: 0, maximum: 1, example: 0.87 }
+        model_version: { type: string, example: "1.0.0" }
+        calibration_method:
+          type: string
+          nullable: true
+          enum: [ruler, arcore, manual]
+          default: ruler
+        scale_mm_per_px: { type: number, nullable: true, example: 0.15 }
+
+    TrainingJobResponse:
+      type: object
+      properties:
+        job_id:     { type: string, format: uuid }
+        status:
+          type: string
+          enum: [queued, running, completed, failed]
+        created_at: { type: number, description: Unix timestamp }
+        message:    { type: string, nullable: true }
+
+    ErrorResponse:
+      type: object
+      properties:
+        detail: { type: string }
+
+# ── 全域安全預設 ──────────────────────────────────────────────────────────
+security:
+  - BearerAuth: []
+
+# ── 端點定義 ──────────────────────────────────────────────────────────────
+paths:
+
+  # ── 認證 ────────────────────────────────────────────────────────────────
+  /auth/login:
+    post:
+      tags: [認證]
+      summary: 登入取得 JWT
+      security: []          # 此端點不需要 token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: 登入成功
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+        "401":
+          description: 帳號或密碼錯誤
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  # ── 服務狀態 ─────────────────────────────────────────────────────────────
+  /status:
+    get:
+      tags: [狀態]
+      summary: 取得服務健康狀態
+      security: []
+      responses:
+        "200":
+          description: 服務狀態
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServiceStatus" }
+
+  # ── 影像上傳 ─────────────────────────────────────────────────────────────
+  /upload:
+    post:
+      tags: [影像上傳]
+      summary: 上傳傷口影像
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 影像檔（JPEG / PNG，最大 20MB）
+      responses:
+        "200":
+          description: 上傳成功
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UploadResponse" }
+        "413":
+          description: 影像超過大小限制
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "415":
+          description: 不支援的媒體類型
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  # ── 品質評估 ─────────────────────────────────────────────────────────────
+  /quality:
+    post:
+      tags: [品質評估]
+      summary: 評估影像品質（0–100 分）
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: 品質評估結果
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QualityResponse" }
+
+  # ── 傷口分析 ─────────────────────────────────────────────────────────────
+  /analyze:
+    post:
+      tags: [傷口分析]
+      summary: 傷口影像 AI 分析（分割 + 分類 + 面積換算）
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image:
+                  type: string
+                  format: binary
+                calibration_method:
+                  type: string
+                  enum: [ruler, arcore, manual]
+                  default: ruler
+                scale_mm_per_px:
+                  type: number
+                  description: 毫米/像素校準比例（有此值時換算實際面積）
+      responses:
+        "200":
+          description: 傷口分析結果
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnalysisResponse" }
+        "500":
+          description: 分析失敗
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  # ── 訓練管理（管理員）───────────────────────────────────────────────────
+  /training/jobs:
+    get:
+      tags: [訓練管理]
+      summary: 列出訓練任務（需管理員權限）
+      responses:
+        "200":
+          description: 任務列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items: { $ref: "#/components/schemas/TrainingJobResponse" }
+        "403":
+          description: 非管理員
+
+  /training/enqueue:
+    post:
+      tags: [訓練管理]
+      summary: 排入增量訓練任務（需管理員權限）
+      responses:
+        "200":
+          description: 任務已排入佇列
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TrainingJobResponse" }
+        "403":
+          description: 非管理員
+        "500":
+          description: 無法建立任務
+
+# ── Tag 說明 ──────────────────────────────────────────────────────────────
+tags:
+  - name: 認證
+    description: JWT 登入端點
+  - name: 狀態
+    description: 服務健康檢查
+  - name: 影像上傳
+    description: 原始影像儲存
+  - name: 品質評估
+    description: 影像品質自動評分
+  - name: 傷口分析
+    description: 核心 AI 推論（語意分割 / 分類 / 量測）
+  - name: 訓練管理
+    description: 增量訓練任務管理（管理員限定）
