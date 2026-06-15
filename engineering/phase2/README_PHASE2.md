@@ -34,3 +34,9 @@
   - `classify(..., px_per_mm=ppm)` 即輸出真實 `area_cm2`。
 - `test_calibration.py`：9 項（assisted 精確值、合成貼紙自動偵測、缺貼紙 graceful），已納入 CI。
 > 誠實：雜亂真實照片之全自動偵測尚不穩定（範例中 Bedsore_02 自動會誤鎖），故實例圖採 assisted 框選貼紙計算 cm²；這也是臨床上最務實可靠的方式。
+
+## Track A 量測核心：透視校正（homography）
+- `geometry.py`：以校正貼紙四角（影像座標，已知 20mm 方形）建 image→metric 單應，將傷口遮罩 warp 到正視 metric 平面再計面積 → **消除相機傾斜/貼紙非正視造成的面積偏差**。
+  - `homography_image_to_metric()` / `measure_area_cm2()` / `measure_area_cm2_from_quad()`。
+  - **以貼紙外框四角＝20mm 為唯一比例尺**，解決棋盤「每格 mm」格數歧義。
+- `test_geometry.py`：5 項（平面面積、傾斜校正後回復真值、naive 對照、空遮罩、決定性），已納入 CI。
