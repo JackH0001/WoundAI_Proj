@@ -12,3 +12,9 @@
 - `inference_router.py`（A3）：邊緣優先（on-device wsm）→ 缺則雲端（fusegnet）→ 再缺則 stub；`confidence < min_confidence` 標記 `needs_review`。策略集中於 `routing_policy.json`（SSOT）。
 - `pipeline_flywheel.py`（A4）：端到端 影像→路由初稿→醫師修邊→標註紀錄→再訓練佇列(jsonl)；以 `eval_harness.seg_metrics` 量初稿 vs 醫師 GT 的 Dice/IoU（修邊前品質），並記錄 `correction_iou`（修邊幅度）。無模型時 graceful：`ai_available=False`、僅記可靠幾何。
 - `test_phase2_pipeline.py`：18 項（路由選擇/信心門檻/無模型回退、飛輪紀錄/佇列累加/graceful），已納入 CI。佇列 `*.jsonl` 為執行期資料，不進 repo。
+
+## Track B（分類缺口務實補法，無黑箱模型）
+- `wound_classifier.py`（B3）：以分割遮罩內的**色彩啟發式組織比例**（壞死/腐肉/肉芽，可解釋）+ 幾何，複用 `clinical_rules` 產規則式組織分型、嚴重度與治療建議。色彩組織為**粗估**，輸出標示信心 heuristic-low、需醫師確認；面積未校正則 `area_cm2=None`。B1 規則式為唯一啟用路徑，AI 分類旗標維持 OFF。
+- `demo_render.py`：目視驗證渲染（原圖｜分割疊圖｜組織分型疊圖｜規則式結論）。
+- `test_wound_classifier.py`：12 項（組織色彩分型、規則式嚴重度/治療、未校正標記、決定性），已納入 CI。
+> 實例圖（真實傷口）：見 WoundAI 資料夾 `WoundAI_TrackB_實例驗證.png`（不進協作 repo）。
