@@ -8,7 +8,7 @@ jobs:
         with: { lfs: true }
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-      - run: pip install numpy onnxruntime pillow pyyaml jsonschema flask
+      - run: pip install numpy onnxruntime pillow pyyaml jsonschema flask opencv-python-headless
       - name: Phase 0 workflow simulation (must be 10/10)
         run: python engineering/phase0/workflow_sim.py
       - name: Phase 0 preprocess consistency
@@ -25,6 +25,8 @@ jobs:
         run: python engineering/phase2/test_phase2_pipeline.py
       - name: Phase 2 Track B explainable classifier tests
         run: python engineering/phase2/test_wound_classifier.py
+      - name: Phase 2 calibration (sticker px/mm) tests
+        run: python engineering/phase2/test_calibration.py
       - name: OpenAPI YAML parses
         run: python -c "import yaml;yaml.safe_load(open('openapi/annotation_segmentation.yaml',encoding='utf-8'));print('openapi OK')"
       - uses: actions/setup-node@v4

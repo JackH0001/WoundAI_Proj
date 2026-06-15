@@ -26,3 +26,11 @@
 ## 可執行服務
 - `app.py`：Flask 包裝 `api_service`（`/segment` multipart、`/annotations` JSON、`/annotation-tasks`）。啟動 `python app.py`；生產可換 FastAPI + 認證。
 - `test_app.py`：10 項整合測試（Flask test_client，不開真實 port），驗證 HTTP 狀態碼 + OpenAPI schema + 缺參數 400。已納入 CI。
+
+## Track A 量測核心：校正貼紙 → 精確面積（cm²）
+- `calibration.py`：貼紙 20mm（方形/圓形）→ px/mm。
+  - **assisted（可靠、推薦）**：`calibrate_from_bbox`（框選貼紙）/`calibrate_from_two_points`（兩點已知距離）→ 精確 px/mm。
+  - **auto（best-effort）**：`detect_color_corner_sticker`（R/B/G/Y 四角點，cv<0.05 才採信）/`detect_circle_sticker`（Hough）；雜亂照片不保證命中，低信心 → found=False、建議改 assisted（不偽造）。
+  - `classify(..., px_per_mm=ppm)` 即輸出真實 `area_cm2`。
+- `test_calibration.py`：9 項（assisted 精確值、合成貼紙自動偵測、缺貼紙 graceful），已納入 CI。
+> 誠實：雜亂真實照片之全自動偵測尚不穩定（範例中 Bedsore_02 自動會誤鎖），故實例圖採 assisted 框選貼紙計算 cm²；這也是臨床上最務實可靠的方式。
