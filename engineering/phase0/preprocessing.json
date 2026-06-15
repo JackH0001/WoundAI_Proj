@@ -1,0 +1,8 @@
+{
+  "_note": "單一真實來源(SSOT)：iOS/Android/Windows/Cloud 一律讀此檔，禁止各端硬編碼前處理常數。",
+  "models": {
+    "wsm":      {"input_size":[256,256],"layout":"NHWC","channel_order":"BGR","normalize":"[-1,1]","threshold":0.30,"output":"sigmoid_mask"},
+    "fusegnet": {"input_size":[512,512],"layout":"NCHW","channel_order":"RGB","normalize":"[0,1]","threshold":0.50,"output":"sigmoid_mask"},
+    "deepskin": {"input_size":[256,256],"layout":"NHWC","channel_order":"RGB","normalize":"[0,1]","threshold":0.50,"output":"tissue_3ch"}
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "segmentation.wsm":       {"task":"segmentation","artifact":"models/wsm.onnx","preprocess":"wsm","stage":"prod"},
+  "segmentation.fusegnet":  {"task":"segmentation","artifact":"models/fusegnet.onnx","preprocess":"fusegnet","stage":"candidate"},
+  "segmentation.stub":      {"task":"segmentation","artifact":"models/stub/wsm_stub.onnx","preprocess":"wsm","stage":"stub"},
+  "tissue.classifier":      {"task":"tissue_classification","artifact":"models/tissue_fp16.tflite","preprocess":null,"stage":"missing"},
+  "woundtype.classifier":   {"task":"wound_type","artifact":"models/wound_type_fp16.tflite","preprocess":null,"stage":"missing"},
+  "severity.classifier":    {"task":"severity","artifact":"models/severity_fp16.tflite","preprocess":null,"stage":"missing"}
+}

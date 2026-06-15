@@ -1,0 +1,11 @@
+{
+  "_policy": "未達標或無模型之功能預設 false；以資料與評測達標後才開啟。",
+  "measurement_2d": true,
+  "semi_auto_segmentation": true,
+  "upload_annotation": true,
+  "progress_tracking": true,
+  "ai_tissue_classification": false,
+  "ai_wound_type": false,
+  "ai_severity": false,
+  "ai_treatment_suggestion": false
+}
