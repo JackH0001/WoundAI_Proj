@@ -19,6 +19,8 @@ jobs:
         run: python engineering/phase1/test_clinical_rules.py
       - name: Phase 0 eval_harness seg_metrics tests
         run: python engineering/phase0/test_eval_harness.py
+      - name: Phase 2 seg inference graceful-degrade tests
+        run: python engineering/phase2/test_phase2.py
       - name: OpenAPI YAML parses
         run: python -c "import yaml;yaml.safe_load(open('openapi/annotation_segmentation.yaml',encoding='utf-8'));print('openapi OK')"
       - uses: actions/setup-node@v4

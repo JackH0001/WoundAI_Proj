@@ -38,6 +38,12 @@ for(let y=0;y<H;y++)for(let x=0;x<W;x++){const i=(y*W+x)*3; const dx=x-64,dy=y-6
   let r=222,g=184,b=160; if(d<34){r=170;g=70;b=60;} img[i]=r;img[i+1]=g;img[i+2]=b;
   if(x>=44&&x<84&&y>=44&&y<84) aiMask[y*W+x]=1;}    // AI 初稿方塊
 ed.set(aiMask);
+// A2：若後端 /segment 提供真實 AI 初稿，取代合成方塊（最近鄰映射到 W×H 網格）
+function loadDraft(d){ if(!d||!d.data) return false;
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){const sx=Math.floor(x*d.w/W),sy=Math.floor(y*d.h/H);aiMask[y*W+x]=d.data[sy*d.w+sx]?1:0;}
+  ed.set(aiMask); if(typeof d.confidence==="number")document.getElementById("conf").textContent=d.confidence.toFixed(2);
+  render(); return true;}
+window.loadDraft=loadDraft;
 function render(){const id=ctx.createImageData(W,H);for(let p=0;p<W*H;p++){id.data[p*4]=img[p*3];id.data[p*4+1]=img[p*3+1];id.data[p*4+2]=img[p*3+2];id.data[p*4+3]=255;
   if(ed[p]){id.data[p*4]=Math.min(255,id.data[p*4]+0);id.data[p*4+1]=Math.min(255,id.data[p*4+1]+90);id.data[p*4+2]=Math.min(255,id.data[p*4+2]+0);}}
   const off=document.createElement("canvas");off.width=W;off.height=H;off.getContext("2d").putImageData(id,0,0);
@@ -63,5 +69,6 @@ document.getElementById("submit").onclick=()=>{lastRec=AnnotMetrics.buildRecord(
   document.getElementById("out").textContent=JSON.stringify(lastRec,null,2)+"\n\n// mock: POST /annotations 201 Created（實機改為呼叫後端）";};
 document.getElementById("dl").onclick=()=>{if(!lastRec)return;const b=new Blob([JSON.stringify(lastRec,null,2)],{type:"application/json"});
   const a=document.createElement("a");a.href=URL.createObjectURL(b);a.download="annotation_"+lastRec.image_id+".json";a.click();};
+if(window.__AI_DRAFT__) loadDraft(window.__AI_DRAFT__);
 render();
 </script></body></html>
