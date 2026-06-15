@@ -15,6 +15,8 @@ jobs:
         run: python engineering/phase0/preprocess_consistency.py
       - name: Phase 1 rules & annotation tests
         run: python engineering/phase1/test_phase1.py
+      - name: Phase 1 clinical rules boundary tests (30)
+        run: python engineering/phase1/test_clinical_rules.py
       - name: OpenAPI YAML parses
         run: python -c "import yaml;yaml.safe_load(open('openapi/annotation_segmentation.yaml',encoding='utf-8'));print('openapi OK')"
       - uses: actions/setup-node@v4
