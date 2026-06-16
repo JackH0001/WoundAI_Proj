@@ -1,0 +1,3 @@
+name,image_path,mask_path,true_cm2,sticker_x0,sticker_y0,sticker_x1,sticker_y1,sticker_mm,distance_cm,angle_deg,operator,device,lux,notes
+ph001_round_2cm_0deg_25cm_A,images/ph001_a.jpg,masks/ph001_a.png,2.00,0,0,0,0,20,25,0,A,iPhone15Pro,800,圓形標準件;貼紙框選四角請填 x0..y1
+ph001_round_2cm_30deg_25cm_A,images/ph001_b.jpg,masks/ph001_b.png,2.00,0,0,0,0,20,25,30,A,iPhone15Pro,800,同件30度

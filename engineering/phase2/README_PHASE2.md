@@ -40,3 +40,18 @@
   - `homography_image_to_metric()` / `measure_area_cm2()` / `measure_area_cm2_from_quad()`。
   - **以貼紙外框四角＝20mm 為唯一比例尺**，解決棋盤「每格 mm」格數歧義。
 - `test_geometry.py`：5 項（平面面積、傾斜校正後回復真值、naive 對照、空遮罩、決定性），已納入 CI。
+
+## Track A 統一量測管線 + phantom 精度基準
+- `measure.py`：校正(貼紙)→透視(homography)→面積(cm²)→可解釋分類，單一入口。assisted 框選四角/bbox（精確＋透視校正）為主；auto 棋盤（px/mm，無透視）為備；無校正→不偽造面積。
+- `phantom_validation.py`：已知真實面積 vs 量測 → `area_err%`，建立校正後面積精度基準（接 VALIDATION_RUNBOOK / eval_harness area_err）。
+- `test_measure.py`：8 項（assisted quad/bbox≈真值、無校正不偽造、phantom 平面+傾斜平均誤差<8%、公式、決定性），已納入 CI。
+
+## 可執行服務（production-grade）：FastAPI + 認證
+- `app_fastapi.py`：FastAPI 包 `api_service` 之 `/segment`、`/annotations`、`/annotation-tasks` + `/healthz`；可選 **Bearer 認證**（token 由環境變數 `WOUNDAI_API_TOKEN` 提供，未設＝開發模式，不硬編任何祕密）。啟動：`uvicorn app_fastapi:app --port 8000`。
+- `test_app_fastapi.py`：11 項（TestClient 契約 schema + graceful + 認證 401/200），已納入 CI。
+> Flask 版 `app.py` 保留為輕量備援；生產建議 FastAPI + 認證 +（後續）TLS/反向代理。
+
+## Phantom 2D 面積驗證（收實機數據用）
+- `phantom/PHANTOM_2D_AREA_RUNBOOK.md`：照表操作的收數據手冊（硬體/標準件/拍攝矩陣/manifest/通過判定）。
+- `phantom/manifest_template.csv`：每張影像一列（name,image,mask,true_cm2,貼紙四角 bbox,sticker_mm,距離/角度/操作者…）。
+- `phantom_validation.run_from_manifest(manifest, out_csv=...)`：讀 manifest → 逐張量測 → 產 area_err 報告(CSV)+摘要。缺校正→measured=None、不偽造。
