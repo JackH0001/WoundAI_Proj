@@ -89,8 +89,11 @@ def main():
     # 10 前處理跨端一致 (兩實作位元級相同)
     cfg = json.load(open(os.path.join(base,"preprocessing.json"),encoding="utf-8"))["models"]["wsm"]
     u8 = np.random.default_rng(2).integers(0,256,(256,256,3),dtype=np.uint8)
-    a = pp.preprocess(u8,cfg); b = np.ascontiguousarray((u8.astype(np.float32)[...,::-1]/127.5-1.0)[None,...])
-    check("10 前處理跨端位元級一致", np.array_equal(a,b))
+    a = pp.preprocess(u8,cfg)
+    _ref = u8.astype(np.float32)
+    if cfg["channel_order"]=="BGR": _ref=_ref[...,::-1]   # 依 SSOT channel_order(wsm 已修正為 RGB)
+    b = np.ascontiguousarray((_ref/127.5-1.0)[None,...])
+    check("10 前處理跨端位元級一致(channel_order="+cfg["channel_order"]+")", np.array_equal(a,b) and cfg["channel_order"]=="RGB")
 
     ok = sum(1 for _,c in results if c)
     print(f"\n===== 完整性模擬結果：{ok}/{len(results)} PASS =====")

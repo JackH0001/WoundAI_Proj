@@ -8,7 +8,7 @@ jobs:
         with: { lfs: true }
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-      - run: pip install numpy onnxruntime pillow pyyaml jsonschema flask opencv-python-headless
+      - run: pip install numpy onnxruntime pillow pyyaml jsonschema flask opencv-python-headless fastapi 'httpx<0.28' python-multipart
       - name: Phase 0 workflow simulation (must be 10/10)
         run: python engineering/phase0/workflow_sim.py
       - name: Phase 0 preprocess consistency
@@ -29,6 +29,12 @@ jobs:
         run: python engineering/phase2/test_calibration.py
       - name: Phase 2 perspective(homography) area tests
         run: python engineering/phase2/test_geometry.py
+      - name: Phase 2 unified measure + phantom area-error tests
+        run: python engineering/phase2/test_measure.py
+      - name: iOS Swift DTO <-> OpenAPI contract
+        run: python engineering/phase2/verify_ios_contract.py
+      - name: Phase 2 FastAPI service + auth integration
+        run: python engineering/phase2/test_app_fastapi.py
       - name: OpenAPI YAML parses
         run: python -c "import yaml;yaml.safe_load(open('openapi/annotation_segmentation.yaml',encoding='utf-8'));print('openapi OK')"
       - uses: actions/setup-node@v4
