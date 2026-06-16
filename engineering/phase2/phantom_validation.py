@@ -50,3 +50,35 @@ def run_from_manifest(manifest_path, base_dir=None, out_csv=None):
             for r in res["rows"]: w.writerow({k: r.get(k) for k in cols})
         res["out_csv"] = out_csv
     return res
+
+def tissue_report(synth_dir, out_csv=None):
+    """組織分類 GT 對照：對每個合成 case（*_meta.json + *_image + *_woundmask）跑分類，
+    比對偵測 vs GT 之 necrosis/slough/granulation 比例與 dominant。回傳逐筆 + 摘要。"""
+    import os, glob, json, csv as _csv
+    from PIL import Image
+    import wound_classifier as wc
+    CLS = ("necrosis", "slough", "granulation")
+    rows = []
+    for mp in sorted(glob.glob(os.path.join(synth_dir, "*_meta.json"))):
+        meta = json.load(open(mp, encoding="utf-8")); nm = meta["name"]; gt = meta["tissue_fraction_gt"]
+        img = np.asarray(Image.open(os.path.join(synth_dir, nm + "_image.png")).convert("RGB"))
+        m = np.asarray(Image.open(os.path.join(synth_dir, nm + "_woundmask.png")).convert("L")) > 127
+        res = wc.classify(img, m); det = res["tissue_proxy"]
+        row = {"name": nm}
+        for k in CLS:
+            row[f"gt_{k}"] = round(gt[k], 3); row[f"det_{k}"] = round(det[k], 3)
+            row[f"abserr_{k}"] = round(abs(gt[k] - det[k]), 3)
+        gt_dom = max(CLS, key=lambda k: gt[k])
+        row["gt_dom"] = gt_dom; row["det_dom"] = res["tissue_dominant"]
+        row["dom_match"] = {"necrosis": "壞死為主", "slough": "腐肉為主", "granulation": "肉芽為主"}[gt_dom] == res["tissue_dominant"]
+        rows.append(row)
+    n = len(rows) or 1
+    summary = {"n": len(rows),
+               "mean_abserr": {k: round(sum(r[f"abserr_{k}"] for r in rows) / n, 3) for k in CLS},
+               "dom_match_rate": round(sum(1 for r in rows if r["dom_match"]) / n, 3)}
+    if out_csv and rows:
+        cols = list(rows[0].keys())
+        with open(out_csv, "w", newline="", encoding="utf-8") as fh:
+            w = _csv.DictWriter(fh, fieldnames=cols); w.writeheader()
+            for r in rows: w.writerow(r)
+    return {"rows": rows, "summary": summary}

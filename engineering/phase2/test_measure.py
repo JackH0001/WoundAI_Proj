@@ -41,4 +41,17 @@ ck("manifest: n_measured=1", _res["summary"]["n_measured"]==1)
 ck("manifest: area_err≈0%", _res["summary"]["mean_area_err_pct"]<3.0)
 ck("manifest: 報告CSV產出 + 帶meta(operator)", _os.path.exists(_res["out_csv"]) and _res["rows"][0]["operator"]=="A")
 
+# tissue_report smoke（自足合成：紅肉芽 wound + GT）
+import json as _json
+_sd=_tf.mkdtemp()
+_im=np.full((120,120,3),200,np.uint8); _im[40:80,40:80]=[190,55,55]   # 紅=肉芽
+_Img.fromarray(_im).save(_os.path.join(_sd,"w_image.png"))
+_wm=np.zeros((120,120),np.uint8); _wm[40:80,40:80]=255; _Img.fromarray(_wm).save(_os.path.join(_sd,"w_woundmask.png"))
+_json.dump({"name":"w","true_cm2":1.0,"tissue_fraction_gt":{"necrosis":0.0,"slough":0.0,"granulation":1.0,"epithelial":0.0}},
+           open(_os.path.join(_sd,"w_meta.json"),"w"))
+_tr=pv.tissue_report(_sd, out_csv=_os.path.join(_sd,"tr.csv"))
+ck("tissue_report: dominant 命中(肉芽)", _tr["rows"][0]["dom_match"] is True)
+ck("tissue_report: necrosis 誤差≈0", _tr["summary"]["mean_abserr"]["necrosis"]<0.05)
+ck("tissue_report: 報告CSV產出", _os.path.exists(_os.path.join(_sd,"tr.csv")))
+
 ok=sum(r); print(f"\n{ok}/{len(r)} PASS"); sys.exit(0 if ok==len(r) else 1)

@@ -6,7 +6,8 @@ import os, json, csv
 import numpy as np, cv2
 OUT = "/sessions/nifty-sweet-edison/mnt/WoundAI/phantom_samples/synthetic"
 os.makedirs(OUT, exist_ok=True)
-PXMM = 8.0                       # 解析度 px/mm
+PXMM = 8.0
+SKINS=[(222,184,160),(205,165,140),(238,200,178),(190,150,128),(215,178,150)]  # 多樣膚色                       # 解析度 px/mm
 NEC, SLO, GRA, EPI = 1, 2, 3, 4
 COL = {NEC:(45,35,32), SLO:(200,175,95), GRA:(165,52,55), EPI:(225,170,168)}  # RGB 基色
 # 各件設計組織傾向（核心區 necrosis/slough 比例；其餘為 granulation；epithelial 為邊緣環）
@@ -44,13 +45,17 @@ def make_case(target_cm2, seed):
     margin=int(18*PXMM); gap=int(10*PXMM); stick=int(20*PXMM)+8
     cw=margin*2+W+gap+stick; ch=margin*2+max(H,stick)
     # 皮膚底
-    skin=np.zeros((ch,cw,3),np.uint8); base=np.array([222,184,160],np.float32)
+    skin=np.zeros((ch,cw,3),np.uint8); base=np.array(SKINS[seed%len(SKINS)],np.float32)
     tex=cv2.GaussianBlur(rng.standard_normal((ch,cw)).astype(np.float32),(0,0),6)*10
     for c in range(3): skin[...,c]=np.clip(base[c]+tex+rng.uniform(-6,6),0,255)
     # 傷口遮罩
     cx0=margin-int(wpx.min()); cy0=margin-int(hpx.min())
     poly=np.column_stack([wpx+cx0,hpx+cy0]).astype(np.int32)
     mask=np.zeros((ch,cw),np.uint8); cv2.fillPoly(mask,[poly],1); mb=mask.astype(bool)
+    # 柔和投影：位移+模糊的暗遮罩壓低皮膚
+    sh=np.zeros((ch,cw),np.float32); cv2.fillPoly(sh,[poly+np.array([int(3*PXMM*0.3),int(3*PXMM*0.3)])],1.0)
+    sh=cv2.GaussianBlur(sh,(0,0),6)*0.35
+    skin=(skin.astype(np.float32)*(1-sh[...,None])).clip(0,255).astype(np.uint8)
     # 組織分類
     dist=cv2.distanceTransform(mask,cv2.DIST_L2,5)
     rim=mb&(dist< max(2.0,2.0*PXMM*0.4))   # 上皮邊緣環
@@ -73,6 +78,18 @@ def make_case(target_cm2, seed):
     img[ring]=(img[ring].astype(np.float32)*[1.05,0.92,0.9]).clip(0,255).astype(np.uint8)
     # 校正貼紙
     bbox=render_sticker(img, margin+W+gap, margin, mm=20.0)
+    # 不均光照：方向光 + 暗角(vignette)
+    yy,xx=np.mgrid[0:ch,0:cw]
+    lx,ly=rng.uniform(0.2,0.8)*cw, rng.uniform(0.2,0.8)*ch
+    d=np.sqrt((xx-lx)**2+(yy-ly)**2); d/=d.max()
+    light=(1.18-0.5*d).astype(np.float32)
+    img=np.clip(img.astype(np.float32)*light[...,None],0,255).astype(np.uint8)
+    # 鏡面反光亮點(傷口濕潤)
+    for _ in range(rng.integers(2,5)):
+        ys,xs=np.where(mb)
+        if len(xs)==0: break
+        i=rng.integers(len(xs)); cv2.circle(img,(xs[i],ys[i]),rng.integers(2,5),(255,255,255),-1)
+    img=cv2.GaussianBlur(img,(0,0),0.7)
     # 攝影感：輕微模糊+雜訊
     img=cv2.GaussianBlur(img,(0,0),0.6)
     img=np.clip(img.astype(np.float32)+rng.standard_normal(img.shape)*3,0,255).astype(np.uint8)
