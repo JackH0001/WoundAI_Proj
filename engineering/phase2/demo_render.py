@@ -16,7 +16,7 @@ def cjk():
         if g: return FontProperties(fname=sorted(g)[0])
     return FontProperties()
 FP = cjk()
-TC = {1:(30,30,30), 2:(235,200,40), 3:(210,55,55), 4:(150,150,150)}
+TC = {1:(30,30,30), 2:(235,200,40), 3:(210,55,55), 4:(228,172,168), 5:(150,150,150)}  # 壞死/腐肉/肉芽/上皮/其他
 def load(p): return np.asarray(Image.open(p).convert("RGB"))
 def loadmask(p): return np.asarray(Image.open(p).convert("L")) > 127
 def ov_mask(img, m, a=0.45):
@@ -56,7 +56,7 @@ def main():
             base0=ov_sticker(img,c)
         ax[i,0].imshow(base0); ax[i,0].set_title(f"① 原圖＋校正貼紙偵測：{title}", fontproperties=FP, fontsize=12)
         ax[i,1].imshow(ov_mask(img,m)); ax[i,1].set_title("② 分割遮罩（此例＝人工標註GT）", fontproperties=FP, fontsize=12)
-        ax[i,2].imshow(ov_tissue(img,cm)); ax[i,2].set_title("③ 組織分型（黑壞死/黃腐肉/紅肉芽/灰其他）", fontproperties=FP, fontsize=11)
+        ax[i,2].imshow(ov_tissue(img,cm)); ax[i,2].set_title("③ 組織分型（黑壞死/黃腐肉/紅肉芽/粉上皮/灰其他）", fontproperties=FP, fontsize=11)
         t=res["tissue_proxy"]; sev=res["severity"]
         mname={"assisted_bbox":"框選(assisted)","assisted_2pt":"兩點(assisted)","color_corner":"自動四角點","circle":"自動圓形","square":"自動方形"}.get(c.get("method"),"未偵測")
         cal_line = (f"校正貼紙 20mm（{mname}），px/mm={ppm:.2f}" if c.get("found") else "校正貼紙：未偵測到，建議框選校正")
@@ -64,7 +64,7 @@ def main():
                      if res["area_cm2"] is not None else f"面積：{res['area_px']:,} px（未校正）")
         txt=(f"規則式分類（輔助・需醫師確認）\n\n{cal_line}\n{area_line}\n\n"
              f"組織比例（色彩粗估）：\n  壞死 {t['necrosis']*100:4.1f}%  腐肉 {t['slough']*100:4.1f}%\n"
-             f"  肉芽 {t['granulation']*100:4.1f}%  其他 {t['other']*100:4.1f}%\n\n"
+             f"  肉芽 {t['granulation']*100:4.1f}%  上皮 {t['epithelial']*100:4.1f}%  其他 {t['other']*100:4.1f}%\n\n"
              f"組織分型：{res['tissue_dominant']}\n嚴重度（規則式）：grade {sev['grade']}/4\n\n"
              f"治療建議：\n  {res['treatment']['recommendation']}")
         ax[i,3].axis("off"); ax[i,3].text(0.0,0.98,txt,fontproperties=FP,fontsize=10.5,va="top",ha="left",
