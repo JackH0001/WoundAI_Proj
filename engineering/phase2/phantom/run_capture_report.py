@@ -6,9 +6,13 @@ manifest 欄：image,gt_name。gt.json：{"wound_5cm2":5.065,...}。"""
 import os, sys, csv, json, argparse, glob
 import numpy as np, cv2
 HERE=os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.join(HERE,".."))
+import json as _json
 import aruco_calibrate as ac
 from measure import measure_wound
-ARUCO_MM = 18.0
+_SSOT=_json.load(open(os.path.join(HERE,"..","..","phase0","preprocessing.json"),encoding="utf-8"))["calibration"]
+_ID2MM={int(k):_SSOT["stickers"][v]["marker_mm"] for k,v in _SSOT["id_to_sticker"].items()}
+_DEFAULT_MM=_SSOT["stickers"][_SSOT["recommended"]]["marker_mm"]
+def aruco_mm(mid): return _ID2MM.get(int(mid), _DEFAULT_MM)
 def checker_bbox(img):
     g=cv2.cvtColor(img,cv2.COLOR_RGB2GRAY)
     for sc in (1,2):
@@ -43,20 +47,20 @@ def measure_one(img):
     """回 (area_cm2, method, exclude_box_for_mask)。ArUco 優先(透視校正)。"""
     d=ac.detect_marker(img)
     if d is not None:
-        corners,_=d; box=(corners[:,0].min(),corners[:,1].min(),corners[:,0].max(),corners[:,1].max())
-        return ("aruco", corners, box)
-    return ("checker", None, checker_bbox(img))
+        corners,mid=d; box=(corners[:,0].min(),corners[:,1].min(),corners[:,0].max(),corners[:,1].max())
+        return ("aruco", corners, box, aruco_mm(mid))
+    return ("checker", None, checker_bbox(img), None)
 def run(manifest, images_dir, gt_json, outdir):
     os.makedirs(outdir,exist_ok=True); GT=json.load(open(gt_json,encoding="utf-8")); rows=[]; viz=[]
     for r in csv.DictReader(open(manifest,encoding="utf-8")):
         img=load_rgb(os.path.join(images_dir,r["image"])); true=GT[r["gt_name"]]
-        method,corners,box=measure_one(img); mask=solid_red_mask(img,box)
+        method,corners,box,mk_mm=measure_one(img); mask=solid_red_mask(img,box)
         if method=="aruco":
-            area=round(ac.measure_area_cm2(mask,corners,ARUCO_MM),2)
+            area=round(ac.measure_area_cm2(mask,corners,mk_mm),2)
         else:
             area=measure_wound(img,mask,sticker_mm=20.0).get("area_cm2")
         ae=None if not area else round(abs(area-true)/true*100,2)
-        rows.append({"image":r["image"],"gt":r["gt_name"],"true_cm2":true,"measured_cm2":area,"area_err_pct":ae,"calib":method})
+        rows.append({"image":r["image"],"gt":r["gt_name"],"true_cm2":true,"measured_cm2":area,"area_err_pct":ae,"calib":method,"marker_mm":mk_mm})
         viz.append((img,mask,box,r["image"],area,true,ae,method)); print(r["image"],method,"meas",area,"true",true,"err",ae,"%",flush=True)
     with open(os.path.join(outdir,"capture_report.csv"),"w",newline="",encoding="utf-8") as f:
         w=csv.DictWriter(f,fieldnames=list(rows[0].keys())); w.writeheader(); [w.writerow(x) for x in rows]

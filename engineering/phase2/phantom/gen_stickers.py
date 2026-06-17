@@ -4,10 +4,10 @@
 import os, sys, numpy as np, cv2
 from PIL import Image
 OUT="/sessions/nifty-sweet-edison/mnt/dev/WoundAI_work/phantom/stickers"; os.makedirs(OUT,exist_ok=True)
-DICT=cv2.aruco.DICT_4X4_50; MID=7; SCALE=48  # px/mm
+DICT=cv2.aruco.DICT_4X4_50; SCALE=48; ID_SQ=7; ID_CI=8  # px/mm
 RGB={"R":(255,0,0),"B":(0,0,255),"G":(0,160,0),"Y":(255,210,0),"K":(189,189,189)}
-def aruco(a_mm):
-    n=int(round(a_mm*SCALE)); m=cv2.aruco.generateImageMarker(cv2.aruco.getPredefinedDictionary(DICT),MID,n)
+def aruco(a_mm,mid):
+    n=int(round(a_mm*SCALE)); m=cv2.aruco.generateImageMarker(cv2.aruco.getPredefinedDictionary(DICT),mid,n)
     return cv2.cvtColor(m,cv2.COLOR_GRAY2RGB)
 def dot(img,cx,cy,col,r_mm=1.4): cv2.circle(img,(int(cx*SCALE),int(cy*SCALE)),int(r_mm*SCALE),col,-1); cv2.circle(img,(int(cx*SCALE),int(cy*SCALE)),int(r_mm*SCALE),(110,110,110),max(1,SCALE//40))
 def save(img,name,mm):
@@ -15,13 +15,13 @@ def save(img,name,mm):
     Image.fromarray(img).save(os.path.join(OUT,name+".png"),dpi=(d,d))  # 1:1 列印(嵌入 dpi)
 def square20():
     mm=20; W=mm*SCALE; img=np.full((W,W,3),255,np.uint8)  # 不畫外框(避免被誤判為marker quad)；裁切線交印廠
-    a=13.0; ap=aruco(a); o=int((mm-a)/2*SCALE); img[o:o+ap.shape[0],o:o+ap.shape[1]]=ap
+    a=13.0; ap=aruco(a,ID_SQ); o=int((mm-a)/2*SCALE); img[o:o+ap.shape[0],o:o+ap.shape[1]]=ap
     for col,(x,y) in zip("RBGY",[(2.0,2.0),(18.0,2.0),(2.0,18.0),(18.0,18.0)]): dot(img,x,y,RGB[col],1.0)
     dot(img,mm/2,18.4,RGB["K"],0.9)   # 灰=凸點(LiDAR)
     save(img,"sticker_square_20mm",mm)
 def circle30():
     mm=30; W=mm*SCALE; img=np.full((W,W,3),255,np.uint8); cv2.circle(img,(W//2,W//2),W//2-2,(90,90,90),max(1,SCALE//30))
-    a=20.0; ap=aruco(a); o=int((mm-a)/2*SCALE); img[o:o+ap.shape[0],o:o+ap.shape[1]]=ap
+    a=20.0; ap=aruco(a,ID_CI); o=int((mm-a)/2*SCALE); img[o:o+ap.shape[0],o:o+ap.shape[1]]=ap
     for col,(x,y) in zip("RBGY",[(4.8,4.8),(25.2,4.8),(4.8,25.2),(25.2,25.2)]): dot(img,x,y,RGB[col],1.5)
     dot(img,mm/2,27.6,RGB["K"],1.5)   # 灰=凸點(LiDAR)
     save(img,"sticker_circle_30mm",mm)

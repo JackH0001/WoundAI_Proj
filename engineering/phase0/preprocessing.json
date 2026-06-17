@@ -2,25 +2,108 @@
   "_note": "單一真實來源(SSOT)：iOS/Android/Windows/Cloud 一律讀此檔，禁止各端硬編碼前處理常數。",
   "_fix_2026-06a": "wsm channel_order BGR→RGB：BGR 產生全空遮罩，[-1,1] RGB 才正確。",
   "_fix_2026-06b": "fusegnet normalize [0,1]→imagenet：efficientnet-b7/imagenet 編碼器需 ImageNet mean/std，僅 [0,1] 會嚴重過切。",
-  "imagenet_mean": [0.485, 0.456, 0.406],
-  "imagenet_std": [0.229, 0.224, 0.225],
+  "imagenet_mean": [
+    0.485,
+    0.456,
+    0.406
+  ],
+  "imagenet_std": [
+    0.229,
+    0.224,
+    0.225
+  ],
   "models": {
-    "wsm":      {"input_size":[256,256],"layout":"NHWC","channel_order":"RGB","normalize":"[-1,1]","threshold":0.30,"output":"sigmoid_mask"},
-    "fusegnet": {"input_size":[512,512],"layout":"NCHW","channel_order":"RGB","normalize":"imagenet","threshold":0.50,"output":"sigmoid_mask"},
-    "deepskin": {"input_size":[256,256],"layout":"NHWC","channel_order":"RGB","normalize":"[0,1]","threshold":0.50,"output":"tissue_3ch"}
+    "wsm": {
+      "input_size": [
+        256,
+        256
+      ],
+      "layout": "NHWC",
+      "channel_order": "RGB",
+      "normalize": "[-1,1]",
+      "threshold": 0.3,
+      "output": "sigmoid_mask"
+    },
+    "fusegnet": {
+      "input_size": [
+        512,
+        512
+      ],
+      "layout": "NCHW",
+      "channel_order": "RGB",
+      "normalize": "imagenet",
+      "threshold": 0.5,
+      "output": "sigmoid_mask"
+    },
+    "deepskin": {
+      "input_size": [
+        256,
+        256
+      ],
+      "layout": "NHWC",
+      "channel_order": "RGB",
+      "normalize": "[0,1]",
+      "threshold": 0.5,
+      "output": "tissue_3ch"
+    }
   },
   "calibration": {
     "_note": "校正貼紙規格(各端共用)。ArUco 提供穩定四角→homography 透視校正；RGBY/灰供色彩白平衡；灰點兼凸點供 LiDAR。",
     "aruco_dict": "DICT_4X4_50",
-    "aruco_id": 7,
     "stickers": {
-      "square_20mm": {"shape": "square", "footprint_mm": 20.0, "marker_mm": 13.0},
-      "circle_30mm": {"shape": "circle", "footprint_mm": 30.0, "marker_mm": 20.0}
+      "square_20mm": {
+        "shape": "square",
+        "footprint_mm": 20.0,
+        "marker_mm": 13.0,
+        "aruco_id": 7
+      },
+      "circle_30mm": {
+        "shape": "circle",
+        "footprint_mm": 30.0,
+        "marker_mm": 20.0,
+        "aruco_id": 8
+      }
     },
     "recommended": "circle_30mm",
     "raised_dot_mm": 0.15,
-    "color_dots": ["R", "B", "G", "Y", "gray18"],
-    "srgb_targets": {"R": [255,0,0], "G": [0,160,0], "B": [0,0,255], "Y": [255,210,0], "gray18": [189,189,189]},
-    "homography_out_ppmm": 10.0
+    "color_dots": [
+      "R",
+      "B",
+      "G",
+      "Y",
+      "gray18"
+    ],
+    "srgb_targets": {
+      "R": [
+        255,
+        0,
+        0
+      ],
+      "G": [
+        0,
+        160,
+        0
+      ],
+      "B": [
+        0,
+        0,
+        255
+      ],
+      "Y": [
+        255,
+        210,
+        0
+      ],
+      "gray18": [
+        189,
+        189,
+        189
+      ]
+    },
+    "homography_out_ppmm": 10.0,
+    "id_to_sticker": {
+      "7": "square_20mm",
+      "8": "circle_30mm"
+    }
   }
 }
