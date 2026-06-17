@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
-"""一鍵：印刷傷口圖樣張拍照 → 自動校正＋量測＋對 GT 出報告。
-用法：python run_capture_report.py --manifest caps.csv --images DIR --synth SYNTH_DIR --out OUTDIR
-manifest 欄：image,gt_name[,sticker_x0,sticker_y0,sticker_x1,sticker_y1]。gt_name 對應 synth/*_meta.json。"""
+"""一鍵：印刷傷口圖樣張拍照 → 校正＋量測＋對 GT 出報告。
+校正優先序：ArUco(透視校正, 斜拍可用) → 棋盤 px/mm(無透視)。分割：實心紅(紙內填洞最大連通)。
+用法：python run_capture_report.py --manifest caps.csv --images DIR --gt gt.json --out OUTDIR
+manifest 欄：image,gt_name。gt.json：{"wound_5cm2":5.065,...}。"""
 import os, sys, csv, json, argparse, glob
 import numpy as np, cv2
 HERE=os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.join(HERE,".."))
+import aruco_calibrate as ac
 from measure import measure_wound
-def checker_bbox(img_rgb):
-    g=cv2.cvtColor(img_rgb,cv2.COLOR_RGB2GRAY)
+ARUCO_MM = 18.0
+def checker_bbox(img):
+    g=cv2.cvtColor(img,cv2.COLOR_RGB2GRAY)
     for sc in (1,2):
         gg=cv2.resize(g,None,fx=sc,fy=sc) if sc>1 else g
         ok,c=cv2.findChessboardCornersSB(gg,(3,3))
@@ -15,80 +18,66 @@ def checker_bbox(img_rgb):
             P=c.reshape(-1,2)/sc; x0,y0=P.min(0); x1,y1=P.max(0); pad=(x1-x0)/3*1.4
             return (int(x0-pad),int(y0-pad),int(x1+pad),int(y1+pad))
     return None
-def paper_wound_mask(img_rgb, sticker_bbox=None):
-    """印刷張為白底：傷口＝非白且有彩度/暗的最大中央連通區（排除貼紙、淡邊）。"""
-    hsv=cv2.cvtColor(cv2.cvtColor(img_rgb,cv2.COLOR_RGB2BGR),cv2.COLOR_BGR2HSV)
-    S,V=hsv[...,1].astype(int),hsv[...,2].astype(int)
-    colored=((S>55)|(V<90)).astype(np.uint8)           # 非白紙
-    H,W=colored.shape
-    if sticker_bbox:
-        x0,y0,x1,y1=[int(v) for v in sticker_bbox]; pad=int(0.02*max(H,W))
-        colored[max(0,y0-pad):y1+pad,max(0,x0-pad):x1+pad]=0
-    colored=cv2.morphologyEx(colored,cv2.MORPH_OPEN,np.ones((5,5),np.uint8))
-    colored=cv2.morphologyEx(colored,cv2.MORPH_CLOSE,np.ones((15,15),np.uint8))
-    n,lab,stats,cents=cv2.connectedComponentsWithStats(colored)
-    if n<=1: return colored.astype(bool)
-    cx,cy=W/2,H/2; best=None
-    for i in range(1,n):
-        a=stats[i,cv2.CC_STAT_AREA]
-        if a<H*W*0.002: continue
-        d=np.hypot(cents[i][0]-cx,cents[i][1]-cy)/np.hypot(cx,cy)
-        sc=a*(1.3-d)
-        if best is None or sc>best[0]: best=(sc,i)
-    return (lab==best[1]) if best else colored.astype(bool)
-def tissue_err(det,gt):
-    return {k:round(abs(det.get(k,0)-gt.get(k,0)),3) for k in ("necrosis","slough","granulation","epithelial")}
-def _montage(viz, out):
-    import glob as _g
-    import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
-    from matplotlib.font_manager import FontProperties
-    fp=None
-    for p in _g.glob("/usr/share/fonts/**/NotoSansCJK*",recursive=True)+_g.glob("/usr/share/fonts/**/NotoSerifCJK*",recursive=True): fp=FontProperties(fname=p); break
-    if not fp: fp=FontProperties()
-    n=len(viz); 
-    if n==0: return
-    fig,ax=plt.subplots(n,2,figsize=(9,3.2*n))
-    if n==1: ax=ax.reshape(1,-1)
-    for i,(img,mask,bbox,nm,meas,gt,ae) in enumerate(viz):
-        b=img.copy()
-        if bbox: cv2.rectangle(b,(int(bbox[0]),int(bbox[1])),(int(bbox[2]),int(bbox[3])),(0,200,255),max(2,img.shape[1]//300))
-        ax[i,0].imshow(b); ax[i,0].set_title(f"{nm} 原圖+貼紙偵測",fontproperties=fp,fontsize=10); ax[i,0].axis("off")
-        o=img.copy(); o[mask]=(o[mask]*0.5+np.array([0,210,90])*0.5).astype(np.uint8)
-        ax[i,1].imshow(o); ax[i,1].set_title(f"量測 {meas} cm²  (真實 {gt}, 誤差 {ae}%)",fontproperties=fp,fontsize=10); ax[i,1].axis("off")
-    plt.tight_layout(); plt.savefig(out,dpi=105,bbox_inches="tight"); plt.close(fig)
-def run(manifest, images_dir, synth_dir, outdir):
-    os.makedirs(outdir,exist_ok=True); rows=[]; viz=[]
+def solid_red_mask(img, exclude_box=None):
+    H,W=img.shape[:2]; hsv=cv2.cvtColor(cv2.cvtColor(img,cv2.COLOR_RGB2BGR),cv2.COLOR_BGR2HSV)
+    S,V=hsv[...,1].astype(int),hsv[...,2].astype(int); R,G,B=img[...,0].astype(int),img[...,1].astype(int),img[...,2].astype(int)
+    paper=cv2.morphologyEx(((V>150)&(S<60)).astype(np.uint8),cv2.MORPH_CLOSE,np.ones((25,25),np.uint8))
+    n,lab,st,_=cv2.connectedComponentsWithStats(paper); pm=(lab==(1+int(np.argmax(st[1:,cv2.CC_STAT_AREA])))).astype(np.uint8)
+    cnts,_=cv2.findContours(pm,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)        # 填補傷口洞→整張紙
+    pm=(cv2.fillPoly(np.zeros_like(pm),[max(cnts,key=cv2.contourArea)],1).astype(bool)) if cnts else pm.astype(bool)
+    red=(pm&(R>G+22)&(R>B+18)&(S>50)&(V>40)).astype(np.uint8)
+    if exclude_box is not None:
+        x0,y0,x1,y1=[int(v) for v in exclude_box]; p=int(0.035*max(H,W)); red[max(0,y0-p):y1+p,max(0,x0-p):x1+p]=0
+    k=max(7,W//180); red=cv2.morphologyEx(red,cv2.MORPH_CLOSE,np.ones((k,k),np.uint8)); red=cv2.morphologyEx(red,cv2.MORPH_OPEN,np.ones((5,5),np.uint8))
+    n,lab,st,_=cv2.connectedComponentsWithStats(red)
+    return (lab==max(range(1,n),key=lambda i:st[i,cv2.CC_STAT_AREA])) if n>1 else red.astype(bool)
+def load_rgb(path, max_dim=2400):
+    if path.lower().endswith(".heic"):
+        import pillow_heif; pillow_heif.register_heif_opener()
+        from PIL import Image; img=np.asarray(Image.open(path).convert("RGB"))
+    else:
+        img=cv2.cvtColor(cv2.imread(path),cv2.COLOR_BGR2RGB)
+    sc=max_dim/max(img.shape[:2])
+    return cv2.resize(img,(int(img.shape[1]*sc),int(img.shape[0]*sc))) if sc<1 else img
+def measure_one(img):
+    """回 (area_cm2, method, exclude_box_for_mask)。ArUco 優先(透視校正)。"""
+    d=ac.detect_marker(img)
+    if d is not None:
+        corners,_=d; box=(corners[:,0].min(),corners[:,1].min(),corners[:,0].max(),corners[:,1].max())
+        return ("aruco", corners, box)
+    return ("checker", None, checker_bbox(img))
+def run(manifest, images_dir, gt_json, outdir):
+    os.makedirs(outdir,exist_ok=True); GT=json.load(open(gt_json,encoding="utf-8")); rows=[]; viz=[]
     for r in csv.DictReader(open(manifest,encoding="utf-8")):
-        img=cv2.cvtColor(cv2.imread(os.path.join(images_dir,r["image"])),cv2.COLOR_BGR2RGB)
-        meta=json.load(open(os.path.join(synth_dir,r["gt_name"]+"_meta.json"),encoding="utf-8"))
-        gt_area=meta["true_cm2"]; gt_t=meta["tissue_fraction_gt"]
-        bbox=None
-        if all(r.get(k) not in (None,"") for k in ("sticker_x0","sticker_y0","sticker_x1","sticker_y1")):
-            bbox=tuple(int(float(r[k])) for k in ("sticker_x0","sticker_y0","sticker_x1","sticker_y1"))
-        if bbox is None: bbox=checker_bbox(img)        # 自動偵測棋盤貼紙
-        mask=paper_wound_mask(img, bbox)
-        res=measure_wound(img, mask, sticker_mm=20.0)   # auto 棋盤校正(角點間距×4mm/格)；bbox 僅供排除貼紙
-        meas=res.get("area_cm2"); c=res.get("classification",{}); det=c.get("tissue_proxy",{})
-        ae=None if meas is None else round(abs(meas-gt_area)/gt_area*100,2)
-        te=tissue_err(det,gt_t)
-        viz.append((img,mask,bbox,r["gt_name"],meas,gt_area,ae))
-        rows.append({"image":r["image"],"gt_name":r["gt_name"],"true_cm2":gt_area,"measured_cm2":meas,
-                     "area_err_pct":ae,"method":res.get("method"),"dom":c.get("tissue_dominant","-"),
-                     **{f"tissue_abserr_{k}":v for k,v in te.items()}})
-    cols=list(rows[0].keys()) if rows else []
+        img=load_rgb(os.path.join(images_dir,r["image"])); true=GT[r["gt_name"]]
+        method,corners,box=measure_one(img); mask=solid_red_mask(img,box)
+        if method=="aruco":
+            area=round(ac.measure_area_cm2(mask,corners,ARUCO_MM),2)
+        else:
+            area=measure_wound(img,mask,sticker_mm=20.0).get("area_cm2")
+        ae=None if not area else round(abs(area-true)/true*100,2)
+        rows.append({"image":r["image"],"gt":r["gt_name"],"true_cm2":true,"measured_cm2":area,"area_err_pct":ae,"calib":method})
+        viz.append((img,mask,box,r["image"],area,true,ae,method)); print(r["image"],method,"meas",area,"true",true,"err",ae,"%",flush=True)
     with open(os.path.join(outdir,"capture_report.csv"),"w",newline="",encoding="utf-8") as f:
-        w=csv.DictWriter(f,fieldnames=cols); w.writeheader(); [w.writerow(x) for x in rows]
-    _montage(viz, os.path.join(outdir,"capture_montage.png"))
+        w=csv.DictWriter(f,fieldnames=list(rows[0].keys())); w.writeheader(); [w.writerow(x) for x in rows]
     aes=[x["area_err_pct"] for x in rows if x["area_err_pct"] is not None]
-    summary={"n":len(rows),"n_measured":len(aes),
-             "mean_area_err_pct":round(float(np.mean(aes)),2) if aes else None,
-             "max_area_err_pct":round(float(np.max(aes)),2) if aes else None}
+    summary={"n":len(rows),"mean_area_err_pct":round(float(np.mean(aes)),2) if aes else None,"calib_used":list({x["calib"] for x in rows})}
     json.dump(summary,open(os.path.join(outdir,"capture_summary.json"),"w"),ensure_ascii=False,indent=2)
+    try:
+        import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
+        from matplotlib.font_manager import FontProperties
+        fp=FontProperties(fname=(glob.glob("/usr/share/fonts/**/NotoSansCJK*",recursive=True)+glob.glob("/usr/share/fonts/**/NotoSerifCJK*",recursive=True)+[None])[0])
+        nn=len(viz); fig,ax=plt.subplots((nn+1)//2,2,figsize=(11,3.0*((nn+1)//2))); ax=np.atleast_1d(ax).ravel()
+        for i,(img,m,box,base,meas,true,ae,method) in enumerate(viz):
+            o=img.copy(); o[m]=(o[m]*0.45+np.array([0,255,0])*0.55).astype(np.uint8)
+            if box is not None: cv2.rectangle(o,(int(box[0]),int(box[1])),(int(box[2]),int(box[3])),(0,200,255),6)
+            sc=560/o.shape[0]; o=cv2.resize(o,(int(o.shape[1]*sc),560))
+            ax[i].imshow(o); ax[i].axis("off"); ax[i].set_title(f"{base} [{method}]\n量測 {meas} cm² (真實 {true}, 誤差 {ae}%)",fontproperties=fp,fontsize=9)
+        for j in range(nn,len(ax)): ax[j].axis("off")
+        plt.tight_layout(); plt.savefig(os.path.join(outdir,"capture_montage.png"),dpi=95,bbox_inches="tight"); plt.close()
+    except Exception as e: print("montage skip:",e)
     return {"rows":rows,"summary":summary}
 if __name__=="__main__":
-    ap=argparse.ArgumentParser()
-    ap.add_argument("--manifest",required=True); ap.add_argument("--images",required=True)
-    ap.add_argument("--synth",required=True); ap.add_argument("--out",required=True)
-    a=ap.parse_args(); res=run(a.manifest,a.images,a.synth,a.out)
-    print("summary:",json.dumps(res["summary"],ensure_ascii=False))
-    for x in res["rows"]: print(f"  {x['gt_name']:12} 真實{x['true_cm2']} 量測{x['measured_cm2']} 誤差{x['area_err_pct']}% 分型{x['dom']}")
+    ap=argparse.ArgumentParser(); ap.add_argument("--manifest",required=True); ap.add_argument("--images",required=True)
+    ap.add_argument("--gt",required=True); ap.add_argument("--out",required=True); a=ap.parse_args()
+    res=run(a.manifest,a.images,a.gt,a.out); print("summary:",json.dumps(res["summary"],ensure_ascii=False))
