@@ -3,7 +3,7 @@ import json, os
 class ModelRegistry:
     def __init__(self, manifest_path, base_dir=None):
         self.base = base_dir or os.path.dirname(os.path.abspath(manifest_path))
-        self.m = json.load(open(manifest_path, encoding="utf-8"))
+        self.m = {k:v for k,v in json.load(open(manifest_path, encoding="utf-8")).items() if not k.startswith("_")}
     def path(self, model_id):
         d = self.m.get(model_id)
         return os.path.join(self.base, d["artifact"]) if d and d.get("artifact") else None

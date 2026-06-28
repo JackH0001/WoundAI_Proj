@@ -1,7 +1,8 @@
 {
   "_note": "單一真實來源(SSOT)：iOS/Android/Windows/Cloud 一律讀此檔，禁止各端硬編碼前處理常數。",
-  "_fix_2026-06a": "wsm channel_order BGR→RGB：BGR 產生全空遮罩，[-1,1] RGB 才正確。",
+  "_fix_2026-06a": "【更正】wsm 正確前處理＝[0,1] BGR thr0.5(GT-Dice 0.786)；先前誤記 [-1,1] RGB(僅憑像素非空,GT-Dice 僅0.189)。與 WoundAI3D 獨立結論一致。注意:smp 仍為 imagenet/RGB/NCHW(不同模型)。",
   "_fix_2026-06b": "fusegnet normalize [0,1]→imagenet：efficientnet-b7/imagenet 編碼器需 ImageNet mean/std，僅 [0,1] 會嚴重過切。",
+  "_fix_2026-06c": "新增 smp(輕型 UNet=平台主力分割)：NCHW/imagenet/256；最佳 thr0.3+水平翻轉TTA+閉運算。",
   "imagenet_mean": [
     0.485,
     0.456,
@@ -13,16 +14,29 @@
     0.225
   ],
   "models": {
-    "wsm": {
+    "smp": {
+      "_note": "輕型 UNet(smp_trained.onnx)=平台主力分割；固定 256 輸入(無法多尺度)。難例可與 fusegnet 機率集成。",
       "input_size": [
         256,
         256
       ],
-      "layout": "NHWC",
+      "layout": "NCHW",
       "channel_order": "RGB",
-      "normalize": "[-1,1]",
+      "normalize": "imagenet",
       "threshold": 0.3,
       "output": "sigmoid_mask"
+    },
+    "wsm": {
+      "input_size": [
+        224,
+        224
+      ],
+      "layout": "NHWC",
+      "channel_order": "BGR",
+      "normalize": "[0,1]",
+      "threshold": 0.5,
+      "output": "sigmoid_mask",
+      "_size_note": "實測 wound-segmentation-master/wsm.onnx 輸入為 224；各端載入時應斷言 model.input 與此一致。"
     },
     "fusegnet": {
       "input_size": [
@@ -45,6 +59,18 @@
       "normalize": "[0,1]",
       "threshold": 0.5,
       "output": "tissue_3ch"
+    },
+    "student": {
+      "_note": "蒸餾輕量學生(smp.Unet+mobilenet_v2);A∪U 老師蒸餾;行動端主力候選。FP16 13.3MB。",
+      "input_size": [
+        256,
+        256
+      ],
+      "layout": "NCHW",
+      "channel_order": "RGB",
+      "normalize": "imagenet",
+      "threshold": 0.4,
+      "output": "sigmoid_mask"
     }
   },
   "calibration": {
@@ -62,9 +88,70 @@
         "footprint_mm": 30.0,
         "marker_mm": 20.0,
         "aruco_id": 8
+      },
+      "clean_aruco_15mm": {
+        "shape": "square",
+        "aruco_dict": "DICT_4X4_50",
+        "aruco_id": 7,
+        "marker_mm": 15.0,
+        "quiet_mm": 3.0,
+        "color_strip": [
+          "R",
+          "G",
+          "B",
+          "Y",
+          "gray18"
+        ],
+        "patch_mm": 4.0,
+        "detect": "標準 cv2.aruco.detectMarkers(無需色點幾何);面積用 measure_area_cm2_ratio",
+        "generator": "engineering/phase2/aruco_calibrate.gen_clean_aruco_sticker",
+        "_deprecates": "square_20mm/circle_30mm(點疊式)"
+      },
+      "square_20mm_v2": {
+        "shape": "square",
+        "footprint_mm": 20.0,
+        "aruco_dict": "DICT_4X4_50",
+        "aruco_id": 7,
+        "marker_mm": 12.0,
+        "quiet": "白底footprint提供",
+        "color_dots": "R上/G下/B左/Y右 Ø3mm(WB)",
+        "raised_dots": "四角 gray18 Ø2mm 凸起~0.5mm(LiDAR)",
+        "raised_dot_centers_mm": [
+          [
+            -9,
+            -9
+          ],
+          [
+            -9,
+            9
+          ],
+          [
+            9,
+            -9
+          ],
+          [
+            9,
+            9
+          ]
+        ],
+        "detect": "標準 cv2.aruco.detectMarkers→measure_area_cm2_ratio(marker_mm=12)",
+        "generator": "engineering/phase2/svg_stickers.square_svg_20mm",
+        "val": "5/5,面積誤差均2.68%"
+      },
+      "circle_30mm_v2": {
+        "shape": "circle",
+        "footprint_mm": 30.0,
+        "aruco_dict": "DICT_4X4_50",
+        "aruco_id": 7,
+        "marker_mm": 15.0,
+        "color_dots": "R北/Y東/G南/B西 Ø4mm",
+        "raised_dots": "四對角 gray18 Ø3mm(LiDAR)",
+        "generator": "engineering/phase2/svg_stickers.circle_svg_30mm",
+        "val": "5/5但一張離群",
+        "stage": "備援"
       }
     },
-    "recommended": "circle_30mm",
+    "recommended": "square_20mm_v2",
     "raised_dot_mm": 0.15,
     "color_dots": [
       "R",
@@ -104,6 +191,34 @@
     "id_to_sticker": {
       "7": "square_20mm",
       "8": "circle_30mm"
-    }
+    },
+    "_recommended_note": "實測(印刷模擬傷口 n=30)：方形20mm+面積比例法全角度~3.3%(30°僅1.3%)，優於圓形30mm(~12%)；故改建議方形20mm。",
+    "_fix_2026-06d": "【改版】舊『點疊 ArUco』貼紙棄用(色點/灰十字蓋住 marker 資料格→標準解碼僅2/5、面積亂跳)。改用 clean_aruco_15mm:乾淨 DICT_4X4_50 id=7 + 白quiet zone + 獨立 RGBY/灰色條(不覆蓋)。實測 5/5、尺度誤差0.7-1.9%、20mm方塊面積誤差<4%。",
+    "_fix_2026-06e": "【v2定案】方形20mm(marker12mm id7)經5張驗證:5/5、尺度0.68-2.34%、20mm方塊面積誤差均2.68%→建議款。圓形30mm(marker15mm)備援(一張離群至33%)。皆真實ArUco+乾淨+LiDAR凸點。生成器 svg_stickers.py/calib_stickers.py。",
+    "marker_mm_active": 12.0
+  },
+  "capture_container": {
+    "_note": "擷取容器 SSOT:每次拍攝封存固定結構,供未來 3D 無痛回溯重建。預設被動擷取單幀深度(僅 LiDAR 機型),端上不重建,深度延遲上傳。UI 僅顯示 2D。",
+    "schema_version": "1.0",
+    "fields": {
+      "rgb": "原始 RGB(JPEG)",
+      "depth_mm": "Float32 深度(mm),ARKit sceneDepth 256x192;存壓縮 16-bit PNG/EXR(~30-80KB)",
+      "intrinsics_K": "相機內參 fx,fy,cx,cy(+影像尺寸)",
+      "confidence": "ARKit 深度信心圖(選)",
+      "sticker_pose": "校正貼紙四角/凸點影像座標(平面+尺度錨點)",
+      "timestamp": "ISO8601",
+      "device": "機型/OS",
+      "deidentified": "bool"
+    },
+    "policy": {
+      "depth_capture": "僅 LiDAR 機型(iPhone12Pro+/iPad Pro);非 LiDAR 退回純 2D,depth 欄位留空",
+      "on_device_reconstruction": "否(只封存原始;重建延後雲端/未來版本)",
+      "active_scan_default": "否(預設單幀被動;繞掃多幀=未來選配,避免增加攝影負擔)",
+      "store_derived_pointcloud": "否(由 depth+K 隨需反投影,不另存)",
+      "cloud_upload": "延遲(留裝置/冷儲存,需建模時再拉;或僅標記3D個案上傳)+去識別化",
+      "added_burden": "攝影~0、端上算力可忽略、儲存+3-8%/張、雲端可控"
+    },
+    "3d_release_gate": "3D(表面積/體積)須先驗證達『實務可用級』精度才推出迭代;體積列實驗性可勾選,不宣稱醫療級。表面積核心 measure3d.surface_area_cm2 已驗證(斜面1.969≈2.0);volume_cm3 基準面校正待補。",
+    "ui": "介面預設只顯示 2D 資訊;LiDAR 機型顯示靜默指示『深度+內參 已封存』,不加 2D/3D 切換鈕。"
   }
 }

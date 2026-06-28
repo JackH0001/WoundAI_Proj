@@ -168,7 +168,9 @@ class WoundAnalysisService:
         """搜尋可用的 ONNX 模型檔案，依優先順序回傳第一個存在的路徑"""
         base_dir = os.path.dirname(os.path.abspath(__file__))
         candidates = [
-            # 本地 models/ 目錄
+            # 本地 models/ 目錄(student 蒸餾輕量為最優先)
+            os.path.join(base_dir, 'models', 'student_fp16.onnx'),
+            os.path.join(base_dir, 'models', 'student_distilled.onnx'),
             os.path.join(base_dir, 'models', 'deepskin.onnx'),
             os.path.join(base_dir, 'models', 'wsm.onnx'),
             # 專案模型訓練目錄 - Deepskin (80MB, 較精準)
@@ -207,6 +209,20 @@ class WoundAnalysisService:
                     # 記錄模型輸入/輸出資訊以利除錯
                     inp = session.get_inputs()[0]
                     logger.info(f"ONNX 模型輸入: name={inp.name}, shape={inp.shape}, type={inp.type}")
+                    # M2: 載入時對齊 SSOT input shape(防止靜默用錯前處理)
+                    try:
+                        import json as _j
+                        _sp = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),"..","..","engineering","phase0","preprocessing.json"))
+                        _ss = _j.load(open(_sp, encoding="utf-8")) if os.path.exists(_sp) else {}
+                        _key = next((k for k in ("student","wsm","deepskin","fusegnet","smp") if k in os.path.basename(onnx_path).lower()), None)
+                        _exp = ((_ss.get("models",{}) or {}).get(_key or "",{}) or {}).get("input_size")
+                        _got = [d for d in inp.shape if isinstance(d,int) and d>3]
+                        if _exp and len(_got)>=2 and (int(_exp[0]),int(_exp[1])) != (int(_got[0]),int(_got[1])):
+                            logger.warning(f"⚠ SSOT 對齊失敗: 模型 {_key} input {_got} ≠ SSOT {_exp};前處理恐錯,請使 preprocessing.json 與模型一致")
+                        else:
+                            logger.info(f"SSOT 對齊檢查通過: {_key} input {_got}")
+                    except Exception as _e:
+                        logger.warning(f"SSOT 對齊檢查略過: {_e}")
                     return  # 成功，不需繼續
                 except Exception as e:
                     logger.error(f"ONNX 模型加載失敗 ({onnx_path}): {e}")
@@ -731,6 +747,47 @@ def assess_depth_quality(depth_array):
         'overall_score': float((coverage + max(0, consistency) + (1 - min(1, noise_level))) / 3.0)
     }
 
+
+# ---- SSOT 驅動前處理(M1 接線：依 preprocessing.json 按模型套 channel_order+normalize) ----
+import json as _json
+_SSOT_CACHE = None
+def _load_ssot():
+    global _SSOT_CACHE
+    if _SSOT_CACHE is None:
+        p = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          "..", "..", "engineering", "phase0", "preprocessing.json"))
+        try:
+            _SSOT_CACHE = _json.load(open(p, encoding="utf-8"))
+        except Exception as e:
+            logger.warning(f"無法讀取 SSOT preprocessing.json: {e}; 退回 [0,1] RGB")
+            _SSOT_CACHE = {}
+    return _SSOT_CACHE
+
+def _active_model_key():
+    path = (getattr(analysis_service, "_onnx_model_path", "") or "")
+    name = os.path.basename(path).lower()
+    for k in ("student", "wsm", "deepskin", "fusegnet", "smp"):
+        if k in name:
+            return k
+    return None
+
+def _apply_ssot_preproc(resized_rgb, model_key):
+    """依 SSOT 對 RGB 影像套 channel_order(BGR 翻轉)+normalize。回傳 float32 連續陣列。"""
+    cfg = (_load_ssot().get("models", {}) or {}).get(model_key or "", {})
+    x = resized_rgb.astype(np.float32)
+    if cfg.get("channel_order") == "BGR":
+        x = x[..., ::-1]
+    nrm = cfg.get("normalize", "[0,1]")
+    if nrm == "[-1,1]":
+        x = x / 127.5 - 1.0
+    elif nrm == "imagenet":
+        mean = np.array(_load_ssot().get("imagenet_mean", [0.485, 0.456, 0.406]), np.float32)
+        std = np.array(_load_ssot().get("imagenet_std", [0.229, 0.224, 0.225]), np.float32)
+        x = (x / 255.0 - mean) / std
+    else:
+        x = x / 255.0
+    return np.ascontiguousarray(x)
+
 def segment_wound_ai(image):
     """使用AI模型進行傷口分割 - 支援 ONNX Runtime 與 TensorFlow Keras。"""
     try:
@@ -739,14 +796,17 @@ def segment_wound_ai(image):
             inp_info = wound_segmentation_model.get_inputs()[0]
             shape = inp_info.shape
             # 從模型 input 取空間尺寸 (支援 NHWC / NCHW)
-            h_in, w_in = 256, 256
-            if len(shape) == 4:
+            mkey = _active_model_key()
+            scfg = (_load_ssot().get("models", {}) or {}).get(mkey or "", {})
+            ssize = scfg.get("input_size")
+            h_in, w_in = (int(ssize[0]), int(ssize[1])) if ssize else (256, 256)
+            if not ssize and len(shape) == 4:
                 spatial = [s for s in shape[1:] if isinstance(s, int) and s > 3]
                 if len(spatial) >= 2:
                     h_in, w_in = int(spatial[0]), int(spatial[1])
             orig_h, orig_w = image.shape[:2]
             resized = cv2.resize(image, (w_in, h_in), interpolation=cv2.INTER_CUBIC)
-            x = resized.astype(np.float32) / 255.0
+            x = _apply_ssot_preproc(resized, mkey)   # SSOT: channel_order + normalize(按模型)
             # NCHW 偵測
             if len(shape) == 4 and shape[1] == 3:
                 x = np.transpose(x, (2, 0, 1))
@@ -780,6 +840,59 @@ def segment_wound_ai(image):
     except Exception as e:
         logger.error(f"AI分割失敗: {e}")
         return segment_wound_traditional(image)
+
+# ===== 雲端 A∪U 集成 escalate 端點(雙軌路由:端上判難→上雲) =====
+_CLOUD_AU = {"a": None, "u": None, "ver": "AU-2026-06"}
+def _resolve_au_paths():
+    base = os.path.dirname(os.path.abspath(__file__))
+    cands = {
+        "a": [os.path.join(base,"models","a_unet.onnx"),
+              os.path.join(base,"..","..","WoundAI_weights_archive","onnx_export","a_unet.onnx")],
+        "u": [os.path.join(base,"models","unetpp.onnx"),
+              os.path.join(base,"..","..","WoundAI_weights_archive","onnx_export","unetpp.onnx")],
+    }
+    out = {}
+    for k, lst in cands.items():
+        out[k] = next((os.path.normpath(p) for p in lst if os.path.isfile(os.path.normpath(p))), None)
+    return out
+def _load_cloud_au():
+    if not ONNX_AVAILABLE: return None, None
+    if _CLOUD_AU["a"] is None:
+        p = _resolve_au_paths()
+        if not p["a"] or not p["u"]: return None, None
+        _CLOUD_AU["a"] = ort.InferenceSession(p["a"], providers=["CPUExecutionProvider"])
+        _CLOUD_AU["u"] = ort.InferenceSession(p["u"], providers=["CPUExecutionProvider"])
+    return _CLOUD_AU["a"], _CLOUD_AU["u"]
+def _au_infer(sess, image_rgb):
+    # a_unet/unetpp: 256 NHWC, [-1,1] RGB
+    r = cv2.resize(image_rgb, (256, 256)).astype(np.float32) / 127.5 - 1.0
+    o = np.squeeze(sess.run(None, {sess.get_inputs()[0].name: r[None].astype(np.float32)})[0]).astype(np.float32)
+    if o.ndim == 3: o = o[..., 0]
+    if o.min() < 0 or o.max() > 1: o = 1.0/(1.0+np.exp(-np.clip(o,-30,30)))
+    return o
+
+@app.route('/api/v1/segment/escalate', methods=['POST'])
+@jwt_required()
+def segment_escalate():
+    """端上判為難例時呼叫:回傳雲端 A∪U(a_unet⊕unet++ 機率融合 thr0.4)遮罩。"""
+    if 'image' not in request.files:
+        return jsonify({'error': '缺少圖像文件'}), 400
+    a, u = _load_cloud_au()
+    if a is None:
+        return jsonify({'error': '雲端 A∪U 模型不可用(請部署 models/a_unet.onnx, unetpp.onnx)', 'route': 'cloud_unavailable'}), 503
+    img = process_uploaded_image(request.files['image'])      # RGB
+    fused = 0.5 * _au_infer(a, img) + 0.5 * _au_infer(u, img)  # A∪U 機率融合
+    mask = (cv2.resize(fused, (img.shape[1], img.shape[0])) > 0.40).astype(np.uint8) * 255
+    ok, buf = cv2.imencode('.png', mask)
+    mask_b64 = base64.b64encode(buf.tobytes()).decode('ascii') if ok else None
+    return jsonify({
+        'mask_png_b64': mask_b64,
+        'model': 'ensemble.AU',
+        'model_version': _CLOUD_AU["ver"],
+        'route': 'cloud',
+        'threshold': 0.40,
+        'note': 'A∪U 機率融合(a_unet⊕unet++);面積由端上校正計算'
+    }), 200
 
 def segment_wound_traditional(image):
     """使用傳統方法進行傷口分割"""
@@ -1071,6 +1184,72 @@ def retrain_models_async():
         
     except Exception as e:
         logger.error(f"模型重新訓練失敗: {e}")
+
+# ===== 分類/嚴重度端點(PUSH 量表 + 組織 v2;方案1+3 接線) =====
+_ENG = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "engineering"))
+def _load_classify_mods():
+    """延遲載入 engineering 的 wound_classifier(v2)/clinical_rules(PUSH)/aruco;失敗回 None。"""
+    import sys
+    for sub in ("phase2", "phase1"):
+        pth = os.path.join(_ENG, sub)
+        if pth not in sys.path: sys.path.insert(0, pth)
+    try:
+        from wound_classifier import tissue_proxy_v2
+        from clinical_rules import push_score
+        try:
+            import aruco_calibrate as _ac
+        except Exception:
+            _ac = None
+        return tissue_proxy_v2, push_score, _ac
+    except Exception as e:
+        logger.error(f"classify 模組載入失敗: {e}")
+        return None
+
+@app.route('/api/v1/classify', methods=['POST'])
+@jwt_required()
+def classify_wound():
+    """分割→(ArUco/手動)校正面積→組織v2→PUSH 嚴重度。回傳標準階段結果。
+    body(multipart): image=<jpg/png>; 選配 cm_per_pixel=<float>(無 ArUco 時手動校正)。"""
+    mods = _load_classify_mods()
+    if mods is None:
+        return jsonify({'error': '分類模組不可用(engineering 模組缺)', 'stage': 'init'}), 503
+    tissue_proxy_v2, push_score, _ac = mods
+    if 'image' not in request.files:
+        return jsonify({'error': '缺少 image'}), 400
+    try:
+        data = np.frombuffer(request.files['image'].read(), np.uint8)
+        bgr = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        if bgr is None: return jsonify({'error': '影像解碼失敗'}), 400
+        img = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        H, W = img.shape[:2]
+        # Stage2 分割(沿用現役模型)
+        wound_prob, conf = segment_wound_ai(img)
+        thr = float(((_load_ssot().get("models", {}) or {}).get(_active_model_key() or "", {}) or {}).get("threshold", 0.4))
+        mask = wound_prob > thr
+        # Stage3 校正面積:優先 ArUco,否則 cm_per_pixel(手動)
+        area_cm2 = None; calib = "none"
+        if _ac is not None:
+            det = _ac.detect_marker(img)
+            if det is not None:
+                _mm = float((_load_ssot().get("calibration", {}) or {}).get("marker_mm_active", 12.0))
+                area_cm2 = float(_ac.measure_area_cm2_ratio(mask.astype(np.uint8), det[0], marker_mm=_mm)); calib = f"aruco(marker {_mm}mm)"
+        if area_cm2 is None:
+            cpp = request.form.get('cm_per_pixel', type=float)
+            if cpp: area_cm2 = float(mask.sum()) * (cpp ** 2); calib = "manual_cm_per_pixel"
+        # Stage4 組織 v2 + Stage5 PUSH
+        t = tissue_proxy_v2(img, mask)
+        push = push_score(area_cm2, t)
+        return jsonify({
+            'stage2_segment': {'model': _active_model_key(), 'wound_ratio': round(float(mask.mean()), 4), 'confidence': round(conf, 4)},
+            'stage3_calibrate': {'method': calib, 'area_cm2': (round(area_cm2, 2) if area_cm2 is not None else None),
+                                 'note': ('未校正(無 ArUco 且未提供 cm_per_pixel)' if area_cm2 is None else None)},
+            'stage4_tissue': {'method': 'v2(WB+HSV)', 'tissue_frac': {k: round(t[k], 3) for k in ('necrosis','slough','granulation','epithelial','other')}},
+            'stage5_severity': {k: push[k] for k in ('tool','area_subscore','tissue_subscore','exudate_subscore','total_partial_img','total_full','range_full')},
+            'disclaimer': '輔助用途、非診斷、需醫師確認;滲液量無法由單張影像判定,需醫師輸入'
+        }), 200
+    except Exception as e:
+        logger.error(f"classify 失敗: {e}")
+        return jsonify({'error': str(e), 'stage': 'inference'}), 500
 
 if __name__ == '__main__':
     logger.info("啟動傷口分析Flask服務...")

@@ -1,8 +1,132 @@
 {
-  "segmentation.wsm":       {"task":"segmentation","artifact":"models/wsm.onnx","preprocess":"wsm","stage":"prod"},
-  "segmentation.fusegnet":  {"task":"segmentation","artifact":"models/fusegnet.onnx","preprocess":"fusegnet","stage":"candidate"},
-  "segmentation.stub":      {"task":"segmentation","artifact":"models/stub/wsm_stub.onnx","preprocess":"wsm","stage":"stub"},
-  "tissue.classifier":      {"task":"tissue_classification","artifact":"models/tissue_fp16.tflite","preprocess":null,"stage":"missing"},
-  "woundtype.classifier":   {"task":"wound_type","artifact":"models/wound_type_fp16.tflite","preprocess":null,"stage":"missing"},
-  "severity.classifier":    {"task":"severity","artifact":"models/severity_fp16.tflite","preprocess":null,"stage":"missing"}
+  "_note": "模型治理註冊表(SSOT)。缺檔→呼叫端 graceful degrade,禁偽造。sha256 供部署期完整性驗證(前16碼)。權重不入協作 repo;部署期由私有儲存拉取。",
+  "_governance": "每模型須: version / sha256 / source / license / preprocess(對應 preprocessing.json) / val_metric / stage。",
+  "segmentation.smp": {
+    "task": "segmentation",
+    "artifact": "models/smp_trained.onnx",
+    "preprocess": "smp",
+    "stage": "candidate",
+    "version": "2025-08",
+    "sha256": "96afdfa359114748",
+    "mb": 57.3,
+    "source": "自訓(架構=segmentation_models_pytorch UNet,qubvel,MIT)",
+    "license": "權重自有;架構 MIT",
+    "val_metric": "臨床照 n=3 Dice 0.737→0.800(TTA);輸入 256 NCHW imagenet"
+  },
+  "segmentation.fusegnet": {
+    "task": "segmentation",
+    "artifact": "models/fusegnet.onnx",
+    "preprocess": "fusegnet",
+    "stage": "candidate",
+    "version": "2025-08",
+    "sha256": "f07bc61d8e48b67c",
+    "mb": 259.4,
+    "source": "自訓(架構=FUSegNet/smp,efficientnet-b7)",
+    "license": "權重自有;架構 MIT",
+    "val_metric": "512 NCHW imagenet;單獨弱,與 smp 機率集成最佳"
+  },
+  "segmentation.a_unet": {
+    "task": "segmentation",
+    "artifact": "models/a_unet.onnx",
+    "preprocess": "aunet",
+    "stage": "candidate",
+    "version": "2026-06(ONNX)",
+    "sha256": "b05b3d17c5f8b971",
+    "mb": 32.5,
+    "source": "自訓 Attention-UNet(自有資料)",
+    "license": "權重自有",
+    "val_metric": "臨床 n=3 Dice 0.849;足部最強 0.93;輸入 256 NHWC [-1,1]"
+  },
+  "segmentation.unetpp": {
+    "task": "segmentation",
+    "artifact": "models/unetpp.onnx",
+    "preprocess": "unetpp",
+    "stage": "candidate",
+    "version": "2026-06(ONNX)",
+    "sha256": "aa6c9619c68c7d26",
+    "mb": 36.6,
+    "source": "自訓 UNet++(自有資料)",
+    "license": "權重自有",
+    "val_metric": "臨床 n=3 Dice 0.854;壓瘡最強 0.99;輸入 256 NHWC [-1,1]"
+  },
+  "segmentation.ensemble_smp_fusegnet": {
+    "task": "segmentation",
+    "artifact": "(runtime: smp+fusegnet 機率融合)",
+    "preprocess": "smp+fusegnet",
+    "stage": "prod-wide",
+    "version": "2026-06",
+    "source": "smp×FUSegNet 0.6/0.4 thr0.45",
+    "val_metric": "retrain_bottom 最難子集 Dice 0.873(>微調集成0.810);廣域軌建議"
+  },
+  "segmentation.ensemble_au": {
+    "task": "segmentation",
+    "artifact": "[models/a_unet.onnx, models/unetpp.onnx] 機率融合",
+    "preprocess": "aunet(256 NHWC [-1,1] RGB);融合權重0.5/0.5;二值門檻0.4",
+    "stage": "prod-cloud",
+    "version": "AU-2026-06",
+    "components": [
+      "segmentation.a_unet",
+      "segmentation.unetpp"
+    ],
+    "source": "自訓 A-UNet ⊕ UNet++ 機率融合(雲端難例升級用)",
+    "license": "權重自有",
+    "val_metric": "未見過臨床照 n=5 Dice 0.924(面積與GT幾乎一致);雙軌路由後 0.900(雲端僅跑3/5)",
+    "serving": "POST /api/v1/segment/escalate(JWT);缺模型→503 graceful;對應 docs/dual_track_routing_spec.md",
+    "regression": "engineering/phase2/test_dual_track_integration.py(路由後≥0.88 守門)"
+  },
+  "segmentation.wsm": {
+    "task": "segmentation",
+    "artifact": "models/wsm.onnx",
+    "preprocess": "wsm",
+    "stage": "legacy",
+    "version": "<=2025",
+    "sha256": "8e613b07ec664793",
+    "mb": 8.5,
+    "source": "自訓 UNet256(輕量,部署於 Android/Cloud)",
+    "license": "權重自有",
+    "val_metric": "【更正】正確前處理=[0,1] BGR 224 thr0.5(GT-Dice 0.786;舊記[-1,1]RGB錯)"
+  },
+  "segmentation.stub": {
+    "task": "segmentation",
+    "artifact": "models/stub/wsm_stub.onnx",
+    "preprocess": "wsm",
+    "stage": "stub",
+    "note": "協作 repo 佔位,260K"
+  },
+  "tissue.classifier": {
+    "task": "tissue_classification",
+    "artifact": "wound_classifier.tissue_classmap_v2(規則)",
+    "stage": "heuristic_v2",
+    "method": "白平衡(灰世界/灰塊)+HSV飽和度感知規則",
+    "val": "修正暗紅誤判壞死(模擬傷口 necrosis 86-90%→0%,改判肉芽);test_tissue_severity 通過",
+    "upgrade_path": "飛輪累積醫師驗證組織標註(annotation_pipeline.make_tissue_annotation_record)達門檻後訓真模型",
+    "note": "色彩粗估、非診斷、需醫師確認;對外勿稱 AI 組織診斷"
+  },
+  "woundtype.classifier": {
+    "task": "wound_type",
+    "artifact": null,
+    "stage": "deferred_no_data",
+    "method": "無足量分類標註→不硬訓(造假)",
+    "upgrade_path": "飛輪收醫師驗證類型標籤;aggregate_classifier_manifest 達 MIN_TYPE_TOTAL/類門檻才訓",
+    "note": "現況不提供傷口類型自動分類;誠實延後"
+  },
+  "severity.classifier": {
+    "task": "severity",
+    "artifact": "clinical_rules.push_score",
+    "stage": "validated_scale",
+    "method": "PUSH(NPUAP 3.0)已驗證量表:面積子分(ArUco校正)+組織子分(取最差)+滲液(醫師輸入)",
+    "val": "面積子分角度不變(模擬30/60/90°面積0.93-0.98,<5%);PUSH 量表為文獻實證",
+    "note": "取代失敗的 DeepSkin/PWAT(其 onnx 輸出退化);滲液單張照量不到須醫師;輔助非診斷"
+  },
+  "segmentation.student": {
+    "task": "segmentation",
+    "artifact": "models/student_fp16.onnx",
+    "preprocess": "student",
+    "stage": "prod",
+    "version": "2026-06",
+    "source": "A∪U 老師蒸餾(KD)輕量學生 smp.Unet+mobilenet_v2",
+    "license": "權重自有",
+    "val_metric": "retrain_merged Dice 0.762(>老師0.698,smp0.737);FP16 13.3MB;CoreML StudentSeg.mlmodel 13.2MB",
+    "deploy": "Android/Windows/Backend=student_fp16.onnx;iOS=StudentSeg.mlmodel(neuralnetwork,內含正規化+sigmoid)"
+  }
 }

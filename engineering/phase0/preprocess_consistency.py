@@ -16,14 +16,13 @@ if __name__ == "__main__":
     import sys
     P = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "preprocessing.json"), encoding="utf-8"))
     M = P["models"]; checks = []
-    # wsm：RGB [-1,1]，回歸防呆（BGR 會產空遮罩）
-    cfg = M["wsm"]; img = np.random.default_rng(0).integers(0, 256, (256, 256, 3), dtype=np.uint8)
+    # wsm：[0,1] BGR（GT-Dice 0.786 實證；先前誤記 [-1,1] RGB 僅 0.189）。回歸防呆。
+    cfg = M["wsm"]; sz = cfg["input_size"][0]
+    img = np.random.default_rng(0).integers(0, 256, (sz, sz, 3), dtype=np.uint8)
     a = preprocess(img, cfg)
-    ref = img.astype(np.float32)
-    if cfg["channel_order"] == "BGR": ref = ref[..., ::-1]
-    ref = np.ascontiguousarray((ref / 127.5 - 1.0)[None, ...])
-    r_ok = np.array_equal(a[0, ..., 0], img.astype(np.float32)[..., 0] / 127.5 - 1.0)
-    checks.append(("wsm RGB [-1,1]", np.array_equal(a, ref) and a.shape == (1,256,256,3) and cfg["channel_order"] == "RGB" and r_ok))
+    ref = img.astype(np.float32)[..., ::-1] / 255.0          # BGR + [0,1]
+    ref = np.ascontiguousarray(ref[None, ...])
+    checks.append(("wsm [0,1] BGR", np.array_equal(a, ref) and cfg["channel_order"] == "BGR" and cfg["normalize"] == "[0,1]"))
     # fusegnet：imagenet NCHW
     fcfg = M["fusegnet"]; fimg = np.random.default_rng(1).integers(0, 256, (512, 512, 3), dtype=np.uint8)
     fa = preprocess(fimg, fcfg)

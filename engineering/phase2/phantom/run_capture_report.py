@@ -56,7 +56,7 @@ def run(manifest, images_dir, gt_json, outdir):
         img=load_rgb(os.path.join(images_dir,r["image"])); true=GT[r["gt_name"]]
         method,corners,box,mk_mm=measure_one(img); mask=solid_red_mask(img,box)
         if method=="aruco":
-            area=round(ac.measure_area_cm2(mask,corners,mk_mm),2)
+            area=round(ac.measure_area_cm2_ratio(mask,corners,mk_mm),2)
         else:
             area=measure_wound(img,mask,sticker_mm=20.0).get("area_cm2")
         ae=None if not area else round(abs(area-true)/true*100,2)
