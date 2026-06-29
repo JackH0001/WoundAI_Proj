@@ -22,11 +22,10 @@ namespace WoundMeasurement.AI.Modules
         private string _inputName = string.Empty;
         private int _inputSize = 256;
         private bool _isNchw;
-        // G stage fix (2026-05-27): per-model preprocessing dispatch.
-        // wsm.onnx 訓練於 [-1, 1] BGR + threshold 0.30 (per Cloud FastAPI internal evaluation
-        // 顯示 +25.3% IoU vs [0,1]+0.50 on internal GT). Deepskin trained on [0, 1] RGB.
-        // 之前 Windows 統一用 [0, 1] RGB 會讓 wsm fallback path 量測誤差大幅升高.
-        private enum ModelFamily { Deepskin, Wsm, Unknown }
+        // 2026-06 SSOT 更正: wsm.onnx 正確前處理 = [0,1] BGR + threshold 0.50
+        // (人工 GT Dice 實證: [0,1]BGR@0.50=0.742 vs 舊 [-1,1]BGR@0.30=0.222;與 WoundAI3D 一致)。
+        // Deepskin = [0,1] RGB。前處理常數應對齊 engineering/phase0/preprocessing.json(SSOT)。
+        private enum ModelFamily { Deepskin, Wsm, Student, Unknown }
         private ModelFamily _modelFamily = ModelFamily.Unknown;
         private float _binaryThreshold = 0.5f;
 
@@ -45,6 +44,8 @@ namespace WoundMeasurement.AI.Modules
             var candidates = new List<string>();
             if (!string.IsNullOrWhiteSpace(settings.ModelPath))
                 candidates.Add(settings.ModelPath);
+            candidates.Add(Path.Combine(AppContext.BaseDirectory, "models", "student_fp16.onnx"));
+            candidates.Add(Path.Combine(AppContext.BaseDirectory, "models", "student_distilled.onnx"));
             candidates.Add(Path.Combine(AppContext.BaseDirectory, "models", "deepskin.onnx"));
             candidates.Add(Path.Combine(AppContext.BaseDirectory, "models", "wsm.onnx"));
 
@@ -84,10 +85,15 @@ namespace WoundMeasurement.AI.Modules
 
                 // G stage fix (2026-05-27): detect model family from filename → 對應正確 preprocessing.
                 var lowerName = ModelVersion.ToLowerInvariant();
-                if (lowerName.Contains("wsm"))
+                if (lowerName.Contains("student"))
+                {
+                    _modelFamily = ModelFamily.Student;   // SSOT student: ImageNet RGB NCHW, thr 0.4
+                    _binaryThreshold = 0.40f;
+                }
+                else if (lowerName.Contains("wsm"))
                 {
                     _modelFamily = ModelFamily.Wsm;
-                    _binaryThreshold = 0.30f;
+                    _binaryThreshold = 0.50f;   // SSOT 修正: GT-Dice 實證 [0,1]BGR@0.50=0.742 vs 舊 [-1,1]BGR@0.30=0.222
                 }
                 else if (lowerName.Contains("deepskin"))
                 {
@@ -258,12 +264,11 @@ namespace WoundMeasurement.AI.Modules
             var rect = new Rectangle(0, 0, _inputSize, _inputSize);
             var data = resized.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
 
-            // G stage fix (2026-05-27): per-model normalization + channel order.
-            // - wsm.onnx     → [-1, 1] BGR  (matches Cloud FastAPI wound_segmentation.py + Android)
-            // - deepskin.onnx → [0, 1] RGB
-            // - unknown      → [0, 1] RGB (deepskin-style default)
-            bool useNegOneToOne = _modelFamily == ModelFamily.Wsm;
-            bool useBgrOrder    = _modelFamily == ModelFamily.Wsm;
+            // SSOT per-model: wsm.onnx → [0,1] BGR;deepskin.onnx → [0,1] RGB;unknown → [0,1] RGB。
+            bool useNegOneToOne = false;                              // SSOT: 無模型用 [-1,1]
+            bool useBgrOrder    = _modelFamily == ModelFamily.Wsm;     // wsm=BGR;student/deepskin=RGB
+            bool useImageNet    = _modelFamily == ModelFamily.Student; // student=ImageNet 正規化
+            float[] inMean = {0.485f,0.456f,0.406f}, inStd = {0.229f,0.224f,0.225f};
 
             try
             {
@@ -289,6 +294,13 @@ namespace WoundMeasurement.AI.Modules
                                 float rN = (r_raw / 127.5f) - 1.0f;
                                 if (useBgrOrder) { c0 = bN; c1 = gN; c2 = rN; }
                                 else            { c0 = rN; c1 = gN; c2 = bN; }
+                            }
+                            else if (useImageNet)
+                            {
+                                // ImageNet: (x/255 - mean)/std, RGB 順序(c0=R,c1=G,c2=B)
+                                c0 = (r_raw/255f - inMean[0]) / inStd[0];
+                                c1 = (g_raw/255f - inMean[1]) / inStd[1];
+                                c2 = (b_raw/255f - inMean[2]) / inStd[2];
                             }
                             else
                             {
