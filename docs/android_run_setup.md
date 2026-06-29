@@ -54,3 +54,19 @@ setContent { MaterialTheme { SamplePickerScreen(vm) } }
 - `ArucoDetector` 找不到類別 → OpenCV 版本 <4.7 或未連結;改方式B 官方 SDK。
 - 面積 null → 範例圖未含可偵測貼紙(graceful);換含 square_20mm_v2 的標準化圖。
 - 模型載入失敗 → assets 無 student_fp16.onnx 或檔名不符(OnnxSegmentationModule.MODEL_FILENAME)。
+
+## 7. CameraX 高解析拍攝（CameraCaptureScreen）
+build.gradle 加：
+```gradle
+implementation "androidx.camera:camera-core:1.3.4"
+implementation "androidx.camera:camera-camera2:1.3.4"
+implementation "androidx.camera:camera-lifecycle:1.3.4"
+implementation "androidx.camera:camera-view:1.3.4"
+```
+AndroidManifest.xml：
+```xml
+<uses-permission android:name="android.permission.CAMERA"/>
+<uses-feature android:name="android.hardware.camera.any"/>
+```
+執行期請求 CAMERA 權限後，`setContent { CameraCaptureScreen(measureVM) }` → 預覽+「拍攝」→ 全解析 Bitmap(已修正旋轉) → `vm.analyze`。
+> CameraX 1.3+ 才有 `ImageProxy.toBitmap()`;舊版需自行 YUV→Bitmap 轉換。
