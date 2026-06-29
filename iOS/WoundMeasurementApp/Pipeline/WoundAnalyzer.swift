@@ -36,16 +36,51 @@ public final class WoundAnalyzer {
     /// 端到端分析；cloudEscalate：難例上雲回 A∪U 二值遮罩。
     public func run(image: CGImage,
                     markerCorners: [CGFloat]?,
-                    tissueFrac: [String: Double],
                     exudate: Int?,
+                    tissueFracOverride: [String: Double]? = nil,
                     cloudEscalate: ((CGImage) async -> [Bool])? = nil) async -> MeasureResult {
         var mask = await student.segment(image)
         let dis = (wsm != nil) ? iou(mask, await wsm!.segment(image)) : 1.0
         if dis < 0.50, let esc = cloudEscalate { mask = await esc(image) }
         let woundPx = mask.filter { $0 }.count
         let markerPxArea = markerCorners.map { quadPxArea($0) }
+        // 組織 v2:遮罩內像素 → 灰世界白平衡 → 互斥分類 → 比例(可由 override 帶入)
+        let frac = tissueFracOverride ?? computeTissueFrac(image, mask)
         let cap = CaptureContainer(rgb: Data(), timestamp: ISO8601DateFormatter().string(from: Date()))
         return WoundPipeline.analyze(cap: cap, woundPx: woundPx, markerPxArea: markerPxArea,
-                                     tissueFrac: tissueFrac, disagreementIou: dis, exudate: exudate)
+                                     tissueFrac: frac, disagreementIou: dis, exudate: exudate)
+    }
+
+    /// 取出 image 縮放至 side×side 的 RGBA 緩衝。
+    private func rgba(_ image: CGImage, _ side: Int) -> [UInt8] {
+        var data = [UInt8](repeating: 0, count: side * side * 4)
+        let cs = CGColorSpaceCreateDeviceRGB()
+        data.withUnsafeMutableBytes { ptr in
+            let ctx = CGContext(data: ptr.baseAddress, width: side, height: side, bitsPerComponent: 8,
+                                bytesPerRow: side * 4, space: cs,
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            ctx?.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
+        }
+        return data
+    }
+    /// 由遮罩內像素計算組織比例(灰世界白平衡 + TissueClassifierV2 互斥分類)。
+    private func computeTissueFrac(_ image: CGImage, _ mask: [Bool]) -> [String: Double] {
+        let mw = Int(Double(mask.count).squareRoot())
+        guard mw > 0 else { return [:] }
+        let d = rgba(image, mw)
+        var sr = 0.0, sg = 0.0, sb = 0.0, n = 0
+        for i in 0..<mask.count where mask[i] && i * 4 + 2 < d.count {
+            let o = i * 4; sr += Double(d[o]); sg += Double(d[o + 1]); sb += Double(d[o + 2]); n += 1
+        }
+        if n == 0 { return ["necrosis": 0, "slough": 0, "granulation": 0, "epithelial": 0, "other": 0] }
+        let gains = TissueClassifierV2.wbGains(sr / Double(n), sg / Double(n), sb / Double(n))
+        var px = [[Int]](); px.reserveCapacity(n)
+        for i in 0..<mask.count where mask[i] && i * 4 + 2 < d.count {
+            let o = i * 4
+            px.append([TissueClassifierV2.applyGain(Int(d[o]), gains[0]),
+                       TissueClassifierV2.applyGain(Int(d[o + 1]), gains[1]),
+                       TissueClassifierV2.applyGain(Int(d[o + 2]), gains[2])])
+        }
+        return TissueClassifierV2.proxy(px)
     }
 }

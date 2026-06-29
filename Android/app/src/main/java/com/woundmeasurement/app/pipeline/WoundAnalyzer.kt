@@ -41,8 +41,8 @@ class WoundAnalyzer(
     suspend fun run(
         bitmap: Bitmap,
         markerCorners: FloatArray?,
-        tissueFrac: Map<String, Double>,
         exudate: Int?,
+        tissueFracOverride: Map<String, Double>? = null,
         cloudEscalate: (suspend (Bitmap) -> BooleanArray)? = null
     ): MeasureResult {
         val s = student.analyze(bitmap)                 // SegmentationResult(probMap, binaryMask)
@@ -52,14 +52,39 @@ class WoundAnalyzer(
         if (dis < 0.50 && cloudEscalate != null) mask = cloudEscalate(bitmap)
         val woundPx = mask.count { it }
         val markerPxArea = markerCorners?.let { quadPxArea(it) }
+        // 組織 v2:遮罩內像素 → 灰世界白平衡 → 互斥分類 → 比例(可由 override 帶入)
+        val frac = tissueFracOverride ?: computeTissueFrac(bitmap, mask)
         return WoundPipeline.analyze(
             cap = CaptureContainer(rgb = ByteArray(0), timestamp = nowIso()),
             woundPx = woundPx,
             markerPxArea = markerPxArea,
-            tissueFrac = tissueFrac,
+            tissueFrac = frac,
             disagreementIou = dis,
             exudate = exudate
         )
+    }
+
+    /** 由遮罩內像素計算組織比例(灰世界白平衡 + TissueClassifierV2 互斥分類)。 */
+    private fun computeTissueFrac(bitmap: Bitmap, mask: BooleanArray): Map<String, Double> {
+        val mw = Math.sqrt(mask.size.toDouble()).toInt()
+        if (mw <= 0) return emptyMap()
+        val scaled = Bitmap.createScaledBitmap(bitmap, mw, mw, true)
+        val px = IntArray(mw * mw); scaled.getPixels(px, 0, mw, 0, 0, mw, mw)
+        var sr = 0.0; var sg = 0.0; var sb = 0.0; var n = 0
+        for (i in mask.indices) if (mask[i] && i < px.size) {
+            val c = px[i]; sr += (c shr 16 and 0xff); sg += (c shr 8 and 0xff); sb += (c and 0xff); n++
+        }
+        if (n == 0) return mapOf("necrosis" to 0.0,"slough" to 0.0,"granulation" to 0.0,"epithelial" to 0.0,"other" to 0.0)
+        val gains = TissueClassifierV2.wbGains(sr / n, sg / n, sb / n)
+        val pixels = ArrayList<IntArray>(n)
+        for (i in mask.indices) if (mask[i] && i < px.size) {
+            val c = px[i]
+            pixels.add(intArrayOf(
+                TissueClassifierV2.applyGain(c shr 16 and 0xff, gains[0]),
+                TissueClassifierV2.applyGain(c shr 8 and 0xff, gains[1]),
+                TissueClassifierV2.applyGain(c and 0xff, gains[2])))
+        }
+        return TissueClassifierV2.proxy(pixels)
     }
     private fun nowIso(): String = java.time.OffsetDateTime.now().toString()
 }
