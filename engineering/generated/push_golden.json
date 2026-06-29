@@ -1,0 +1,102 @@
+{
+  "area_subscore": [
+    [
+      0,
+      0
+    ],
+    [
+      0.2,
+      1
+    ],
+    [
+      0.5,
+      2
+    ],
+    [
+      0.9,
+      3
+    ],
+    [
+      1.5,
+      4
+    ],
+    [
+      2.5,
+      5
+    ],
+    [
+      3.5,
+      6
+    ],
+    [
+      6,
+      7
+    ],
+    [
+      10,
+      8
+    ],
+    [
+      20,
+      9
+    ],
+    [
+      30,
+      10
+    ]
+  ],
+  "tissue_subscore": [
+    [
+      {
+        "necrosis": 0.1,
+        "granulation": 0.8
+      },
+      4
+    ],
+    [
+      {
+        "slough": 0.2,
+        "granulation": 0.7
+      },
+      3
+    ],
+    [
+      {
+        "granulation": 0.95
+      },
+      2
+    ],
+    [
+      {
+        "epithelial": 0.9
+      },
+      1
+    ]
+  ],
+  "push_cases": [
+    {
+      "area_cm2": 8.66,
+      "exudate": 2,
+      "area_sub": 8,
+      "tissue_sub": 4,
+      "partial": 12,
+      "full": 14
+    },
+    {
+      "area_cm2": 2.78,
+      "exudate": 2,
+      "area_sub": 5,
+      "tissue_sub": 3,
+      "partial": 8,
+      "full": 10
+    },
+    {
+      "area_cm2": 0.0,
+      "exudate": null,
+      "area_sub": 0,
+      "tissue_sub": 2,
+      "partial": 2,
+      "full": null
+    }
+  ]
+}

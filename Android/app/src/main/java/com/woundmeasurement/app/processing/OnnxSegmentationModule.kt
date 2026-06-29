@@ -20,11 +20,11 @@ import kotlin.math.sqrt
 /**
  * OnnxSegmentationModule — Sprint T3
  *
- * On-device wound segmentation using wsm.onnx (converted from unet_tf_round3_s256).
+ * On-device wound segmentation using student_fp16.onnx (蒸餾學生, A∪U teacher).
  *
  * Model specs (same as Cloud service):
- *   Input:  NHWC [1, 256, 256, 3] float32, normalised to [-1, 1] (/ 127.5 – 1.0)
- *   Output: NHWC [1, 256, 256, 1] float32 logits → sigmoid → binary at threshold=0.30
+ *   Input:  NCHW [1, 3, 256, 256] float32, ImageNet RGB (SSOT student)
+ *   Output: NCHW [1, 1, 256, 256] float32 logits → sigmoid → binary at threshold=0.40
  *   Optimisation: 4-fold TTA (orig + h-flip + v-flip + 90°CW) — same as server
  *
  * Area / volume formula (Sprint S3):
@@ -41,10 +41,10 @@ class OnnxSegmentationModule(private val context: Context) {
 
     companion object {
         private const val TAG = "OnnxSeg"
-        private const val MODEL_FILENAME = "wsm.onnx"
-        private const val INPUT_SIZE = 256
-        private const val OUTPUT_SIZE = 224          // standard output / display size
-        private const val THRESHOLD = 0.30f          // Sprint S1: optimal threshold
+        private const val MODEL_FILENAME = "student_fp16.onnx"  // 蒸餾學生(SSOT student)
+        private const val INPUT_SIZE = 256          // SSOT student=256
+        private const val OUTPUT_SIZE = 256
+        private const val THRESHOLD = 0.40f          // SSOT student thr0.4
         private const val TTA_ENABLED = true         // 4-fold TTA
     }
 
@@ -209,39 +209,43 @@ class OnnxSegmentationModule(private val context: Context) {
         val session = ortSession ?: return FloatArray(OUTPUT_SIZE * OUTPUT_SIZE)
         val env     = ortEnv    ?: return FloatArray(OUTPUT_SIZE * OUTPUT_SIZE)
 
-        // Resize to 256×256 (INTER_CUBIC equivalent: LANCZOS)
+        // Resize to INPUT_SIZE×INPUT_SIZE (SSOT wsm=224)
         val scaled = Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, true)
         val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
         scaled.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
 
-        // Build NHWC float32 tensor [-1, 1]
-        val tensorBuf = ByteBuffer.allocateDirect(1 * INPUT_SIZE * INPUT_SIZE * 3 * 4)
-            .order(ByteOrder.nativeOrder())
-        for (px in pixels) {
-            val r = ((px shr 16) and 0xFF)
-            val g = ((px shr 8)  and 0xFF)
-            val b = ( px         and 0xFF)
-            tensorBuf.putFloat(r / 127.5f - 1.0f)
-            tensorBuf.putFloat(g / 127.5f - 1.0f)
-            tensorBuf.putFloat(b / 127.5f - 1.0f)
+        // Build NCHW float32 tensor — SSOT student = ImageNet RGB (planar);輸出 logits→sigmoid
+        val mean = floatArrayOf(0.485f, 0.456f, 0.406f)
+        val sd   = floatArrayOf(0.229f, 0.224f, 0.225f)
+        val hw = INPUT_SIZE * INPUT_SIZE
+        val chw = FloatArray(3 * hw)
+        for (i in pixels.indices) {
+            val px = pixels[i]
+            val r = ((px shr 16) and 0xFF) / 255.0f
+            val g = ((px shr 8)  and 0xFF) / 255.0f
+            val b = ( px         and 0xFF) / 255.0f
+            chw[0 * hw + i] = (r - mean[0]) / sd[0]   // R plane
+            chw[1 * hw + i] = (g - mean[1]) / sd[1]   // G plane
+            chw[2 * hw + i] = (b - mean[2]) / sd[2]   // B plane
         }
-        tensorBuf.rewind()
+        val tensorBuf = ByteBuffer.allocateDirect(chw.size * 4).order(ByteOrder.nativeOrder())
+        tensorBuf.asFloatBuffer().put(chw); tensorBuf.rewind()
 
         val inputName = session.inputNames.first()
         val tensor = OnnxTensor.createTensor(
             env, tensorBuf,
-            longArrayOf(1, INPUT_SIZE.toLong(), INPUT_SIZE.toLong(), 3)
+            longArrayOf(1, 3, INPUT_SIZE.toLong(), INPUT_SIZE.toLong())   // NCHW
         )
 
         val outputs = session.run(mapOf(inputName to tensor))
         tensor.close()
 
-        // Output shape [1, 256, 256, 1] float32 logits
-        val logits = (outputs[0].value as Array<Array<Array<FloatArray>>>)[0]
-        val sigMap = FloatArray(INPUT_SIZE * INPUT_SIZE)
+        // Output NCHW [1, 1, INPUT_SIZE, INPUT_SIZE] float32 logits → sigmoid
+        val logits = (outputs[0].value as Array<Array<Array<FloatArray>>>)[0][0]  // [H][W]
+        val sigMap = FloatArray(hw)
         for (h in 0 until INPUT_SIZE) {
             for (w in 0 until INPUT_SIZE) {
-                val logit = logits[h][w][0].coerceIn(-88f, 88f)
+                val logit = logits[h][w].coerceIn(-88f, 88f)
                 sigMap[h * INPUT_SIZE + w] = 1f / (1f + exp(-logit))
             }
         }

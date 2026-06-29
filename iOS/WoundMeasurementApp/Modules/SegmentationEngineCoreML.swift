@@ -4,7 +4,7 @@ import CoreML
 import CoreImage
 import VideoToolbox
 
-/// CoreML 版傷口分割引擎（UNet-256）
+/// CoreML 版傷口分割引擎（StudentSeg 蒸餾學生；imagenet 正規化+sigmoid 已內建於模型）
 /// - 輸入: 任意尺寸 UIImage（自動縮放至模型輸入尺寸）
 /// - 前處理: 使用 CoreML 的 ImageType 正規化 (x/127.5 - 1.0)
 /// - 輸出: 概率圖 (Float) 與二值遮罩 CGImage（使用閾值 threshold）
@@ -23,7 +23,7 @@ final class SegmentationEngineCoreML {
 
     init?(bundle: Bundle = .main) {
         // 尋找已編譯的 .mlmodelc
-        guard let url = bundle.url(forResource: "UNet256", withExtension: "mlmodelc") else {
+        guard let url = bundle.url(forResource: "StudentSeg", withExtension: "mlmodelc") else {
             return nil
         }
         do {
@@ -43,8 +43,8 @@ final class SegmentationEngineCoreML {
     }
 
     // MARK: - Sprint S1 constants
-    // Threshold tuned to 0.30 (threshold sweep on 3 GT images: mean IoU 0.701 → 0.878)
-    static let optimizedThreshold: Float = 0.30
+    // SSOT student 門檻 0.40(蒸餾學生;模型輸出已 sigmoid 機率)
+    static let optimizedThreshold: Float = 0.40   // SSOT student thr0.4
 
     /// 主推論：4-fold TTA + 優化閾值（Sprint S1）
     /// - threshold: 二值化閾值，預設 0.30（優化後，原為 0.5）
