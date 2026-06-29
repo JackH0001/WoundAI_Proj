@@ -1,0 +1,112 @@
+{
+  "Bedsore_方形校正貼紙範例": {
+    "zh": "壓瘡",
+    "aruco_id": 7,
+    "area_cm2": 8.07,
+    "tissue": {
+      "necrosis": 0.0,
+      "slough": 0.0,
+      "granulation": 0.852,
+      "epithelial": 0.146,
+      "other": 0.003
+    },
+    "push": {
+      "area": 8,
+      "tissue": 2,
+      "partial": 10
+    },
+    "tolerance": {
+      "area_pct": 8.0,
+      "push_exact": true,
+      "tissue_abs": 0.1
+    }
+  },
+  "Bedsore_02_方形校正貼紙範例": {
+    "zh": "壓瘡02",
+    "aruco_id": 7,
+    "area_cm2": 2.62,
+    "tissue": {
+      "necrosis": 0.13,
+      "slough": 0.218,
+      "granulation": 0.183,
+      "epithelial": 0.002,
+      "other": 0.467
+    },
+    "push": {
+      "area": 5,
+      "tissue": 4,
+      "partial": 9
+    },
+    "tolerance": {
+      "area_pct": 8.0,
+      "push_exact": true,
+      "tissue_abs": 0.1
+    }
+  },
+  "Body_chronic_wound_校正貼紙範例": {
+    "zh": "軀幹慢性",
+    "aruco_id": 7,
+    "area_cm2": 6.1,
+    "tissue": {
+      "necrosis": 0.0,
+      "slough": 0.0,
+      "granulation": 0.852,
+      "epithelial": 0.045,
+      "other": 0.103
+    },
+    "push": {
+      "area": 7,
+      "tissue": 2,
+      "partial": 9
+    },
+    "tolerance": {
+      "area_pct": 8.0,
+      "push_exact": true,
+      "tissue_abs": 0.1
+    }
+  },
+  "Burn_ChronicWound": {
+    "zh": "燒傷慢性",
+    "aruco_id": 7,
+    "area_cm2": 8.5,
+    "tissue": {
+      "necrosis": 0.0,
+      "slough": 0.007,
+      "granulation": 0.855,
+      "epithelial": 0.09,
+      "other": 0.047
+    },
+    "push": {
+      "area": 8,
+      "tissue": 2,
+      "partial": 10
+    },
+    "tolerance": {
+      "area_pct": 8.0,
+      "push_exact": true,
+      "tissue_abs": 0.1
+    }
+  },
+  "Foot_chronic_ulcer_校正貼紙": {
+    "zh": "足部潰瘍",
+    "aruco_id": 7,
+    "area_cm2": 6.09,
+    "tissue": {
+      "necrosis": 0.0,
+      "slough": 0.001,
+      "granulation": 0.979,
+      "epithelial": 0.009,
+      "other": 0.012
+    },
+    "push": {
+      "area": 7,
+      "tissue": 2,
+      "partial": 9
+    },
+    "tolerance": {
+      "area_pct": 8.0,
+      "push_exact": true,
+      "tissue_abs": 0.1
+    }
+  }
+}
