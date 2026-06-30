@@ -47,9 +47,10 @@ try:
     import tensorflow as tf
     import tensorflow_hub as hub
     TENSORFLOW_AVAILABLE = True
-except ImportError:
+except Exception as _tf_err:  # ImportError 或 numpy ABI 衝突(ValueError)等皆視為不可用
     TENSORFLOW_AVAILABLE = False
-    print("警告: TensorFlow未安裝，將使用替代ML方案")
+    tf = None; hub = None
+    print(f"警告: TensorFlow不可用({type(_tf_err).__name__}),改用ONNX/替代方案")
 
 from werkzeug.utils import secure_filename
 from PIL import Image, ImageEnhance
@@ -72,6 +73,14 @@ app.config.update(
 )
 
 jwt = JWTManager(app)
+
+# 飛輪 HTTP 端點(/api/v1/annotation, /api/v1/consent/withdraw)
+try:
+    from api_flywheel import flywheel_bp
+    if flywheel_bp is not None:
+        app.register_blueprint(flywheel_bp)
+except Exception:
+    pass
 
 # 預設帳號（正式環境應改為資料庫驗證）
 _USERS = {

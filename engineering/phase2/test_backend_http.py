@@ -14,7 +14,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://127.0.0.1:5000")
     ap.add_argument("--img", default=None)
-    ap.add_argument("--user", default="admin"); ap.add_argument("--pw", default="admin123")
+    ap.add_argument("--user", default="admin"); ap.add_argument("--pw", default="woundai-admin")  # 後端預設 ADMIN_PASSWORD
     a = ap.parse_args(); U = a.url; ok = True
     # 1 登入
     r = requests.post(f"{U}/api/auth/login", json={"username": a.user, "password": a.pw}, timeout=10)
