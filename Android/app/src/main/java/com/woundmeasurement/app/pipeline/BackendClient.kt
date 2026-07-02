@@ -22,8 +22,23 @@ data class ClassifyResult(
     val pushPartial: Int?, val pushFull: Int?, val confidence: Double, val route: String
 )
 
-class BackendClient(private val baseUrl: String, private val jwt: String) {
+class BackendClient(private val baseUrl: String, jwt: String = "") {
     private val http = OkHttpClient()
+    @Volatile private var jwt: String = jwt
+
+    /** 登入取得 JWT(後端 /api/auth/login)。成功回 true 並存 token 供後續呼叫。同步阻塞,請於 IO 執行。 */
+    fun login(username: String, password: String): Boolean {
+        val body = JSONObject(mapOf("username" to username, "password" to password)).toString()
+            .toRequestBody("application/json".toMediaType())
+        val req = Request.Builder().url("$baseUrl/api/auth/login").post(body).build()
+        http.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) return false
+            val tok = JSONObject(resp.body!!.string()).optString("access_token", "")
+            if (tok.isEmpty()) return false
+            jwt = tok
+            return true
+        }
+    }
 
     /** 呼叫 /api/v1/classify;回傳解析後結果(對齊後端契約)。 */
     fun classify(jpeg: ByteArray, cmPerPixel: Double? = null): ClassifyResult {

@@ -25,6 +25,7 @@ import com.woundmeasurement.app.camera.CaptureResult
 import com.woundmeasurement.app.camera.AdvancedCameraModule
 import com.woundmeasurement.app.camera.ImageQualityAssessor
 import com.woundmeasurement.app.annotation.DoctorAuthActivity
+import com.woundmeasurement.app.pipeline.MeasureValidationEntry
 
 class MainActivity : ComponentActivity() {
     
@@ -93,12 +94,16 @@ fun WoundMeasurementApp() {
             val intent = Intent(context, DoctorAuthActivity::class.java)
             context.startActivity(intent)
         }
-        
+
+        // AI 量測驗證(端上/後端可切;後端走 /api/v1/classify)
+        MainButton("AI 量測驗證(模擬)") { currentScreen = "validate" }
+
         // 顯示當前螢幕
         when (currentScreen) {
             "capture" -> CaptureScreen(onBack = { currentScreen = "main" })
             "history" -> HistoryScreen(onBack = { currentScreen = "main" })
             "settings" -> SettingsScreen(onBack = { currentScreen = "main" })
+            "validate" -> MeasureValidationEntry(onBack = { currentScreen = "main" })
         }
     }
 }
