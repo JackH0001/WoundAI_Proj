@@ -5,6 +5,177 @@
 	};
 	objectVersion = 56;
 	objects = {
+		PIPE01_BLD /* ArucoDetecting.swift in Sources */ = {isa = PBXBuildFile; fileRef = PIPE01_REF /* ArucoDetecting.swift */; };
+		PIPE02_BLD /* CameraCaptureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = PIPE02_REF /* CameraCaptureView.swift */; };
+		PIPE03_BLD /* MeasureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = PIPE03_REF /* MeasureView.swift */; };
+		PIPE04_BLD /* MeasureViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = PIPE04_REF /* MeasureViewModel.swift */; };
+		PIPE05_BLD /* TissueClassifierV2.swift in Sources */ = {isa = PBXBuildFile; fileRef = PIPE05_REF /* TissueClassifierV2.swift */; };
+		PIPE06_BLD /* WoundAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = PIPE06_REF /* WoundAnalyzer.swift */; };
+		PIPE07_BLD /* WoundNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = PIPE07_REF /* WoundNavigation.swift */; };
+		PIPE08_BLD /* WoundPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = PIPE08_REF /* WoundPipeline.swift */; };
+		GEN01_BLD /* Preprocessing.generated.swift in Sources */ = {isa = PBXBuildFile; fileRef = GEN01_REF /* Preprocessing.generated.swift */; };
+		FLYSVC_BLD /* AnnotationFlywheelService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FLYSVC_REF /* AnnotationFlywheelService.swift */; };
+		FLYDEMO_BLD /* FlywheelDemoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FLYDEMO_REF /* FlywheelDemoView.swift */; };
+		ARMON_BLD /* ARSessionMonitorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ARMON_REF /* ARSessionMonitorView.swift */; };
+		TST_BAT_BLD /* BatchProcessingServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TST_BAT_REF /* BatchProcessingServiceTests.swift */; };
+		TST_PDF_BLD /* PDFReportGeneratorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TST_PDF_REF /* PDFReportGeneratorTests.swift */; };
+		TST_VIS_BLD /* VisionBasedStickerDetectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TST_VIS_REF /* VisionBasedStickerDetectorTests.swift */; };
+		TST_INT_BLD /* IntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TST_INT_REF /* IntegrationTests.swift */; };
+		TST_HLP_BLD /* TestHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = TST_HLP_REF /* TestHelpers.swift */; };
+		TST_WVZ_BLD /* WoundVisualizationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TST_WVZ_REF /* WoundVisualizationTests.swift */; };
+		TST_TC2_BLD /* TissueClassifierV2Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TST_TC2_REF /* TissueClassifierV2Tests.swift */; };
+		TST_PSH_BLD /* PushScorerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TST_PSH_REF /* PushScorerTests.swift */; };
+		TST_MEAS_BLD /* MeasurementEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1TST001_REF /* MeasurementEngineTests.swift */; };
+		PIPE01_REF /* ArucoDetecting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ArucoDetecting.swift"; sourceTree = "<group>"; };
+		PIPE02_REF /* CameraCaptureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CameraCaptureView.swift"; sourceTree = "<group>"; };
+		PIPE03_REF /* MeasureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MeasureView.swift"; sourceTree = "<group>"; };
+		PIPE04_REF /* MeasureViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MeasureViewModel.swift"; sourceTree = "<group>"; };
+		PIPE05_REF /* TissueClassifierV2.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TissueClassifierV2.swift"; sourceTree = "<group>"; };
+		PIPE06_REF /* WoundAnalyzer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WoundAnalyzer.swift"; sourceTree = "<group>"; };
+		PIPE07_REF /* WoundNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WoundNavigation.swift"; sourceTree = "<group>"; };
+		PIPE08_REF /* WoundPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WoundPipeline.swift"; sourceTree = "<group>"; };
+		GEN01_REF /* Preprocessing.generated.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Preprocessing.generated.swift"; sourceTree = "<group>"; };
+		FLYSVC_REF /* AnnotationFlywheelService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WoundMeasurementApp/Services/AnnotationFlywheelService.swift"; sourceTree = SOURCE_ROOT; };
+		FLYDEMO_REF /* FlywheelDemoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WoundMeasurementApp/Views/FlywheelDemoView.swift"; sourceTree = SOURCE_ROOT; };
+		ARMON_REF /* ARSessionMonitorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WoundMeasurementApp/Views/ARSessionMonitorView.swift"; sourceTree = SOURCE_ROOT; };
+		TST_BAT_REF /* BatchProcessingServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WoundMeasurementAppTests/BatchProcessingServiceTests.swift"; sourceTree = SOURCE_ROOT; };
+		TST_PDF_REF /* PDFReportGeneratorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WoundMeasurementAppTests/PDFReportGeneratorTests.swift"; sourceTree = SOURCE_ROOT; };
+		TST_VIS_REF /* VisionBasedStickerDetectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WoundMeasurementAppTests/VisionBasedStickerDetectorTests.swift"; sourceTree = SOURCE_ROOT; };
+		TST_INT_REF /* IntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WoundMeasurementAppTests/IntegrationTests.swift"; sourceTree = SOURCE_ROOT; };
+		TST_HLP_REF /* TestHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WoundMeasurementAppTests/TestHelpers.swift"; sourceTree = SOURCE_ROOT; };
+		TST_WVZ_REF /* WoundVisualizationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WoundMeasurementAppTests/WoundVisualizationTests.swift"; sourceTree = SOURCE_ROOT; };
+		TST_TC2_REF /* TissueClassifierV2Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WoundMeasurementAppTests/TissueClassifierV2Tests.swift"; sourceTree = SOURCE_ROOT; };
+		TST_PSH_REF /* PushScorerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WoundMeasurementAppTests/PushScorerTests.swift"; sourceTree = SOURCE_ROOT; };
+		TSTPROD /* WoundMeasurementAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WoundMeasurementAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		PIPEGRP /* Pipeline */ = {
+			isa = PBXGroup;
+			children = (
+				PIPE01_REF /* ArucoDetecting.swift */,
+				PIPE02_REF /* CameraCaptureView.swift */,
+				PIPE03_REF /* MeasureView.swift */,
+				PIPE04_REF /* MeasureViewModel.swift */,
+				PIPE05_REF /* TissueClassifierV2.swift */,
+				PIPE06_REF /* WoundAnalyzer.swift */,
+				PIPE07_REF /* WoundNavigation.swift */,
+				PIPE08_REF /* WoundPipeline.swift */,
+			);
+			path = Pipeline;
+			sourceTree = "<group>";
+		};
+		GENGRP /* Generated */ = {
+			isa = PBXGroup;
+			children = (
+				GEN01_REF /* Preprocessing.generated.swift */,
+			);
+			path = Generated;
+			sourceTree = "<group>";
+		};
+		TSTGRP /* WoundMeasurementAppTests */ = {
+			isa = PBXGroup;
+			children = (
+				TST_BAT_REF /* BatchProcessingServiceTests.swift */,
+				TST_PDF_REF /* PDFReportGeneratorTests.swift */,
+				TST_VIS_REF /* VisionBasedStickerDetectorTests.swift */,
+				TST_INT_REF /* IntegrationTests.swift */,
+				TST_HLP_REF /* TestHelpers.swift */,
+				TST_WVZ_REF /* WoundVisualizationTests.swift */,
+				TST_TC2_REF /* TissueClassifierV2Tests.swift */,
+				TST_PSH_REF /* PushScorerTests.swift */,
+			);
+			path = WoundMeasurementAppTests;
+			sourceTree = "<group>";
+		};
+		TSTSRC /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				TST_BAT_BLD /* BatchProcessingServiceTests.swift in Sources */,
+				TST_PDF_BLD /* PDFReportGeneratorTests.swift in Sources */,
+				TST_VIS_BLD /* VisionBasedStickerDetectorTests.swift in Sources */,
+				TST_INT_BLD /* IntegrationTests.swift in Sources */,
+				TST_HLP_BLD /* TestHelpers.swift in Sources */,
+				TST_WVZ_BLD /* WoundVisualizationTests.swift in Sources */,
+				TST_TC2_BLD /* TissueClassifierV2Tests.swift in Sources */,
+				TST_PSH_BLD /* PushScorerTests.swift in Sources */,
+				TST_MEAS_BLD /* MeasurementEngineTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		TSTTARGET /* WoundMeasurementAppTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = TSTCFGLIST /* Build configuration list for PBXNativeTarget "WoundMeasurementAppTests" */;
+			buildPhases = (
+				TSTSRC /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				TSTDEP /* PBXTargetDependency */,
+			);
+			name = WoundMeasurementAppTests;
+			productName = WoundMeasurementAppTests;
+			productReference = TSTPROD /* WoundMeasurementAppTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		TSTDEP /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 3D4B7A252B1234567890123 /* WoundMeasurementApp */;
+			targetProxy = TSTPROXY /* PBXContainerItemProxy */;
+		};
+		TSTPROXY /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 3D4B7A1E2B1234567890123 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 3D4B7A252B1234567890123;
+			remoteInfo = WoundMeasurementApp;
+		};
+		TSTCFGLIST /* Build configuration list for PBXNativeTarget "WoundMeasurementAppTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				TSTDEBUG /* Debug */,
+				TSTRELEASE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		TSTDEBUG /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = LY2F24ZM68;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.woundmeasurement.appTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/WoundMeasurementApp.app/WoundMeasurementApp";
+			};
+			name = Debug;
+		};
+		TSTRELEASE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = LY2F24ZM68;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.woundmeasurement.appTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/WoundMeasurementApp.app/WoundMeasurementApp";
+			};
+			name = Release;
+		};
 
 /* Begin PBXBuildFile section */
 		3D4B7A2A2B1234567890123 /* WoundMeasurementApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A292B1234567890123 /* WoundMeasurementApp.swift */; };
@@ -102,7 +273,6 @@
 		B1ANL002_BUILD /* ExecuteRealDataAnalysis.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1ANL002_REF /* ExecuteRealDataAnalysis.swift */; };
 		B1UTL001_BUILD /* AreaCalibrationHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1UTL001_REF /* AreaCalibrationHelper.swift */; };
 		B1UTL002_BUILD /* SimulatedAnalysisExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1UTL002_REF /* SimulatedAnalysisExecutor.swift */; };
-		B1TST001_BUILD /* MeasurementEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1TST001_REF /* MeasurementEngineTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -235,6 +405,7 @@
 		3D4B7A1D2B1234567890123 = {
 			isa = PBXGroup;
 			children = (
+				TSTGRP /* WoundMeasurementAppTests */,
 				3D4B7A282B1234567890123 /* WoundMeasurementApp */,
 				3D4B7A272B1234567890123 /* Products */,
 			);
@@ -243,6 +414,7 @@
 		3D4B7A272B1234567890123 /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				TSTPROD /* WoundMeasurementAppTests.xctest */,
 				3D4B7A262B1234567890123 /* WoundMeasurementApp.app */,
 			);
 			name = Products;
@@ -251,6 +423,8 @@
 		3D4B7A282B1234567890123 /* WoundMeasurementApp */ = {
 			isa = PBXGroup;
 			children = (
+				PIPEGRP /* Pipeline */,
+				GENGRP /* Generated */,
 				3D4B7A292B1234567890123 /* WoundMeasurementApp.swift */,
 				3D4B7A2B2B1234567890123 /* ContentView.swift */,
 				A1VIEWGRP /* Views */,
@@ -392,6 +566,7 @@
 		A1SERVGRP /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				FLYSVC_REF /* AnnotationFlywheelService.swift */,
 				A1SERV001 /* BatchProcessingService.swift */,
 				A1SERV002 /* PDFReportGenerator.swift */,
 				A1SERV003 /* EnhancedPerformanceMonitor.swift */,
@@ -406,6 +581,8 @@
 		A1VIEWGRP /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				FLYDEMO_REF /* FlywheelDemoView.swift */,
+				ARMON_REF /* ARSessionMonitorView.swift */,
 				A1FILE001 /* AnnotationView.swift */,
 				A1FILE002 /* AnalysisHistoryView.swift */,
 				A1FILE003 /* SettingsView.swift */,
@@ -463,6 +640,10 @@
 				LastSwiftUpdateCheck = 1500;
 				LastUpgradeCheck = 1500;
 				TargetAttributes = {
+					TSTTARGET = {
+						CreatedOnToolsVersion = 15.0;
+						TestTargetID = 3D4B7A252B1234567890123;
+					};
 					3D4B7A252B1234567890123 = {
 						CreatedOnToolsVersion = 15.0;
 					};
@@ -484,6 +665,7 @@
 			projectRoot = "";
 			targets = (
 				3D4B7A252B1234567890123 /* WoundMeasurementApp */,
+				TSTTARGET /* WoundMeasurementAppTests */,
 			);
 		};
 /* End PBXProject section */
@@ -506,6 +688,18 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				PIPE01_BLD /* ArucoDetecting.swift in Sources */,
+				PIPE02_BLD /* CameraCaptureView.swift in Sources */,
+				PIPE03_BLD /* MeasureView.swift in Sources */,
+				PIPE04_BLD /* MeasureViewModel.swift in Sources */,
+				PIPE05_BLD /* TissueClassifierV2.swift in Sources */,
+				PIPE06_BLD /* WoundAnalyzer.swift in Sources */,
+				PIPE07_BLD /* WoundNavigation.swift in Sources */,
+				PIPE08_BLD /* WoundPipeline.swift in Sources */,
+				GEN01_BLD /* Preprocessing.generated.swift in Sources */,
+				FLYSVC_BLD /* AnnotationFlywheelService.swift in Sources */,
+				FLYDEMO_BLD /* FlywheelDemoView.swift in Sources */,
+				ARMON_BLD /* ARSessionMonitorView.swift in Sources */,
 				3D4B7A442B1234567890123 /* WoundMeasurementModel.xcdatamodeld in Sources */,
 				3D4B7A2C2B1234567890123 /* ContentView.swift in Sources */,
 				A1VIEW001 /* AnnotationView.swift in Sources */,
@@ -596,7 +790,6 @@
 				B1ANL002_BUILD /* ExecuteRealDataAnalysis.swift in Sources */,
 				B1UTL001_BUILD /* AreaCalibrationHelper.swift in Sources */,
 				B1UTL002_BUILD /* SimulatedAnalysisExecutor.swift in Sources */,
-				B1TST001_BUILD /* MeasurementEngineTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

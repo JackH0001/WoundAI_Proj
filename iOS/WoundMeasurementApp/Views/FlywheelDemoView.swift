@@ -8,7 +8,7 @@ struct FlywheelDemoView: View {
     enum Step: String { case pick = "選擇/拍攝影像", segment = "AI 初稿(輔助)", edit = "醫師修邊", upload = "上傳標註", done = "完成" }
     @State private var step: Step = .pick
     @State private var image: UIImage?
-    @State private var draft: SegmentationResult?
+    @State private var draft: FlywheelSegmentationResult?
     @State private var record: AnnotationRecord?
     @State private var status: String = ""
     @State private var busy = false

@@ -55,14 +55,14 @@ struct ARSessionMonitorView: View {
             
             HStack(spacing: 16) {
                 // 會話狀態
-                StatusBadge(
+                ARMonitorStatusBadge(
                     title: "會話",
                     value: sessionStateText,
                     color: sessionStateColor
                 )
                 
                 // 當前擁有者
-                StatusBadge(
+                ARMonitorStatusBadge(
                     title: "擁有者",
                     value: arSessionManager.currentSession != nil ? getCurrentOwnerName() : "無",
                     color: .blue
@@ -86,14 +86,14 @@ struct ARSessionMonitorView: View {
                 .fontWeight(.medium)
             
             HStack(spacing: 12) {
-                StatCard(
+                ARMonitorStatCard(
                     title: "衝突次數",
                     value: "\(arSessionManager.conflictCount)",
                     icon: "exclamationmark.triangle",
                     color: arSessionManager.conflictCount > 0 ? .red : .green
                 )
                 
-                StatCard(
+                ARMonitorStatCard(
                     title: "切換次數",
                     value: "\(arSessionManager.sessionSwitchCount)",
                     icon: "arrow.triangle.2.circlepath",
@@ -138,19 +138,19 @@ struct ARSessionMonitorView: View {
             Button("查看歷史") {
                 showingHistory = true
             }
-            .buttonStyle(SecondaryButtonStyle())
+            .buttonStyle(ARMonitorSecondaryButtonStyle())
             
             Button("重置統計") {
                 resetStatistics()
             }
-            .buttonStyle(SecondaryButtonStyle())
+            .buttonStyle(ARMonitorSecondaryButtonStyle())
             
             Spacer()
             
             Button("診斷檢查") {
                 performDiagnostics()
             }
-            .buttonStyle(PrimaryButtonStyle())
+            .buttonStyle(ARMonitorPrimaryButtonStyle())
         }
     }
     
@@ -227,7 +227,7 @@ struct ARSessionMonitorView: View {
 }
 
 // MARK: - 支援組件
-struct StatusBadge: View {
+struct ARMonitorStatusBadge: View {
     let title: String
     let value: String
     let color: Color
@@ -249,7 +249,7 @@ struct StatusBadge: View {
     }
 }
 
-struct StatCard: View {
+struct ARMonitorStatCard: View {
     let title: String
     let value: String
     let icon: String
@@ -278,7 +278,7 @@ struct StatCard: View {
 }
 
 // MARK: - 按鈕樣式
-struct PrimaryButtonStyle: ButtonStyle {
+struct ARMonitorPrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.caption)
@@ -291,7 +291,7 @@ struct PrimaryButtonStyle: ButtonStyle {
     }
 }
 
-struct SecondaryButtonStyle: ButtonStyle {
+struct ARMonitorSecondaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.caption)

@@ -3,8 +3,8 @@ import UIKit
 
 // MARK: - DTOs（對齊 openapi/annotation_segmentation.yaml；CodingKeys 之 raw value 必須等於 schema 欄位名）
 
-/// GET 自 POST /segment → SegmentationResult
-struct SegmentationResult: Codable {
+/// GET 自 POST /segment → FlywheelSegmentationResult
+struct FlywheelSegmentationResult: Codable {
     let status: String            // ai_assistive | manual_fallback | unavailable
     let maskPngB64: String?
     let confidence: Double?
@@ -68,7 +68,7 @@ final class AnnotationFlywheelService {
     }
 
     /// POST /segment（multipart）：取得 AI 分割初稿（輔助、附信心；缺模型回 503 → manual_fallback）
-    func segment(image: UIImage, modelId: String? = nil, imageId: String? = nil) async throws -> SegmentationResult {
+    func segment(image: UIImage, modelId: String? = nil, imageId: String? = nil) async throws -> FlywheelSegmentationResult {
         guard let url = URL(string: "\(baseURL)/segment"),
               let jpeg = image.jpegData(compressionQuality: 0.9) else { throw FlywheelError.badURL }
         let boundary = "Boundary-\(UUID().uuidString)"
@@ -92,7 +92,7 @@ final class AnnotationFlywheelService {
         if let http = resp as? HTTPURLResponse, !(200...503).contains(http.statusCode) {
             throw FlywheelError.http(http.statusCode)
         }
-        return try JSONDecoder().decode(SegmentationResult.self, from: data)
+        return try JSONDecoder().decode(FlywheelSegmentationResult.self, from: data)
     }
 
     /// POST /annotations：提交醫師修正後遮罩（修邊即標註，進訓練佇列）
