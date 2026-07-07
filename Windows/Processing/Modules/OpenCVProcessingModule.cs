@@ -215,3 +215,10 @@ namespace WoundMeasurement.Processing.Modules
         }
 
         private static void ApplyEdgeEnhancement(Mat bgr, double strength)
+        {
+            using var blur = new Mat();
+            Cv2.GaussianBlur(bgr, blur, new OpenCvSharp.Size(0, 0), 3);
+            Cv2.AddWeighted(bgr, 1.0 + strength, blur, -strength, 0, bgr);
+        }
+    }
+}
