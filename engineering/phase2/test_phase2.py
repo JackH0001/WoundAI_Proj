@@ -35,7 +35,8 @@ ck("stub -> status ok", d["status"]=="ok")
 ck("stub -> mask 為 2D bool", isinstance(d["mask"],np.ndarray) and d["mask"].dtype==bool and d["mask"].ndim==2)
 ck("stub -> mask 256x256 (符合 SSOT input_size)", list(d["mask"].shape)==[256,256])
 ck("stub -> confidence ∈ [0,1]", d["confidence"] is not None and 0.0<=d["confidence"]<=1.0)
-ck("stub -> 套用 SSOT threshold", abs(d["threshold"]-0.30)<1e-9)
+_thr = float(seg_infer._cfg("wsm").get("threshold", 0.5))
+ck("stub -> 套用 SSOT threshold", abs(d["threshold"]-_thr)<1e-9)
 
 # 5) 決定性
 d2 = seg_infer.segment(img, "segmentation.stub", flags_on, reg)

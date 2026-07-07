@@ -1,6 +1,6 @@
-{ "_note":"推論路由策略（SSOT）：邊緣優先，缺則雲端，再缺則 stub；低於 min_confidence 須醫師複核。",
+{ "_note":"推論路由策略（SSOT）：邊緣優先，缺則雲端，再缺則 stub；低於 min_confidence 須醫師複核。edge=student(prod,SSOT registry deploy: Android/Windows/Backend=student_fp16)；難例升級走 /api/v1/segment/escalate(A∪U 雙模集成,見 dual_track_routing_spec)。",
   "prefer":"edge",
-  "edge_model":"segmentation.wsm",
+  "edge_model":"segmentation.student",
   "cloud_model":"segmentation.fusegnet",
   "fallback_model":"segmentation.stub",
   "min_confidence":0.50 }

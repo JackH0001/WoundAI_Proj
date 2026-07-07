@@ -1,5 +1,6 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:local="clr-namespace:WoundMeasurement.WPF.Converters">
 
     <!-- 自定義顏色 -->
     <SolidColorBrush x:Key="SuccessColor" Color="#4CAF50"/>

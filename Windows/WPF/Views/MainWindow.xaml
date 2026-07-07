@@ -220,7 +220,7 @@
                         <!-- 面積 -->
                         <StackPanel Grid.Column="0" HorizontalAlignment="Center">
                             <TextBlock Text="面積" Style="{DynamicResource MaterialDesignBody2TextBlock}" HorizontalAlignment="Center"/>
-                            <TextBlock Text="{Binding MeasurementResult.Area, StringFormat='{0:F2} mm²'}" 
+                            <TextBlock Text="{Binding MeasurementResult.Area, StringFormat='{}{0:F2} mm²'}"
                                      Style="{DynamicResource MaterialDesignHeadline6TextBlock}" 
                                      HorizontalAlignment="Center"
                                      Foreground="{DynamicResource PrimaryHueMidBrush}"/>
@@ -229,7 +229,7 @@
                         <!-- 周長 -->
                         <StackPanel Grid.Column="1" HorizontalAlignment="Center">
                             <TextBlock Text="周長" Style="{DynamicResource MaterialDesignBody2TextBlock}" HorizontalAlignment="Center"/>
-                            <TextBlock Text="{Binding MeasurementResult.Perimeter, StringFormat='{0:F2} mm'}" 
+                            <TextBlock Text="{Binding MeasurementResult.Perimeter, StringFormat='{}{0:F2} mm'}"
                                      Style="{DynamicResource MaterialDesignHeadline6TextBlock}" 
                                      HorizontalAlignment="Center"
                                      Foreground="{DynamicResource PrimaryHueMidBrush}"/>
@@ -238,7 +238,7 @@
                         <!-- 深度 -->
                         <StackPanel Grid.Column="2" HorizontalAlignment="Center">
                             <TextBlock Text="深度" Style="{DynamicResource MaterialDesignBody2TextBlock}" HorizontalAlignment="Center"/>
-                            <TextBlock Text="{Binding MeasurementResult.Depth, StringFormat='{0:F2} mm'}" 
+                            <TextBlock Text="{Binding MeasurementResult.Depth, StringFormat='{}{0:F2} mm'}"
                                      Style="{DynamicResource MaterialDesignHeadline6TextBlock}" 
                                      HorizontalAlignment="Center"
                                      Foreground="{DynamicResource PrimaryHueMidBrush}"/>
@@ -247,7 +247,7 @@
                         <!-- 體積 -->
                         <StackPanel Grid.Column="3" HorizontalAlignment="Center">
                             <TextBlock Text="體積" Style="{DynamicResource MaterialDesignBody2TextBlock}" HorizontalAlignment="Center"/>
-                            <TextBlock Text="{Binding MeasurementResult.Volume, StringFormat='{0:F2} mm³'}" 
+                            <TextBlock Text="{Binding MeasurementResult.Volume, StringFormat='{}{0:F2} mm³'}" 
                                      Style="{DynamicResource MaterialDesignHeadline6TextBlock}" 
                                      HorizontalAlignment="Center"
                                      Foreground="{DynamicResource PrimaryHueMidBrush}"/>

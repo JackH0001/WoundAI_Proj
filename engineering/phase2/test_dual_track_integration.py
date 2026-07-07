@@ -6,8 +6,10 @@
 import os, numpy as np
 from PIL import Image
 
-ROUTE5 = os.environ.get("ROUTE5",
-    "/sessions/nifty-sweet-edison/mnt/dev/WoundAI_weights_archive/批次驗證工具/route5")
+ROUTE5 = os.environ.get("ROUTE5", "")  # 本機驗證資料(不隨 repo 發布)；設 ROUTE5 環境變數指向 批次驗證工具/route5
+if not ROUTE5 or not os.path.isdir(ROUTE5):
+    print("SKIP: ROUTE5 資料集不存在(本測試需本機 批次驗證工具/route5，非 repo 內容)。設環境變數 ROUTE5 後重跑。")
+    raise SystemExit(0)
 GTDIR = os.environ.get("GTDIR",
     "/sessions/nifty-sweet-edison/mnt/dev/WoundAI_weights_archive/test_images/方形校正貼紙範例/labels_correct")
 ESCALATE_IOU, STU_THR, WSM_THR, CLOUD_THR = 0.50, 0.40, 0.50, 0.40

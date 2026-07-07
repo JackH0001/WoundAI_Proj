@@ -6,12 +6,16 @@
 ## 重要事項
 - ⚠ 本 repo **不含真實模型**。`models/stub/wsm_stub.onnx` 為**假模型**（I/O 同 wsm.onnx：
   input [1,256,256,3] → output [1,256,256,1]，輸出固定假遮罩），僅供建置與 UI 測試。
+  ⚠ stub 輸入為 256；SSOT 註記實測 wsm.onnx 為 224——實作「依 SSOT 斷言輸入尺寸」時請以**實際載入之模型 input shape** 為準，勿寫死。
   真實推論請呼叫官方推論 API（介面見 `openapi/`）。
 - 機敏已淨化；**請勿提交**任何密碼／金鑰／真實病患影像。
-- 本 repo 為**全新 git 歷史**，不含原專案歷史與 LFS 物件。
+- 本 repo 為**全新 git 歷史**，不含原專案歷史。注意：`*.onnx` 等大檔走 **Git LFS**
+  （如 `engineering/phase0/models/stub/wsm_stub.onnx`），clone 前請先 `git lfs install`，
+  否則拿到的是 pointer 檔，推論相關測試（workflow_sim / test_phase2 / test_app_fastapi 等）會失敗。
 
 ## 環境設定
 1. 防呆：`pip install pre-commit && pre-commit install`（gitleaks 機敏掃描＋大檔阻擋）。
+1b. `git lfs install && git lfs pull`（取回 stub 模型實體檔）。
 2. CI：`.github/workflows/gitleaks.yml` 已就緒。
 3. 授權與保密：見 `LICENSE` 與 `docs/NDA_CLA_範本.md`（協作者需簽署）。
 

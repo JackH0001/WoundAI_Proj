@@ -5,8 +5,11 @@ using Microsoft.Extensions.Logging;
 using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Media.Imaging;
+using WoundMeasurement.Core.Interfaces;
 using WoundMeasurement.Core.Models;
 using WoundMeasurement.Core.Services;
+// alias 避免「namespace WoundMeasurement」與「class WoundMeasurement」名稱衝突（同 IMeasurementModule.cs 慣例）
+using WoundMeasurementModel = WoundMeasurement.Core.Models.WoundMeasurement;
 
 namespace WoundMeasurement.WPF.ViewModels
 {
@@ -22,7 +25,7 @@ namespace WoundMeasurement.WPF.ViewModels
         {
             _system = system;
             _logger = logger;
-            RecentMeasurements = new ObservableCollection<WoundMeasurement>();
+            RecentMeasurements = new ObservableCollection<WoundMeasurementModel>();
 
             // 初始化系統
             _ = InitializeSystemAsync();
@@ -46,7 +49,7 @@ namespace WoundMeasurement.WPF.ViewModels
         private string _processedImageInfo = "未處理影像";
 
         [ObservableProperty]
-        private WoundMeasurement _measurementResult = new();
+        private WoundMeasurementModel _measurementResult = new();
 
         [ObservableProperty]
         private string _statusMessage = "系統就緒";
@@ -66,7 +69,7 @@ namespace WoundMeasurement.WPF.ViewModels
         [ObservableProperty]
         private bool _canPerformMeasurement = false;
 
-        public ObservableCollection<WoundMeasurement> RecentMeasurements { get; }
+        public ObservableCollection<WoundMeasurementModel> RecentMeasurements { get; }
 
         #endregion
 

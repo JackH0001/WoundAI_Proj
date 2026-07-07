@@ -151,8 +151,10 @@ namespace WoundMeasurement.Processing.Modules
 
                 using var m1 = new Mat();
                 using var m2 = new Mat();
-                Cv2.InRange(hsv, new Scalar(0, 40, 40), new Scalar(15, 255, 255), m1);
-                Cv2.InRange(hsv, new Scalar(160, 40, 40), new Scalar(180, 255, 255), m2);
+                // S 下限 100：膚色(如 RGB 210,170,150 → H≈10,S≈73)會落入紅色帶造成全圖誤判；
+                // 傷口紅 S≈188 / 壞死 S≈128 遠高於膚色，以飽和度分離。
+                Cv2.InRange(hsv, new Scalar(0, 100, 40), new Scalar(15, 255, 255), m1);
+                Cv2.InRange(hsv, new Scalar(160, 100, 40), new Scalar(180, 255, 255), m2);
                 using var mask = new Mat();
                 Cv2.BitwiseOr(m1, m2, mask);
                 using var kernel = Cv2.GetStructuringElement(MorphShapes.Ellipse, new OpenCvSharp.Size(7, 7));
@@ -213,10 +215,3 @@ namespace WoundMeasurement.Processing.Modules
         }
 
         private static void ApplyEdgeEnhancement(Mat bgr, double strength)
-        {
-            using var blur = new Mat();
-            Cv2.GaussianBlur(bgr, blur, new OpenCvSharp.Size(0, 0), 3);
-            Cv2.AddWeighted(bgr, 1.0 + strength, blur, -strength, 0, bgr);
-        }
-    }
-}
