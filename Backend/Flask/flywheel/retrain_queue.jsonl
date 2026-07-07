@@ -1,2 +1,0 @@
-{"code": "WD-TEST01", "gt_polygon": [[1, 2]], "exudate": 2, "doctor_verified": true, "deidentified": true, "consent_train": true, "correction_iou": null, "care_note": null, "received_at": "2026-06-30T22:10:10"}
-{"code": "WD-TEST01", "gt_polygon": [[1, 2]], "exudate": 2, "doctor_verified": true, "deidentified": true, "consent_train": true, "correction_iou": null, "care_note": null, "received_at": "2026-06-30T22:36:25"}

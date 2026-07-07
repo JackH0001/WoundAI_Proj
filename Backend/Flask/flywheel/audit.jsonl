@@ -1,6 +1,0 @@
-{"ts": "2026-06-30T22:10:10", "actor": "admin", "action": "annotation_enqueued", "code": "WD-TEST01", "result": "ok"}
-{"ts": "2026-06-30T22:10:10", "actor": "admin", "action": "annotation_rejected", "code": "WD-TEST01", "result": "未取得訓練同意(consent_train=false)"}
-{"ts": "2026-06-30T22:10:10", "actor": "admin", "action": "consent_withdraw", "code": "WD-TEST01", "result": "下架+排除訓練"}
-{"ts": "2026-06-30T22:36:25", "actor": "admin", "action": "annotation_enqueued", "code": "WD-TEST01", "result": "ok"}
-{"ts": "2026-06-30T22:36:25", "actor": "admin", "action": "annotation_rejected", "code": "WD-TEST01", "result": "未取得訓練同意(consent_train=false)"}
-{"ts": "2026-06-30T22:36:25", "actor": "admin", "action": "consent_withdraw", "code": "WD-TEST01", "result": "下架+排除訓練"}
