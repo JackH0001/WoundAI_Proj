@@ -24,9 +24,16 @@ def segment(img_rgb_uint8, model_id, flags, registry, flag_name="semi_auto_segme
     meta = registry.m[model_id]
     cfg = _cfg(meta.get("preprocess", "wsm"))
     W, H = cfg["input_size"]
+    sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+    ishape = sess.get_inputs()[0].shape          # 以實際模型 input shape 為準(防 SSOT 與模型檔尺寸漂移,如 stub=256 vs wsm=224)
+    dims = [d for d in ishape if isinstance(d, int)]
+    if len(dims) >= 2:
+        mh, mw = (dims[-2], dims[-1]) if cfg.get("layout") == "NCHW" else (dims[0] if len(dims) < 3 else dims[-3], dims[-2])
+        if (mw, mh) != (W, H):
+            print(f"[seg_infer] warn: SSOT input_size {cfg['input_size']} != model {[mh, mw]}, 以模型為準", file=sys.stderr)
+            W, H = mw, mh
     img = np.asarray(Image.fromarray(img_rgb_uint8).resize((W, H), Image.BILINEAR))
     x = preprocess(img, cfg).astype(np.float32)
-    sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
     out = sess.run(None, {sess.get_inputs()[0].name: x})[0]
     prob = np.squeeze(out).astype(np.float32)
     if prob.min() < 0.0 or prob.max() > 1.0:     # 若輸出非 [0,1] 視為 logits

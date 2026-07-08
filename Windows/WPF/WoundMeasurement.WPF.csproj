@@ -6,7 +6,7 @@
     <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <ApplicationIcon>Resources\app.ico</ApplicationIcon>
+    <!-- ApplicationIcon 暫移除：Resources\app.ico 不在 repo（補上圖檔後再啟用） -->
     <AssemblyTitle>傷口自動化量測系統</AssemblyTitle>
     <AssemblyDescription>Windows 平台傷口自動化量測應用程式</AssemblyDescription>
     <AssemblyVersion>1.0.0.0</AssemblyVersion>

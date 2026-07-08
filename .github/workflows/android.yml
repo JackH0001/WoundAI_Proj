@@ -37,6 +37,8 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "8.13"   # 釘住與 AGP 8.12 相容版(runner 預設 9.6.x 移除 AGP 依賴之內部 API)
 
       - name: Gradle assembleDebug
         run: gradle assembleDebug --no-daemon

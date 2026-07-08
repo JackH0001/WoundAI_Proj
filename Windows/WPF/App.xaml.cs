@@ -8,6 +8,8 @@ using WoundMeasurement.Core.Interfaces;
 using WoundMeasurement.Core.Services;
 using WoundMeasurement.Measurement.Modules;
 using WoundMeasurement.Processing.Modules;
+using WoundMeasurement.WPF.ViewModels;
+using WoundMeasurement.WPF.Views;
 
 namespace WoundMeasurement.WPF
 {
@@ -83,15 +85,13 @@ namespace WoundMeasurement.WPF
 
                     // 註冊 ViewModels
                     services.AddTransient<MainViewModel>();
-                    services.AddTransient<CaptureViewModel>();
-                    services.AddTransient<ProcessingViewModel>();
-                    services.AddTransient<MeasurementViewModel>();
+                    // Capture/Processing/Measurement ViewModel 類別尚未實作（僅 MainViewModel 存在），
+                    // 先移除註冊以通過編譯；後續補實作時再加回。
 
                     // 註冊 Views
                     services.AddTransient<MainWindow>();
-                    services.AddTransient<CaptureView>();
-                    services.AddTransient<ProcessingView>();
-                    services.AddTransient<MeasurementView>();
+                    // Capture/Processing/Measurement View 尚未實作（僅 MainWindow 存在），
+                    // 先移除註冊以通過編譯；後續補實作時再加回。
                 })
                 .ConfigureLogging((context, logging) =>
                 {

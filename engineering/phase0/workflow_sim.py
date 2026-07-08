@@ -88,12 +88,17 @@ def main():
     check("9 治療建議規則式+需醫師確認", tx["status"]=="rule_based" and "醫師" in tx["note"] and "清創" in tx["recommendation"])
     # 10 前處理跨端一致 (兩實作位元級相同)
     cfg = json.load(open(os.path.join(base,"preprocessing.json"),encoding="utf-8"))["models"]["wsm"]
-    u8 = np.random.default_rng(2).integers(0,256,(256,256,3),dtype=np.uint8)
+    _sz = cfg["input_size"][0]
+    u8 = np.random.default_rng(2).integers(0,256,(_sz,_sz,3),dtype=np.uint8)
     a = pp.preprocess(u8,cfg)
-    _ref = u8.astype(np.float32)
-    if cfg["channel_order"]=="BGR": _ref=_ref[...,::-1]   # 依 SSOT channel_order(wsm 已修正為 RGB)
-    b = np.ascontiguousarray((_ref/127.5-1.0)[None,...])
-    check("10 前處理跨端位元級一致(channel_order="+cfg["channel_order"]+")", np.array_equal(a,b) and cfg["channel_order"]=="RGB")
+    _ref = u8.astype(np.float32)                          # 參考實作：依 SSOT 獨立重算(勿寫死常數,防 SSOT 更新後測試過時)
+    if cfg["channel_order"]=="BGR": _ref=_ref[...,::-1]
+    if cfg["normalize"]=="[-1,1]": _ref=_ref/127.5-1.0
+    elif cfg["normalize"]=="[0,1]": _ref=_ref/255.0
+    else: _ref=(_ref/255.0-pp._IMAGENET_MEAN)/pp._IMAGENET_STD
+    if cfg.get("layout")=="NCHW": _ref=np.transpose(_ref,(2,0,1))
+    b = np.ascontiguousarray(_ref[None,...])
+    check("10 前處理跨端位元級一致(channel_order="+cfg["channel_order"]+",normalize="+cfg["normalize"]+")", np.array_equal(a,b) and cfg["channel_order"] in ("RGB","BGR"))
 
     ok = sum(1 for _,c in results if c)
     print(f"\n===== 完整性模擬結果：{ok}/{len(results)} PASS =====")
