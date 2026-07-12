@@ -19,7 +19,8 @@ import org.json.JSONObject
  */
 data class ClassifyResult(
     val areaCm2: Double?, val tissueFrac: Map<String, Double>,
-    val pushPartial: Int?, val pushFull: Int?, val confidence: Double, val route: String
+    val pushPartial: Int?, val pushFull: Int?, val confidence: Double, val route: String,
+    val escalated: Boolean = false
 )
 
 class BackendClient(private val baseUrl: String, jwt: String = "") {
@@ -62,7 +63,9 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
                 pushPartial = if (s5.isNull("total_partial_img")) null else s5.getInt("total_partial_img"),
                 pushFull = if (s5.isNull("total_full")) null else s5.getInt("total_full"),
                 confidence = if (s2.isNull("confidence")) 0.0 else s2.getDouble("confidence"),
-                route = "cloud"
+                // 後端雙軌路由:student(端上主力) 或 cloud_escalated(AU)(難例自動上雲集成)
+                route = if (s2.isNull("route")) "cloud" else s2.getString("route"),
+                escalated = !s2.isNull("escalated") && s2.getBoolean("escalated")
             )
         }
     }

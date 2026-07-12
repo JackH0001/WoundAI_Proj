@@ -1231,10 +1231,30 @@ def classify_wound():
         if bgr is None: return jsonify({'error': '影像解碼失敗'}), 400
         img = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         H, W = img.shape[:2]
-        # Stage2 分割(沿用現役模型)
+        # Stage2 分割(端上主力 student)
         wound_prob, conf = segment_wound_ai(img)
         thr = float(((_load_ssot().get("models", {}) or {}).get(_active_model_key() or "", {}) or {}).get("threshold", 0.4))
         mask = wound_prob > thr
+        seg_model = _active_model_key(); route = "student"; escalated = False; au_ratio = None; iou_sa = None
+        # 雙軌自動 escalate:難例(碎片/低對比→student 大幅低估)自動改用雲端 A∪U 集成
+        # 判難靠「第二意見」(student vs A∪U),因 student 漏 segment 區域機率≈0、無自我訊號
+        if str(request.form.get('escalate', 'on')).lower() not in ('off', '0', 'false'):
+            try:
+                _a, _u = _load_cloud_au()
+                if _a is not None and _u is not None:
+                    _fused = 0.5 * _au_infer(_a, img) + 0.5 * _au_infer(_u, img)
+                    au_mask = cv2.resize(_fused, (W, H)) > 0.40
+                    def _big(m):
+                        cs, _h = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        return max((cv2.contourArea(c) for c in cs), default=0.0)
+                    _sp, _ap = _big(mask), _big(au_mask)
+                    _inter = float(np.logical_and(mask, au_mask).sum()); _uni = float(np.logical_or(mask, au_mask).sum())
+                    iou_sa = round(_inter / _uni, 3) if _uni > 0 else 1.0
+                    au_ratio = round(_ap / _sp, 2) if _sp > 0 else (999.0 if _ap > 0 else 0.0)
+                    if _ap > 0 and (au_ratio > 1.5 or (iou_sa is not None and iou_sa < 0.5)):
+                        mask = au_mask; route = "cloud_escalated(AU)"; escalated = True; seg_model = "ensemble.AU"
+            except Exception as _e:
+                logger.warning(f"escalate 略過: {_e}")
         # Stage3 校正面積:優先 ArUco,否則 cm_per_pixel(手動)
         area_cm2 = None; calib = "none"
         if _ac is not None:
@@ -1249,7 +1269,8 @@ def classify_wound():
         t = tissue_proxy_v2(img, mask)
         push = push_score(area_cm2, t)
         return jsonify({
-            'stage2_segment': {'model': _active_model_key(), 'wound_ratio': round(float(mask.mean()), 4), 'confidence': round(conf, 4)},
+            'stage2_segment': {'model': seg_model, 'wound_ratio': round(float(mask.mean()), 4), 'confidence': round(conf, 4),
+                               'route': route, 'escalated': escalated, 'au_area_ratio': au_ratio, 'iou_student_au': iou_sa},
             'stage3_calibrate': {'method': calib, 'area_cm2': (round(area_cm2, 2) if area_cm2 is not None else None),
                                  'note': ('未校正(無 ArUco 且未提供 cm_per_pixel)' if area_cm2 is None else None)},
             'stage4_tissue': {'method': 'v2(WB+HSV)', 'tissue_frac': {k: round(t[k], 3) for k in ('necrosis','slough','granulation','epithelial','other')}},
