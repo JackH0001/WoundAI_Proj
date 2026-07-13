@@ -22,9 +22,11 @@ fun MeasureValidationEntry(
     onBack: () -> Unit = {}
 ) {
     val ctx = LocalContext.current
-    val vm = remember { MeasureViewModel(WoundAnalyzer(OnnxSegmentationModule(ctx)), null) }
+    val seg = remember { OnnxSegmentationModule(ctx) }
+    val vm = remember { MeasureViewModel(WoundAnalyzer(seg), null) }
     val backend = remember { BackendClient(backendBaseUrl) }
     var loginState by remember { mutableStateOf("後端登入中…") }
+    var modelState by remember { mutableStateOf("端上模型載入中…") }
 
     LaunchedEffect(Unit) {
         loginState = try {
@@ -34,12 +36,50 @@ fun MeasureValidationEntry(
         } catch (e: Exception) {
             "⚠️ 後端連線錯誤:${e.message}"
         }
+        // 端上模型載入(assets/student_fp16.onnx);缺檔則端上停用,後端路徑不受影響
+        modelState = try {
+            seg.loadModel()
+            if (seg.loaded) "✅ 端上模型已載入(可切端上模式;端上面積無 ArUco 校正)"
+            else "端上模型未載入(assets 缺 student_fp16.onnx;後端不受影響)"
+        } catch (e: Exception) { "端上模型載入失敗:${e.message}" }
     }
 
     Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(loginState, style = MaterialTheme.typography.bodySmall)
+        Text(modelState, style = MaterialTheme.typography.bodySmall)
         Divider()
         SamplePickerScreen(vm = vm, backend = backend)
+        Divider()
+        DoctorFlywheelSubmit(vm = vm, backend = backend)
         OutlinedButton(onBack, Modifier.fillMaxWidth()) { Text("返回主畫面") }
+    }
+}
+
+/**
+ * 醫師確認・送出訓練標註(飛輪閉環 UI)。量測有結果後出現:選滲液 → 送出 →
+ * 以後端回傳(或修邊後)傷口輪廓當 GT，POST /api/v1/annotation(doctor_verified/deidentified/consent_train=true)。
+ * 修邊(拖曳頂點)為後續 C2b;此處先打通「確認→去識別代碼→守門→再訓練佇列」閉環。
+ */
+@Composable
+private fun DoctorFlywheelSubmit(vm: MeasureViewModel, backend: BackendClient) {
+    val st by vm.state.collectAsState()
+    if (st.result == null) return
+    var exudate by remember { mutableStateOf<Int?>(null) }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("醫師確認・送出訓練標註(飛輪)", style = MaterialTheme.typography.titleSmall)
+        Text("滲液量(醫師輸入 0–3,供 PUSH full):", style = MaterialTheme.typography.bodySmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            (0..3).forEach { v ->
+                FilterChip(selected = exudate == v, onClick = { exudate = v }, label = { Text("$v") })
+            }
+        }
+        Button(
+            onClick = {
+                val code = "WD-" + System.currentTimeMillis().toString().takeLast(8)
+                vm.submitAnnotation(backend, code, exudate, careNote = "emulator demo confirm")
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("醫師確認・送出標註 → 再訓練佇列") }
+        st.submitStatus?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
     }
 }

@@ -5,6 +5,7 @@ import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -20,7 +21,8 @@ import org.json.JSONObject
 data class ClassifyResult(
     val areaCm2: Double?, val tissueFrac: Map<String, Double>,
     val pushPartial: Int?, val pushFull: Int?, val confidence: Double, val route: String,
-    val escalated: Boolean = false
+    val escalated: Boolean = false,
+    val woundPolygon: List<List<Int>> = emptyList()   // 傷口輪廓(供醫師修邊/飛輪標註)
 )
 
 class BackendClient(private val baseUrl: String, jwt: String = "") {
@@ -57,6 +59,13 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
             val s2 = j.getJSONObject("stage2_segment")
             val tissue = listOf("necrosis","slough","granulation","epithelial","other")
                 .associateWith { if (s4.isNull(it)) 0.0 else s4.getDouble(it) }
+            val poly = ArrayList<List<Int>>()
+            if (!s2.isNull("wound_polygon")) {
+                val pa = s2.getJSONArray("wound_polygon")
+                for (i in 0 until pa.length()) {
+                    val pt = pa.getJSONArray(i); poly.add(listOf(pt.getInt(0), pt.getInt(1)))
+                }
+            }
             return ClassifyResult(
                 areaCm2 = if (s3.isNull("area_cm2")) null else s3.getDouble("area_cm2"),
                 tissueFrac = tissue,
@@ -65,8 +74,37 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
                 confidence = if (s2.isNull("confidence")) 0.0 else s2.getDouble("confidence"),
                 // 後端雙軌路由:student(端上主力) 或 cloud_escalated(AU)(難例自動上雲集成)
                 route = if (s2.isNull("route")) "cloud" else s2.getString("route"),
-                escalated = !s2.isNull("escalated") && s2.getBoolean("escalated")
+                escalated = !s2.isNull("escalated") && s2.getBoolean("escalated"),
+                woundPolygon = poly
             )
+        }
+    }
+
+    /**
+     * 送出醫師驗證標註 → 飛輪 retrain 佇列(POST /api/v1/annotation)。回 (成功, 訊息)。
+     * 後端守門:code 需 WD-*、gt_polygon 非空、doctor_verified/deidentified/consent_train 皆 true。
+     * 醫師修邊後把修正 polygon 帶入 gtPolygon;correctionIou 記錄修正幅度。同步阻塞,請於 IO 執行。
+     */
+    fun submitAnnotation(
+        code: String, gtPolygon: List<List<Int>>, exudate: Int?,
+        correctionIou: Double? = null, careNote: String? = null
+    ): Pair<Boolean, String> {
+        val poly = JSONArray()
+        for (p in gtPolygon) { val pt = JSONArray(); pt.put(p[0]); pt.put(p.getOrElse(1) { 0 }); poly.put(pt) }
+        val obj = JSONObject()
+            .put("code", code)
+            .put("gt_polygon", poly)
+            .put("exudate", if (exudate != null) exudate else JSONObject.NULL)
+            .put("doctor_verified", true)
+            .put("deidentified", true)
+            .put("consent_train", true)
+        if (correctionIou != null) obj.put("correction_iou", correctionIou)
+        if (careNote != null) obj.put("care_note", careNote)
+        val req = Request.Builder().url("$baseUrl/api/v1/annotation")
+            .header("Authorization", "Bearer $jwt")
+            .post(obj.toString().toRequestBody("application/json".toMediaType())).build()
+        http.newCall(req).execute().use { resp ->
+            return Pair(resp.isSuccessful, (resp.body?.string() ?: "").take(300))
         }
     }
 

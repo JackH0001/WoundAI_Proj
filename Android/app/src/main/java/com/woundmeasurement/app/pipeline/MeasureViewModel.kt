@@ -18,7 +18,8 @@ import java.io.ByteArrayOutputStream
 data class MeasureUiState(
     val loading: Boolean = false,
     val result: MeasureResult? = null,
-    val error: String? = null
+    val error: String? = null,
+    val submitStatus: String? = null    // 飛輪標註送出狀態(醫師修邊→再訓練佇列)
 )
 
 class MeasureViewModel(
@@ -28,6 +29,10 @@ class MeasureViewModel(
 
     private val _state = MutableStateFlow(MeasureUiState())
     val state: StateFlow<MeasureUiState> = _state.asStateFlow()
+
+    // 後端 classify 回傳的傷口輪廓(供醫師修邊/飛輪標註送出);修邊 UI 可覆寫此值
+    @Volatile var lastPolygon: List<List<Int>> = emptyList()
+        private set
 
     /**
      * @param bitmap 拍攝原圖(含校正貼紙)
@@ -70,9 +75,11 @@ class MeasureViewModel(
         _state.value = _state.value.copy(loading = true, error = null)
         viewModelScope.launch {
             try {
+                var polyCap: List<List<Int>> = emptyList()
                 val r = withContext(Dispatchers.IO) {
                     val jpeg = bitmap.toJpeg()
                     val c = backend.classify(jpeg, cmPerPixel)
+                    polyCap = c.woundPolygon
                     MeasureResult(
                         areaCm2 = c.areaCm2,
                         tissueFrac = c.tissueFrac,
@@ -85,9 +92,37 @@ class MeasureViewModel(
                         confidence = c.confidence
                     )
                 }
+                lastPolygon = polyCap
                 _state.value = MeasureUiState(loading = false, result = r)
             } catch (e: Exception) {
                 _state.value = MeasureUiState(loading = false, error = e.message ?: "後端分析失敗")
+            }
+        }
+    }
+
+    /**
+     * 醫師確認・送出訓練標註(飛輪閉環)：以後端回傳(或修邊後)的傷口輪廓為 GT → POST /api/v1/annotation。
+     * 送 doctor_verified/deidentified/consent_train=true;後端守門不合則回訊息。
+     * @param code 去識別代碼(WD-*);@param exudate 醫師輸入滲液 0–3
+     */
+    fun submitAnnotation(
+        backend: BackendClient, code: String, exudate: Int?, careNote: String? = null
+    ) {
+        val poly = lastPolygon
+        if (poly.isEmpty()) {
+            _state.value = _state.value.copy(submitStatus = "⚠️ 無傷口輪廓可送(請先量測)"); return
+        }
+        _state.value = _state.value.copy(submitStatus = "送出中…")
+        viewModelScope.launch {
+            try {
+                val (ok, msg) = withContext(Dispatchers.IO) {
+                    backend.submitAnnotation(code, poly, exudate, careNote = careNote)
+                }
+                _state.value = _state.value.copy(
+                    submitStatus = if (ok) "✅ 已送出,進再訓練佇列($code)" else "⚠️ 被守門擋下:$msg"
+                )
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(submitStatus = "⚠️ 送出失敗:${e.message}")
             }
         }
     }

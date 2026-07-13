@@ -1268,9 +1268,17 @@ def classify_wound():
         # Stage4 組織 v2 + Stage5 PUSH
         t = tissue_proxy_v2(img, mask)
         push = push_score(area_cm2, t)
+        # 傷口輪廓多邊形(最大連通、approxPolyDP 精簡)→ 供 App 醫師修邊/飛輪標註
+        wound_poly = []
+        _cnts, _hh = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if _cnts:
+            _bc = max(_cnts, key=cv2.contourArea)
+            _ap = cv2.approxPolyDP(_bc, 0.01 * cv2.arcLength(_bc, True), True).reshape(-1, 2)
+            wound_poly = [[int(x), int(y)] for x, y in _ap.tolist()]
         return jsonify({
             'stage2_segment': {'model': seg_model, 'wound_ratio': round(float(mask.mean()), 4), 'confidence': round(conf, 4),
-                               'route': route, 'escalated': escalated, 'au_area_ratio': au_ratio, 'iou_student_au': iou_sa},
+                               'route': route, 'escalated': escalated, 'au_area_ratio': au_ratio, 'iou_student_au': iou_sa,
+                               'wound_polygon': wound_poly},
             'stage3_calibrate': {'method': calib, 'area_cm2': (round(area_cm2, 2) if area_cm2 is not None else None),
                                  'note': ('未校正(無 ArUco 且未提供 cm_per_pixel)' if area_cm2 is None else None)},
             'stage4_tissue': {'method': 'v2(WB+HSV)', 'tissue_frac': {k: round(t[k], 3) for k in ('necrosis','slough','granulation','epithelial','other')}},

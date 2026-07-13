@@ -77,6 +77,9 @@ class OnnxSegmentationModule(private val context: Context) {
     private var ortSession: OrtSession? = null
     private var isLoaded = false
 
+    /** 端上模型是否已載入(供 UI 顯示狀態)。 */
+    val loaded: Boolean get() = isLoaded
+
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     /**
