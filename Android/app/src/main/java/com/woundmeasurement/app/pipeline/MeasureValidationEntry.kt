@@ -70,11 +70,17 @@ private fun DoctorFlywheelSubmit(vm: MeasureViewModel, backend: BackendClient) {
     var exudate by remember { mutableStateOf<Int?>(null) }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("醫師確認・送出訓練標註(飛輪)", style = MaterialTheme.typography.titleSmall)
-        Text("滲液量(醫師輸入 0–3,供 PUSH full):", style = MaterialTheme.typography.bodySmall)
+        // 滲液量參考標準(NPUAP PUSH tool:Exudate Amount)
+        Text("滲液量 Exudate(PUSH 標準):0=無(None) · 1=少量(Light) · 2=中量(Moderate) · 3=大量(Heavy)",
+            style = MaterialTheme.typography.bodySmall)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             (0..3).forEach { v ->
                 FilterChip(selected = exudate == v, onClick = { exudate = v }, label = { Text("$v") })
             }
+        }
+        // 送出狀態放按鈕「上方」,按下即可見(先前在下方、被捲出畫面外)
+        st.submitStatus?.let {
+            Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
         }
         Button(
             onClick = {
@@ -83,6 +89,5 @@ private fun DoctorFlywheelSubmit(vm: MeasureViewModel, backend: BackendClient) {
             },
             modifier = Modifier.fillMaxWidth()
         ) { Text("醫師確認・送出標註 → 再訓練佇列") }
-        st.submitStatus?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
     }
 }
