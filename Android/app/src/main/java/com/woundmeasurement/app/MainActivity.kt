@@ -26,6 +26,7 @@ import com.woundmeasurement.app.camera.AdvancedCameraModule
 import com.woundmeasurement.app.camera.ImageQualityAssessor
 import com.woundmeasurement.app.annotation.DoctorAuthActivity
 import com.woundmeasurement.app.pipeline.MeasureValidationEntry
+import com.woundmeasurement.app.pipeline.WoundTimelineScreen
 
 class MainActivity : ComponentActivity() {
     
@@ -73,7 +74,7 @@ fun WoundMeasurementApp() {
     // 只顯示當前畫面:主選單 或 全螢幕子畫面(子畫面各自有返回鈕,避免被選單擠壓/無法捲動)
     when (currentScreen) {
         "capture" -> CaptureScreen(onBack = { currentScreen = "main" })
-        "history" -> HistoryScreen(onBack = { currentScreen = "main" })
+        "history" -> WoundTimelineScreen(onBack = { currentScreen = "main" })
         "settings" -> SettingsScreen(onBack = { currentScreen = "main" })
         "validate" -> MeasureValidationEntry(onBack = { currentScreen = "main" })
         else -> Column(
