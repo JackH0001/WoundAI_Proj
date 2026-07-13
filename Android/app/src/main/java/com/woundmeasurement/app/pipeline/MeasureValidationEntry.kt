@@ -68,26 +68,44 @@ private fun DoctorFlywheelSubmit(vm: MeasureViewModel, backend: BackendClient) {
     val st by vm.state.collectAsState()
     if (st.result == null) return
     var exudate by remember { mutableStateOf<Int?>(null) }
+    var editing by remember { mutableStateOf(false) }
+    val bmp = vm.lastBitmap
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("醫師確認・送出訓練標註(飛輪)", style = MaterialTheme.typography.titleSmall)
-        // 滲液量參考標準(NPUAP PUSH tool:Exudate Amount)
-        Text("滲液量 Exudate(PUSH 標準):0=無(None) · 1=少量(Light) · 2=中量(Moderate) · 3=大量(Heavy)",
-            style = MaterialTheme.typography.bodySmall)
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            (0..3).forEach { v ->
-                FilterChip(selected = exudate == v, onClick = { exudate = v }, label = { Text("$v") })
+        if (editing && bmp != null) {
+            // 修邊模式:拖曳頂點編輯遮罩
+            WoundEditScreen(
+                bitmap = bmp,
+                initialPolygon = vm.lastPolygon,
+                onCancel = { editing = false },
+                onDone = { poly, iou -> vm.applyEditedPolygon(poly, iou); editing = false }
+            )
+        } else {
+            // 醫師修邊入口(修邊即標註):修正後 polygon 雜湊不同→正常入列、帶 correction_iou
+            OutlinedButton(
+                onClick = { if (bmp != null && vm.lastPolygon.isNotEmpty()) editing = true },
+                enabled = bmp != null && vm.lastPolygon.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("✏️ 醫師修邊(拖曳頂點編輯遮罩)") }
+            // 滲液量參考標準(NPUAP PUSH tool:Exudate Amount)
+            Text("滲液量 Exudate(PUSH 標準):0=無(None) · 1=少量(Light) · 2=中量(Moderate) · 3=大量(Heavy)",
+                style = MaterialTheme.typography.bodySmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                (0..3).forEach { v ->
+                    FilterChip(selected = exudate == v, onClick = { exudate = v }, label = { Text("$v") })
+                }
             }
+            // 送出狀態放按鈕「上方」,按下即可見
+            st.submitStatus?.let {
+                Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+            }
+            Button(
+                onClick = {
+                    val code = "WD-" + System.currentTimeMillis().toString().takeLast(8)
+                    vm.submitAnnotation(backend, code, exudate, careNote = "emulator demo confirm")
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("醫師確認・送出標註 → 再訓練佇列") }
         }
-        // 送出狀態放按鈕「上方」,按下即可見(先前在下方、被捲出畫面外)
-        st.submitStatus?.let {
-            Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
-        }
-        Button(
-            onClick = {
-                val code = "WD-" + System.currentTimeMillis().toString().takeLast(8)
-                vm.submitAnnotation(backend, code, exudate, careNote = "emulator demo confirm")
-            },
-            modifier = Modifier.fillMaxWidth()
-        ) { Text("醫師確認・送出標註 → 再訓練佇列") }
     }
 }

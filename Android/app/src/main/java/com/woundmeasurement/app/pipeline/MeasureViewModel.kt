@@ -33,6 +33,12 @@ class MeasureViewModel(
     // 後端 classify 回傳的傷口輪廓(供醫師修邊/飛輪標註送出);修邊 UI 可覆寫此值
     @Volatile var lastPolygon: List<List<Int>> = emptyList()
         private set
+    // 最近分析的原圖(供修邊畫布顯示)
+    @Volatile var lastBitmap: Bitmap? = null
+        private set
+    // 醫師修邊後與原始遮罩的 IoU(修正幅度;1.0=未改),隨標註送出
+    @Volatile var lastCorrectionIou: Double? = null
+        private set
 
     /**
      * @param bitmap 拍攝原圖(含校正貼紙)
@@ -93,6 +99,8 @@ class MeasureViewModel(
                     )
                 }
                 lastPolygon = polyCap
+                lastBitmap = bitmap
+                lastCorrectionIou = null   // 新分析→重置修邊修正量
                 _state.value = MeasureUiState(loading = false, result = r)
             } catch (e: Exception) {
                 _state.value = MeasureUiState(loading = false, error = e.message ?: "後端分析失敗")
@@ -116,7 +124,7 @@ class MeasureViewModel(
         viewModelScope.launch {
             try {
                 val (ok, msg) = withContext(Dispatchers.IO) {
-                    backend.submitAnnotation(code, poly, exudate, careNote = careNote)
+                    backend.submitAnnotation(code, poly, exudate, correctionIou = lastCorrectionIou, careNote = careNote)
                 }
                 _state.value = _state.value.copy(
                     submitStatus = when {
@@ -129,6 +137,13 @@ class MeasureViewModel(
                 _state.value = _state.value.copy(submitStatus = "⚠️ 送出失敗:${e.message}")
             }
         }
+    }
+
+    /** 醫師修邊完成:以編輯後 polygon 覆寫 GT,記錄與原始遮罩的 correction_iou(隨飛輪標註送出)。 */
+    fun applyEditedPolygon(edited: List<List<Int>>, correctionIou: Double?) {
+        lastPolygon = edited
+        lastCorrectionIou = correctionIou
+        _state.value = _state.value.copy(submitStatus = "已套用修邊(修正 IoU=${correctionIou?.let { "%.2f".format(it) } ?: "-"}),可送出")
     }
 }
 
