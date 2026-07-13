@@ -142,11 +142,21 @@ class MeasureViewModel(
         }
     }
 
-    /** 醫師修邊完成:以編輯後 polygon 覆寫 GT,記錄與原始遮罩的 correction_iou(隨飛輪標註送出)。 */
-    fun applyEditedPolygon(edited: List<List<Int>>, correctionIou: Double?) {
+    /**
+     * 醫師修邊完成:覆寫 GT polygon、記 correction_iou,並以修邊後面積重算 PUSH → 更新結果卡。
+     * newArea 由編輯頁以「原始面積×新舊多邊形像素面積比」本機換算(免重傳)。
+     */
+    fun applyEditedPolygon(edited: List<List<Int>>, correctionIou: Double?, newArea: Double?, exudate: Int?) {
         lastPolygon = edited
         lastCorrectionIou = correctionIou
-        _state.value = _state.value.copy(submitStatus = "已套用修邊(修正 IoU=${correctionIou?.let { "%.2f".format(it) } ?: "-"}),可送出")
+        val r = _state.value.result
+        val updated = if (r != null && newArea != null) {
+            r.copy(areaCm2 = newArea, push = WoundPipeline.push(newArea, r.tissueFrac, exudate))
+        } else r
+        _state.value = _state.value.copy(
+            result = updated,
+            submitStatus = "已套用修邊(面積 ${newArea?.let { "%.2f".format(it) } ?: "-"} cm²,修正 IoU=${correctionIou?.let { "%.2f".format(it) } ?: "-"}),可送出"
+        )
     }
 
     /** 存入個案時間軸(本機 Room/SQLite)。一般量測 patientId=null;供傷口時間軸/趨勢。 */

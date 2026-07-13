@@ -48,31 +48,36 @@ fun MeasureValidationEntry(
         modelState = "端上模型:未自動載入(避免模擬器原生庫閃退;demo 走後端模式)"
     }
 
-    Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        Text(loginState, style = MaterialTheme.typography.bodySmall)
-        Text(modelState, style = MaterialTheme.typography.bodySmall)
-        Divider()
-        SamplePickerScreen(
-            vm = vm, backend = backend,
-            onReview = { if (vm.lastBitmap != null && vm.lastPolygon.isNotEmpty()) editing = true },
-            onSaveToTimeline = { vm.saveToTimeline(dao, exudate) }
+    val st by vm.state.collectAsState()
+    val eb = vm.lastBitmap
+    if (editing && eb != null) {
+        // 專屬全螢幕修邊頁(對齊原型 v_review)
+        WoundEditScreen(
+            bitmap = eb,
+            initialPolygon = vm.lastPolygon,
+            originalArea = st.result?.areaCm2,
+            tissueFrac = st.result?.tissueFrac ?: emptyMap(),
+            exudate = exudate,
+            onCancel = { editing = false },
+            onDone = { poly, iou, newA -> vm.applyEditedPolygon(poly, iou, newA, exudate); editing = false }
         )
-        val eb = vm.lastBitmap
-        if (editing && eb != null) {
+    } else {
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(loginState, style = MaterialTheme.typography.bodySmall)
+            Text(modelState, style = MaterialTheme.typography.bodySmall)
             Divider()
-            WoundEditScreen(
-                bitmap = eb,
-                initialPolygon = vm.lastPolygon,
-                onCancel = { editing = false },
-                onDone = { poly, iou -> vm.applyEditedPolygon(poly, iou); editing = false }
+            SamplePickerScreen(
+                vm = vm, backend = backend,
+                onReview = { if (vm.lastBitmap != null && vm.lastPolygon.isNotEmpty()) editing = true },
+                onSaveToTimeline = { vm.saveToTimeline(dao, exudate) }
             )
+            Divider()
+            DoctorFlywheelSubmit(vm = vm, backend = backend, exudate = exudate, onExudate = { exudate = it })
+            OutlinedButton(onBack, Modifier.fillMaxWidth()) { Text("返回主畫面") }
         }
-        Divider()
-        DoctorFlywheelSubmit(vm = vm, backend = backend, exudate = exudate, onExudate = { exudate = it })
-        OutlinedButton(onBack, Modifier.fillMaxWidth()) { Text("返回主畫面") }
     }
 }
 
