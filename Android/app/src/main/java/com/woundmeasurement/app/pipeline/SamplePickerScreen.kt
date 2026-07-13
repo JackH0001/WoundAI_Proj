@@ -23,7 +23,12 @@ import androidx.compose.ui.unit.dp
  *       後端路徑需傳入 [backend](BackendClient,baseUrl+JWT),後端 app.py 啟動中。
  */
 @Composable
-fun SamplePickerScreen(vm: MeasureViewModel, backend: BackendClient? = null) {
+fun SamplePickerScreen(
+    vm: MeasureViewModel,
+    backend: BackendClient? = null,
+    onReview: () -> Unit = {},
+    onSaveToTimeline: () -> Unit = {}
+) {
     val ctx = LocalContext.current
     // 模式:false=端上、true=後端。有後端時預設走後端(端上 ONNX 原生庫在模擬器可能不相容)
     var useBackend by remember { mutableStateOf(backend != null) }
@@ -58,6 +63,6 @@ fun SamplePickerScreen(vm: MeasureViewModel, backend: BackendClient? = null) {
             OutlinedButton({ takePhoto.launch(null) }, Modifier.weight(1f)) { Text("拍照") }
         }
         Divider()
-        MeasureScreen(vm = vm, onReview = { /* TODO 導向修邊 */ }, onSaveToTimeline = { /* TODO 存時間軸 */ })
+        MeasureScreen(vm = vm, onReview = onReview, onSaveToTimeline = onSaveToTimeline)
     }
 }

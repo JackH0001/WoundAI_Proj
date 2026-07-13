@@ -3,6 +3,9 @@ package com.woundmeasurement.app.pipeline
 import android.graphics.Bitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.woundmeasurement.app.data.dao.MeasurementDao
+import com.woundmeasurement.app.data.entity.MeasurementEntity
+import java.util.Date
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -144,6 +147,36 @@ class MeasureViewModel(
         lastPolygon = edited
         lastCorrectionIou = correctionIou
         _state.value = _state.value.copy(submitStatus = "已套用修邊(修正 IoU=${correctionIou?.let { "%.2f".format(it) } ?: "-"}),可送出")
+    }
+
+    /** 存入個案時間軸(本機 Room/SQLite)。一般量測 patientId=null;供傷口時間軸/趨勢。 */
+    fun saveToTimeline(dao: MeasurementDao, exudate: Int?) {
+        val r = _state.value.result ?: return
+        _state.value = _state.value.copy(submitStatus = "存入時間軸中…")
+        viewModelScope.launch {
+            try {
+                fun pct(k: String) = ((r.tissueFrac[k] ?: 0.0) * 100).toInt()
+                val id = withContext(Dispatchers.IO) {
+                    dao.insertMeasurement(MeasurementEntity(
+                        patientId = null,
+                        timestamp = Date(),
+                        hasWound = (r.areaCm2 ?: 0.0) > 0.0 || r.tissueFrac.values.any { it > 0.0 },
+                        confidence = r.confidence,
+                        estimatedArea = r.areaCm2,
+                        estimatedVolume = null,
+                        woundType = "AI(${r.route})",
+                        quality = "backend",
+                        processingTime = 0L,
+                        imagePath = "",
+                        dataPath = "",
+                        notes = "PUSH ${r.push.partial ?: "-"}; 肉芽${pct("granulation")}% 腐肉${pct("slough")}% 壞死${pct("necrosis")}%; 滲液${exudate ?: "-"}; route ${r.route}"
+                    ))
+                }
+                _state.value = _state.value.copy(submitStatus = "✅ 已存入個案時間軸(#$id)")
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(submitStatus = "⚠️ 存入失敗:${e.message}")
+            }
+        }
     }
 }
 

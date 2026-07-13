@@ -8,6 +8,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.woundmeasurement.app.data.database.WoundMeasurementDatabase
 import com.woundmeasurement.app.processing.OnnxSegmentationModule
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -24,11 +25,14 @@ fun MeasureValidationEntry(
     onBack: () -> Unit = {}
 ) {
     val ctx = LocalContext.current
+    val dao = remember { WoundMeasurementDatabase.getDatabase(ctx).measurementDao() }
     val seg = remember { OnnxSegmentationModule(ctx) }
     val vm = remember { MeasureViewModel(WoundAnalyzer(seg), null) }
     val backend = remember { BackendClient(backendBaseUrl) }
     var loginState by remember { mutableStateOf("後端登入中…") }
     var modelState by remember { mutableStateOf("端上模型載入中…") }
+    var editing by remember { mutableStateOf(false) }
+    var exudate by remember { mutableStateOf<Int?>(null) }
 
     LaunchedEffect(Unit) {
         loginState = try {
@@ -51,9 +55,23 @@ fun MeasureValidationEntry(
         Text(loginState, style = MaterialTheme.typography.bodySmall)
         Text(modelState, style = MaterialTheme.typography.bodySmall)
         Divider()
-        SamplePickerScreen(vm = vm, backend = backend)
+        SamplePickerScreen(
+            vm = vm, backend = backend,
+            onReview = { if (vm.lastBitmap != null && vm.lastPolygon.isNotEmpty()) editing = true },
+            onSaveToTimeline = { vm.saveToTimeline(dao, exudate) }
+        )
+        val eb = vm.lastBitmap
+        if (editing && eb != null) {
+            Divider()
+            WoundEditScreen(
+                bitmap = eb,
+                initialPolygon = vm.lastPolygon,
+                onCancel = { editing = false },
+                onDone = { poly, iou -> vm.applyEditedPolygon(poly, iou); editing = false }
+            )
+        }
         Divider()
-        DoctorFlywheelSubmit(vm = vm, backend = backend)
+        DoctorFlywheelSubmit(vm = vm, backend = backend, exudate = exudate, onExudate = { exudate = it })
         OutlinedButton(onBack, Modifier.fillMaxWidth()) { Text("返回主畫面") }
     }
 }
@@ -64,48 +82,32 @@ fun MeasureValidationEntry(
  * 修邊(拖曳頂點)為後續 C2b;此處先打通「確認→去識別代碼→守門→再訓練佇列」閉環。
  */
 @Composable
-private fun DoctorFlywheelSubmit(vm: MeasureViewModel, backend: BackendClient) {
+private fun DoctorFlywheelSubmit(
+    vm: MeasureViewModel, backend: BackendClient, exudate: Int?, onExudate: (Int) -> Unit
+) {
     val st by vm.state.collectAsState()
     if (st.result == null) return
-    var exudate by remember { mutableStateOf<Int?>(null) }
-    var editing by remember { mutableStateOf(false) }
-    val bmp = vm.lastBitmap
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("醫師確認・送出訓練標註(飛輪)", style = MaterialTheme.typography.titleSmall)
-        if (editing && bmp != null) {
-            // 修邊模式:拖曳頂點編輯遮罩
-            WoundEditScreen(
-                bitmap = bmp,
-                initialPolygon = vm.lastPolygon,
-                onCancel = { editing = false },
-                onDone = { poly, iou -> vm.applyEditedPolygon(poly, iou); editing = false }
-            )
-        } else {
-            // 醫師修邊入口(修邊即標註):修正後 polygon 雜湊不同→正常入列、帶 correction_iou
-            OutlinedButton(
-                onClick = { if (bmp != null && vm.lastPolygon.isNotEmpty()) editing = true },
-                enabled = bmp != null && vm.lastPolygon.isNotEmpty(),
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("✏️ 醫師修邊(拖曳頂點編輯遮罩)") }
-            // 滲液量參考標準(NPUAP PUSH tool:Exudate Amount)
-            Text("滲液量 Exudate(PUSH 標準):0=無(None) · 1=少量(Light) · 2=中量(Moderate) · 3=大量(Heavy)",
-                style = MaterialTheme.typography.bodySmall)
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                (0..3).forEach { v ->
-                    FilterChip(selected = exudate == v, onClick = { exudate = v }, label = { Text("$v") })
-                }
+        Text("(修邊按上方「醫師確認・修邊」;確認後選滲液再送出)", style = MaterialTheme.typography.bodySmall)
+        // 滲液量參考標準(NPUAP PUSH tool:Exudate Amount)
+        Text("滲液量 Exudate(PUSH 標準):0=無(None) · 1=少量(Light) · 2=中量(Moderate) · 3=大量(Heavy)",
+            style = MaterialTheme.typography.bodySmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            (0..3).forEach { v ->
+                FilterChip(selected = exudate == v, onClick = { onExudate(v) }, label = { Text("$v") })
             }
-            // 送出狀態放按鈕「上方」,按下即可見
-            st.submitStatus?.let {
-                Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
-            }
-            Button(
-                onClick = {
-                    val code = "WD-" + System.currentTimeMillis().toString().takeLast(8)
-                    vm.submitAnnotation(backend, code, exudate, careNote = "emulator demo confirm")
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("醫師確認・送出標註 → 再訓練佇列") }
         }
+        // 送出狀態放按鈕「上方」,按下即可見
+        st.submitStatus?.let {
+            Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+        }
+        Button(
+            onClick = {
+                val code = "WD-" + System.currentTimeMillis().toString().takeLast(8)
+                vm.submitAnnotation(backend, code, exudate, careNote = "emulator demo confirm")
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("醫師確認・送出標註 → 再訓練佇列") }
     }
 }
