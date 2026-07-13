@@ -7,6 +7,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.TimeUnit
 
 /**
  * 後端 HTTP 客戶端骨架（對接 Backend/Flask app.py）。回應 schema 見 docs/api_contract_classify；
@@ -26,7 +27,13 @@ data class ClassifyResult(
 )
 
 class BackendClient(private val baseUrl: String, jwt: String = "") {
-    private val http = OkHttpClient()
+    // escalate 的 classify 需跑 student+A∪U 兩模型,首次冷啟>10s;拉長逾時避免 timeout
+    private val http = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(90, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(120, TimeUnit.SECONDS)
+        .build()
     @Volatile private var jwt: String = jwt
 
     /** 登入取得 JWT(後端 /api/auth/login)。成功回 true 並存 token 供後續呼叫。同步阻塞,請於 IO 執行。 */

@@ -3,7 +3,7 @@
 /api/v1/consent/withdraw(撤回同意→下架排除訓練)。需 JWT、去識別、醫師驗證。輔助、非診斷。
 app.py 註冊:from api_flywheel import flywheel_bp; app.register_blueprint(flywheel_bp)
 驗證邏輯抽出為純函式(validate_annotation/append_jsonl)供契約/單元測試。"""
-import os, json, time
+import os, json, time, hashlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 QUEUE = os.path.join(HERE, "flywheel", "retrain_queue.jsonl")
@@ -32,6 +32,29 @@ def append_jsonl(path: str, rec: dict):
 def audit(actor: str, action: str, code: str, result: str):
     append_jsonl(AUDIT, {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "actor": actor, "action": action, "code": code, "result": result})
 
+def poly_sig(poly):
+    """遮罩輪廓內容雜湊(座標四捨五入後序列化)→ 供去重。同一傷口遮罩→同 sig。"""
+    try:
+        norm = json.dumps([[round(float(p[0])), round(float(p[1]))] for p in (poly or [])], sort_keys=True)
+    except Exception:
+        norm = json.dumps(poly or [])
+    return hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16]
+
+def is_duplicate(path, poly):
+    """佇列中是否已有相同遮罩(依 poly_sig)。撤回過的不算(下架另處理)。"""
+    sig = poly_sig(poly)
+    if not sig or sig == poly_sig([]) or not os.path.exists(path):
+        return False
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+                if poly_sig(rec.get("gt_polygon")) == sig:
+                    return True
+            except Exception:
+                pass
+    return False
+
 # ---- Flask Blueprint(import flask 失敗時不影響純函式測試) ----
 try:
     from flask import Blueprint, request, jsonify
@@ -47,6 +70,11 @@ try:
         if not ok:
             audit(actor, "annotation_rejected", d.get("code", "?"), ";".join(issues))
             return jsonify({"error": "標註不符上傳規範", "issues": issues}), 400
+        # 去重:相同傷口遮罩已在佇列 → 自動略過(避免多次上傳灌爆同一樣本)
+        if is_duplicate(QUEUE, d.get("gt_polygon")):
+            audit(actor, "annotation_duplicate", d.get("code", "?"), "同遮罩已在佇列,自動略過")
+            return jsonify({"status": "duplicate_skipped", "code": d.get("code"),
+                            "note": "相同傷口遮罩已存在再訓練佇列,已自動略過(避免重複樣本)"}), 200
         rec = {k: d.get(k) for k in REQUIRED}
         rec["correction_iou"] = d.get("correction_iou")
         rec["care_note"] = d.get("care_note")

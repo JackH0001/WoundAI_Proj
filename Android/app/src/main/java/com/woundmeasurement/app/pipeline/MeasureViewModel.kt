@@ -119,7 +119,11 @@ class MeasureViewModel(
                     backend.submitAnnotation(code, poly, exudate, careNote = careNote)
                 }
                 _state.value = _state.value.copy(
-                    submitStatus = if (ok) "✅ 已送出,進再訓練佇列($code)" else "⚠️ 被守門擋下:$msg"
+                    submitStatus = when {
+                        !ok -> "⚠️ 被守門擋下:$msg"
+                        msg.contains("duplicate") -> "ℹ️ 相同傷口遮罩已在佇列,已自動略過(去重)"
+                        else -> "✅ 已送出,進再訓練佇列($code)"
+                    }
                 )
             } catch (e: Exception) {
                 _state.value = _state.value.copy(submitStatus = "⚠️ 送出失敗:${e.message}")
