@@ -20,7 +20,7 @@ fun MeasureScreen(
     onSaveToTimeline: () -> Unit
 ) {
     val st by vm.state.collectAsState()
-    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("量測結果", fontSize = 20.sp, fontWeight = FontWeight.Bold)
         when {
             st.loading -> Box(Modifier.fillMaxWidth().padding(24.dp), Alignment.Center) { CircularProgressIndicator() }

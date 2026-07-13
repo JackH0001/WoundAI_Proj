@@ -70,40 +70,32 @@ fun WoundMeasurementApp() {
     var currentScreen by remember { mutableStateOf("main") }
     val context = LocalContext.current
     
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        // 標題
-        Text(
-            text = stringResource(id = R.string.app_title),
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(bottom = 32.dp)
-        )
-        
-        // 主要功能按鈕
-        MainButton(stringResource(id = R.string.start_measurement)) { currentScreen = "capture" }
-        MainButton(stringResource(id = R.string.view_history)) { currentScreen = "history" }
-        MainButton(stringResource(id = R.string.settings)) { currentScreen = "settings" }
-        
-        // 醫師專用標註功能
-        MainButton(stringResource(id = R.string.doctor_annotation_system)) {
-            val intent = Intent(context, DoctorAuthActivity::class.java)
-            context.startActivity(intent)
-        }
-
-        // AI 量測驗證(端上/後端可切;後端走 /api/v1/classify)
-        MainButton("AI 量測驗證(模擬)") { currentScreen = "validate" }
-
-        // 顯示當前螢幕
-        when (currentScreen) {
-            "capture" -> CaptureScreen(onBack = { currentScreen = "main" })
-            "history" -> HistoryScreen(onBack = { currentScreen = "main" })
-            "settings" -> SettingsScreen(onBack = { currentScreen = "main" })
-            "validate" -> MeasureValidationEntry(onBack = { currentScreen = "main" })
+    // 只顯示當前畫面:主選單 或 全螢幕子畫面(子畫面各自有返回鈕,避免被選單擠壓/無法捲動)
+    when (currentScreen) {
+        "capture" -> CaptureScreen(onBack = { currentScreen = "main" })
+        "history" -> HistoryScreen(onBack = { currentScreen = "main" })
+        "settings" -> SettingsScreen(onBack = { currentScreen = "main" })
+        "validate" -> MeasureValidationEntry(onBack = { currentScreen = "main" })
+        else -> Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = stringResource(id = R.string.app_title),
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(bottom = 32.dp)
+            )
+            MainButton(stringResource(id = R.string.start_measurement)) { currentScreen = "capture" }
+            MainButton(stringResource(id = R.string.view_history)) { currentScreen = "history" }
+            MainButton(stringResource(id = R.string.settings)) { currentScreen = "settings" }
+            MainButton(stringResource(id = R.string.doctor_annotation_system)) {
+                val intent = Intent(context, DoctorAuthActivity::class.java)
+                context.startActivity(intent)
+            }
+            MainButton("AI 量測驗證(模擬)") { currentScreen = "validate" }
         }
     }
 }

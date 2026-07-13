@@ -1,6 +1,8 @@
 package com.woundmeasurement.app.pipeline
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -36,15 +38,16 @@ fun MeasureValidationEntry(
         } catch (e: Exception) {
             "⚠️ 後端連線錯誤:${e.message}"
         }
-        // 端上模型載入(assets/student_fp16.onnx);缺檔則端上停用,後端路徑不受影響
-        modelState = try {
-            seg.loadModel()
-            if (seg.loaded) "✅ 端上模型已載入(可切端上模式;端上面積無 ArUco 校正)"
-            else "端上模型未載入(assets 缺 student_fp16.onnx;後端不受影響)"
-        } catch (e: Exception) { "端上模型載入失敗:${e.message}" }
+        // 端上 ONNX 原生庫(libonnxruntime.so)在部分模擬器/裝置(16KB 分頁/ABI)不相容,
+        // 自動載入會拋 UnsatisfiedLinkError(Error 非 Exception,攔不到)→ App 閃退。
+        // 故「不自動載入」;demo 走後端(不需原生庫)。端上點亮待實機(或加 16KB 對齊庫)驗證。
+        modelState = "端上模型:未自動載入(避免模擬器原生庫閃退;demo 走後端模式)"
     }
 
-    Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
         Text(loginState, style = MaterialTheme.typography.bodySmall)
         Text(modelState, style = MaterialTheme.typography.bodySmall)
         Divider()

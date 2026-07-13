@@ -25,8 +25,8 @@ import androidx.compose.ui.unit.dp
 @Composable
 fun SamplePickerScreen(vm: MeasureViewModel, backend: BackendClient? = null) {
     val ctx = LocalContext.current
-    // 模式:false=端上、true=後端;後端不可用則固定端上
-    var useBackend by remember { mutableStateOf(false) }
+    // 模式:false=端上、true=後端。有後端時預設走後端(端上 ONNX 原生庫在模擬器可能不相容)
+    var useBackend by remember { mutableStateOf(backend != null) }
 
     fun dispatch(bmp: Bitmap) {
         if (useBackend && backend != null) vm.analyzeViaBackend(bitmap = bmp, backend = backend, exudate = null)
@@ -43,7 +43,7 @@ fun SamplePickerScreen(vm: MeasureViewModel, backend: BackendClient? = null) {
         if (bmp != null) dispatch(bmp)
     }
 
-    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("模擬驗證 / 檢錯", style = MaterialTheme.typography.titleLarge)
         // 端上 / 後端 切換(後端為 null 時禁用)
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
