@@ -147,3 +147,13 @@ static async Task<bool[]> EscalateToCloud(byte[] jpeg, string jwt) {
 - `engineering/phase2/test_dual_track_integration.py`:用 5 張快取機率重現端到端路由,**斷言路由後平均 Dice ≥ 0.88、優於純端上、難例(student<0.6)皆 escalate**。
 - 實跑結果:端上純 student 0.656 → **路由後 0.900**,escalate 3/5;`pytest` 1 passed。
 - 飛輪每輪重訓後須先過此測試(見 `retrain_flywheel_SOP`)再放行新權重。
+
+## 8. 端上判難:信心後備模式(無 wsm)  ← 2026-07-13 補
+分歧度判難需要**兩個**端上模型(student vs wsm)。但行動端實際部署常只放 student(Proj Android assets 僅 `student_fp16.onnx`,無 wsm)。原 `WoundAnalyzer` 在無 wsm 時把分歧度設為恆 1.0 → **端上永不自動升級**,難例只能靠手動走後端。
+
+修正(`WoundAnalyzer.kt`,對齊 `routing_policy.json`):
+- **有 wsm** → 分歧度判難:`IoU(student, wsm) < escalate_iou(0.50)` → escalate。
+- **無 wsm** → **信心後備**:student 遮罩內平均機率 `confidence < min_confidence(0.50)` → escalate(視為難例)。
+
+保留兩模式供未來實拍 **A/B 比較**(哪種判難升級決策較準)。門檻皆取自 SSOT `routing_policy.json`(escalate_iou=0.50、min_confidence=0.50)。
+**待驗證**:實拍一批(易/難例混合)量測信心後備的升級率是否落在合理區間;`test_dual_track` 補「無 wsm→信心後備」分支單元測試。後端 `/api/v1/classify` 另有獨立的自動 escalate(student vs A∪U 面積比>1.5 或 IoU<0.5,見 EVIDENCE_LEDGER 2026-07-09),與端上信心後備互為冗餘保護。

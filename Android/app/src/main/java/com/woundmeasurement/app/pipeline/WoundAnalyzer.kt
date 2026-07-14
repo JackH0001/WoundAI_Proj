@@ -4,17 +4,24 @@ import android.graphics.Bitmap
 import com.woundmeasurement.app.processing.OnnxSegmentationModule
 
 /**
- * 端到端協調器：端上分割(student) → 與 wsm 算分歧度 → ArUco 面積 → 組織 v2 → PUSH；
- * 難例(分歧度<門檻)以 cloudEscalate 上雲(雙軌)。對齊 engineering/phase2/dual_track_router.py。
- * 計分常數取自 SSOT [com.woundmeasurement.app.generated.Preproc]（透過 [WoundPipeline]）。
+ * 端到端協調器：端上分割(student) → 判難 → ArUco 面積 → 組織 v2 → PUSH；難例以 cloudEscalate 上雲(雙軌)。
+ * 判難兩模式(對齊 engineering/phase2/dual_track_router.py + routing_policy.json):
+ *   有 wsm → 分歧度(student vs wsm IoU < escalate_iou);
+ *   無 wsm → student 信心後備(遮罩內平均機率 < min_confidence)。← 補上「純 student 端上永不升級」缺口。
+ * 保留未來實拍時 A/B 比較兩種判難。計分常數取自 SSOT [Preproc](透過 [WoundPipeline])。
  *
  * @param student 端上主分割(OnnxSegmentationModule, student_fp16)
- * @param wsm     端上備援分割(可選;用於分歧度判難)
+ * @param wsm     端上備援分割(可選;有→分歧度判難;無→改用 student 信心後備判難)
  */
 class WoundAnalyzer(
     private val student: OnnxSegmentationModule,
     private val wsm: OnnxSegmentationModule? = null
 ) {
+    companion object {
+        // 難例升級門檻,對齊 engineering/phase2/routing_policy.json(SSOT)
+        const val ESCALATE_IOU = 0.50      // student vs wsm 分歧度 < 此 → 上雲
+        const val MIN_CONFIDENCE = 0.50f   // 無 wsm:student 遮罩內平均機率 < 此 → 上雲(信心後備)
+    }
     /** IoU(分歧度)：兩端上遮罩一致度;低→難例。 */
     private fun iou(a: BooleanArray, b: BooleanArray): Double {
         var inter = 0; var uni = 0
@@ -47,9 +54,11 @@ class WoundAnalyzer(
     ): MeasureResult {
         val s = student.analyze(bitmap)                 // SegmentationResult(probMap, binaryMask)
         var mask = s.binaryMask
-        val dis = if (wsm != null) iou(mask, wsm.analyze(bitmap).binaryMask) else 1.0
+        // 判難:有 wsm→分歧度(IoU);無 wsm→student 信心後備(遮罩內平均機率 < MIN_CONFIDENCE 視為難例)
+        val dis = if (wsm != null) iou(mask, wsm.analyze(bitmap).binaryMask)
+                  else if (s.confidence < MIN_CONFIDENCE) 0.0 else 1.0
         // 雙軌:難例上雲(以雲端遮罩取代端上)
-        if (dis < 0.50 && cloudEscalate != null) mask = cloudEscalate(bitmap)
+        if (dis < ESCALATE_IOU && cloudEscalate != null) mask = cloudEscalate(bitmap)
         val woundPx = mask.count { it }
         val markerPxArea = markerCorners?.let { quadPxArea(it) }
         // 組織 v2:遮罩內像素 → 灰世界白平衡 → 互斥分類 → 比例(可由 override 帶入)
