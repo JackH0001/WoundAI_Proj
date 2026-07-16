@@ -1273,7 +1273,7 @@ def classify_wound():
         _cnts, _hh = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if _cnts:
             _bc = max(_cnts, key=cv2.contourArea)
-            _ap = cv2.approxPolyDP(_bc, 0.01 * cv2.arcLength(_bc, True), True).reshape(-1, 2)
+            _ap = cv2.approxPolyDP(_bc, 0.003 * cv2.arcLength(_bc, True), True).reshape(-1, 2)  # 0.01→0.003:初始點加密(~3x),描邊更貼
             wound_poly = [[int(x), int(y)] for x, y in _ap.tolist()]
         return jsonify({
             'stage2_segment': {'model': seg_model, 'wound_ratio': round(float(mask.mean()), 4), 'confidence': round(conf, 4),
