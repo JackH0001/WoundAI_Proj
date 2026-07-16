@@ -72,10 +72,20 @@ fun MeasureValidationEntry(
             SamplePickerScreen(
                 vm = vm, backend = backend,
                 onReview = { if (vm.lastBitmap != null && vm.lastPolygon.isNotEmpty()) editing = true },
-                onSaveToTimeline = { vm.saveToTimeline(dao, exudate) }
+                onSaveToTimeline = { vm.saveToTimeline(dao, exudate) },
+                exudate = exudate, onExudate = { exudate = it }
             )
-            Divider()
-            DoctorFlywheelSubmit(vm = vm, backend = backend, exudate = exudate, onExudate = { exudate = it })
+            // 飛輪送出:滲液已填 + 上一步(修邊確認或存檔)完成後才自動顯示
+            if (st.result != null) {
+                Divider()
+                if (exudate != null && (st.edited || st.saved)) {
+                    DoctorFlywheelSubmit(vm = vm, backend = backend, exudate = exudate)
+                } else {
+                    Text("(輸入滲液並完成「修邊確認」或「存入時間軸」後,將顯示送出訓練標註)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
             OutlinedButton(onBack, Modifier.fillMaxWidth()) { Text("返回主畫面") }
         }
     }
@@ -87,22 +97,14 @@ fun MeasureValidationEntry(
  * 修邊(拖曳頂點)為後續 C2b;此處先打通「確認→去識別代碼→守門→再訓練佇列」閉環。
  */
 @Composable
-private fun DoctorFlywheelSubmit(
-    vm: MeasureViewModel, backend: BackendClient, exudate: Int?, onExudate: (Int) -> Unit
-) {
+private fun DoctorFlywheelSubmit(vm: MeasureViewModel, backend: BackendClient, exudate: Int?) {
     val st by vm.state.collectAsState()
     if (st.result == null) return
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("醫師確認・送出訓練標註(飛輪)", style = MaterialTheme.typography.titleSmall)
-        Text("(修邊按上方「醫師確認・修邊」;確認後選滲液再送出)", style = MaterialTheme.typography.bodySmall)
-        // 滲液量參考標準(NPUAP PUSH tool:Exudate Amount)
-        Text("滲液量 Exudate(PUSH 標準):0=無(None) · 1=少量(Light) · 2=中量(Moderate) · 3=大量(Heavy)",
-            style = MaterialTheme.typography.bodySmall)
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            (0..3).forEach { v ->
-                FilterChip(selected = exudate == v, onClick = { onExudate(v) }, label = { Text("$v") })
-            }
-        }
+        Text("滲液 $exudate · 修邊${if (st.edited) "✓" else "—"} · 存檔${if (st.saved) "✓" else "—"}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
         // 送出狀態放按鈕「上方」,按下即可見
         st.submitStatus?.let {
             Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)

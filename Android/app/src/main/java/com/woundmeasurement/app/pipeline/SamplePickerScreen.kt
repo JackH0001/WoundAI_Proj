@@ -27,7 +27,9 @@ fun SamplePickerScreen(
     vm: MeasureViewModel,
     backend: BackendClient? = null,
     onReview: () -> Unit = {},
-    onSaveToTimeline: () -> Unit = {}
+    onSaveToTimeline: () -> Unit = {},
+    exudate: Int? = null,
+    onExudate: ((Int) -> Unit)? = null
 ) {
     val ctx = LocalContext.current
     // 模式:false=端上、true=後端。有後端時預設走後端(端上 ONNX 原生庫在模擬器可能不相容)
@@ -63,6 +65,7 @@ fun SamplePickerScreen(
             OutlinedButton({ takePhoto.launch(null) }, Modifier.weight(1f)) { Text("拍照") }
         }
         Divider()
-        MeasureScreen(vm = vm, onReview = onReview, onSaveToTimeline = onSaveToTimeline)
+        MeasureScreen(vm = vm, onReview = onReview, onSaveToTimeline = onSaveToTimeline,
+            exudate = exudate, onExudate = onExudate)
     }
 }

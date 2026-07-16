@@ -17,7 +17,9 @@ import androidx.compose.ui.unit.sp
 fun MeasureScreen(
     vm: MeasureViewModel,
     onReview: () -> Unit,
-    onSaveToTimeline: () -> Unit
+    onSaveToTimeline: () -> Unit,
+    exudate: Int? = null,
+    onExudate: ((Int) -> Unit)? = null   // 提供時:滲液顯示於結果卡下方,且未輸入前鎖定修邊/存檔(防呆)
 ) {
     val st by vm.state.collectAsState()
     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -38,10 +40,24 @@ fun MeasureScreen(
                         Text("路由：${r.route} · 信心 ${"%.0f".format(r.confidence * 100)}%")
                     }
                 }
+                // 滲液量(醫師輸入)——緊接量測結果;未輸入前修邊/存檔鎖定(防呆)
+                val needExudate = onExudate != null && exudate == null
+                if (onExudate != null) {
+                    Text("滲液量 Exudate(PUSH):0=無 · 1=少量 · 2=中量 · 3=大量", fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        (0..3).forEach { v ->
+                            FilterChip(selected = exudate == v, onClick = { onExudate(v) }, label = { Text("$v") })
+                        }
+                    }
+                    if (needExudate)
+                        Text("⚠ 請先輸入滲液量,才能進行「修邊」或「存入時間軸」",
+                            fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+                }
                 if (r.confidence < 0.70)
                     AssistChip(onClick = onReview, label = { Text("信心度偏低，建議醫師確認") })
-                Button(onReview, Modifier.fillMaxWidth()) { Text("醫師確認・修邊") }
-                OutlinedButton(onSaveToTimeline, Modifier.fillMaxWidth()) { Text("存入個案時間軸") }
+                Button(onReview, Modifier.fillMaxWidth(), enabled = !needExudate) { Text("醫師確認・修邊") }
+                OutlinedButton(onSaveToTimeline, Modifier.fillMaxWidth(), enabled = !needExudate) { Text("存入個案時間軸") }
                 Text(r.disclaimer, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             else -> Text("尚無結果，請先拍攝。", color = MaterialTheme.colorScheme.onSurfaceVariant)

@@ -22,7 +22,9 @@ data class MeasureUiState(
     val loading: Boolean = false,
     val result: MeasureResult? = null,
     val error: String? = null,
-    val submitStatus: String? = null    // 飛輪標註送出狀態(醫師修邊→再訓練佇列)
+    val submitStatus: String? = null,   // 飛輪標註送出狀態(醫師修邊→再訓練佇列)
+    val edited: Boolean = false,        // 醫師已完成修邊(閘門:送出標註前置條件之一)
+    val saved: Boolean = false          // 已存入時間軸(閘門:同上)
 )
 
 class MeasureViewModel(
@@ -155,7 +157,8 @@ class MeasureViewModel(
         } else r
         _state.value = _state.value.copy(
             result = updated,
-            submitStatus = "已套用修邊(面積 ${newArea?.let { "%.2f".format(it) } ?: "-"} cm²,修正 IoU=${correctionIou?.let { "%.2f".format(it) } ?: "-"}),可送出"
+            edited = true,
+            submitStatus = "已套用修邊(面積 ${newArea?.let { "%.2f".format(it) } ?: "-"} cm²,修正 IoU=${correctionIou?.let { "%.2f".format(it) } ?: "-"})"
         )
     }
 
@@ -182,7 +185,7 @@ class MeasureViewModel(
                         notes = "PUSH ${r.push.partial ?: "-"}; 肉芽${pct("granulation")}% 腐肉${pct("slough")}% 壞死${pct("necrosis")}%; 滲液${exudate ?: "-"}; route ${r.route}"
                     ))
                 }
-                _state.value = _state.value.copy(submitStatus = "✅ 已存入個案時間軸(#$id)")
+                _state.value = _state.value.copy(saved = true, submitStatus = "✅ 已存入個案時間軸(#$id)")
             } catch (e: Exception) {
                 _state.value = _state.value.copy(submitStatus = "⚠️ 存入失敗:${e.message}")
             }

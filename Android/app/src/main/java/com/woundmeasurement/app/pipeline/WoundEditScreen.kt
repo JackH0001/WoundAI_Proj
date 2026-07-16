@@ -7,23 +7,28 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
  * 醫師修邊(專屬全螢幕頁,對齊原型 v_review 邊界模式)。
- * 邊界=GT:拖控制點改邊界、＋加節點(最長邊中點)、刪節點(選取後)、undo/redo;
- * 即時重算面積(以原始面積×新舊多邊形像素面積比)與 PUSH(WoundPipeline)。免重傳後端。
- * 完成回傳:修正後 polygon、correction_iou(與原始遮罩 IoU)、新面積。
- * 組織筆刷(重標記各組織)為下一輪 B。輔助、非診斷、需醫師確認。
+ * 版面:畫布佔中間(weight),工具列/完成鈕固定底部(不被遮蔽、免捲動)。
+ * 視圖:進入自動將 ROI(輪廓外框)放大至編修框 ~50%;「＋/－」縮放、「ROI/全圖」快速切換;
+ *      單指拖「頂點」=修邊;拖「空白處」=平移。
+ * 即時重算:面積(原始面積×新舊多邊形像素面積比)與 PUSH。免重傳後端。
+ * 完成回傳:修正後 polygon、correction_iou、新面積。輔助、非診斷、需醫師確認。
  */
 @Composable
 fun WoundEditScreen(
@@ -36,80 +41,137 @@ fun WoundEditScreen(
     onDone: (edited: List<List<Int>>, correctionIou: Double?, newArea: Double?) -> Unit
 ) {
     val img = remember(bitmap) { bitmap.asImageBitmap() }
+    val bw = bitmap.width.toFloat(); val bh = bitmap.height.toFloat()
     val initPts = remember(initialPolygon) { initialPolygon.map { Offset(it[0].toFloat(), it[1].toFloat()) } }
     var pts by remember { mutableStateOf(initPts) }
     var selectedIdx by remember { mutableStateOf(-1) }
     val undo = remember { mutableStateListOf<List<Offset>>() }
     val redo = remember { mutableStateListOf<List<Offset>>() }
 
+    // 視圖狀態:boxSize=編修框px;k=base*viewScale;viewOffset=影像座標的視窗左上角
+    var boxSize by remember { mutableStateOf(IntSize.Zero) }
+    var viewScale by remember { mutableStateOf(1f) }
+    var viewOffset by remember { mutableStateOf(Offset.Zero) }
+    var viewInit by remember { mutableStateOf(false) }
+    fun base(): Float = if (boxSize == IntSize.Zero) 1f else min(boxSize.width / bw, boxSize.height / bh)
+    fun k(): Float = base() * viewScale
+
+    fun fitFull() {
+        viewScale = 1f
+        val kk = k()
+        viewOffset = Offset((bw - boxSize.width / kk) / 2f, (bh - boxSize.height / kk) / 2f)
+    }
+    fun fitRoi() {
+        if (pts.isEmpty() || boxSize == IntSize.Zero) return
+        val minX = pts.minOf { it.x }; val maxX = pts.maxOf { it.x }
+        val minY = pts.minOf { it.y }; val maxY = pts.maxOf { it.y }
+        val w = max(maxX - minX, 8f); val h = max(maxY - minY, 8f)
+        // ROI 佔編修框 ~50%
+        val kT = 0.5f * min(boxSize.width / w, boxSize.height / h)
+        viewScale = (kT / base()).coerceIn(0.5f, 24f)
+        val kk = k()
+        viewOffset = Offset(
+            (minX + maxX) / 2f - boxSize.width / (2f * kk),
+            (minY + maxY) / 2f - boxSize.height / (2f * kk)
+        )
+    }
+    fun zoomBy(f: Float) {
+        if (boxSize == IntSize.Zero) return
+        val c = Offset(boxSize.width / 2f, boxSize.height / 2f)
+        val centerImg = viewOffset + c / k()
+        viewScale = (viewScale * f).coerceIn(0.5f, 24f)
+        viewOffset = centerImg - c / k()
+    }
+    // 首次量到框尺寸→自動 ROI 50%
+    LaunchedEffect(boxSize) {
+        if (!viewInit && boxSize != IntSize.Zero) { fitRoi(); viewInit = true }
+    }
+
     val origPx = remember(initPts) { shoelace(initPts) }
     fun newArea(): Double? {
         if (originalArea == null || origPx <= 0.0) return originalArea
         return originalArea * shoelace(pts) / origPx
     }
-    fun pushPartial(a: Double?): Int? = WoundPipeline.push(a, tissueFrac, exudate).partial
-
     val liveArea = newArea()
-    val livePush = pushPartial(liveArea)
+    val livePush = WoundPipeline.push(liveArea, tissueFrac, exudate).partial
 
-    Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("醫師修邊・邊界(=GT)", style = MaterialTheme.typography.titleMedium)
-        Text("面積 ${liveArea?.let { "%.2f".format(it) } ?: "-"} cm²  ·  PUSH ${livePush ?: "-"}",
+    Column(Modifier.fillMaxSize().navigationBarsPadding().padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("修邊・邊界(=GT)   面積 ${liveArea?.let { "%.2f".format(it) } ?: "-"} cm² · PUSH ${livePush ?: "-"}",
             style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-        Text("拖紅點改邊界;選取後可刪點;＋加點於最長邊中點。", fontSize = 12.sp,
+        Text("拖紅點=修邊;拖空白=平移;－/＋縮放;ROI=放大傷口區", fontSize = 11.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
 
-        Canvas(
-            modifier = Modifier
+        // 編修框(佔中間;工具列固定在下,不會被擠出畫面)
+        Box(
+            Modifier
                 .fillMaxWidth()
-                .aspectRatio(bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1))
-                .pointerInput(Unit) {
-                    var startSnapshot: List<Offset>? = null
-                    detectDragGestures(
-                        onDragStart = { off ->
-                            val sc = size.width.toFloat() / bitmap.width
-                            val imgPt = Offset(off.x / sc, off.y / sc)
-                            val i = pts.indices.minByOrNull { (pts[it] - imgPt).getDistanceSquared() } ?: -1
-                            selectedIdx = if (i >= 0 && (pts[i] - imgPt).getDistance() * sc <= 60f) i else -1
-                            startSnapshot = if (selectedIdx >= 0) pts else null
-                        },
-                        onDrag = { change, delta ->
-                            change.consume()
-                            if (selectedIdx >= 0) {
-                                val sc = size.width.toFloat() / bitmap.width
-                                val d = Offset(delta.x / sc, delta.y / sc)
-                                pts = pts.toMutableList().also { it[selectedIdx] = it[selectedIdx] + d }
-                            }
-                        },
-                        onDragEnd = { startSnapshot?.let { undo.add(it); redo.clear() }; startSnapshot = null },
-                        onDragCancel = { startSnapshot = null }
-                    )
-                }
+                .weight(1f)
+                .clipToBounds()
+                .onSizeChanged { boxSize = it }
         ) {
-            val sc = size.width / bitmap.width
-            drawImage(
-                image = img,
-                srcOffset = IntOffset.Zero, srcSize = IntSize(bitmap.width, bitmap.height),
-                dstOffset = IntOffset.Zero, dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt())
-            )
-            for (i in pts.indices) {
-                drawLine(Color(0xFFFFEB00), pts[i] * sc, pts[(i + 1) % pts.size] * sc, strokeWidth = 4f)
-            }
-            pts.forEachIndexed { i, p ->
-                drawCircle(if (i == selectedIdx) Color(0xFF35C759) else Color(0xFFFF3030), 13f, p * sc)
+            Canvas(
+                Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        var startSnapshot: List<Offset>? = null
+                        var mode = 0 // 0=none 1=vertex 2=pan
+                        detectDragGestures(
+                            onDragStart = { off ->
+                                val kk = k()
+                                val imgPt = off / kk + viewOffset
+                                val i = pts.indices.minByOrNull { (pts[it] - imgPt).getDistanceSquared() } ?: -1
+                                if (i >= 0 && (pts[i] - imgPt).getDistance() * kk <= 48f) {
+                                    selectedIdx = i; mode = 1; startSnapshot = pts
+                                } else { mode = 2 }
+                            },
+                            onDrag = { change, delta ->
+                                change.consume()
+                                val kk = k()
+                                when (mode) {
+                                    1 -> if (selectedIdx >= 0)
+                                        pts = pts.toMutableList().also { it[selectedIdx] = it[selectedIdx] + delta / kk }
+                                    2 -> viewOffset -= delta / kk
+                                }
+                            },
+                            onDragEnd = {
+                                if (mode == 1) startSnapshot?.let { undo.add(it); redo.clear() }
+                                startSnapshot = null; mode = 0
+                            },
+                            onDragCancel = { startSnapshot = null; mode = 0 }
+                        )
+                    }
+            ) {
+                val kk = k()
+                drawImage(
+                    image = img,
+                    srcOffset = IntOffset.Zero, srcSize = IntSize(bitmap.width, bitmap.height),
+                    dstOffset = IntOffset((-viewOffset.x * kk).roundToInt(), (-viewOffset.y * kk).roundToInt()),
+                    dstSize = IntSize((bw * kk).roundToInt(), (bh * kk).roundToInt())
+                )
+                fun sp(p: Offset) = (p - viewOffset) * kk
+                for (i in pts.indices) {
+                    drawLine(Color(0xFFFFEB00), sp(pts[i]), sp(pts[(i + 1) % pts.size]), strokeWidth = 4f)
+                }
+                pts.forEachIndexed { i, p ->
+                    drawCircle(if (i == selectedIdx) Color(0xFF35C759) else Color(0xFFFF3030), 13f, sp(p))
+                }
             }
         }
 
-        // 工具列:undo / redo / ＋加點 / 刪點
+        // 縮放列
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            OutlinedButton({ zoomBy(1 / 1.3f) }, Modifier.weight(1f), contentPadding = PaddingValues(4.dp)) { Text("－") }
+            OutlinedButton({ zoomBy(1.3f) }, Modifier.weight(1f), contentPadding = PaddingValues(4.dp)) { Text("＋") }
+            OutlinedButton({ fitRoi() }, Modifier.weight(1f), contentPadding = PaddingValues(4.dp)) { Text("ROI") }
+            OutlinedButton({ fitFull() }, Modifier.weight(1f), contentPadding = PaddingValues(4.dp)) { Text("全圖") }
+        }
+        // 編輯列
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             OutlinedButton({ if (undo.isNotEmpty()) { redo.add(pts); pts = undo.removeAt(undo.lastIndex) } },
-                enabled = undo.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("↺ 復原") }
+                enabled = undo.isNotEmpty(), modifier = Modifier.weight(1f), contentPadding = PaddingValues(4.dp)) { Text("↺復原") }
             OutlinedButton({ if (redo.isNotEmpty()) { undo.add(pts); pts = redo.removeAt(redo.lastIndex) } },
-                enabled = redo.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("↩ 重做") }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                enabled = redo.isNotEmpty(), modifier = Modifier.weight(1f), contentPadding = PaddingValues(4.dp)) { Text("↩重做") }
             OutlinedButton({
-                // 於最長邊中點插入節點
                 if (pts.size >= 2) {
                     var bi = 0; var bd = -1.0
                     for (i in pts.indices) { val d = (pts[i] - pts[(i + 1) % pts.size]).getDistanceSquared(); if (d > bd) { bd = d.toDouble(); bi = i } }
@@ -117,16 +179,15 @@ fun WoundEditScreen(
                     undo.add(pts); redo.clear()
                     pts = pts.toMutableList().also { it.add(bi + 1, mid) }
                 }
-            }, modifier = Modifier.weight(1f)) { Text("＋ 加點") }
+            }, modifier = Modifier.weight(1f), contentPadding = PaddingValues(4.dp)) { Text("＋加點") }
             OutlinedButton({
                 if (selectedIdx in pts.indices && pts.size > 3) {
                     undo.add(pts); redo.clear()
                     pts = pts.toMutableList().also { it.removeAt(selectedIdx) }; selectedIdx = -1
                 }
-            }, enabled = selectedIdx >= 0 && pts.size > 3, modifier = Modifier.weight(1f)) { Text("刪點") }
+            }, enabled = selectedIdx >= 0 && pts.size > 3, modifier = Modifier.weight(1f), contentPadding = PaddingValues(4.dp)) { Text("刪點") }
         }
-
-        Spacer(Modifier.weight(1f))
+        // 完成列(固定底部)
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(onCancel, Modifier.weight(1f)) { Text("取消") }
             Button({
