@@ -13,6 +13,25 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import aruco_calibrate as ac
 
 
+def imread_u(path):
+    """支援中文/Unicode 路徑的 imread(Windows cv2.imread 吃不了非 ASCII 路徑)。"""
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+        if data.size == 0:
+            return None
+        return cv2.imdecode(data, cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+
+
+def imwrite_u(path, img):
+    """支援中文/Unicode 路徑的 imwrite。"""
+    ok, buf = cv2.imencode(os.path.splitext(path)[1] or ".png", img)
+    if ok:
+        buf.tofile(path)
+    return ok
+
+
 def seg_red(img_rgb):
     """分割印刷深紅/暗紅傷口(高S,紅色調)。回最大連通遮罩與其輪廓。"""
     hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
@@ -35,7 +54,7 @@ def main():
     ap.add_argument("--marker-mm", type=float, default=12.0)
     a = ap.parse_args()
 
-    bgr = cv2.imread(a.img)
+    bgr = imread_u(a.img)
     if bgr is None:
         print("讀不到影像:", a.img); return 1
     img = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB); H, W = img.shape[:2]
@@ -64,7 +83,7 @@ def main():
     cv2.putText(vis, f"color-seg {area:.2f} cm2 (true {a.true}) err {err:+.1f}%",
                 (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
     out = os.path.splitext(a.img)[0] + "_diag.png"
-    cv2.imwrite(out, vis)
+    imwrite_u(out, vis)
     print("目視疊圖:", out)
 
     print("\n判讀:")
