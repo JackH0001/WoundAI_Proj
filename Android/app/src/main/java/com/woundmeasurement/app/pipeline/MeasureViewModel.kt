@@ -44,6 +44,21 @@ class MeasureViewModel(
     // 醫師修邊後與原始遮罩的 IoU(修正幅度;1.0=未改),隨標註送出
     @Volatile var lastCorrectionIou: Double? = null
         private set
+    // 同一次影像去重存檔:影像雜湊 + 已存的 row id(同影像重存→更新同筆,不新增)
+    @Volatile private var lastImageHash: Int? = null
+    @Volatile private var lastSavedId: Long? = null
+
+    private fun quickHash(b: Bitmap): Int {
+        var h = 17
+        val sx = maxOf(1, b.width / 32); val sy = maxOf(1, b.height / 32)
+        var y = 0
+        while (y < b.height) {
+            var x = 0
+            while (x < b.width) { h = 31 * h + b.getPixel(x, y); x += sx }
+            y += sy
+        }
+        return h
+    }
 
     /**
      * @param bitmap 拍攝原圖(含校正貼紙)
@@ -106,6 +121,9 @@ class MeasureViewModel(
                 lastPolygon = polyCap
                 lastBitmap = bitmap
                 lastCorrectionIou = null   // 新分析→重置修邊修正量
+                val hh = quickHash(bitmap)
+                if (hh != lastImageHash) lastSavedId = null   // 換了影像→允許新增;同影像→保留 id 供更新
+                lastImageHash = hh
                 _state.value = MeasureUiState(loading = false, result = r)
             } catch (e: Exception) {
                 _state.value = MeasureUiState(loading = false, error = e.message ?: "後端分析失敗")
@@ -145,15 +163,20 @@ class MeasureViewModel(
     }
 
     /**
-     * 醫師修邊完成:覆寫 GT polygon、記 correction_iou,並以修邊後面積重算 PUSH → 更新結果卡。
-     * newArea 由編輯頁以「原始面積×新舊多邊形像素面積比」本機換算(免重傳)。
+     * 醫師修邊完成:覆寫 GT polygon、記 correction_iou,以修邊後「面積+組織比例」重算 PUSH → 更新結果卡。
+     * newArea/tissue 由編輯頁 raster 像素計數即時換算(免重傳)。
      */
-    fun applyEditedPolygon(edited: List<List<Int>>, correctionIou: Double?, newArea: Double?, exudate: Int?) {
+    fun applyEditedPolygon(
+        edited: List<List<Int>>, correctionIou: Double?, newArea: Double?, exudate: Int?,
+        tissue: Map<String, Double>? = null
+    ) {
         lastPolygon = edited
         lastCorrectionIou = correctionIou
         val r = _state.value.result
-        val updated = if (r != null && newArea != null) {
-            r.copy(areaCm2 = newArea, push = WoundPipeline.push(newArea, r.tissueFrac, exudate))
+        val updated = if (r != null) {
+            val frac = tissue ?: r.tissueFrac
+            val area = newArea ?: r.areaCm2
+            r.copy(areaCm2 = area, tissueFrac = frac, push = WoundPipeline.push(area, frac, exudate))
         } else r
         _state.value = _state.value.copy(
             result = updated,
@@ -162,30 +185,52 @@ class MeasureViewModel(
         )
     }
 
-    /** 存入個案時間軸(本機 Room/SQLite)。一般量測 patientId=null;供傷口時間軸/趨勢。 */
+    /**
+     * 存入個案時間軸(本機 Room/SQLite)。一般量測 patientId=null。
+     * 同一次影像去重:同影像(雜湊相同)重存/修邊後再存 → 更新同一筆,不重複新增(避免時間軸資料誤差)。
+     */
     fun saveToTimeline(dao: MeasurementDao, exudate: Int?) {
         val r = _state.value.result ?: return
         _state.value = _state.value.copy(submitStatus = "存入時間軸中…")
         viewModelScope.launch {
             try {
                 fun pct(k: String) = ((r.tissueFrac[k] ?: 0.0) * 100).toInt()
-                val id = withContext(Dispatchers.IO) {
-                    dao.insertMeasurement(MeasurementEntity(
-                        patientId = null,
-                        timestamp = Date(),
-                        hasWound = (r.areaCm2 ?: 0.0) > 0.0 || r.tissueFrac.values.any { it > 0.0 },
-                        confidence = r.confidence,
-                        estimatedArea = r.areaCm2,
-                        estimatedVolume = null,
-                        woundType = "AI(${r.route})",
-                        quality = "backend",
-                        processingTime = 0L,
-                        imagePath = "",
-                        dataPath = "",
-                        notes = "PUSH ${r.push.partial ?: "-"}; 肉芽${pct("granulation")}% 腐肉${pct("slough")}% 壞死${pct("necrosis")}%; 滲液${exudate ?: "-"}; route ${r.route}"
-                    ))
+                val notes = "PUSH ${r.push.partial ?: "-"}; 肉芽${pct("granulation")}% 腐肉${pct("slough")}% 壞死${pct("necrosis")}%; 滲液${exudate ?: "-"}; route ${r.route}" +
+                        (lastCorrectionIou?.let { "; 修邊IoU %.2f".format(it) } ?: "")
+                val (id, updatedRow) = withContext(Dispatchers.IO) {
+                    val existId = lastSavedId
+                    val exist = existId?.let { dao.getMeasurementById(it) }
+                    if (exist != null) {
+                        dao.updateMeasurement(exist.copy(
+                            timestamp = Date(), confidence = r.confidence, estimatedArea = r.areaCm2,
+                            woundType = "AI(${r.route})", notes = notes,
+                            hasWound = (r.areaCm2 ?: 0.0) > 0.0 || r.tissueFrac.values.any { it > 0.0 }
+                        ))
+                        Pair(exist.id, true)
+                    } else {
+                        val nid = dao.insertMeasurement(MeasurementEntity(
+                            patientId = null,
+                            timestamp = Date(),
+                            hasWound = (r.areaCm2 ?: 0.0) > 0.0 || r.tissueFrac.values.any { it > 0.0 },
+                            confidence = r.confidence,
+                            estimatedArea = r.areaCm2,
+                            estimatedVolume = null,
+                            woundType = "AI(${r.route})",
+                            quality = "backend",
+                            processingTime = 0L,
+                            imagePath = "",
+                            dataPath = "",
+                            notes = notes
+                        ))
+                        Pair(nid, false)
+                    }
                 }
-                _state.value = _state.value.copy(saved = true, submitStatus = "✅ 已存入個案時間軸(#$id)")
+                lastSavedId = id
+                _state.value = _state.value.copy(
+                    saved = true,
+                    submitStatus = if (updatedRow) "ℹ️ 同一次影像→已更新同筆紀錄(#$id),未重複新增"
+                                   else "✅ 已存入個案時間軸(#$id)"
+                )
             } catch (e: Exception) {
                 _state.value = _state.value.copy(submitStatus = "⚠️ 存入失敗:${e.message}")
             }

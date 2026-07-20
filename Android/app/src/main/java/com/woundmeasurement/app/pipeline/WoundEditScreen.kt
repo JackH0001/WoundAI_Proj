@@ -25,13 +25,23 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
- * 醫師修邊(筆刷塗抹版,對齊原型 v_review):
- * 工具=塗抹＋/擦除－/移動;筆刷大小可調;AI 遮罩為底,塗抹自動增減面積(免逐點拖)。
- * 面積以 raster 遮罩「像素計數」即時重算(根除舊版多邊形自交互抵與 approxPolyDP 簡化基準誤差)。
- * 完成→輪廓追蹤(Moore)取邊界→RDP 精簡為 GT polygon;correction_iou=初始/最終遮罩 IoU(精確)。
- * 視圖:進入自動 ROI 放大 ~50%;－/＋縮放、ROI/全圖。輔助、非診斷、需醫師確認。
+ * 醫師修邊(對齊原型 v_review):邊界筆刷(=GT) + 組織筆刷(遮罩內互斥塗蓋)。
+ * 邊界:塗抹＋/擦除－ 增減傷口遮罩;面積=raster 像素計數即時重算。
+ * 組織:肉芽/腐肉/壞死/上皮 四類筆刷,只作用於傷口遮罩內;比例即時 → 組織分/PUSH 連動。
+ * 完成 → Moore 輪廓+RDP 產 GT polygon、correction_iou(遮罩IoU)、新面積、新組織比例。
+ * 視圖:自動 ROI 50% 放大、－/＋/ROI/全圖、單指移動(移動模式)。輔助、非診斷、需醫師確認。
  */
-private enum class EditTool { PAINT, ERASE, PAN }
+private enum class EditTool { B_PAINT, B_ERASE, PAN, TISSUE }
+
+private val T_KEYS = arrayOf("", "granulation", "slough", "necrosis", "epithelial")
+private val T_NAMES = arrayOf("", "肉芽", "腐肉", "壞死", "上皮")
+private val T_COLORS = intArrayOf(  // overlay ARGB(半透明)
+    0,
+    android.graphics.Color.argb(110, 220, 60, 60),    // 肉芽 紅
+    android.graphics.Color.argb(120, 235, 210, 70),   // 腐肉 黃
+    android.graphics.Color.argb(140, 40, 40, 40),     // 壞死 深灰
+    android.graphics.Color.argb(120, 240, 150, 170)   // 上皮 粉
+)
 
 @Composable
 fun WoundEditScreen(
@@ -41,42 +51,57 @@ fun WoundEditScreen(
     tissueFrac: Map<String, Double>,
     exudate: Int?,
     onCancel: () -> Unit,
-    onDone: (edited: List<List<Int>>, correctionIou: Double?, newArea: Double?) -> Unit
+    onDone: (edited: List<List<Int>>, correctionIou: Double?, newArea: Double?, tissue: Map<String, Double>) -> Unit
 ) {
     val img = remember(bitmap) { bitmap.asImageBitmap() }
     val bw = bitmap.width; val bh = bitmap.height
 
-    // ---- raster 遮罩(工作解析度,長邊≤640) ----
+    // ---- raster 兩層:mask(傷口) + tissue(組織類別 1..4) ----
     val mScale = remember { min(1f, 640f / max(bw, bh)) }
     val mw = remember { max(8, (bw * mScale).roundToInt()) }
     val mh = remember { max(8, (bh * mScale).roundToInt()) }
     val mask = remember { ByteArray(mw * mh) }
+    val tissue = remember { ByteArray(mw * mh) }
     val initMask = remember { ByteArray(mw * mh) }
     var maskCount by remember { mutableStateOf(0) }
     var initCount by remember { mutableStateOf(0) }
+    val tCounts = remember { intArrayOf(0, 0, 0, 0, 0) }
+    var version by remember { mutableStateOf(0) }
     val overlay = remember { Bitmap.createBitmap(mw, mh, Bitmap.Config.ARGB_8888) }
-    var version by remember { mutableStateOf(0) }              // 觸發 Canvas 重繪
-    val undo = remember { mutableStateListOf<Pair<ByteArray, Int>>() }
-    val redo = remember { mutableStateListOf<Pair<ByteArray, Int>>() }
-    val ovColor = android.graphics.Color.argb(90, 255, 235, 0)  // 半透明黃
+
+    class Snap(val m: ByteArray, val t: ByteArray, val c: Int, val tc: IntArray)
+    val undo = remember { mutableStateListOf<Snap>() }
+    val redo = remember { mutableStateListOf<Snap>() }
+    fun snap() = Snap(mask.copyOf(), tissue.copyOf(), maskCount, tCounts.copyOf())
+    fun restore(s: Snap) {
+        System.arraycopy(s.m, 0, mask, 0, mask.size)
+        System.arraycopy(s.t, 0, tissue, 0, tissue.size)
+        maskCount = s.c
+        System.arraycopy(s.tc, 0, tCounts, 0, 5)
+    }
+
+    val defaultClass = remember {  // 初始組織=AI 判定的主導類(無資訊時=肉芽)
+        val cand = listOf("granulation" to 1, "slough" to 2, "necrosis" to 3, "epithelial" to 4)
+        (cand.maxByOrNull { tissueFrac[it.first] ?: 0.0 }?.takeIf { (tissueFrac[it.first] ?: 0.0) > 0.0 }?.second) ?: 1
+    }
 
     fun syncOverlayAll() {
         val px = IntArray(mw * mh)
-        for (i in mask.indices) px[i] = if (mask[i].toInt() != 0) ovColor else 0
+        for (i in mask.indices) px[i] = if (mask[i].toInt() != 0) T_COLORS[tissue[i].toInt().coerceIn(0, 4).coerceAtLeast(1)] else 0
         overlay.setPixels(px, 0, mw, 0, 0, mw, mh)
     }
-    // 初始化:初始 polygon → raster(scanline 填充)
     remember(initialPolygon) {
-        java.util.Arrays.fill(mask, 0)
+        java.util.Arrays.fill(mask, 0); java.util.Arrays.fill(tissue, 0); tCounts.fill(0)
         scanlineFill(initialPolygon, mScale, mw, mh, mask)
+        var c = 0
+        for (i in mask.indices) if (mask[i].toInt() != 0) { c++; tissue[i] = defaultClass.toByte() }
+        maskCount = c; initCount = c; tCounts[defaultClass] = c
         System.arraycopy(mask, 0, initMask, 0, mask.size)
-        maskCount = mask.count { it.toInt() != 0 }
-        initCount = maskCount
         syncOverlayAll(); version++
         true
     }
 
-    // ---- 視圖(縮放/平移) ----
+    // ---- 視圖 ----
     var boxSize by remember { mutableStateOf(IntSize.Zero) }
     var viewScale by remember { mutableStateOf(1f) }
     var viewOffset by remember { mutableStateOf(Offset.Zero) }
@@ -104,73 +129,92 @@ fun WoundEditScreen(
     LaunchedEffect(boxSize) { if (!viewInit && boxSize != IntSize.Zero) { fitRoi(); viewInit = true } }
 
     // ---- 工具 ----
-    var tool by remember { mutableStateOf(EditTool.PAINT) }
-    var brushScreen by remember { mutableStateOf(36f) }   // 螢幕px(顯示大小固定,影像端隨縮放)
+    var tool by remember { mutableStateOf(EditTool.B_PAINT) }
+    var curTissue by remember { mutableStateOf(2) }        // 組織筆刷預設=腐肉(常見要標的)
+    var brushScreen by remember { mutableStateOf(36f) }
     var cursor by remember { mutableStateOf<Offset?>(null) }
 
-    fun stamp(imgPt: Offset, paint: Boolean) {
-        val r = (brushScreen / k()) * mScale / 1f          // 影像px→mask px 半徑
+    fun stamp(imgPt: Offset) {
+        val r = max(1f, (brushScreen / k()) * mScale)
         val cx = imgPt.x * mScale; val cy = imgPt.y * mScale
-        val ri = max(1f, r); val r2 = ri * ri
-        val x0 = max(0, (cx - ri).toInt()); val x1 = min(mw - 1, (cx + ri).toInt())
-        val y0 = max(0, (cy - ri).toInt()); val y1 = min(mh - 1, (cy + ri).toInt())
-        val v: Byte = if (paint) 1 else 0
-        val col = if (paint) ovColor else 0
+        val r2 = r * r
+        val x0 = max(0, (cx - r).toInt()); val x1 = min(mw - 1, (cx + r).toInt())
+        val y0 = max(0, (cy - r).toInt()); val y1 = min(mh - 1, (cy + r).toInt())
         for (y in y0..y1) for (x in x0..x1) {
             val dx = x - cx; val dy = y - cy
-            if (dx * dx + dy * dy <= r2) {
-                val idx = y * mw + x
-                if (mask[idx] != v) {
-                    maskCount += if (paint) 1 else -1
-                    mask[idx] = v
-                    overlay.setPixel(x, y, col)
+            if (dx * dx + dy * dy > r2) continue
+            val i = y * mw + x
+            when (tool) {
+                EditTool.B_PAINT -> if (mask[i].toInt() == 0) {
+                    mask[i] = 1; maskCount++
+                    tissue[i] = defaultClass.toByte(); tCounts[defaultClass]++
+                    overlay.setPixel(x, y, T_COLORS[defaultClass])
                 }
+                EditTool.B_ERASE -> if (mask[i].toInt() != 0) {
+                    mask[i] = 0; maskCount--
+                    val tc = tissue[i].toInt(); if (tc in 1..4) tCounts[tc]--
+                    tissue[i] = 0
+                    overlay.setPixel(x, y, 0)
+                }
+                EditTool.TISSUE -> if (mask[i].toInt() != 0 && tissue[i].toInt() != curTissue) {
+                    val tc = tissue[i].toInt(); if (tc in 1..4) tCounts[tc]--
+                    tissue[i] = curTissue.toByte(); tCounts[curTissue]++
+                    overlay.setPixel(x, y, T_COLORS[curTissue])
+                }
+                EditTool.PAN -> {}
             }
         }
         version++
     }
-    fun stampLine(a: Offset, b: Offset, paint: Boolean) {
+    fun stampLine(a: Offset, b: Offset) {
         val d = b - a; val len = sqrt(d.x * d.x + d.y * d.y)
         val stepPx = max(1f, (brushScreen / k()) * 0.5f)
         val n = max(1, (len / stepPx).toInt())
-        for (i in 0..n) stamp(a + d * (i.toFloat() / n), paint)
+        for (i in 0..n) stamp(a + d * (i.toFloat() / n))
     }
 
+    fun liveFrac(): Map<String, Double> {
+        val tot = max(1, maskCount)
+        return mapOf(
+            "granulation" to tCounts[1].toDouble() / tot, "slough" to tCounts[2].toDouble() / tot,
+            "necrosis" to tCounts[3].toDouble() / tot, "epithelial" to tCounts[4].toDouble() / tot,
+            "other" to 0.0
+        )
+    }
+    @Suppress("UNUSED_EXPRESSION") version
     val liveArea = if (originalArea != null && initCount > 0) originalArea * maskCount / initCount else originalArea
-    val livePush = WoundPipeline.push(liveArea, tissueFrac, exudate).partial
+    val lf = liveFrac()
+    val livePush = WoundPipeline.push(liveArea, lf, exudate).partial
 
     Column(Modifier.fillMaxSize().navigationBarsPadding().padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("修邊・筆刷塗抹(=GT)   面積 ${liveArea?.let { "%.2f".format(it) } ?: "-"} cm² · PUSH ${livePush ?: "-"}",
+        Text("修邊(=GT)  面積 ${liveArea?.let { "%.2f".format(it) } ?: "-"} cm² · PUSH ${livePush ?: "-"}",
             style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+        Text("組織  肉芽${(lf["granulation"]!! * 100).toInt()}% · 腐肉${(lf["slough"]!! * 100).toInt()}% · " +
+             "壞死${(lf["necrosis"]!! * 100).toInt()}% · 上皮${(lf["epithelial"]!! * 100).toInt()}%",
+            fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
         Box(Modifier.fillMaxWidth().weight(1f).clipToBounds().onSizeChanged { boxSize = it }) {
             Canvas(
                 Modifier.fillMaxSize().pointerInput(Unit) {
-                    var strokeSnapshot: Pair<ByteArray, Int>? = null
+                    var strokeSnapshot: Snap? = null
                     var last: Offset? = null
                     detectDragGestures(
                         onDragStart = { off ->
                             val kk = k(); val imgPt = off / kk + viewOffset
                             cursor = off
-                            when (tool) {
-                                EditTool.PAN -> {}
-                                else -> {
-                                    strokeSnapshot = Pair(mask.copyOf(), maskCount)
-                                    stamp(imgPt, tool == EditTool.PAINT); last = imgPt
-                                }
+                            if (tool != EditTool.PAN) {
+                                strokeSnapshot = snap()
+                                stamp(imgPt); last = imgPt
                             }
                         },
                         onDrag = { change, delta ->
                             change.consume()
                             val kk = k()
                             cursor = change.position
-                            when (tool) {
-                                EditTool.PAN -> viewOffset -= delta / kk
-                                else -> {
-                                    val cur = change.position / kk + viewOffset
-                                    last?.let { stampLine(it, cur, tool == EditTool.PAINT) }
-                                    last = cur
-                                }
+                            if (tool == EditTool.PAN) viewOffset -= delta / kk
+                            else {
+                                val cur = change.position / kk + viewOffset
+                                last?.let { stampLine(it, cur) }; last = cur
                             }
                         },
                         onDragEnd = {
@@ -181,7 +225,7 @@ fun WoundEditScreen(
                     )
                 }
             ) {
-                @Suppress("UNUSED_EXPRESSION") version   // 讀取以觸發重繪
+                @Suppress("UNUSED_EXPRESSION") version
                 val kk = k()
                 val dstOff = IntOffset((-viewOffset.x * kk).roundToInt(), (-viewOffset.y * kk).roundToInt())
                 val dstSz = IntSize((bw * kk).roundToInt(), (bh * kk).roundToInt())
@@ -189,18 +233,31 @@ fun WoundEditScreen(
                 drawImage(overlay.asImageBitmap(), srcOffset = IntOffset.Zero, srcSize = IntSize(mw, mh),
                     dstOffset = dstOff, dstSize = dstSz)
                 cursor?.let {
-                    drawCircle(if (tool == EditTool.ERASE) Color(0xFFFF5050) else Color(0xFF35C759),
-                        radius = brushScreen, center = it, alpha = 0.9f,
+                    val col = when (tool) {
+                        EditTool.B_ERASE -> Color(0xFFFF5050)
+                        EditTool.TISSUE -> Color(T_COLORS[curTissue] or -0x1000000)
+                        else -> Color(0xFF35C759)
+                    }
+                    drawCircle(col, radius = brushScreen, center = it, alpha = 0.9f,
                         style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f))
                 }
             }
         }
 
-        // 工具列
+        // 模式列:邊界＋/邊界－/移動/組織
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            FilterChip(tool == EditTool.PAINT, { tool = EditTool.PAINT }, { Text("塗抹＋") }, modifier = Modifier.weight(1f))
-            FilterChip(tool == EditTool.ERASE, { tool = EditTool.ERASE }, { Text("擦除－") }, modifier = Modifier.weight(1f))
+            FilterChip(tool == EditTool.B_PAINT, { tool = EditTool.B_PAINT }, { Text("邊界＋") }, modifier = Modifier.weight(1f))
+            FilterChip(tool == EditTool.B_ERASE, { tool = EditTool.B_ERASE }, { Text("邊界－") }, modifier = Modifier.weight(1f))
             FilterChip(tool == EditTool.PAN, { tool = EditTool.PAN }, { Text("移動") }, modifier = Modifier.weight(1f))
+            FilterChip(tool == EditTool.TISSUE, { tool = EditTool.TISSUE }, { Text("組織🖌") }, modifier = Modifier.weight(1f))
+        }
+        // 組織類別列(組織模式時)
+        if (tool == EditTool.TISSUE) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                (1..4).forEach { c ->
+                    FilterChip(curTissue == c, { curTissue = c }, { Text(T_NAMES[c]) }, modifier = Modifier.weight(1f))
+                }
+            }
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("筆刷", fontSize = 12.sp)
@@ -213,18 +270,10 @@ fun WoundEditScreen(
             OutlinedButton({ fitRoi() }, Modifier.weight(1f), contentPadding = PaddingValues(2.dp)) { Text("ROI") }
             OutlinedButton({ fitFull() }, Modifier.weight(1f), contentPadding = PaddingValues(2.dp)) { Text("全圖") }
             OutlinedButton({
-                if (undo.isNotEmpty()) {
-                    redo.add(Pair(mask.copyOf(), maskCount))
-                    val (m, c) = undo.removeAt(undo.lastIndex)
-                    System.arraycopy(m, 0, mask, 0, m.size); maskCount = c; syncOverlayAll(); version++
-                }
+                if (undo.isNotEmpty()) { redo.add(snap()); restore(undo.removeAt(undo.lastIndex)); syncOverlayAll(); version++ }
             }, enabled = undo.isNotEmpty(), modifier = Modifier.weight(1f), contentPadding = PaddingValues(2.dp)) { Text("↺") }
             OutlinedButton({
-                if (redo.isNotEmpty()) {
-                    undo.add(Pair(mask.copyOf(), maskCount))
-                    val (m, c) = redo.removeAt(redo.lastIndex)
-                    System.arraycopy(m, 0, mask, 0, m.size); maskCount = c; syncOverlayAll(); version++
-                }
+                if (redo.isNotEmpty()) { undo.add(snap()); restore(redo.removeAt(redo.lastIndex)); syncOverlayAll(); version++ }
             }, enabled = redo.isNotEmpty(), modifier = Modifier.weight(1f), contentPadding = PaddingValues(2.dp)) { Text("↩") }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -240,7 +289,7 @@ fun WoundEditScreen(
                         if (a || b) uni++; if (a && b) inter++
                     }
                     val iou = if (uni == 0) 1.0 else inter.toDouble() / uni
-                    onDone(poly, iou, liveArea)
+                    onDone(poly, iou, liveArea, liveFrac())
                 }
             }, Modifier.weight(1f), enabled = maskCount > 0) { Text("完成修邊") }
         }
@@ -272,9 +321,8 @@ private fun scanlineFill(poly: List<List<Int>>, s: Float, mw: Int, mh: Int, out:
     }
 }
 
-/** 最大連通元件的外邊界(Moore-neighbor 追蹤);回傳 mask 座標點列。 */
+/** 最大連通元件外邊界(Moore-neighbor)。 */
 private fun traceLargestBoundary(mask: ByteArray, mw: Int, mh: Int): List<FloatArray> {
-    // BFS 標記取最大元件
     val label = IntArray(mw * mh)
     var bestLbl = 0; var bestCnt = 0; var lbl = 0
     val stack = IntArray(mw * mh)
@@ -294,13 +342,12 @@ private fun traceLargestBoundary(mask: ByteArray, mw: Int, mh: Int): List<FloatA
     }
     if (bestLbl == 0) return emptyList()
     fun on(x: Int, y: Int) = x in 0 until mw && y in 0 until mh && label[y * mw + x] == bestLbl
-    // 起點=最上排最左像素
     var sx = -1; var sy = -1
     outer@ for (y in 0 until mh) for (x in 0 until mw) if (on(x, y)) { sx = x; sy = y; break@outer }
-    val dirs = arrayOf(intArrayOf(0,-1), intArrayOf(1,-1), intArrayOf(1,0), intArrayOf(1,1),
-                       intArrayOf(0,1), intArrayOf(-1,1), intArrayOf(-1,0), intArrayOf(-1,-1))
+    val dirs = arrayOf(intArrayOf(0, -1), intArrayOf(1, -1), intArrayOf(1, 0), intArrayOf(1, 1),
+                       intArrayOf(0, 1), intArrayOf(-1, 1), intArrayOf(-1, 0), intArrayOf(-1, -1))
     val pts = ArrayList<FloatArray>()
-    var cx = sx; var cy = sy; var d = 6  // 從西側進入
+    var cx = sx; var cy = sy; var d = 6
     val cap = 4 * (mw + mh) * 4
     var steps = 0
     do {
@@ -311,23 +358,24 @@ private fun traceLargestBoundary(mask: ByteArray, mw: Int, mh: Int): List<FloatA
             val nx = cx + dirs[nd][0]; val ny = cy + dirs[nd][1]
             if (on(nx, ny)) { cx = nx; cy = ny; d = (nd + 6) % 8; found = true; break }
         }
-        if (!found) break   // 孤立點
+        if (!found) break
         steps++
     } while ((cx != sx || cy != sy) && steps < cap)
     return pts
 }
 
-/** Ramer–Douglas–Peucker 折線精簡(閉合輪廓)。 */
+/** Ramer–Douglas–Peucker 精簡。 */
 private fun rdp(pts: List<FloatArray>, eps: Double): List<FloatArray> {
     if (pts.size < 8) return pts
     val keep = BooleanArray(pts.size)
     keep[0] = true; keep[pts.size - 1] = true
     val stack = ArrayDeque<IntArray>(); stack.add(intArrayOf(0, pts.size - 1))
     while (stack.isNotEmpty()) {
-        val (a, b) = stack.removeLast().let { Pair(it[0], it[1]) }
+        val seg = stack.removeLast(); val a = seg[0]; val b = seg[1]
         var maxD = 0.0; var idx = -1
         val ax = pts[a][0]; val ay = pts[a][1]; val bx = pts[b][0]; val by = pts[b][1]
-        val dx = bx - ax; val dy = by - ay; val len = sqrt((dx * dx + dy * dy).toDouble()).coerceAtLeast(1e-6)
+        val dx = bx - ax; val dy = by - ay
+        val len = sqrt((dx * dx + dy * dy).toDouble()).coerceAtLeast(1e-6)
         for (i in a + 1 until b) {
             val dist = abs((pts[i][0] - ax) * dy - (pts[i][1] - ay) * dx) / len
             if (dist > maxD) { maxD = dist; idx = i }

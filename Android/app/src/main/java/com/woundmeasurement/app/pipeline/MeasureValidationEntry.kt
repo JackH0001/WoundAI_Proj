@@ -49,9 +49,26 @@ fun MeasureValidationEntry(
     }
 
     val st by vm.state.collectAsState()
+    // 重要狀態(✅/ℹ️/⚠️)改彈出視窗,點「確認」才關閉
+    var dlg by remember { mutableStateOf<String?>(null) }
+    var seenStatus by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(st.submitStatus) {
+        val s = st.submitStatus
+        if (s != null && s != seenStatus && (s.startsWith("✅") || s.startsWith("ℹ️") || s.startsWith("⚠️"))) {
+            dlg = s; seenStatus = s
+        }
+    }
+    dlg?.let { msg ->
+        AlertDialog(
+            onDismissRequest = { dlg = null },
+            confirmButton = { TextButton({ dlg = null }) { Text("確認") } },
+            title = { Text(if (msg.startsWith("⚠️")) "注意" else "完成") },
+            text = { Text(msg) }
+        )
+    }
     val eb = vm.lastBitmap
     if (editing && eb != null) {
-        // 專屬全螢幕修邊頁(對齊原型 v_review)
+        // 專屬全螢幕修邊頁(對齊原型 v_review:邊界+組織筆刷)
         WoundEditScreen(
             bitmap = eb,
             initialPolygon = vm.lastPolygon,
@@ -59,7 +76,9 @@ fun MeasureValidationEntry(
             tissueFrac = st.result?.tissueFrac ?: emptyMap(),
             exudate = exudate,
             onCancel = { editing = false },
-            onDone = { poly, iou, newA -> vm.applyEditedPolygon(poly, iou, newA, exudate); editing = false }
+            onDone = { poly, iou, newA, tis ->
+                vm.applyEditedPolygon(poly, iou, newA, exudate, tis); editing = false
+            }
         )
     } else {
         Column(
