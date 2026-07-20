@@ -46,6 +46,13 @@ fun SamplePickerScreen(
             if (bmp != null) dispatch(bmp)
         }
     }
+    // 檔案瀏覽(DocumentsUI):可選 Download 等任意資料夾(Photo Picker 看不到未入媒體庫的新圖,如拖入模擬器的 JPG)
+    val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let {
+            val bmp = ctx.contentResolver.openInputStream(it)?.use { s -> BitmapFactory.decodeStream(s) }
+            if (bmp != null) dispatch(bmp)
+        }
+    }
     val takePhoto = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bmp ->
         if (bmp != null) dispatch(bmp)
     }
@@ -60,10 +67,14 @@ fun SamplePickerScreen(
         }
         if (backend == null) Text("(未設定後端,僅端上)", style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button({ pickGallery.launch("image/*") }, Modifier.weight(1f)) { Text("載入範例圖") }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button({ pickGallery.launch("image/*") }, Modifier.weight(1f)) { Text("相簿") }
+            OutlinedButton({ pickFile.launch(arrayOf("image/*")) }, Modifier.weight(1f)) { Text("檔案") }
             OutlinedButton({ takePhoto.launch(null) }, Modifier.weight(1f)) { Text("拍照") }
         }
+        Text("「檔案」可瀏覽 Download 等資料夾(拖入模擬器的新圖選這個;相簿只列已入媒體庫的照片)",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
         Divider()
         MeasureScreen(vm = vm, onReview = onReview, onSaveToTimeline = onSaveToTimeline,
             exudate = exudate, onExudate = onExudate)
