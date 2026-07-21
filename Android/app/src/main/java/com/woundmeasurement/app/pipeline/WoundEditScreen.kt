@@ -35,13 +35,15 @@ private enum class EditTool { B_PAINT, B_ERASE, PAN, TISSUE }
 
 private val T_KEYS = arrayOf("", "granulation", "slough", "necrosis", "epithelial")
 private val T_NAMES = arrayOf("", "肉芽", "腐肉", "壞死", "上皮")
-private val T_COLORS = intArrayOf(  // overlay ARGB(半透明)
+private val T_COLORS = intArrayOf(  // overlay ARGB(半透明,壓低讓底圖傷口紋理可見)
     0,
-    android.graphics.Color.argb(110, 220, 60, 60),    // 肉芽 紅
-    android.graphics.Color.argb(120, 235, 210, 70),   // 腐肉 黃
-    android.graphics.Color.argb(140, 40, 40, 40),     // 壞死 深灰
-    android.graphics.Color.argb(120, 240, 150, 170)   // 上皮 粉
+    android.graphics.Color.argb(70, 220, 60, 60),     // 肉芽 紅(低透明:疊在紅傷口上仍看得到底圖)
+    android.graphics.Color.argb(110, 235, 210, 70),   // 腐肉 黃
+    android.graphics.Color.argb(130, 40, 40, 40),     // 壞死 深灰
+    android.graphics.Color.argb(110, 240, 150, 170)   // 上皮 粉
 )
+// 遮罩外緣輪廓線:亮青色不透明——紅色傷口與白紙上都高對比,供精確對齊邊界
+private val EDGE_COLOR = android.graphics.Color.argb(255, 0, 229, 255)
 
 @Composable
 fun WoundEditScreen(
@@ -85,10 +87,25 @@ fun WoundEditScreen(
         (cand.maxByOrNull { tissueFrac[it.first] ?: 0.0 }?.takeIf { (tissueFrac[it.first] ?: 0.0) > 0.0 }?.second) ?: 1
     }
 
+    // 邊緣規則:遮罩px 的 4 鄰有空(或到圖邊)→ 畫亮青輪廓線;否則畫組織半透明色
+    fun ovColorAt(x: Int, y: Int): Int {
+        val i = y * mw + x
+        if (mask[i].toInt() == 0) return 0
+        val edge = x == 0 || y == 0 || x == mw - 1 || y == mh - 1 ||
+                mask[i - 1].toInt() == 0 || mask[i + 1].toInt() == 0 ||
+                mask[i - mw].toInt() == 0 || mask[i + mw].toInt() == 0
+        return if (edge) EDGE_COLOR else T_COLORS[tissue[i].toInt().coerceIn(1, 4)]
+    }
     fun syncOverlayAll() {
         val px = IntArray(mw * mh)
-        for (i in mask.indices) px[i] = if (mask[i].toInt() != 0) T_COLORS[tissue[i].toInt().coerceIn(0, 4).coerceAtLeast(1)] else 0
+        for (y in 0 until mh) for (x in 0 until mw) px[y * mw + x] = ovColorAt(x, y)
         overlay.setPixels(px, 0, mw, 0, 0, mw, mh)
+    }
+    /** 筆刷後只重算受影響區域(含外擴1px,讓邊緣線跟著移動)。 */
+    fun refreshOverlayRegion(rx0: Int, ry0: Int, rx1: Int, ry1: Int) {
+        val a0 = max(0, rx0); val b0 = max(0, ry0)
+        val a1 = min(mw - 1, rx1); val b1 = min(mh - 1, ry1)
+        for (y in b0..b1) for (x in a0..a1) overlay.setPixel(x, y, ovColorAt(x, y))
     }
     remember(initialPolygon) {
         java.util.Arrays.fill(mask, 0); java.util.Arrays.fill(tissue, 0); tCounts.fill(0)
@@ -148,22 +165,21 @@ fun WoundEditScreen(
                 EditTool.B_PAINT -> if (mask[i].toInt() == 0) {
                     mask[i] = 1; maskCount++
                     tissue[i] = defaultClass.toByte(); tCounts[defaultClass]++
-                    overlay.setPixel(x, y, T_COLORS[defaultClass])
                 }
                 EditTool.B_ERASE -> if (mask[i].toInt() != 0) {
                     mask[i] = 0; maskCount--
                     val tc = tissue[i].toInt(); if (tc in 1..4) tCounts[tc]--
                     tissue[i] = 0
-                    overlay.setPixel(x, y, 0)
                 }
                 EditTool.TISSUE -> if (mask[i].toInt() != 0 && tissue[i].toInt() != curTissue) {
                     val tc = tissue[i].toInt(); if (tc in 1..4) tCounts[tc]--
                     tissue[i] = curTissue.toByte(); tCounts[curTissue]++
-                    overlay.setPixel(x, y, T_COLORS[curTissue])
                 }
                 EditTool.PAN -> {}
             }
         }
+        // 邊緣線隨筆刷即時更新(區域外擴1px)
+        refreshOverlayRegion(x0 - 1, y0 - 1, x1 + 1, y1 + 1)
         version++
     }
     fun stampLine(a: Offset, b: Offset) {
