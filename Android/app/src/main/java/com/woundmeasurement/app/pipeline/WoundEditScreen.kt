@@ -58,10 +58,22 @@ fun WoundEditScreen(
     val img = remember(bitmap) { bitmap.asImageBitmap() }
     val bw = bitmap.width; val bh = bitmap.height
 
-    // ---- raster 兩層:mask(傷口) + tissue(組織類別 1..4) ----
-    val mScale = remember { min(1f, 640f / max(bw, bh)) }
-    val mw = remember { max(8, (bw * mScale).roundToInt()) }
-    val mh = remember { max(8, (bh * mScale).roundToInt()) }
+    // ---- ROI 裁切高解析柵格:遮罩只覆蓋「傷口外框+40%邊距」,上限1024 → 遮罩px≈原圖px ----
+    // (舊版全圖640柵格:大照片縮到0.1x,鋸齒粗且每次完成→再進的往返損失半像素圈,面積越修越縮)
+    val roi = remember(initialPolygon) {
+        if (initialPolygon.size >= 3) {
+            val xs = initialPolygon.map { it[0] }; val ys = initialPolygon.map { it[1] }
+            val w = (xs.max() - xs.min()).coerceAtLeast(16); val h = (ys.max() - ys.min()).coerceAtLeast(16)
+            val mgx = (w * 0.4f).roundToInt().coerceAtLeast(32); val mgy = (h * 0.4f).roundToInt().coerceAtLeast(32)
+            val x0 = (xs.min() - mgx).coerceAtLeast(0); val y0 = (ys.min() - mgy).coerceAtLeast(0)
+            val x1 = (xs.max() + mgx).coerceAtMost(bw - 1); val y1 = (ys.max() + mgy).coerceAtMost(bh - 1)
+            intArrayOf(x0, y0, x1 - x0 + 1, y1 - y0 + 1)
+        } else intArrayOf(0, 0, bw, bh)
+    }
+    val rx0 = roi[0]; val ry0 = roi[1]; val rw = roi[2]; val rh = roi[3]
+    val mScale = remember { min(1f, 1024f / max(rw, rh)) }
+    val mw = remember { max(8, (rw * mScale).roundToInt()) }
+    val mh = remember { max(8, (rh * mScale).roundToInt()) }
     val mask = remember { ByteArray(mw * mh) }
     val tissue = remember { ByteArray(mw * mh) }
     val initMask = remember { ByteArray(mw * mh) }
@@ -109,7 +121,7 @@ fun WoundEditScreen(
     }
     remember(initialPolygon) {
         java.util.Arrays.fill(mask, 0); java.util.Arrays.fill(tissue, 0); tCounts.fill(0)
-        scanlineFill(initialPolygon, mScale, mw, mh, mask)
+        scanlineFill(initialPolygon, mScale, mw, mh, mask, rx0, ry0)
         var c = 0
         for (i in mask.indices) if (mask[i].toInt() != 0) { c++; tissue[i] = defaultClass.toByte() }
         maskCount = c; initCount = c; tCounts[defaultClass] = c
@@ -153,7 +165,7 @@ fun WoundEditScreen(
 
     fun stamp(imgPt: Offset) {
         val r = max(1f, (brushScreen / k()) * mScale)
-        val cx = imgPt.x * mScale; val cy = imgPt.y * mScale
+        val cx = (imgPt.x - rx0) * mScale; val cy = (imgPt.y - ry0) * mScale
         val r2 = r * r
         val x0 = max(0, (cx - r).toInt()); val x1 = min(mw - 1, (cx + r).toInt())
         val y0 = max(0, (cy - r).toInt()); val y1 = min(mh - 1, (cy + r).toInt())
@@ -234,7 +246,8 @@ fun WoundEditScreen(
                             }
                         },
                         onDragEnd = {
-                            strokeSnapshot?.let { if (undo.size >= 12) undo.removeAt(0); undo.add(it); redo.clear() }
+                            // 高解析快照較大(≤2MB/筆),上限8筆防OOM
+                            strokeSnapshot?.let { if (undo.size >= 8) undo.removeAt(0); undo.add(it); redo.clear() }
                             strokeSnapshot = null; last = null; cursor = null
                         },
                         onDragCancel = { strokeSnapshot = null; last = null; cursor = null }
@@ -246,8 +259,15 @@ fun WoundEditScreen(
                 val dstOff = IntOffset((-viewOffset.x * kk).roundToInt(), (-viewOffset.y * kk).roundToInt())
                 val dstSz = IntSize((bw * kk).roundToInt(), (bh * kk).roundToInt())
                 drawImage(img, srcOffset = IntOffset.Zero, srcSize = IntSize(bw, bh), dstOffset = dstOff, dstSize = dstSz)
+                // 編輯層只覆蓋 ROI 區(高解析);灰框=可編修範圍
+                val ovOff = IntOffset(((rx0 - viewOffset.x) * kk).roundToInt(), ((ry0 - viewOffset.y) * kk).roundToInt())
+                val ovSz = IntSize((rw * kk).roundToInt(), (rh * kk).roundToInt())
                 drawImage(overlay.asImageBitmap(), srcOffset = IntOffset.Zero, srcSize = IntSize(mw, mh),
-                    dstOffset = dstOff, dstSize = dstSz)
+                    dstOffset = ovOff, dstSize = ovSz)
+                drawRect(Color(0x66888888),
+                    topLeft = Offset(ovOff.x.toFloat(), ovOff.y.toFloat()),
+                    size = androidx.compose.ui.geometry.Size(ovSz.width.toFloat(), ovSz.height.toFloat()),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2f))
                 cursor?.let {
                     val col = when (tool) {
                         EditTool.B_ERASE -> Color(0xFFFF5050)
@@ -295,28 +315,33 @@ fun WoundEditScreen(
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(onCancel, Modifier.weight(1f)) { Text("取消") }
             Button({
-                val boundary = traceLargestBoundary(mask, mw, mh)
-                if (boundary.size >= 3) {
-                    val simplified = rdp(boundary, 1.5)
-                    val poly = simplified.map { listOf((it[0] / mScale).roundToInt(), (it[1] / mScale).roundToInt()) }
-                    var inter = 0; var uni = 0
-                    for (i in mask.indices) {
-                        val a = initMask[i].toInt() != 0; val b = mask[i].toInt() != 0
-                        if (a || b) uni++; if (a && b) inter++
+                try {
+                    val boundary = traceLargestBoundary(mask, mw, mh)
+                    if (boundary.size >= 3) {
+                        val simplified = rdp(boundary, 1.5)
+                        // 還原到影像座標(含 ROI 原點)
+                        val poly = simplified.map {
+                            listOf((it[0] / mScale + rx0).roundToInt(), (it[1] / mScale + ry0).roundToInt())
+                        }
+                        var inter = 0; var uni = 0
+                        for (i in mask.indices) {
+                            val a = initMask[i].toInt() != 0; val b = mask[i].toInt() != 0
+                            if (a || b) uni++; if (a && b) inter++
+                        }
+                        val iou = if (uni == 0) 1.0 else inter.toDouble() / uni
+                        onDone(poly, iou, liveArea, liveFrac())
                     }
-                    val iou = if (uni == 0) 1.0 else inter.toDouble() / uni
-                    onDone(poly, iou, liveArea, liveFrac())
-                }
+                } catch (_: Exception) { onCancel() }   // 極端遮罩防呆:不讓完成鍵閃退
             }, Modifier.weight(1f), enabled = maskCount > 0) { Text("完成修邊") }
         }
     }
 }
 
-/** 多邊形 scanline 填充(even-odd)→ mask(工作解析度)。 */
-private fun scanlineFill(poly: List<List<Int>>, s: Float, mw: Int, mh: Int, out: ByteArray) {
+/** 多邊形 scanline 填充(even-odd)→ mask(ROI 局部座標,工作解析度)。 */
+private fun scanlineFill(poly: List<List<Int>>, s: Float, mw: Int, mh: Int, out: ByteArray, ox: Int = 0, oy: Int = 0) {
     if (poly.size < 3) return
-    val xs = FloatArray(poly.size) { poly[it][0] * s }
-    val ys = FloatArray(poly.size) { poly[it][1] * s }
+    val xs = FloatArray(poly.size) { (poly[it][0] - ox) * s }
+    val ys = FloatArray(poly.size) { (poly[it][1] - oy) * s }
     val cuts = ArrayList<Float>(16)
     for (y in 0 until mh) {
         val yc = y + 0.5f

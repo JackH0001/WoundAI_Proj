@@ -101,9 +101,18 @@ class MeasureViewModel(
         _state.value = _state.value.copy(loading = true, error = null)
         viewModelScope.launch {
             try {
+                // 長邊縮到 ≤2048:模型輸入僅256、ArUco 於2048仍清晰、比例法尺度不變;
+                // 記憶體(5712寬原圖≈70MB ARGB)與上傳大減,避免反覆編修 OOM 閃退
+                val work = withContext(Dispatchers.Default) {
+                    val mx = maxOf(bitmap.width, bitmap.height)
+                    if (mx > 2048) {
+                        val s = 2048f / mx
+                        Bitmap.createScaledBitmap(bitmap, (bitmap.width * s).toInt(), (bitmap.height * s).toInt(), true)
+                    } else bitmap
+                }
                 var polyCap: List<List<Int>> = emptyList()
                 val r = withContext(Dispatchers.IO) {
-                    val jpeg = bitmap.toJpeg()
+                    val jpeg = work.toJpeg()
                     val c = backend.classify(jpeg, cmPerPixel)
                     polyCap = c.woundPolygon
                     MeasureResult(
@@ -119,9 +128,9 @@ class MeasureViewModel(
                     )
                 }
                 lastPolygon = polyCap
-                lastBitmap = bitmap
+                lastBitmap = work          // 編輯/顯示一律用縮圖(polygon 座標即此圖座標)
                 lastCorrectionIou = null   // 新分析→重置修邊修正量
-                val hh = quickHash(bitmap)
+                val hh = quickHash(work)
                 if (hh != lastImageHash) lastSavedId = null   // 換了影像→允許新增;同影像→保留 id 供更新
                 lastImageHash = hh
                 _state.value = MeasureUiState(loading = false, result = r)
