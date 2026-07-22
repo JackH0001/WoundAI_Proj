@@ -295,6 +295,9 @@ fun WoundEditScreen(
         Text("組織  肉芽${(lf["granulation"]!! * 100).toInt()}% · 腐肉${(lf["slough"]!! * 100).toInt()}% · " +
              "壞死${(lf["necrosis"]!! * 100).toInt()}% · 上皮${(lf["epithelial"]!! * 100).toInt()}%  (框會隨筆刷自動擴張)",
             fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (st.maskCount == 0)
+            Text("⚠ AI 未偵測到傷口:請用「邊界＋」從零塗抹;ArUco 尺度仍有效,面積照常精確計算",
+                fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
 
         Box(Modifier.fillMaxWidth().weight(1f).clipToBounds().onSizeChanged { boxSize = it }) {
             Canvas(

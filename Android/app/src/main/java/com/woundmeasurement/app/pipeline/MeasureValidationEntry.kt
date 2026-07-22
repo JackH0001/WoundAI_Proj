@@ -93,7 +93,8 @@ fun MeasureValidationEntry(
             Divider()
             SamplePickerScreen(
                 vm = vm, backend = backend,
-                onReview = { if (vm.lastBitmap != null && vm.lastPolygon.isNotEmpty()) editing = true },
+                // AI 空遮罩(如印刷OOD/難例全失敗)也可進修邊:醫師從零手畫,ArUco 尺度(mm/px)仍有效
+                onReview = { if (vm.lastBitmap != null) editing = true },
                 onSaveToTimeline = { vm.saveToTimeline(dao, exudate) },
                 exudate = exudate, onExudate = { exudate = it }
             )
