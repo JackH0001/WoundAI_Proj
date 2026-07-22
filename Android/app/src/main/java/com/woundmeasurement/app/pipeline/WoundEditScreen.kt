@@ -289,7 +289,8 @@ fun WoundEditScreen(
     val livePush = WoundPipeline.push(liveArea, lf, exudate).partial
 
     Column(Modifier.fillMaxSize().navigationBarsPadding().padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("修邊(=GT)  面積 ${liveArea?.let { "%.2f".format(it) } ?: "-"} cm² · PUSH ${livePush ?: "-"}",
+        Text("修邊(=GT)  面積 ${liveArea?.let { "%.2f".format(it) } ?: "-"} cm² · PUSH ${livePush ?: "-"}" +
+             "  [尺度:${if (mmPerPx != null) "ArUco✓" else "AI後備⚠"}]",
             style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
         Text("組織  肉芽${(lf["granulation"]!! * 100).toInt()}% · 腐肉${(lf["slough"]!! * 100).toInt()}% · " +
              "壞死${(lf["necrosis"]!! * 100).toInt()}% · 上皮${(lf["epithelial"]!! * 100).toInt()}%  (框會隨筆刷自動擴張)",
