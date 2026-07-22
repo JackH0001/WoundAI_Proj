@@ -33,6 +33,17 @@ import kotlin.math.sqrt
  */
 private enum class EditTool { B_PAINT, B_ERASE, PAN, TISSUE }
 
+/**
+ * 編輯狀態持久化(治「小面積反覆修邊劣化」):遮罩 raster 為唯一真相,跨編輯回合原樣傳遞,
+ * 不再經「輪廓追蹤→RDP→重柵格化」往返(該路徑每輪內縮半像素圈+簡化削角,小傷口佔比大)。
+ * cm2PerPx 於首次編輯鎖定(=後端面積/初始像素數),之後面積=像素數×係數,冪等不漂移。
+ */
+class EditRaster(
+    val mask: ByteArray, val tissue: ByteArray, val origMask: ByteArray,
+    val rx0: Int, val ry0: Int, val mw: Int, val mh: Int,
+    val mScale: Float, val cm2PerPx: Double?
+)
+
 private val T_KEYS = arrayOf("", "granulation", "slough", "necrosis", "epithelial")
 private val T_NAMES = arrayOf("", "肉芽", "腐肉", "壞死", "上皮")
 private val T_COLORS = intArrayOf(  // overlay ARGB(半透明,壓低讓底圖傷口紋理可見)
@@ -52,16 +63,18 @@ fun WoundEditScreen(
     originalArea: Double?,
     tissueFrac: Map<String, Double>,
     exudate: Int?,
+    resume: EditRaster? = null,   // 上次編輯的遮罩(同影像再進修邊→原樣續編,零損耗)
     onCancel: () -> Unit,
-    onDone: (edited: List<List<Int>>, correctionIou: Double?, newArea: Double?, tissue: Map<String, Double>) -> Unit
+    onDone: (edited: List<List<Int>>, correctionIou: Double?, newArea: Double?, tissue: Map<String, Double>, raster: EditRaster) -> Unit
 ) {
     val img = remember(bitmap) { bitmap.asImageBitmap() }
     val bw = bitmap.width; val bh = bitmap.height
 
-    // ---- ROI 裁切高解析柵格:遮罩只覆蓋「傷口外框+40%邊距」,上限1024 → 遮罩px≈原圖px ----
-    // (舊版全圖640柵格:大照片縮到0.1x,鋸齒粗且每次完成→再進的往返損失半像素圈,面積越修越縮)
-    val roi = remember(initialPolygon) {
-        if (initialPolygon.size >= 3) {
+    // ---- ROI 裁切高解析柵格(續編時沿用上次幾何) ----
+    val roi = remember(initialPolygon, resume) {
+        if (resume != null) intArrayOf(resume.rx0, resume.ry0,
+            (resume.mw / resume.mScale).roundToInt(), (resume.mh / resume.mScale).roundToInt())
+        else if (initialPolygon.size >= 3) {
             val xs = initialPolygon.map { it[0] }; val ys = initialPolygon.map { it[1] }
             val w = (xs.max() - xs.min()).coerceAtLeast(16); val h = (ys.max() - ys.min()).coerceAtLeast(16)
             val mgx = (w * 0.4f).roundToInt().coerceAtLeast(32); val mgy = (h * 0.4f).roundToInt().coerceAtLeast(32)
@@ -71,9 +84,9 @@ fun WoundEditScreen(
         } else intArrayOf(0, 0, bw, bh)
     }
     val rx0 = roi[0]; val ry0 = roi[1]; val rw = roi[2]; val rh = roi[3]
-    val mScale = remember { min(1f, 1024f / max(rw, rh)) }
-    val mw = remember { max(8, (rw * mScale).roundToInt()) }
-    val mh = remember { max(8, (rh * mScale).roundToInt()) }
+    val mScale = remember { resume?.mScale ?: min(1f, 1024f / max(rw, rh)) }
+    val mw = remember { resume?.mw ?: max(8, (rw * mScale).roundToInt()) }
+    val mh = remember { resume?.mh ?: max(8, (rh * mScale).roundToInt()) }
     val mask = remember { ByteArray(mw * mh) }
     val tissue = remember { ByteArray(mw * mh) }
     val initMask = remember { ByteArray(mw * mh) }
@@ -119,13 +132,30 @@ fun WoundEditScreen(
         val a1 = min(mw - 1, rx1); val b1 = min(mh - 1, ry1)
         for (y in b0..b1) for (x in a0..a1) overlay.setPixel(x, y, ovColorAt(x, y))
     }
-    remember(initialPolygon) {
-        java.util.Arrays.fill(mask, 0); java.util.Arrays.fill(tissue, 0); tCounts.fill(0)
-        scanlineFill(initialPolygon, mScale, mw, mh, mask, rx0, ry0)
-        var c = 0
-        for (i in mask.indices) if (mask[i].toInt() != 0) { c++; tissue[i] = defaultClass.toByte() }
-        maskCount = c; initCount = c; tCounts[defaultClass] = c
-        System.arraycopy(mask, 0, initMask, 0, mask.size)
+    val cm2PerPx = remember { mutableStateOf<Double?>(null) }
+    remember(initialPolygon, resume) {
+        if (resume != null && resume.mask.size == mask.size) {
+            // 續編:原樣載回上次遮罩/組織/原始AI遮罩(零損耗,不經多邊形往返)
+            System.arraycopy(resume.mask, 0, mask, 0, mask.size)
+            System.arraycopy(resume.tissue, 0, tissue, 0, tissue.size)
+            System.arraycopy(resume.origMask, 0, initMask, 0, initMask.size)
+            tCounts.fill(0); var c = 0
+            for (i in mask.indices) if (mask[i].toInt() != 0) {
+                c++; val tc = tissue[i].toInt().coerceIn(1, 4); tCounts[tc]++
+            }
+            maskCount = c
+            initCount = initMask.count { it.toInt() != 0 }
+            cm2PerPx.value = resume.cm2PerPx
+        } else {
+            java.util.Arrays.fill(mask, 0); java.util.Arrays.fill(tissue, 0); tCounts.fill(0)
+            scanlineFill(initialPolygon, mScale, mw, mh, mask, rx0, ry0)
+            var c = 0
+            for (i in mask.indices) if (mask[i].toInt() != 0) { c++; tissue[i] = defaultClass.toByte() }
+            maskCount = c; initCount = c; tCounts[defaultClass] = c
+            System.arraycopy(mask, 0, initMask, 0, mask.size)
+            // 首次編輯鎖定 cm²/遮罩px 係數:之後面積=像素數×係數,反覆編修不漂移
+            cm2PerPx.value = if (originalArea != null && c > 0) originalArea / c else null
+        }
         syncOverlayAll(); version++
         true
     }
@@ -210,7 +240,7 @@ fun WoundEditScreen(
         )
     }
     @Suppress("UNUSED_EXPRESSION") version
-    val liveArea = if (originalArea != null && initCount > 0) originalArea * maskCount / initCount else originalArea
+    val liveArea = cm2PerPx.value?.let { it * maskCount } ?: originalArea
     val lf = liveFrac()
     val livePush = WoundPipeline.push(liveArea, lf, exudate).partial
 
@@ -329,7 +359,9 @@ fun WoundEditScreen(
                             if (a || b) uni++; if (a && b) inter++
                         }
                         val iou = if (uni == 0) 1.0 else inter.toDouble() / uni
-                        onDone(poly, iou, liveArea, liveFrac())
+                        val raster = EditRaster(mask.copyOf(), tissue.copyOf(), initMask.copyOf(),
+                            rx0, ry0, mw, mh, mScale, cm2PerPx.value)
+                        onDone(poly, iou, liveArea, liveFrac(), raster)
                     }
                 } catch (_: Exception) { onCancel() }   // 極端遮罩防呆:不讓完成鍵閃退
             }, Modifier.weight(1f), enabled = maskCount > 0) { Text("完成修邊") }

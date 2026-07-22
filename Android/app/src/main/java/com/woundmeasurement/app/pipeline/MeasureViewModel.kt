@@ -47,6 +47,8 @@ class MeasureViewModel(
     // 同一次影像去重存檔:影像雜湊 + 已存的 row id(同影像重存→更新同筆,不新增)
     @Volatile private var lastImageHash: Int? = null
     @Volatile private var lastSavedId: Long? = null
+    // 修邊遮罩持久化(同影像再進修邊→原樣續編,免多邊形往返損耗;換影像清除)
+    @Volatile var editRaster: EditRaster? = null
 
     private fun quickHash(b: Bitmap): Int {
         var h = 17
@@ -131,7 +133,7 @@ class MeasureViewModel(
                 lastBitmap = work          // 編輯/顯示一律用縮圖(polygon 座標即此圖座標)
                 lastCorrectionIou = null   // 新分析→重置修邊修正量
                 val hh = quickHash(work)
-                if (hh != lastImageHash) lastSavedId = null   // 換了影像→允許新增;同影像→保留 id 供更新
+                if (hh != lastImageHash) { lastSavedId = null; editRaster = null }  // 換影像→重置去重id與修邊遮罩
                 lastImageHash = hh
                 _state.value = MeasureUiState(loading = false, result = r)
             } catch (e: Exception) {

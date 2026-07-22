@@ -75,8 +75,10 @@ fun MeasureValidationEntry(
             originalArea = st.result?.areaCm2,
             tissueFrac = st.result?.tissueFrac ?: emptyMap(),
             exudate = exudate,
+            resume = vm.editRaster,   // 同影像續編:原樣載回上次遮罩(零損耗)
             onCancel = { editing = false },
-            onDone = { poly, iou, newA, tis ->
+            onDone = { poly, iou, newA, tis, raster ->
+                vm.editRaster = raster
                 vm.applyEditedPolygon(poly, iou, newA, exudate, tis); editing = false
             }
         )
