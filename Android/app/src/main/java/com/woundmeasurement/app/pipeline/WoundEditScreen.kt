@@ -135,6 +135,7 @@ fun WoundEditScreen(
     originalArea: Double?,
     tissueFrac: Map<String, Double>,
     exudate: Int?,
+    mmPerPx: Double? = null,      // ArUco 尺度直傳:面積=像素數×(mm/px)²(優先;不依賴 AI 初始面積)
     resume: EditRaster? = null,
     onCancel: () -> Unit,
     onDone: (edited: List<List<Int>>, correctionIou: Double?, newArea: Double?, tissue: Map<String, Double>, raster: EditRaster) -> Unit
@@ -154,7 +155,8 @@ fun WoundEditScreen(
                 System.arraycopy(resume.mask, 0, mask, 0, mask.size)
                 System.arraycopy(resume.tissue, 0, tissue, 0, tissue.size)
                 System.arraycopy(resume.origMask, 0, orig, 0, orig.size)
-                cm2PerPx = resume.cm2PerPx
+                cm2PerPx = if (mmPerPx != null) (mmPerPx * mmPerPx / 100.0) / (resume.mScale * resume.mScale).toDouble()
+                           else resume.cm2PerPx
                 recount(); syncAll()
             }
         } else {
@@ -176,7 +178,9 @@ fun WoundEditScreen(
                 for (i in mask.indices) if (mask[i].toInt() != 0) { c++; tissue[i] = defaultClass.toByte() }
                 maskCount = c; tCounts[defaultClass] = c
                 System.arraycopy(mask, 0, orig, 0, mask.size)
-                cm2PerPx = if (originalArea != null && c > 0) originalArea / c else null
+                // 係數優先序:ArUco 尺度直傳(精確,=(mm/px)²/100/mScale²) > AI面積/像素數(後備)
+                cm2PerPx = if (mmPerPx != null) (mmPerPx * mmPerPx / 100.0) / (mScale * mScale).toDouble()
+                           else if (originalArea != null && c > 0) originalArea / c else null
                 syncAll()
             }
         }

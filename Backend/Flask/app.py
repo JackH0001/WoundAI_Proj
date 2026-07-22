@@ -1256,15 +1256,21 @@ def classify_wound():
             except Exception as _e:
                 logger.warning(f"escalate 略過: {_e}")
         # Stage3 校正面積:優先 ArUco,否則 cm_per_pixel(手動)
-        area_cm2 = None; calib = "none"
+        area_cm2 = None; calib = "none"; mm_per_px = None
         if _ac is not None:
             det = _ac.detect_marker(img)
             if det is not None:
                 _mm = float((_load_ssot().get("calibration", {}) or {}).get("marker_mm_active", 12.0))
                 area_cm2 = float(_ac.measure_area_cm2_ratio(mask.astype(np.uint8), det[0], marker_mm=_mm)); calib = f"aruco(marker {_mm}mm)"
+                # 尺度直傳:App 修邊面積=像素數×(mm/px)²,不依賴 AI 初始面積(消換算鏈偏差)
+                _c = np.array(det[0]).reshape(-1, 2)
+                _side = float(np.mean([np.linalg.norm(_c[_i] - _c[(_i + 1) % 4]) for _i in range(4)]))
+                if _side > 0: mm_per_px = _mm / _side
         if area_cm2 is None:
             cpp = request.form.get('cm_per_pixel', type=float)
-            if cpp: area_cm2 = float(mask.sum()) * (cpp ** 2); calib = "manual_cm_per_pixel"
+            if cpp:
+                area_cm2 = float(mask.sum()) * (cpp ** 2); calib = "manual_cm_per_pixel"
+                mm_per_px = cpp * 10.0
         # Stage4 組織 v2 + Stage5 PUSH
         t = tissue_proxy_v2(img, mask)
         push = push_score(area_cm2, t)
@@ -1280,6 +1286,7 @@ def classify_wound():
                                'route': route, 'escalated': escalated, 'au_area_ratio': au_ratio, 'iou_student_au': iou_sa,
                                'wound_polygon': wound_poly},
             'stage3_calibrate': {'method': calib, 'area_cm2': (round(area_cm2, 2) if area_cm2 is not None else None),
+                                 'mm_per_px': (round(mm_per_px, 6) if mm_per_px is not None else None),
                                  'note': ('未校正(無 ArUco 且未提供 cm_per_pixel)' if area_cm2 is None else None)},
             'stage4_tissue': {'method': 'v2(WB+HSV)', 'tissue_frac': {k: round(t[k], 3) for k in ('necrosis','slough','granulation','epithelial','other')}},
             'stage5_severity': {k: push[k] for k in ('tool','area_subscore','tissue_subscore','exudate_subscore','total_partial_img','total_full','range_full')},

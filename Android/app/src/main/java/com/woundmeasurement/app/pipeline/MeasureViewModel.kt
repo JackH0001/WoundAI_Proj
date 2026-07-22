@@ -49,6 +49,9 @@ class MeasureViewModel(
     @Volatile private var lastSavedId: Long? = null
     // 修邊遮罩持久化(同影像再進修邊→原樣續編,免多邊形往返損耗;換影像清除)
     @Volatile var editRaster: EditRaster? = null
+    // ArUco 尺度(mm/影像px,後端直傳):修邊面積=像素數×(mm/px)²,不依賴 AI 初始面積
+    @Volatile var lastMmPerPx: Double? = null
+        private set
 
     private fun quickHash(b: Bitmap): Int {
         var h = 17
@@ -113,10 +116,12 @@ class MeasureViewModel(
                     } else bitmap
                 }
                 var polyCap: List<List<Int>> = emptyList()
+                var mmCap: Double? = null
                 val r = withContext(Dispatchers.IO) {
                     val jpeg = work.toJpeg()
                     val c = backend.classify(jpeg, cmPerPixel)
                     polyCap = c.woundPolygon
+                    mmCap = c.mmPerPx
                     MeasureResult(
                         areaCm2 = c.areaCm2,
                         tissueFrac = c.tissueFrac,
@@ -132,6 +137,7 @@ class MeasureViewModel(
                 lastPolygon = polyCap
                 lastBitmap = work          // 編輯/顯示一律用縮圖(polygon 座標即此圖座標)
                 lastCorrectionIou = null   // 新分析→重置修邊修正量
+                lastMmPerPx = mmCap
                 val hh = quickHash(work)
                 if (hh != lastImageHash) { lastSavedId = null; editRaster = null }  // 換影像→重置去重id與修邊遮罩
                 lastImageHash = hh

@@ -23,7 +23,8 @@ data class ClassifyResult(
     val areaCm2: Double?, val tissueFrac: Map<String, Double>,
     val pushPartial: Int?, val pushFull: Int?, val confidence: Double, val route: String,
     val escalated: Boolean = false,
-    val woundPolygon: List<List<Int>> = emptyList()   // 傷口輪廓(供醫師修邊/飛輪標註)
+    val woundPolygon: List<List<Int>> = emptyList(),  // 傷口輪廓(供醫師修邊/飛輪標註)
+    val mmPerPx: Double? = null                       // ArUco 尺度(mm/影像px):修邊面積=像素數×(mm/px)²
 )
 
 class BackendClient(private val baseUrl: String, jwt: String = "") {
@@ -82,7 +83,8 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
                 // 後端雙軌路由:student(端上主力) 或 cloud_escalated(AU)(難例自動上雲集成)
                 route = if (s2.isNull("route")) "cloud" else s2.getString("route"),
                 escalated = !s2.isNull("escalated") && s2.getBoolean("escalated"),
-                woundPolygon = poly
+                woundPolygon = poly,
+                mmPerPx = if (s3.isNull("mm_per_px")) null else s3.getDouble("mm_per_px")
             )
         }
     }
