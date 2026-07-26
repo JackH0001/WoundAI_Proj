@@ -32,6 +32,20 @@ jobs:
     name: xcodebuild (${{ matrix.xcode }})
     runs-on: macos-14
     timeout-minutes: 40
+    env:
+      # -- OpenCV iOS binary provisioning (option 3: fetch pre-built + verify) --
+      # The Obj-C++ bridge (.mm) links a pre-built opencv2.xcframework. It uses
+      # only CORE OpenCV modules (imgproc / imgcodecs / features2d); ArUco/contrib
+      # is NOT required (sticker calibration is Apple-Vision based). Provenance is
+      # pinned in-repo for IEC 62304 auditability -- bump URL + SHA-256 together
+      # via a reviewed PR. Build the framework once with OpenCV's
+      # platforms/apple/build_xcframework.py (default archs -> slices named
+      # ios-arm64 and ios-arm64_x86_64-simulator) and upload
+      # opencv2.xcframework.zip as a Release asset on this repo.
+      OPENCV_VERSION: "4.8.0"
+      OPENCV_XCFRAMEWORK_URL: "https://github.com/JackH0001/WoundAI_Proj/releases/download/opencv-4.8.0-ios/opencv2.xcframework.zip"
+      OPENCV_XCFRAMEWORK_SHA256: "REPLACE_WITH_REAL_SHA256"
+
     strategy:
       fail-fast: false
       matrix:
@@ -43,6 +57,45 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Cache OpenCV xcframework
+        id: opencv-cache
+        uses: actions/cache@v4
+        with:
+          path: iOS/WoundMeasurementApp/opencv2.xcframework
+          key: opencv-xcframework-${{ env.OPENCV_VERSION }}-${{ env.OPENCV_XCFRAMEWORK_SHA256 }}
+
+      - name: Fetch & verify OpenCV xcframework
+        if: steps.opencv-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          if [ "$OPENCV_XCFRAMEWORK_SHA256" = "REPLACE_WITH_REAL_SHA256" ]; then
+            echo "::error::Pin the real SHA-256 of opencv2.xcframework.zip in .github/workflows/ios.yml (env.OPENCV_XCFRAMEWORK_SHA256). See the job env comment for how to build & host it."
+            exit 1
+          fi
+          dest="WoundMeasurementApp/opencv2.xcframework"   # cwd is iOS/
+          echo "Downloading $OPENCV_XCFRAMEWORK_URL"
+          curl -fL --retry 3 --retry-delay 5 -o "$RUNNER_TEMP/opencv2.zip" "$OPENCV_XCFRAMEWORK_URL"
+          echo "Verifying SHA-256"
+          echo "$OPENCV_XCFRAMEWORK_SHA256  $RUNNER_TEMP/opencv2.zip" | shasum -a 256 -c -
+          rm -rf "$RUNNER_TEMP/ocv" && mkdir -p "$RUNNER_TEMP/ocv"
+          unzip -q "$RUNNER_TEMP/opencv2.zip" -d "$RUNNER_TEMP/ocv"
+          src="$(find "$RUNNER_TEMP/ocv" -maxdepth 4 -type d -name opencv2.xcframework | head -1)"
+          test -n "$src" || { echo "::error::opencv2.xcframework not found inside the downloaded archive"; exit 1; }
+          rm -rf "$dest"; cp -R "$src" "$dest"
+
+      - name: Validate OpenCV xcframework slices
+        run: |
+          set -euo pipefail
+          dest="WoundMeasurementApp/opencv2.xcframework"
+          test -d "$dest" || { echo "::error::$dest is missing"; exit 1; }
+          for slice in ios-arm64 ios-arm64_x86_64-simulator; do
+            if [ ! -d "$dest/$slice/opencv2.framework/Headers" ]; then
+              echo "::error::opencv2.xcframework is missing slice '$slice'. Rebuild with platforms/apple/build_xcframework.py (default archs) so slices are named ios-arm64 and ios-arm64_x86_64-simulator."
+              exit 1
+            fi
+          done
+          echo "OpenCV xcframework OK: $(ls "$dest")"
 
       - name: Select Xcode ${{ matrix.xcode }}
         run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app

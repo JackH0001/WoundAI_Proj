@@ -928,13 +928,13 @@
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64",
-					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-i386_x86_64-simulator",
+					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64_x86_64-simulator",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64/opencv2.framework/Headers",
-					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-i386_x86_64-simulator/opencv2.framework/Headers",
+					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64_x86_64-simulator/opencv2.framework/Headers",
 				);
 				INFOPLIST_FILE = WoundMeasurementApp/Info.plist;
 				INFOPLIST_KEY_NSCameraUsageDescription = "需要使用相機來拍攝傷口影像";
@@ -975,13 +975,13 @@
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64",
-					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-i386_x86_64-simulator",
+					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64_x86_64-simulator",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64/opencv2.framework/Headers",
-					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-i386_x86_64-simulator/opencv2.framework/Headers",
+					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64_x86_64-simulator/opencv2.framework/Headers",
 				);
 				INFOPLIST_FILE = WoundMeasurementApp/Info.plist;
 				INFOPLIST_KEY_NSCameraUsageDescription = "需要使用相機來拍攝傷口影像";
