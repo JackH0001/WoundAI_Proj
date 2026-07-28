@@ -34,7 +34,17 @@ REQUIRED_CORE = ["code", "gt_polygon", "exudate", "doctor_verified", "deidentifi
 REQUIRED_IMAGE = ["image_id", "image_w", "image_h"]
 REQUIRED = REQUIRED_CORE + REQUIRED_IMAGE
 # 溯源欄位(非強制,但缺了無法做模型治理/回溯歸因)
-PROVENANCE = ["mm_per_px", "route", "seg_model", "app_version", "correction_iou", "care_note"]
+PROVENANCE = ["mm_per_px", "route", "seg_model", "app_version", "correction_iou", "care_note", "source"]
+
+# 樣本來源。範例/驗證影像可以走同一條管線收進來,但**不得混入臨床樣本數**:
+#   clinical = 真實病人傷口(唯一可作臨床證據者)
+#   sample   = 範例/示範用真實傷口照(如 test_wounds_aruco_v2 那 5 張)——注意它們是 escalate
+#              路由的驗收基準,拿去訓練等於「考卷當講義」,匯出訓練集時請明確排除
+#   phantom  = 印刷模擬傷口/幾何色塊(面積驗證用)——**不具傷口材質**,訓練它只會教模型
+#              分割印刷紅方塊,對真實傷口無遷移價值
+#   external = 外部公開資料集
+SOURCES = ("clinical", "sample", "phantom", "external")
+DEFAULT_SOURCE = "clinical"
 
 # 白名單:image_id/code 會被當成檔名使用 → 不做字元限制就是路徑穿越漏洞
 ID_RE = re.compile(r"^[0-9a-f]{16}$")           # classify 產生的 sha1 前 16 碼
@@ -62,6 +72,10 @@ def validate_annotation(d: dict, require_image: bool = True):
         issues.append("code 格式不合(應為 WD- 加英數/底線/連字號,1-32 字)")
     if require_image and d.get("image_id") is not None and not ID_RE.match(str(d.get("image_id"))):
         issues.append("image_id 格式不合(應為 16 位小寫十六進位;防路徑穿越)")
+
+    src = d.get("source")
+    if src is not None and str(src) not in SOURCES:
+        issues.append(f"source 須為 {'/'.join(SOURCES)}(預設 {DEFAULT_SOURCE})")
 
     ex = d.get("exudate")
     if ex is not None:
@@ -186,15 +200,26 @@ def is_consent_blocked(image_id, withdrawn_path=None, quarantine_dir=None):
     return str(image_id) in withdrawn_keys(withdrawn_path)[1] or is_quarantined(image_id, quarantine_dir)
 
 
-def effective_queue(queue_path=None, images_dir=None, withdrawn_path=None):
+def rec_source(rec):
+    s = str(rec.get("source") or DEFAULT_SOURCE)
+    return s if s in SOURCES else DEFAULT_SOURCE
+
+
+def effective_queue(queue_path=None, images_dir=None, withdrawn_path=None, source=None):
     """可訓練樣本 = 欄位完整、有影像檔、三同意皆真、未撤回(code 或 image_id)、同影像取最新。
-    回 (可用 rec 清單, 統計 dict)。匯出腳本與 /flywheel/stats 共用同一判準(單一真相)。"""
+    回 (可用 rec 清單, 統計 dict)。匯出腳本與 /flywheel/stats 共用同一判準(單一真相)。
+
+    @param source 只保留指定來源(str 或 iterable);None=全收。統計一律附 by_source 分項,
+      讓「臨床樣本數」不會被範例/模擬影像灌水——這是送件數字誠實與否的關鍵。"""
+    keep = None
+    if source is not None:
+        keep = {source} if isinstance(source, str) else set(source)
     queue_path = queue_path or QUEUE
     images_dir = images_dir or IMAGES_DIR
     wd_codes, wd_imgs = withdrawn_keys(withdrawn_path)
     recs, bad = read_jsonl(queue_path, with_bad=True)
     stats = {"total": len(recs) + bad, "orphan_no_image": 0, "malformed": bad, "image_file_missing": 0,
-             "withdrawn": 0, "consent_invalid": 0, "superseded": 0, "trainable": 0}
+             "withdrawn": 0, "consent_invalid": 0, "superseded": 0, "other_source": 0, "trainable": 0}
     latest = {}
     for r in recs:
         iid = r.get("image_id")
@@ -210,6 +235,8 @@ def effective_queue(queue_path=None, images_dir=None, withdrawn_path=None):
             stats["consent_invalid"] += 1; continue
         if not os.path.exists(os.path.join(images_dir, str(iid) + ".jpg")):
             stats["image_file_missing"] += 1; continue
+        if keep is not None and rec_source(r) not in keep:
+            stats["other_source"] += 1; continue
         prev = latest.get(iid)
         if prev is not None: stats["superseded"] += 1
         # received_at 遞增(UTC) → 後到者為醫師最新修訂。
@@ -219,6 +246,8 @@ def effective_queue(queue_path=None, images_dir=None, withdrawn_path=None):
             latest[iid] = r
     out = list(latest.values())
     stats["trainable"] = len(out)
+    # 分項:臨床樣本數不可被範例/模擬影像灌水(送件數字誠實與否的關鍵)
+    stats["by_source"] = {s: sum(1 for r in out if rec_source(r) == s) for s in SOURCES}
     return out, stats
 
 
@@ -278,6 +307,7 @@ try:
         rec = {k: d.get(k) for k in REQUIRED}
         for k in PROVENANCE:
             if d.get(k) is not None: rec[k] = d.get(k)
+        rec["source"] = str(d.get("source") or DEFAULT_SOURCE)   # 顯式落盤,免得日後靠預設值猜
         rec["poly_sig"] = poly_sig(d.get("gt_polygon"))
         rec["supersedes"] = [r.get("code") for r in same_img] or None
         rec["actor"] = actor
@@ -355,8 +385,10 @@ try:
     @flywheel_bp.route("/api/v1/flywheel/stats", methods=["GET"])
     @jwt_required()
     def get_stats():
-        """佇列健康度:總筆數 / 孤兒 / 格式錯 / 影像遺失 / 已撤回 / 同意失效 / 被取代 / 可訓練。"""
-        _, stats = effective_queue()
+        """佇列健康度:總筆數 / 孤兒 / 格式錯 / 影像遺失 / 已撤回 / 同意失效 / 被取代 / 可訓練。
+        `?source=clinical` 可只看臨床樣本(收案進度以此為準,不含範例/模擬影像)。"""
+        src = request.args.get("source")
+        _, stats = effective_queue(source=(src or None))
         stats["images_on_disk"] = len([f for f in os.listdir(IMAGES_DIR)
                                        if f.endswith(".jpg")]) if os.path.isdir(IMAGES_DIR) else 0
         stats["quarantined"] = len([f for f in os.listdir(QUARANTINE_DIR)

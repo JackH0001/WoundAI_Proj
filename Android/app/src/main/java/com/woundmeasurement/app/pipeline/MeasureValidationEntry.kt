@@ -135,7 +135,10 @@ private fun DoctorFlywheelSubmit(vm: MeasureViewModel, backend: BackendClient, e
         Button(
             onClick = {
                 val code = "WD-" + System.currentTimeMillis().toString().takeLast(8)
-                vm.submitAnnotation(backend, code, exudate, careNote = "emulator demo confirm")
+                // 這是內建範例圖的驗證入口 → 標 source=sample,不可混入臨床樣本數;
+                // 真實收案畫面請不要傳 source(後端預設 clinical)
+                vm.submitAnnotation(backend, code, exudate,
+                    careNote = "emulator demo confirm", source = "sample")
             },
             modifier = Modifier.fillMaxWidth()
         ) { Text("醫師確認・送出標註 → 再訓練佇列") }

@@ -11,7 +11,7 @@
 | 1 | 後端已重啟（含 2026-07-28 資料鏈修正） | `GET /api/v1/flywheel/stats` 有回應（此端點是本輪新增） |
 | 2 | classify 回傳 `image_id` / `image_w` / `image_h` | `python engineering/phase2/test_backend_http.py --img <測試圖>` → 全部 PASS |
 | 3 | App 已重編（帶 image_id 送標註） | 修邊頁標題出現 `[尺度:ArUco✓]`；送出後 stats 的 `trainable` +1 |
-| 4 | 佇列已清空 | `stats.total == 0`（舊 8 筆已歸檔，見 `Backend/Flask/flywheel/archive/`）。**跑過驗收腳本就會留測試樣本**，收案前務必再確認一次歸零 |
+| 4 | 臨床佇列已清空 | `by_source.clinical == 0`（舊 8 筆已歸檔，見 `Backend/Flask/flywheel/archive/`）。範例／驗收樣本標 `source=sample`，不影響臨床計數 |
 | 5 | v2 校正貼紙已印妥 | 方形 20mm / marker 12mm / id7，L2040 300dpi；每位病人一張 |
 | 6 | 知情同意 | 紙本同意書已簽（電子簽名是 Sprint N1，本批先走紙本，代碼與紙本編號對照表**離線保管**） |
 
@@ -70,11 +70,11 @@
 ## 5. 收完之後要跑的驗證
 
 ```powershell
-# 1. 佇列健康度（期望 trainable = 20）
-curl -H "Authorization: Bearer <JWT>" http://127.0.0.1:5000/api/v1/flywheel/stats
+# 1. 佇列健康度（期望 by_source.clinical = 20）
+curl -H "Authorization: Bearer <JWT>" "http://127.0.0.1:5000/api/v1/flywheel/stats?source=clinical"
 
 # 2. 匯出訓練集（少於 20 會誠實中止，不硬訓）
-python engineering/phase2/export_flywheel_dataset.py --min-samples 20
+python engineering/phase2/export_flywheel_dataset.py --source clinical --min-samples 20
 
 # 3. 目視抽查遮罩是否貼齊
 #    dataset_<日期>/masks/*.png 疊回 images/*.jpg
@@ -90,7 +90,7 @@ python engineering/phase2/export_flywheel_dataset.py --min-samples 20
 
 ### 判定
 
-- ✅ 資料鏈通過：20/20 進得了 `trainable`，匯出的 mask 目視貼齊
+- ✅ 資料鏈通過：20/20 進得了 `by_source.clinical`，匯出的 mask 目視貼齊
 - ⚠ 若 `orphan_no_image` > 0 → App 未帶 image_id，回頭查前置檢核 #3
 - ⚠ 若 `image_file_missing` > 0 → 後端 `flywheel/images/` 被清或跨機器，檢查部署
 

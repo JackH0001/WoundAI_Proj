@@ -6,6 +6,25 @@
 ## 0. 角色與資料流
 擷取 → AI 初稿(A∪U)→ **醫師修邊(=GT)** → 標註庫 → 再訓練佇列(correction_iou 排序)→ 週期微調 a_unet/unet++ → holdout 評測 → 過門檻才版本升級+部署 → student 重新蒸餾。
 
+### 0.1 實作對照(2026-07-28 資料鏈修正後,**以此為準**)
+
+```
+POST /api/v1/classify        存影像 → 回 image_id + image_w/image_h
+   ↓ App 醫師修邊(GT,座標空間=image_w×image_h)
+POST /api/v1/annotation      強制帶 image_id/尺寸,缺者 400;去重鍵=(image_id, poly_sig)
+   ↓                          同影像不同遮罩=修訂(匯出取最新);source 標 clinical/sample/phantom
+GET  /api/v1/flywheel/stats?source=clinical      ← 收案進度看 by_source.clinical
+   ↓
+python engineering/phase2/export_flywheel_dataset.py --source clinical --min-samples 20
+   → dataset_<日期>/{images,masks,manifest.json,DATASET_CARD.md}
+   ↓
+distill_teacher_gen.py / distill_pseudo_gen.py → distill_pseudo_train.py（見 pseudo_label_distillation_runbook）
+```
+
+⚠ **2026-07-28 前的佇列樣本一律不可訓練**(只有 polygon、無影像無尺寸的「孤兒 GT」,已歸檔)。
+撤回同意以 **code ∪ image_id 雙鍵**排除且影像移入 `quarantine/`;重新同意走 `/api/v1/consent/restore`。
+細節見 `Backend/Flask/flywheel/README.md`、`docs/api_contract_classify.md`。
+
 ## 1. 觸發條件(任一即啟動)
 - **量**:新增「醫師驗證 GT」≥ 100 張(或每月一次,取先到)。
 - **質/缺口**:某類別(足部/身體/燒傷…)holdout Dice < 目標,或新型態樣本累積 ≥ 30。

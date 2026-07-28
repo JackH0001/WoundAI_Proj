@@ -118,6 +118,10 @@ def main():
     ap.add_argument("--images", default=fw.IMAGES_DIR)
     ap.add_argument("--withdrawn", default=fw.WITHDRAWN)
     ap.add_argument("--out", default=os.path.join(fw.FLYWHEEL_DIR, "dataset_" + time.strftime("%Y%m%d")))
+    ap.add_argument("--source", default=None,
+                    help="只匯出指定來源(clinical/sample/phantom/external,逗號分隔)。"
+                         "預設全收。⚠ sample 是 escalate 路由的驗收基準、phantom 是印刷色塊,"
+                         "拿去訓練分別等於「考卷當講義」與「教模型分割印刷紅方塊」")
     ap.add_argument("--min-samples", type=int, default=0,
                     help="低於此數不產出(避免拿極小樣本訓練並誤以為有效);0=不設限")
     ap.add_argument("--dry-run", action="store_true")
@@ -125,10 +129,13 @@ def main():
                     help="輸出目錄已有內容時清空重寫。預設拒絕,避免舊遮罩與新 manifest 混在一起")
     a = ap.parse_args()
 
-    recs, stats = fw.effective_queue(a.queue, a.images, a.withdrawn)
+    src = [s.strip() for s in a.source.split(",")] if a.source else None
+    recs, stats = fw.effective_queue(a.queue, a.images, a.withdrawn, source=src)
     print("=== 佇列健康度 ===")
     for k, v in stats.items():
         print(f"  {k:20s}: {v}")
+    if src:
+        print(f"  (已篩選 source={'/'.join(src)};其他來源 {stats['other_source']} 筆未計入)")
 
     if stats["orphan_no_image"]:
         print(f"\n⚠ {stats['orphan_no_image']} 筆孤兒 GT(無 image_id)已排除——"
@@ -195,7 +202,7 @@ def main():
             "mm_per_px": mm, "route": r.get("route"), "seg_model": r.get("seg_model"),
             "correction_iou": r.get("correction_iou"), "exudate": r.get("exudate"),
             "doctor_verified": r.get("doctor_verified"), "consent_train": r.get("consent_train"),
-            "actor": r.get("actor"), "received_at": r.get("received_at"),
+            "source": fw.rec_source(r), "actor": r.get("actor"), "received_at": r.get("received_at"),
         })
 
     if not manifest:
@@ -208,6 +215,9 @@ def main():
                    "exported": len(manifest), "skipped": skipped, "samples": manifest},
                   f, ensure_ascii=False, indent=2)
 
+    from collections import Counter
+    src_cnt = Counter(m["source"] for m in manifest)
+    src_line = "、".join(f"{k} {v}" for k, v in sorted(src_cnt.items())) or "(無)"
     n_scaled = sum(1 for m in manifest if m["mm_per_px"])
     n_edited = sum(1 for m in manifest if m.get("correction_iou") is not None and m["correction_iou"] < 0.99)
     card = f"""# 飛輪訓練集資料卡（自動產生）
@@ -215,6 +225,7 @@ def main():
 - 產生時間：{time.strftime('%Y-%m-%d %H:%M:%S')}
 - 樣本數：**{len(manifest)}**（來源佇列 {stats['total']} 筆）
 - 來源：App 醫師確認・送出訓練標註 → `POST /api/v1/annotation`
+- **樣本來源分佈**：{src_line}
 - GT 定義：醫師於 App 修邊工具產生的傷口輪廓（筆刷塗抹 → 最大外輪廓 → RDP 簡化 → 本腳本柵格化）
 
 ## 品質與同意

@@ -108,7 +108,8 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
         code: String, gtPolygon: List<List<Int>>, exudate: Int?,
         imageId: String?, imageW: Int, imageH: Int,
         mmPerPx: Double? = null, route: String? = null, segModel: String? = null,
-        correctionIou: Double? = null, careNote: String? = null
+        correctionIou: Double? = null, careNote: String? = null,
+        source: String? = null   // clinical(預設)/sample/phantom/external;範例集不可灌進臨床樣本數
     ): Pair<Boolean, String> {
         // 沒有 image_id/尺寸就送出 = 產生孤兒 GT(後端會 400)。提早在端上擋下並給明確訊息。
         if (imageId.isNullOrEmpty() || imageW <= 0 || imageH <= 0) {
@@ -133,6 +134,7 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
         if (segModel != null) obj.put("seg_model", segModel)
         if (correctionIou != null) obj.put("correction_iou", correctionIou)
         if (careNote != null) obj.put("care_note", careNote)
+        if (source != null) obj.put("source", source)
         val req = Request.Builder().url("$baseUrl/api/v1/annotation")
             .header("Authorization", "Bearer $jwt")
             .post(obj.toString().toRequestBody("application/json".toMediaType())).build()

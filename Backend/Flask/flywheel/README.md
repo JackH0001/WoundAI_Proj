@@ -36,7 +36,20 @@ python engineering/phase2/export_flywheel_dataset.py --min-samples 20
 
 孤兒（無 image_id）／欄位格式不合／影像檔遺失／已撤回同意（code 或 image_id）／三同意不全／
 同影像被更新版取代 → 一律不進訓練集。統計守恆：
-`total = orphan + malformed + withdrawn + consent_invalid + image_file_missing + superseded + trainable`。
+`total = orphan + malformed + withdrawn + consent_invalid + image_file_missing + superseded + other_source + trainable`。
+
+## 樣本來源標籤（source）
+
+| 值 | 意思 | 能不能當訓練資料 |
+|---|---|---|
+| `clinical`（預設） | 真實病人傷口 | ✅ 唯一可作臨床證據者 |
+| `sample` | 範例／示範用的真實傷口照（如 `test_wounds_aruco_v2` 那 5 張） | ⚠ 材質真實但**是 escalate 路由的驗收基準**，拿去訓練＝考卷當講義 |
+| `phantom` | 印刷模擬傷口／幾何色塊（面積驗證用） | ❌ 不具傷口材質，只會教模型分割印刷紅方塊 |
+| `external` | 外部公開資料集 | 視授權而定 |
+
+範例集可以走同一條管線收進來，統計與匯出時分開算：
+`GET /api/v1/flywheel/stats?source=clinical`、`export_flywheel_dataset.py --source clinical`。
+**收案進度一律看 `by_source.clinical`**，不要看 `trainable` 總數。
 
 ## 撤回與重新同意
 

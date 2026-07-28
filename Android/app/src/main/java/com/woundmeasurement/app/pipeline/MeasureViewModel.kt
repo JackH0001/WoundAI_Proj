@@ -222,7 +222,8 @@ class MeasureViewModel(
      * @param code 去識別代碼(WD-*);@param exudate 醫師輸入滲液 0–3
      */
     fun submitAnnotation(
-        backend: BackendClient, code: String, exudate: Int?, careNote: String? = null
+        backend: BackendClient, code: String, exudate: Int?, careNote: String? = null,
+        source: String? = null   // 內建範例圖請傳 "sample";真實病人留 null(後端預設 clinical)
     ) {
         val poly = lastPolygon
         if (poly.isEmpty()) {
@@ -241,7 +242,7 @@ class MeasureViewModel(
                         code, poly, exudate,
                         imageId = lastImageId, imageW = lastImageW, imageH = lastImageH,
                         mmPerPx = lastMmPerPx, route = lastRoute, segModel = lastSegModel,
-                        correctionIou = lastCorrectionIou, careNote = careNote
+                        correctionIou = lastCorrectionIou, careNote = careNote, source = source
                     )
                 }
                 _state.value = _state.value.copy(

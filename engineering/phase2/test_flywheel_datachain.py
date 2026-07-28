@@ -109,7 +109,7 @@ def test_有效佇列排除孤兒_格式錯_同意失效_並只取最新修訂()
         assert st["trainable"] == 2
         assert st["total"] == sum(st[k] for k in ("orphan_no_image", "malformed", "consent_invalid",
                                                   "image_file_missing", "withdrawn", "superseded",
-                                                  "trainable")), "統計未守恆"
+                                                  "other_source", "trainable")), "統計未守恆"
 
 
 def test_撤回同意涵蓋整張影像的所有標註():
@@ -166,7 +166,8 @@ def test_壞行不靜默消失_且統計守恆():
             f.write('"我是字串不是物件"\n')                  # 合法 JSON 但非 dict
         _, st = fw.effective_queue(p, imgs, _write(tmp, "w.jsonl", []))
         assert st["malformed"] == 2 and st["trainable"] == 1, st
-        assert st["total"] == sum(st[k] for k in st if k != "total"), st
+        assert st["total"] == sum(v for k, v in st.items()
+                                  if k not in ("total", "by_source")), st
 
 
 def test_無時間戳不會壓過有時間戳的修訂():
@@ -310,3 +311,56 @@ def test_匯出_min_samples_誠實中止():
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# ---------- source 標籤 ----------
+def test_source_白名單與分項統計():
+    """範例/模擬影像可以走同一條管線,但不得混入臨床樣本數(送件數字誠實與否的關鍵)。"""
+    assert not fw.validate_annotation({**BASE, "source": "亂填"})[0]
+    for s in fw.SOURCES:
+        assert fw.validate_annotation({**BASE, "source": s})[0], s
+    with tempfile.TemporaryDirectory() as tmp:
+        A, B, C = IID, "1111222233334444", "2222333344445555"
+        imgs = _imgs(tmp, [A, B, C])
+        q = _write(tmp, "q.jsonl", [
+            {**BASE, "code": "WD-CLIN", "image_id": A, "source": "clinical",
+             "received_at": "2026-07-28T10:00:00Z"},
+            {**BASE, "code": "WD-SAMP", "image_id": B, "source": "sample",
+             "received_at": "2026-07-28T11:00:00Z"},
+            {**BASE, "code": "WD-PHAN", "image_id": C, "source": "phantom",
+             "received_at": "2026-07-28T12:00:00Z"},
+        ])
+        w = _write(tmp, "w.jsonl", [])
+        _, st = fw.effective_queue(q, imgs, w)
+        assert st["trainable"] == 3 and st["by_source"] == {
+            "clinical": 1, "sample": 1, "phantom": 1, "external": 0}, st
+        recs, st2 = fw.effective_queue(q, imgs, w, source="clinical")
+        assert st2["trainable"] == 1 and st2["other_source"] == 2, st2
+        assert recs[0]["code"] == "WD-CLIN"
+        # 無 source 欄位的舊紀錄預設為 clinical(不會憑空變成範例)
+        q2 = _write(tmp, "q2.jsonl", [{**BASE, "received_at": "2026-07-28T10:00:00Z"}])
+        assert fw.effective_queue(q2, imgs, w, source="clinical")[1]["trainable"] == 1
+
+
+def test_匯出依source篩選():
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        import pytest; pytest.skip("無 cv2 環境")
+    with tempfile.TemporaryDirectory() as tmp:
+        A, B = IID, "1111222233334444"
+        imgs = os.path.join(tmp, "images"); os.makedirs(imgs)
+        _synth_image(os.path.join(imgs, A + ".jpg")); _synth_image(os.path.join(imgs, B + ".jpg"))
+        q = _write(tmp, "q.jsonl", [
+            {**BASE, "code": "WD-CLIN", "image_id": A, "source": "clinical",
+             "received_at": "2026-07-28T10:00:00Z"},
+            {**BASE, "code": "WD-PHAN", "image_id": B, "source": "phantom",
+             "received_at": "2026-07-28T11:00:00Z"},
+        ])
+        out = os.path.join(tmp, "ds")
+        r = _run_export(tmp, q, imgs, _write(tmp, "w.jsonl", []), out, extra=("--source", "clinical"))
+        assert r.returncode == 0, r.stdout + r.stderr
+        man = json.load(open(os.path.join(out, "manifest.json"), encoding="utf-8"))
+        assert man["exported"] == 1 and man["samples"][0]["source"] == "clinical", man["samples"]
+        card = open(os.path.join(out, "DATASET_CARD.md"), encoding="utf-8").read()
+        assert "clinical 1" in card, card[:400]

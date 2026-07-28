@@ -54,11 +54,16 @@ Req `image` → Resp `{ mask_png_b64, model, model_version, route:"cloud" }`；�
 | `image_id` | ✔ | classify 回傳值，`^[0-9a-f]{16}$`；後端須查得到該影像 |
 | `image_w` / `image_h` | ✔ | classify 回傳值 |
 | `mm_per_px` / `route` / `seg_model` / `app_version` / `correction_iou` / `care_note` | — | 溯源，建議都帶 |
+| `source` | — | `clinical`(預設) / `sample` / `phantom` / `external`。**範例與模擬影像務必標明**，否則臨床樣本數會被灌水 |
 
 **Resp**：
 - `200 {status:"enqueued", code, image_id, note}` — 已入佇列（`note` 非空表示本筆是同影像的醫師修訂版）
 - `200 {status:"duplicate_skipped", ...}` — 同影像同遮罩已在佇列，自動略過
 - `400 {error, issues:[...]}` — 守門未過（缺欄位／格式不合／三同意不全／座標超界／影像不存在／該影像已撤回同意）
+
+## POST /api/v1/consent/restore（**新增**）
+`{code}` → 受試者重新取得同意時解除排除、把影像從 `quarantine/` 搬回。
+沒有這條，撤回就是死局（影像被隔離、code 被封，日後再同意也補不回來）。
 
 ## POST /api/v1/consent/withdraw（**已實作**）
 **Req**：`{code}`（選配 `image_id`）。
@@ -71,11 +76,13 @@ Req `image` → Resp `{ mask_png_b64, model, model_version, route:"cloud" }`；�
 ## GET /api/v1/flywheel/stats（**新增**）
 **Resp 200**：
 ```json
-{"total":20,"orphan_no_image":0,"malformed":0,"image_file_missing":0,
- "withdrawn":0,"consent_invalid":0,"superseded":2,"trainable":18,
- "images_on_disk":20,"quarantined":0}
+{"total":25,"orphan_no_image":0,"malformed":0,"image_file_missing":0,
+ "withdrawn":0,"consent_invalid":0,"superseded":2,"other_source":0,"trainable":23,
+ "by_source":{"clinical":20,"sample":3,"phantom":0,"external":0},
+ "images_on_disk":25,"quarantined":0}
 ```
-`trainable` 才是實際可訓練樣本數。統計守恆：`total = orphan + malformed + withdrawn + consent_invalid + image_file_missing + superseded + trainable`。
+`trainable` 才是實際可訓練樣本數；**收案進度看 `by_source.clinical`**（或 `?source=clinical`）。
+統計守恆：`total = orphan + malformed + withdrawn + consent_invalid + image_file_missing + superseded + other_source + trainable`。
 
 ## 飛輪資料鏈（為什麼 image_id 是必要的）
 
