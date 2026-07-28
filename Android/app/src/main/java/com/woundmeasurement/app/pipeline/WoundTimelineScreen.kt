@@ -22,14 +22,32 @@ import kotlin.math.abs
  * 對齊全流程原型 v_timeline:面積↓% 摘要、面積趨勢圖、歷次列表。輔助、非診斷。
  */
 @Composable
-fun WoundTimelineScreen(onBack: () -> Unit) {
+fun WoundTimelineScreen(
+    onBack: () -> Unit,
+    /**
+     * 傷口個案 id。給了就**只畫這個傷口**的癒合曲線。
+     *
+     * null 是相容用的「全部紀錄」模式——注意那條線在臨床上沒有意義:
+     * 一位病患可能同時有薦骨壓瘡與右足潰瘍,不同病患的傷口也會被混進同一條線。
+     * 真實收案請務必從個案進來。
+     */
+    caseId: Long? = null,
+    caseLabel: String? = null
+) {
     val ctx = LocalContext.current
     val dao = remember { WoundMeasurementDatabase.getDatabase(ctx).measurementDao() }
-    val measurements by dao.getAllMeasurements().collectAsState(initial = emptyList())
+    val flow = remember(caseId) {
+        if (caseId != null) dao.getMeasurementsByCase(caseId) else dao.getAllMeasurements()
+    }
+    val measurements by flow.collectAsState(initial = emptyList())
     val fmt = remember { SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()) }
 
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("傷口時間軸 / 歷史紀錄", style = MaterialTheme.typography.titleLarge)
+        Text(if (caseId != null) "傷口時間軸 — ${caseLabel ?: "個案 #$caseId"}"
+             else "傷口時間軸 / 歷史紀錄(全部)", style = MaterialTheme.typography.titleLarge)
+        if (caseId == null) Text(
+            "⚠ 未指定個案:此處把所有量測混在一起,趨勢線不代表任何單一傷口。請由個案管理進入。",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
 
         val asc = remember(measurements) { measurements.sortedBy { it.timestamp.time } }
         val areas = asc.mapNotNull { it.estimatedArea }

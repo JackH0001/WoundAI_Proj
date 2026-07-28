@@ -5,6 +5,11 @@ import com.woundmeasurement.app.data.entity.PatientEntity
 import kotlinx.coroutines.flow.Flow
 import java.util.Date
 
+@Deprecated(
+    "繞過 PhiCrypto,會把明文姓名/病歷號寫進 DB。請改用 data.repo.CaseRepository",
+    ReplaceWith("com.woundmeasurement.app.data.repo.CaseRepository"),
+    level = DeprecationLevel.ERROR
+)
 class PatientRepository(private val patientDao: PatientDao) {
     
     fun getAllPatients(): Flow<List<PatientEntity>> = patientDao.getAllPatients()

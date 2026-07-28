@@ -114,7 +114,13 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
         imageId: String?, imageW: Int, imageH: Int,
         mmPerPx: Double? = null, route: String? = null, segModel: String? = null,
         correctionIou: Double? = null, careNote: String? = null,
-        source: String? = null   // clinical(預設)/sample/phantom/external;範例集不可灌進臨床樣本數
+        source: String? = null,  // clinical(預設)/sample/phantom/external;範例集不可灌進臨床樣本數
+        /**
+         * ②訓練同意的**真值**,來自本機 `ConsentEntity.trainEffective`。
+         * ⚠ 這裡曾經硬編碼 true——等於每筆送出都謊稱已取得訓練同意,而實際上沒人勾過。
+         * 呼叫端沒有有效同意就不該呼叫本函式;真的呼叫了,後端也會以 400 擋下。
+         */
+        consentTrain: Boolean
     ): Pair<Boolean, String> {
         // 沒有 image_id/尺寸就送出 = 產生孤兒 GT(後端會 400)。提早在端上擋下並給明確訊息。
         if (imageId.isNullOrEmpty() || imageW <= 0 || imageH <= 0) {
@@ -130,7 +136,7 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
             .put("exudate", if (exudate != null) exudate else JSONObject.NULL)
             .put("doctor_verified", true)
             .put("deidentified", true)
-            .put("consent_train", true)
+            .put("consent_train", consentTrain)   // 由本機同意紀錄決定,不再硬編碼
             .put("image_id", imageId)
             .put("image_w", imageW)
             .put("image_h", imageH)

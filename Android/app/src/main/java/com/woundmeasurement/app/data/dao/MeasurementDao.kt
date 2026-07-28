@@ -20,6 +20,18 @@ interface MeasurementDao {
     @Query("SELECT * FROM measurements WHERE patientId = :patientId AND timestamp >= :startDate ORDER BY timestamp DESC")
     fun getMeasurementsByPatientAndDateRange(patientId: String, startDate: Date): Flow<List<MeasurementEntity>>
     
+    // ---- Sprint N1：時間軸的正確分組單位是「傷口個案」，不是病患也不是全表 ----
+    // 一位病患可能同時有薦骨壓瘡與右足潰瘍，癒合曲線完全不同；
+    // 原本 WoundTimelineScreen 用 getAllMeasurements() 全表撈，會把不同病患的傷口畫成同一條線。
+    @Query("SELECT * FROM measurements WHERE caseId = :caseId ORDER BY timestamp ASC")
+    fun getMeasurementsByCase(caseId: Long): Flow<List<MeasurementEntity>>
+
+    @Query("SELECT * FROM measurements WHERE caseId = :caseId ORDER BY timestamp DESC LIMIT 1")
+    suspend fun getLatestByCase(caseId: Long): MeasurementEntity?
+
+    @Query("SELECT COUNT(*) FROM measurements WHERE caseId = :caseId")
+    suspend fun getCountByCase(caseId: Long): Int
+
     @Query("SELECT * FROM measurements WHERE id = :measurementId")
     suspend fun getMeasurementById(measurementId: Long): MeasurementEntity?
     

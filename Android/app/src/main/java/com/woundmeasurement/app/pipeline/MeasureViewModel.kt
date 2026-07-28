@@ -222,9 +222,19 @@ class MeasureViewModel(
      * 送 doctor_verified/deidentified/consent_train=true;後端守門不合則回訊息。
      * @param code 去識別代碼(WD-*);@param exudate 醫師輸入滲液 0–3
      */
+    /** 由 UI 端的守門(如同意已撤回)擋下時,用同一個狀態管道回報,才會走到既有的彈窗流程。 */
+    fun reportSubmitBlocked(message: String) {
+        _state.value = _state.value.copy(submitStatus = message)
+    }
+
     fun submitAnnotation(
         backend: BackendClient, code: String, exudate: Int?, careNote: String? = null,
-        source: String? = null   // 內建範例圖請傳 "sample";真實病人留 null(後端預設 clinical)
+        source: String? = null,  // 內建範例圖請傳 "sample";真實病人留 null(後端預設 clinical)
+        /**
+         * ②訓練同意真值。臨床個案請帶 `ConsentEntity.trainEffective`;
+         * 範例/模擬圖無受試者,視同已同意(它們本來就不含 PHI)。
+         */
+        consentTrain: Boolean = true
     ) {
         val poly = lastPolygon
         if (poly.isEmpty()) {
@@ -243,7 +253,8 @@ class MeasureViewModel(
                         code, poly, exudate,
                         imageId = lastImageId, imageW = lastImageW, imageH = lastImageH,
                         mmPerPx = lastMmPerPx, route = lastRoute, segModel = lastSegModel,
-                        correctionIou = lastCorrectionIou, careNote = careNote, source = source
+                        correctionIou = lastCorrectionIou, careNote = careNote, source = source,
+                        consentTrain = consentTrain
                     )
                 }
                 _state.value = _state.value.copy(
@@ -284,10 +295,20 @@ class MeasureViewModel(
     }
 
     /**
-     * 存入個案時間軸(本機 Room/SQLite)。一般量測 patientId=null。
+     * 存入個案時間軸(本機 Room/SQLite)。
+     *
+     * Sprint N1 起接受 [case]:量測綁定**傷口個案**。沒綁的話時間軸只能全表撈,
+     * 兩位病患的傷口會被畫進同一條趨勢線(舊行為,`patientId` 恆為 null)。
+     * 相容起見 case 可為 null(範例/模擬圖驗證不需要個案),但真實收案務必帶。
+     *
      * 同一次影像去重:同影像(雜湊相同)重存/修邊後再存 → 更新同一筆,不重複新增(避免時間軸資料誤差)。
      */
-    fun saveToTimeline(dao: MeasurementDao, exudate: Int?) {
+    fun saveToTimeline(
+        dao: MeasurementDao,
+        exudate: Int?,
+        case: com.woundmeasurement.app.data.entity.WoundCaseEntity? = null,
+        source: String? = null
+    ) {
         val r = _state.value.result ?: return
         _state.value = _state.value.copy(submitStatus = "存入時間軸中…")
         viewModelScope.launch {
@@ -302,12 +323,19 @@ class MeasureViewModel(
                         dao.updateMeasurement(exist.copy(
                             timestamp = Date(), confidence = r.confidence, estimatedArea = r.areaCm2,
                             woundType = "AI(${r.route})", notes = notes,
-                            hasWound = (r.areaCm2 ?: 0.0) > 0.0 || r.tissueFrac.values.any { it > 0.0 }
+                            hasWound = (r.areaCm2 ?: 0.0) > 0.0 || r.tissueFrac.values.any { it > 0.0 },
+                            // 先無個案存檔、之後才選個案時要把 patientId 一起補上,
+                            // 否則刪病患的 CASCADE 帶不走這筆,會留下孤兒紀錄
+                            patientId = case?.patientId ?: exist.patientId,
+                            isPatientIdentified = (case?.patientId ?: exist.patientId) != null,
+                            caseId = case?.id ?: exist.caseId, wdCode = case?.wdCode ?: exist.wdCode,
+                            imageId = lastImageId ?: exist.imageId, mmPerPx = lastMmPerPx ?: exist.mmPerPx,
+                            route = lastRoute ?: exist.route, source = source ?: exist.source
                         ))
                         Pair(exist.id, true)
                     } else {
                         val nid = dao.insertMeasurement(MeasurementEntity(
-                            patientId = null,
+                            patientId = case?.patientId,
                             timestamp = Date(),
                             hasWound = (r.areaCm2 ?: 0.0) > 0.0 || r.tissueFrac.values.any { it > 0.0 },
                             confidence = r.confidence,
@@ -318,7 +346,11 @@ class MeasureViewModel(
                             processingTime = 0L,
                             imagePath = "",
                             dataPath = "",
-                            notes = notes
+                            notes = notes,
+                            // 綁定個案與雲端影像:本機病歷與飛輪樣本靠 wdCode/imageId 對得起來
+                            caseId = case?.id, wdCode = case?.wdCode,
+                            imageId = lastImageId, mmPerPx = lastMmPerPx,
+                            route = lastRoute, source = source
                         ))
                         Pair(nid, false)
                     }

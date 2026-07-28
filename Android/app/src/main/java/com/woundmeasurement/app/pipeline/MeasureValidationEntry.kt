@@ -12,6 +12,7 @@ import androidx.compose.ui.unit.dp
 import com.woundmeasurement.app.data.database.WoundMeasurementDatabase
 import com.woundmeasurement.app.processing.OnnxSegmentationModule
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
@@ -26,7 +27,9 @@ fun MeasureValidationEntry(
     onBack: () -> Unit = {}
 ) {
     val ctx = LocalContext.current
-    val dao = remember { WoundMeasurementDatabase.getDatabase(ctx).measurementDao() }
+    val db = remember { WoundMeasurementDatabase.getDatabase(ctx) }
+    val dao = remember { db.measurementDao() }
+    val repo = remember { com.woundmeasurement.app.data.repo.CaseRepository.from(db) }
     val seg = remember { OnnxSegmentationModule(ctx) }
     val vm = remember { MeasureViewModel(WoundAnalyzer(seg), null) }
     val backend = remember { BackendClient(backendBaseUrl) }
@@ -36,6 +39,11 @@ fun MeasureValidationEntry(
     var exudate by remember { mutableStateOf<Int?>(null) }
     // 樣本來源:載入影像前就要選(決定分割走 AI 還是色彩法),送出標註時沿用同一個值
     var source by rememberSaveable { mutableStateOf<String?>(null) }
+    // Sprint N1:選定的傷口個案與其同意紀錄。臨床收案必須先選個案,
+    // 否則量測存不進正確的時間軸、送出的 code 也不穩定(回診串不起來)。
+    var case by remember { mutableStateOf<com.woundmeasurement.app.data.entity.WoundCaseEntity?>(null) }
+    var consent by remember { mutableStateOf<com.woundmeasurement.app.data.entity.ConsentEntity?>(null) }
+    var managingCase by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         loginState = try {
@@ -70,7 +78,13 @@ fun MeasureValidationEntry(
         )
     }
     val eb = vm.lastBitmap
-    if (editing && eb != null) {
+    if (managingCase) {
+        CaseSelectScreen(
+            repo = repo,
+            onCaseChosen = { c, cs -> case = c; consent = cs; source = "clinical"; managingCase = false },
+            onBack = { managingCase = false }
+        )
+    } else if (editing && eb != null) {
         // 專屬全螢幕修邊頁(對齊原型 v_review:邊界+組織筆刷)
         WoundEditScreen(
             bitmap = eb,
@@ -93,12 +107,28 @@ fun MeasureValidationEntry(
         ) {
             Text(loginState, style = MaterialTheme.typography.bodySmall)
             Text(modelState, style = MaterialTheme.typography.bodySmall)
+
+            // ---- Sprint N1:個案綁定列 ----
+            Divider()
+            Text(
+                case?.let { "個案:${it.bodySite}・${it.woundType}  ${it.wdCode}" +
+                        (if (consent?.trainEffective == true) "  訓練同意✓" else "  訓練同意✗(不可送標註)") }
+                    ?: "個案:未選(臨床收案請先選個案;範例/模擬圖可略過)",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (case == null) MaterialTheme.colorScheme.onSurfaceVariant
+                        else MaterialTheme.colorScheme.primary
+            )
+            OutlinedButton({ managingCase = true }, Modifier.fillMaxWidth()) {
+                Text(if (case == null) "個案管理（病患・同意書・傷口個案）" else "切換個案")
+            }
+
             Divider()
             SamplePickerScreen(
                 vm = vm, backend = backend,
                 // AI 空遮罩(如印刷OOD/難例全失敗)也可進修邊:醫師從零手畫,ArUco 尺度(mm/px)仍有效
                 onReview = { if (vm.lastBitmap != null) editing = true },
-                onSaveToTimeline = { vm.saveToTimeline(dao, exudate) },
+                // 量測綁個案 → 時間軸才畫得出單一傷口的癒合曲線
+                onSaveToTimeline = { vm.saveToTimeline(dao, exudate, case, source) },
                 exudate = exudate, onExudate = { exudate = it },
                 source = source, onSource = { source = it }
             )
@@ -106,7 +136,8 @@ fun MeasureValidationEntry(
             if (st.result != null) {
                 Divider()
                 if (exudate != null && (st.edited || st.saved)) {
-                    DoctorFlywheelSubmit(vm = vm, backend = backend, exudate = exudate, source = source)
+                    DoctorFlywheelSubmit(vm = vm, backend = backend, exudate = exudate,
+                        source = source, case = case, consent = consent, repo = repo)
                 } else {
                     Text("(輸入滲液並完成「修邊確認」或「存入時間軸」後,將顯示送出訓練標註)",
                         style = MaterialTheme.typography.bodySmall,
@@ -125,21 +156,34 @@ fun MeasureValidationEntry(
  */
 @Composable
 private fun DoctorFlywheelSubmit(
-    vm: MeasureViewModel, backend: BackendClient, exudate: Int?, source: String?
+    vm: MeasureViewModel, backend: BackendClient, exudate: Int?, source: String?,
+    case: com.woundmeasurement.app.data.entity.WoundCaseEntity? = null,
+    consent: com.woundmeasurement.app.data.entity.ConsentEntity? = null,
+    repo: com.woundmeasurement.app.data.repo.CaseRepository? = null
 ) {
     val st by vm.state.collectAsState()
+    val scope = rememberCoroutineScope()
     if (st.result == null) return
+    // 臨床樣本必須有個案(穩定 wdCode)與有效訓練同意才可送;範例/模擬圖無受試者,不受此限。
+    val isClinical = source == "clinical" || source == null
+    val trainOk = if (isClinical) consent?.trainEffective == true else true
+    val caseOk = if (isClinical) case != null else true
     // 來源在**載入影像前**就選好(SamplePickerScreen),因為它同時決定分割走 AI 還是色彩法。
     // 這裡只顯示、不重選,避免兩處狀態不一致(選 phantom 跑色彩分割、送出卻標 clinical)。
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("醫師確認・送出訓練標註(飛輪)", style = MaterialTheme.typography.titleSmall)
         Text("來源 ${when (source) {
                 "clinical" -> "臨床"; "sample" -> "範例"; "phantom" -> "模擬圖(色彩分割)"; else -> "未選" }} · " +
+             (case?.let { "個案 ${it.wdCode} · " } ?: "") +
              "滲液 $exudate · 修邊${if (st.edited) "✓" else "—"} · 存檔${if (st.saved) "✓" else "—"}",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (source == "phantom") Text(
             "⚠ 模擬圖樣本僅供量測鏈驗證,不計入臨床樣本數、不作模型訓練",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        if (!caseOk) Text("⚠ 臨床樣本需先選傷口個案(代碼要穩定,回診才串得起來)",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        if (caseOk && !trainOk) Text("⚠ 此病患未勾選②訓練同意(或已撤回),不得送出訓練標註",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
 
         // 送出狀態放按鈕「上方」,按下即可見
@@ -148,11 +192,23 @@ private fun DoctorFlywheelSubmit(
         }
         Button(
             onClick = {
-                val code = "WD-" + System.currentTimeMillis().toString().takeLast(8)
-                vm.submitAnnotation(backend, code, exudate,
-                    careNote = "app confirm", source = source)
+                // 臨床樣本用個案的**穩定** wdCode(回診沿用同一組);範例/模擬圖沒有個案才另發,
+                // 但同樣不可用 timestamp 尾碼(27.8 小時就循環、跨日必碰撞)。
+                val code = case?.wdCode
+                    ?: com.woundmeasurement.app.data.entity.WoundCaseEntity.newWdCode()
+                scope.launch {
+                    // ⚠ 送出當下**重新讀取**同意真值,不用畫面上的快照:
+                    // 醫師可能剛在個案管理頁撤回訓練同意,而快照仍是舊的 true——
+                    // 那就等於又回到「宣稱已同意但其實沒有」的原始缺陷,只是換了個形式。
+                    val fresh = if (isClinical && case != null && repo != null)
+                        repo.activeConsent(case.patientId)?.trainEffective == true
+                    else trainOk
+                    if (!fresh) vm.reportSubmitBlocked("⚠️ 此病患的訓練同意已撤回或失效,不得送出訓練標註")
+                    else vm.submitAnnotation(backend, code, exudate,
+                        careNote = "app confirm", source = source, consentTrain = true)
+                }
             },
-            enabled = source != null,
+            enabled = source != null && caseOk && trainOk,
             modifier = Modifier.fillMaxWidth()
         ) { Text("醫師確認・送出標註 → 再訓練佇列") }
     }
