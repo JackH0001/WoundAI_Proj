@@ -1214,6 +1214,25 @@ def _load_classify_mods():
         logger.error(f"classify 模組載入失敗: {e}")
         return None
 
+
+def _load_seg_red():
+    """印刷模擬圖專用的**決定性色彩分割**(HSV 紅域 + 最大連通)。
+
+    為什麼不讓模型學印刷色塊:①那是分布外樣本,硬訓會污染臨床分布;
+    ②量測鏈驗證本來就該用決定性方法——用 AI 去驗尺度鏈等於兩個未知數解一個方程式。
+    本函式即 verify_area_sheet.seg_red,已在同批驗證單實拍 n=15 上達 **平均|誤差| 1.9%**
+    (EVIDENCE_LEDGER 2026-07-20),遠優於模型且不會隨訓練漂移。"""
+    import sys
+    pth = os.path.join(_ENG, "phase2")
+    if pth not in sys.path: sys.path.insert(0, pth)
+    try:
+        from verify_area_sheet import seg_red
+        return seg_red
+    except Exception as e:
+        logger.warning(f"seg_red 載入失敗: {e}")
+        return None
+
+
 @app.route('/api/v1/classify', methods=['POST'])
 @jwt_required()
 def classify_wound():
@@ -1252,14 +1271,26 @@ def classify_wound():
             image_id = None
         img = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         H, W = img.shape[:2]
-        # Stage2 分割(端上主力 student)
-        wound_prob, conf = segment_wound_ai(img)
-        thr = float(((_load_ssot().get("models", {}) or {}).get(_active_model_key() or "", {}) or {}).get("threshold", 0.4))
-        mask = wound_prob > thr
+        # seg=color:印刷模擬圖走決定性色彩分割,**完全不碰模型**
+        # (模型權重/訓練集/golden 釘值一律不變 → 對臨床效能零風險)
+        phantom = str(request.form.get('seg', 'auto')).lower() == 'color'
         seg_model = _active_model_key(); route = "student"; escalated = False; au_ratio = None; iou_sa = None
+        if phantom:
+            _sr = _load_seg_red()
+            if _sr is None:
+                return jsonify({'error': '色彩分割模組不可用(verify_area_sheet 缺)', 'stage': 'init'}), 503
+            _m, _c = _sr(img)
+            mask = _m.astype(bool); conf = 1.0 if mask.any() else 0.0
+            seg_model = "color_hsv(phantom)"; route = "phantom_color(非AI)"
+        else:
+            # Stage2 分割(端上主力 student)
+            wound_prob, conf = segment_wound_ai(img)
+            thr = float(((_load_ssot().get("models", {}) or {}).get(_active_model_key() or "", {}) or {}).get("threshold", 0.4))
+            mask = wound_prob > thr
         # 雙軌自動 escalate:難例(碎片/低對比→student 大幅低估)自動改用雲端 A∪U 集成
         # 判難靠「第二意見」(student vs A∪U),因 student 漏 segment 區域機率≈0、無自我訊號
-        if str(request.form.get('escalate', 'on')).lower() not in ('off', '0', 'false'):
+        # phantom 走色彩分割,沒有「第二意見」可言,直接跳過
+        if not phantom and str(request.form.get('escalate', 'on')).lower() not in ('off', '0', 'false'):
             try:
                 _a, _u = _load_cloud_au()
                 if _a is not None and _u is not None:
@@ -1312,9 +1343,16 @@ def classify_wound():
             'stage3_calibrate': {'method': calib, 'area_cm2': (round(area_cm2, 2) if area_cm2 is not None else None),
                                  'mm_per_px': (round(mm_per_px, 6) if mm_per_px is not None else None),
                                  'note': ('未校正(無 ArUco 且未提供 cm_per_pixel)' if area_cm2 is None else None)},
-            'stage4_tissue': {'method': 'v2(WB+HSV)', 'tissue_frac': {k: round(t[k], 3) for k in ('necrosis','slough','granulation','epithelial','other')}},
+            'stage4_tissue': {'method': 'v2(WB+HSV)', 'tissue_frac': {k: round(t[k], 3) for k in ('necrosis','slough','granulation','epithelial','other')},
+                              # 印刷單也可能做成多組織混色示範,故照常計算;但顏料≠組織,讀數不可作臨床解讀
+                              'note': ('印刷模擬圖:組織比例由顏料色彩推得,僅供色彩分型演算法比對,不可作臨床解讀'
+                                       if phantom else None)},
             'stage5_severity': {k: push[k] for k in ('tool','area_subscore','tissue_subscore','exudate_subscore','total_partial_img','total_full','range_full')},
-            'disclaimer': '輔助用途、非診斷、需醫師確認;滲液量無法由單張影像判定,需醫師輸入'
+            'phantom_mode': phantom,
+            'disclaimer': ('【印刷模擬圖模式】分割走決定性 HSV 色彩法、**未使用 AI 模型**;'
+                           '面積可作量測鏈驗證,組織/PUSH 為顏料推算,非臨床結果'
+                           if phantom else
+                           '輔助用途、非診斷、需醫師確認;滲液量無法由單張影像判定,需醫師輸入')
         }), 200
     except Exception as e:
         logger.error(f"classify 失敗: {e}")

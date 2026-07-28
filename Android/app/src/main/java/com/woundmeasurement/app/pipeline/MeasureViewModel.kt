@@ -161,7 +161,8 @@ class MeasureViewModel(
         bitmap: Bitmap,
         backend: BackendClient,
         exudate: Int? = null,
-        cmPerPixel: Double? = null
+        cmPerPixel: Double? = null,
+        seg: String? = null            // "color"=印刷模擬圖走色彩分割(不碰模型);null=AI
     ) {
         _state.value = _state.value.copy(loading = true, error = null)
         clearBackendBinding()   // 先清舊綁定:失敗時不可留著上一張的 image_id 讓醫師誤送
@@ -185,7 +186,7 @@ class MeasureViewModel(
                 var routeCap: String? = null; var modelCap: String? = null
                 val r = withContext(Dispatchers.IO) {
                     val jpeg = work.toJpeg()
-                    val c = backend.classify(jpeg, cppWork)
+                    val c = backend.classify(jpeg, cppWork, seg)
                     polyCap = c.woundPolygon
                     mmCap = c.mmPerPx
                     idCap = c.imageId; wCap = c.imageW; hCap = c.imageH

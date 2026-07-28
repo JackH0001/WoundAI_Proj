@@ -9,7 +9,7 @@
 
 ## POST /api/v1/classify
 **Req(multipart)**：`image=<jpg/png>`；選配 `cm_per_pixel=<float>`（無 ArUco 時手動校正，
-單位為**上傳影像**的 cm/px——App 若先縮圖，須換算後再傳）；選配 `escalate=off` 關閉自動上雲。
+單位為**上傳影像**的 cm/px——App 若先縮圖，須換算後再傳）；選配 `escalate=off` 關閉自動上雲；選配 **`seg=color`**（印刷模擬圖走決定性 HSV 色彩分割，**不使用 AI 模型**，回應多 `phantom_mode:true`、`route:"phantom_color(非AI)"`、`model:"color_hsv(phantom)"`；組織/PUSH 照常計算但附 `note` 警語，因模擬圖可能做成多組織混色示範）。
 
 **Resp 200(json)**：
 ```json

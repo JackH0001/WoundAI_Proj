@@ -34,6 +34,8 @@ fun MeasureValidationEntry(
     var modelState by remember { mutableStateOf("端上模型載入中…") }
     var editing by remember { mutableStateOf(false) }
     var exudate by remember { mutableStateOf<Int?>(null) }
+    // 樣本來源:載入影像前就要選(決定分割走 AI 還是色彩法),送出標註時沿用同一個值
+    var source by rememberSaveable { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         loginState = try {
@@ -97,13 +99,14 @@ fun MeasureValidationEntry(
                 // AI 空遮罩(如印刷OOD/難例全失敗)也可進修邊:醫師從零手畫,ArUco 尺度(mm/px)仍有效
                 onReview = { if (vm.lastBitmap != null) editing = true },
                 onSaveToTimeline = { vm.saveToTimeline(dao, exudate) },
-                exudate = exudate, onExudate = { exudate = it }
+                exudate = exudate, onExudate = { exudate = it },
+                source = source, onSource = { source = it }
             )
             // 飛輪送出:滲液已填 + 上一步(修邊確認或存檔)完成後才自動顯示
             if (st.result != null) {
                 Divider()
                 if (exudate != null && (st.edited || st.saved)) {
-                    DoctorFlywheelSubmit(vm = vm, backend = backend, exudate = exudate)
+                    DoctorFlywheelSubmit(vm = vm, backend = backend, exudate = exudate, source = source)
                 } else {
                     Text("(輸入滲液並完成「修邊確認」或「存入時間軸」後,將顯示送出訓練標註)",
                         style = MaterialTheme.typography.bodySmall,
@@ -121,35 +124,23 @@ fun MeasureValidationEntry(
  * 修邊(拖曳頂點)為後續 C2b;此處先打通「確認→去識別代碼→守門→再訓練佇列」閉環。
  */
 @Composable
-private fun DoctorFlywheelSubmit(vm: MeasureViewModel, backend: BackendClient, exudate: Int?) {
+private fun DoctorFlywheelSubmit(
+    vm: MeasureViewModel, backend: BackendClient, exudate: Int?, source: String?
+) {
     val st by vm.state.collectAsState()
     if (st.result == null) return
-    // 樣本來源必須由人選,**不可預設**:這個畫面同時用來跑範例圖與收臨床照,
-    // 寫死 sample 會讓臨床收案永遠算不進 by_source.clinical;
-    // 預設 clinical 又會讓每次 demo 都污染臨床樣本數。比照滲液做強制輸入防呆。
-    var source by rememberSaveable { mutableStateOf<String?>(null) }
+    // 來源在**載入影像前**就選好(SamplePickerScreen),因為它同時決定分割走 AI 還是色彩法。
+    // 這裡只顯示、不重選,避免兩處狀態不一致(選 phantom 跑色彩分割、送出卻標 clinical)。
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("醫師確認・送出訓練標註(飛輪)", style = MaterialTheme.typography.titleSmall)
-        Text("滲液 $exudate · 修邊${if (st.edited) "✓" else "—"} · 存檔${if (st.saved) "✓" else "—"}",
+        Text("來源 ${when (source) {
+                "clinical" -> "臨床"; "sample" -> "範例"; "phantom" -> "模擬圖(色彩分割)"; else -> "未選" }} · " +
+             "滲液 $exudate · 修邊${if (st.edited) "✓" else "—"} · 存檔${if (st.saved) "✓" else "—"}",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
-
-        Text("樣本來源(必選)", style = MaterialTheme.typography.bodySmall)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            listOf("clinical" to "臨床", "sample" to "範例", "phantom" to "模擬單").forEach { (v, label) ->
-                val sel = source == v
-                if (sel) Button({ source = v }, Modifier.weight(1f)) { Text(label) }
-                else OutlinedButton({ source = v }, Modifier.weight(1f)) { Text(label) }
-            }
-        }
-        Text(when (source) {
-            "clinical" -> "真實病人傷口——唯一計入臨床收案進度者"
-            "sample" -> "範例/示範圖,不計入臨床樣本數"
-            "phantom" -> "印刷模擬傷口/驗證單,不具傷口材質,不作訓練用"
-            else -> "⚠ 請先選來源:選錯會讓臨床樣本數失真(送件數字誠實與否的關鍵)"
-        }, style = MaterialTheme.typography.bodySmall,
-            color = if (source == null) MaterialTheme.colorScheme.error
-                    else MaterialTheme.colorScheme.onSurfaceVariant)
+        if (source == "phantom") Text(
+            "⚠ 模擬圖樣本僅供量測鏈驗證,不計入臨床樣本數、不作模型訓練",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
 
         // 送出狀態放按鈕「上方」,按下即可見
         st.submitStatus?.let {

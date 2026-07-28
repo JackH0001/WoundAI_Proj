@@ -58,10 +58,15 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
     }
 
     /** 呼叫 /api/v1/classify;回傳解析後結果(對齊後端契約)。 */
-    fun classify(jpeg: ByteArray, cmPerPixel: Double? = null): ClassifyResult {
+    /**
+     * @param seg null/"auto"=AI 分割(student→難例 A∪U);"color"=印刷模擬圖走決定性 HSV 色彩分割,
+     *   **完全不碰模型**。印刷色塊是分布外樣本,模型實測回空遮罩;而驗證量測鏈也不該拿 AI 當量尺。
+     */
+    fun classify(jpeg: ByteArray, cmPerPixel: Double? = null, seg: String? = null): ClassifyResult {
         val bodyBuilder = MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("image", "wound.jpg", jpeg.toRequestBody("image/jpeg".toMediaType()))
         if (cmPerPixel != null) bodyBuilder.addFormDataPart("cm_per_pixel", cmPerPixel.toString())
+        if (seg != null) bodyBuilder.addFormDataPart("seg", seg)
         val req = Request.Builder().url("$baseUrl/api/v1/classify")
             .header("Authorization", "Bearer $jwt").post(bodyBuilder.build()).build()
         http.newCall(req).execute().use { resp ->
