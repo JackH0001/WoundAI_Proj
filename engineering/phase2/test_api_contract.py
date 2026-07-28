@@ -6,7 +6,9 @@ SCHEMA = {
     "stage3_calibrate": ["method", "area_cm2"],
     "stage4_tissue": ["method", "tissue_frac"],
     "stage5_severity": ["tool", "area_subscore", "tissue_subscore", "exudate_subscore", "total_partial_img", "total_full"],
-    "_top": ["disclaimer"],
+    # image_id/image_w/image_h:飛輪資料鏈必要欄位(2026-07-28)。
+    # 少了它們,App 送出的醫師標註就是無影像、無座標空間的「孤兒 GT」,一筆都不能訓練。
+    "_top": ["disclaimer", "image_id", "image_w", "image_h"],
 }
 TISSUE_KEYS = ["necrosis", "slough", "granulation", "epithelial", "other"]
 def validate(resp: dict):
@@ -27,6 +29,7 @@ def validate(resp: dict):
 if __name__ == "__main__":
     # 代表性回應(同 app.py classify_wound 鍵)
     good = {
+        "image_id": "aaaabbbbccccdddd", "image_w": 2048, "image_h": 1536,
         "stage2_segment": {"model": "student", "wound_ratio": 0.077, "confidence": 0.83},
         "stage3_calibrate": {"method": "aruco(marker 12.0mm)", "area_cm2": 8.07, "note": None},
         "stage4_tissue": {"method": "v2(WB+HSV)", "tissue_frac": {k: 0.0 for k in TISSUE_KEYS}},

@@ -58,4 +58,16 @@ Android/.gradle/
 **/.idea/
 Backend/Flask/*.db
 Backend/Flask/logs/
-Backend/Flask/flywheel/*.jsonl
+# 飛輪執行期資料:醫師標註佇列、稽核軌跡、**病人傷口原始影像**、匯出的訓練集。
+# 2026-07-28:原本只擋 *.jsonl,但 classify 現在會把上傳影像存進 flywheel/images/,
+# 舊規則會讓病人照片被提交進「公開協作 repo」→ 改為整個目錄排除,只保留 README。
+# 註:用 `flywheel/*` 而非 `flywheel/`——排除「目錄本身」時 git 不會再看裡面的 ! 例外規則,
+# README 會一起被擋掉。排除「目錄內容」才能把 README 放行。
+Backend/Flask/flywheel/*
+!Backend/Flask/flywheel/README.md
+# /api/train 走的是另一條路徑,同樣會落地病人影像與醫師遮罩(save_training_image/mask),
+# app.py 啟動時還會在 CWD 自動建這些目錄 → 一併排除,否則飛輪堵住了這裡照樣外洩。
+Backend/Flask/uploads/
+Backend/Flask/processed/
+uploads/
+processed/

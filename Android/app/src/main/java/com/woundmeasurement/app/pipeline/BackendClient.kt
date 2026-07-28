@@ -24,7 +24,13 @@ data class ClassifyResult(
     val pushPartial: Int?, val pushFull: Int?, val confidence: Double, val route: String,
     val escalated: Boolean = false,
     val woundPolygon: List<List<Int>> = emptyList(),  // 傷口輪廓(供醫師修邊/飛輪標註)
-    val mmPerPx: Double? = null                       // ArUco 尺度(mm/影像px):修邊面積=像素數×(mm/px)²
+    val mmPerPx: Double? = null,                      // ArUco 尺度(mm/影像px):修邊面積=像素數×(mm/px)²
+    // 飛輪資料鏈:image_id=後端已存影像的內容雜湊;imageW/H=polygon 與修邊 GT 的座標空間。
+    // 送標註時必須帶回,否則後端收到的是無影像、無尺寸的孤兒 GT(不可訓練)。
+    val imageId: String? = null,
+    val imageW: Int = 0,
+    val imageH: Int = 0,
+    val segModel: String? = null
 )
 
 class BackendClient(private val baseUrl: String, jwt: String = "") {
@@ -84,7 +90,11 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
                 route = if (s2.isNull("route")) "cloud" else s2.getString("route"),
                 escalated = !s2.isNull("escalated") && s2.getBoolean("escalated"),
                 woundPolygon = poly,
-                mmPerPx = if (s3.isNull("mm_per_px")) null else s3.getDouble("mm_per_px")
+                mmPerPx = if (s3.isNull("mm_per_px")) null else s3.getDouble("mm_per_px"),
+                imageId = if (j.isNull("image_id")) null else j.getString("image_id"),
+                imageW = j.optInt("image_w", 0),
+                imageH = j.optInt("image_h", 0),
+                segModel = if (s2.isNull("model")) null else s2.getString("model")
             )
         }
     }
@@ -96,10 +106,18 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
      */
     fun submitAnnotation(
         code: String, gtPolygon: List<List<Int>>, exudate: Int?,
+        imageId: String?, imageW: Int, imageH: Int,
+        mmPerPx: Double? = null, route: String? = null, segModel: String? = null,
         correctionIou: Double? = null, careNote: String? = null
     ): Pair<Boolean, String> {
+        // 沒有 image_id/尺寸就送出 = 產生孤兒 GT(後端會 400)。提早在端上擋下並給明確訊息。
+        if (imageId.isNullOrEmpty() || imageW <= 0 || imageH <= 0) {
+            return Pair(false, "缺影像綁定(image_id/尺寸);請重新以後端模式量測一次再送出")
+        }
         val poly = JSONArray()
-        for (p in gtPolygon) { val pt = JSONArray(); pt.put(p[0]); pt.put(p.getOrElse(1) { 0 }); poly.put(pt) }
+        for (p in gtPolygon) {
+            val pt = JSONArray(); pt.put(p.getOrElse(0) { 0 }); pt.put(p.getOrElse(1) { 0 }); poly.put(pt)
+        }
         val obj = JSONObject()
             .put("code", code)
             .put("gt_polygon", poly)
@@ -107,6 +125,12 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
             .put("doctor_verified", true)
             .put("deidentified", true)
             .put("consent_train", true)
+            .put("image_id", imageId)
+            .put("image_w", imageW)
+            .put("image_h", imageH)
+        if (mmPerPx != null) obj.put("mm_per_px", mmPerPx)
+        if (route != null) obj.put("route", route)
+        if (segModel != null) obj.put("seg_model", segModel)
         if (correctionIou != null) obj.put("correction_iou", correctionIou)
         if (careNote != null) obj.put("care_note", careNote)
         val req = Request.Builder().url("$baseUrl/api/v1/annotation")

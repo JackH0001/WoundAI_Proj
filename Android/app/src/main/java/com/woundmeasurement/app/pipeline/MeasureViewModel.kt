@@ -47,11 +47,70 @@ class MeasureViewModel(
     // 同一次影像去重存檔:影像雜湊 + 已存的 row id(同影像重存→更新同筆,不新增)
     @Volatile private var lastImageHash: Int? = null
     @Volatile private var lastSavedId: Long? = null
+    // editRaster 所依附的畫布尺寸(端上=原圖、後端=≤2048 縮圖);尺寸變了柵格座標就對不上
+    @Volatile private var lastCanvasW: Int = 0
+    @Volatile private var lastCanvasH: Int = 0
     // 修邊遮罩持久化(同影像再進修邊→原樣續編,免多邊形往返損耗;換影像清除)
     @Volatile var editRaster: EditRaster? = null
     // ArUco 尺度(mm/影像px,後端直傳):修邊面積=像素數×(mm/px)²,不依賴 AI 初始面積
     @Volatile var lastMmPerPx: Double? = null
         private set
+    // 飛輪資料鏈綁定:後端 classify 存下的影像雜湊 + polygon 座標空間尺寸 + 路由/模型(溯源)。
+    // 缺這些,送出的標註就是無影像的孤兒 GT,永遠訓練不了(2026-07-28 稽核發現舊佇列 8/8 皆如此)。
+    @Volatile var lastImageId: String? = null
+        private set
+    @Volatile var lastImageW: Int = 0
+        private set
+    @Volatile var lastImageH: Int = 0
+        private set
+    @Volatile var lastRoute: String? = null
+        private set
+    @Volatile var lastSegModel: String? = null
+        private set
+
+    /**
+     * 換一張影像時清空所有「上一次分析」的殘留。
+     *
+     * 沒有這個重置會出人命等級的錯:後端模式跑完 A 圖後切端上模式跑 B 圖,
+     * lastImageId/lastBitmap/lastPolygon 仍指向 A → 修邊畫面開的是 A 圖、
+     * 送出的標註綁 A 的 image_id、時間軸還會用 lastSavedId 覆寫 A 那筆。
+     * 端上路徑(analyze)沒有後端影像綁定,故 imageId 一律為 null,送標註時會被守門擋下。
+     */
+    private fun clearBackendBinding(alsoBitmap: Boolean = false) {
+        lastPolygon = emptyList()
+        lastCorrectionIou = null
+        lastMmPerPx = null
+        lastImageId = null; lastImageW = 0; lastImageH = 0
+        lastRoute = null; lastSegModel = null
+        // 分析失敗時也要丟掉上一張的原圖,否則修邊入口可能開到「上一位病人」的影像
+        if (alsoBitmap) {
+            lastBitmap = null; lastImageHash = null; lastSavedId = null; editRaster = null
+            lastCanvasW = 0; lastCanvasH = 0
+        }
+    }
+
+    /**
+     * 綁定本次分析的影像。
+     * @param identity 影像身分一律以**原圖**計算雜湊——端上路徑拿不到縮圖,若用縮圖當基準,
+     *   同一張照片在「端上 ↔ 後端」切換比對時雜湊必不同,修邊遮罩會被誤清、時間軸重複插入。
+     * @param canvas 實際顯示/編輯用的點陣圖(後端路徑是 ≤2048 縮圖,polygon 座標即此空間)。
+     *   畫布尺寸變了就不能沿用 editRaster(柵格座標對不上)。
+     */
+    private fun bindImage(identity: Bitmap, canvas: Bitmap) {
+        val hh = quickHash(identity)
+        val sameImage = (hh == lastImageHash)
+        if (!sameImage) lastSavedId = null                       // 換影像→時間軸另存新筆
+        if (!sameImage || canvas.width != lastCanvasW || canvas.height != lastCanvasH)
+            editRaster = null                                    // 換影像或換畫布尺寸→修邊遮罩不可沿用
+        lastImageHash = hh
+        lastBitmap = canvas
+        lastCanvasW = canvas.width; lastCanvasH = canvas.height
+    }
+
+    private fun resetBinding(bitmap: Bitmap) {
+        clearBackendBinding()
+        bindImage(bitmap, bitmap)
+    }
 
     private fun quickHash(b: Bitmap): Int {
         var h = 17
@@ -76,6 +135,7 @@ class MeasureViewModel(
         cloudEscalate: (suspend (Bitmap) -> BooleanArray)? = null
     ) {
         _state.value = _state.value.copy(loading = true, error = null)
+        resetBinding(bitmap)   // 端上路徑無後端影像綁定 → 清掉上一次(可能是後端模式)的殘留
         viewModelScope.launch {
             try {
                 val corners = aruco?.detect(bitmap, 7)   // null → 面積未校正(graceful)
@@ -104,24 +164,32 @@ class MeasureViewModel(
         cmPerPixel: Double? = null
     ) {
         _state.value = _state.value.copy(loading = true, error = null)
+        clearBackendBinding()   // 先清舊綁定:失敗時不可留著上一張的 image_id 讓醫師誤送
         viewModelScope.launch {
             try {
                 // 長邊縮到 ≤2048:模型輸入僅256、ArUco 於2048仍清晰、比例法尺度不變;
                 // 記憶體(5712寬原圖≈70MB ARGB)與上傳大減,避免反覆編修 OOM 閃退
+                val mx = maxOf(bitmap.width, bitmap.height)
+                val scale = if (mx > 2048) 2048.0 / mx else 1.0
                 val work = withContext(Dispatchers.Default) {
-                    val mx = maxOf(bitmap.width, bitmap.height)
-                    if (mx > 2048) {
-                        val s = 2048f / mx
-                        Bitmap.createScaledBitmap(bitmap, (bitmap.width * s).toInt(), (bitmap.height * s).toInt(), true)
-                    } else bitmap
+                    if (scale < 1.0)
+                        Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).toInt(), (bitmap.height * scale).toInt(), true)
+                    else bitmap
                 }
+                // ⚠ cmPerPixel 是「原圖」的 cm/px;縮圖後每個像素涵蓋更多原圖像素 → 必須除以 scale,
+                // 否則後端會用原圖尺度乘縮圖像素數,面積差 1/scale²,而且錯的尺度會被寫進訓練集。
+                val cppWork = cmPerPixel?.let { it / scale }
                 var polyCap: List<List<Int>> = emptyList()
                 var mmCap: Double? = null
+                var idCap: String? = null; var wCap = 0; var hCap = 0
+                var routeCap: String? = null; var modelCap: String? = null
                 val r = withContext(Dispatchers.IO) {
                     val jpeg = work.toJpeg()
-                    val c = backend.classify(jpeg, cmPerPixel)
+                    val c = backend.classify(jpeg, cppWork)
                     polyCap = c.woundPolygon
                     mmCap = c.mmPerPx
+                    idCap = c.imageId; wCap = c.imageW; hCap = c.imageH
+                    routeCap = c.route; modelCap = c.segModel
                     MeasureResult(
                         areaCm2 = c.areaCm2,
                         tissueFrac = c.tissueFrac,
@@ -134,15 +202,15 @@ class MeasureViewModel(
                         confidence = c.confidence
                     )
                 }
+                bindImage(identity = bitmap, canvas = work)   // 編輯/顯示用縮圖(polygon 座標即此圖座標)
                 lastPolygon = polyCap
-                lastBitmap = work          // 編輯/顯示一律用縮圖(polygon 座標即此圖座標)
                 lastCorrectionIou = null   // 新分析→重置修邊修正量
                 lastMmPerPx = mmCap
-                val hh = quickHash(work)
-                if (hh != lastImageHash) { lastSavedId = null; editRaster = null }  // 換影像→重置去重id與修邊遮罩
-                lastImageHash = hh
+                lastImageId = idCap; lastImageW = wCap; lastImageH = hCap
+                lastRoute = routeCap; lastSegModel = modelCap
                 _state.value = MeasureUiState(loading = false, result = r)
             } catch (e: Exception) {
+                clearBackendBinding(alsoBitmap = true)
                 _state.value = MeasureUiState(loading = false, error = e.message ?: "後端分析失敗")
             }
         }
@@ -160,16 +228,27 @@ class MeasureViewModel(
         if (poly.isEmpty()) {
             _state.value = _state.value.copy(submitStatus = "⚠️ 無傷口輪廓可送(請先量測)"); return
         }
+        // 端上模式(未經後端 classify)沒有 image_id → 送了也只是孤兒 GT,先擋
+        if (lastImageId.isNullOrEmpty()) {
+            _state.value = _state.value.copy(
+                submitStatus = "⚠️ 此結果未綁定後端影像(端上模式);請切「後端」重新量測後再送訓練標註"); return
+        }
         _state.value = _state.value.copy(submitStatus = "送出中…")
         viewModelScope.launch {
             try {
                 val (ok, msg) = withContext(Dispatchers.IO) {
-                    backend.submitAnnotation(code, poly, exudate, correctionIou = lastCorrectionIou, careNote = careNote)
+                    backend.submitAnnotation(
+                        code, poly, exudate,
+                        imageId = lastImageId, imageW = lastImageW, imageH = lastImageH,
+                        mmPerPx = lastMmPerPx, route = lastRoute, segModel = lastSegModel,
+                        correctionIou = lastCorrectionIou, careNote = careNote
+                    )
                 }
                 _state.value = _state.value.copy(
                     submitStatus = when {
                         !ok -> "⚠️ 被守門擋下:$msg"
-                        msg.contains("duplicate") -> "ℹ️ 相同傷口遮罩已在佇列,已自動略過(去重)"
+                        msg.contains("duplicate") -> "ℹ️ 相同影像的相同遮罩已在佇列,已自動略過(去重)"
+                        msg.contains("修訂") -> "✅ 已送出($code);同影像已有舊標註,本筆視為修訂版,匯出訓練集時取最新"
                         else -> "✅ 已送出,進再訓練佇列($code)"
                     }
                 )

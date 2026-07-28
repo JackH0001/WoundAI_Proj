@@ -1229,6 +1229,27 @@ def classify_wound():
         data = np.frombuffer(request.files['image'].read(), np.uint8)
         bgr = cv2.imdecode(data, cv2.IMREAD_COLOR)
         if bgr is None: return jsonify({'error': '影像解碼失敗'}), 400
+        # 訓練集影像關聯:內容雜湊存檔(去重),回傳 image_id 供標註綁定(無像素的 GT 無法訓練)
+        import hashlib as _hl
+        image_id = _hl.sha1(data.tobytes()).hexdigest()[:16]
+        try:
+            import api_flywheel as _fw
+            # 已撤回同意的影像不可因為「再上傳一次」就復活寫回 images/(那等於繞過撤回);
+            # 此時不給 image_id,量測照常回傳,但不得再送訓練標註。
+            if _fw.is_consent_blocked(image_id):
+                logger.info(f"影像 {image_id} 已撤回訓練同意:不存檔、不發 image_id")
+                image_id = None
+            else:
+                os.makedirs(_fw.IMAGES_DIR, exist_ok=True)
+                _imgp = os.path.join(_fw.IMAGES_DIR, image_id + '.jpg')
+                if not os.path.exists(_imgp):
+                    with open(_imgp, 'wb') as _f: _f.write(data.tobytes())
+                if not os.path.exists(_imgp):
+                    raise IOError("寫檔後檔案不存在")
+        except Exception as _ie:
+            # 存檔失敗卻照發 image_id → 客戶端拿到幽靈 ID,送標註時被擋且訊息誤導
+            logger.warning(f"影像存檔失敗,不發 image_id: {_ie}")
+            image_id = None
         img = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         H, W = img.shape[:2]
         # Stage2 分割(端上主力 student)
@@ -1282,6 +1303,9 @@ def classify_wound():
             _ap = cv2.approxPolyDP(_bc, 0.003 * cv2.arcLength(_bc, True), True).reshape(-1, 2)  # 0.01→0.003:初始點加密(~3x),描邊更貼
             wound_poly = [[int(x), int(y)] for x, y in _ap.tolist()]
         return jsonify({
+            # 飛輪資料鏈:image_id 綁後端已存影像;image_w/h = wound_polygon 與醫師修邊 GT 的座標空間
+            # (缺尺寸則 polygon 無法柵格化成遮罩 → 樣本不可訓練,見 api_flywheel 稽核註記)
+            'image_id': image_id, 'image_w': int(W), 'image_h': int(H),
             'stage2_segment': {'model': seg_model, 'wound_ratio': round(float(mask.mean()), 4), 'confidence': round(conf, 4),
                                'route': route, 'escalated': escalated, 'au_area_ratio': au_ratio, 'iou_student_au': iou_sa,
                                'wound_polygon': wound_poly},
