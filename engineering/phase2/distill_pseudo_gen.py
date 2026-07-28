@@ -104,21 +104,71 @@ def teacher_prob(t_a, t_u, img256):
     return 0.5 * _one(t_a, img256) + 0.5 * _one(t_u, img256)
 
 
-def collect(srcs, exts=(".png", ".jpg", ".jpeg", ".bmp")):
+def _stem_for(path):
+    """由路徑組出可當檔名的 stem:取最後兩層目錄 + 檔名。
+    只用「父目錄_檔名」不夠——`--src "**/image"` 這種寫法下每個父目錄都叫 image,會大量碰撞。"""
+    parts = os.path.normpath(path).replace("\\", "/").split("/")
+    tail = parts[-3:] if len(parts) >= 3 else parts
+    stem = "__".join(tail[:-1] + [os.path.splitext(tail[-1])[0]])
+    return "".join(c if (c.isalnum() or c in "_-") else "_" for c in stem)[:120]
+
+
+def collect(srcs, exts=(".png", ".jpg", ".jpeg", ".bmp"), recursive=False):
+    """展開 --src。支援三種寫法,且 **glob 指到目錄也算數**(常見寫法 `.../**/image`):
+       1) 目錄            → 取其中的影像
+       2) glob 命中目錄    → 取每個目錄中的影像
+       3) glob 命中檔案    → 直接收
+    recursive=True 時目錄再往下遞迴(預設關,避免把 labels/ 一起吸進來)。"""
     out = []
     for s in srcs:
-        if os.path.isdir(s):
-            for e in exts: out += glob.glob(os.path.join(s, "*" + e))
-        else:
-            out += [p for p in glob.glob(s, recursive=True)
-                    if os.path.splitext(p)[1].lower() in exts]
-    # 同檔名不同目錄會撞 stem → 用「父目錄_檔名」當 stem
-    seen, uniq = set(), []
+        cands = [s] if os.path.isdir(s) else glob.glob(s, recursive=True)
+        for c in cands:
+            if os.path.isdir(c):
+                pat = os.path.join(c, "**", "*") if recursive else os.path.join(c, "*")
+                for e in exts:
+                    out += glob.glob(pat + e, recursive=recursive)
+            elif os.path.splitext(c)[1].lower() in exts:
+                out.append(c)
+
+    # stem 必須唯一:碰撞時補路徑雜湊,**絕不靜默丟檔**(丟了就永遠不知道少訓練了什麼)
+    import hashlib
+    seen, uniq = {}, []
     for p in sorted(set(out)):
-        stem = f"{os.path.basename(os.path.dirname(p))}__{os.path.splitext(os.path.basename(p))[0]}"
-        if stem in seen: continue
-        seen.add(stem); uniq.append((stem, p))
+        stem = _stem_for(p)
+        if stem in seen:
+            stem = f"{stem}_{hashlib.sha1(p.encode('utf-8')).hexdigest()[:6]}"
+        seen[stem] = p
+        uniq.append((stem, p))
     return uniq
+
+
+GT_DIRNAMES = ("labels", "label", "masks", "mask", "gt", "annotations")
+
+
+def sibling_gt(path):
+    """這張圖是否已經有人工 GT(同層有 labels/ 等姊妹目錄且同名檔存在)。
+
+    有 GT 的影像**通常不該進偽標籤**:偽標籤是為了覆蓋「沒有 GT、模型沒看過」的分布;
+    對已標註集產偽標籤，學到的只是老師對已知資料的複述,student 早就從真值學過了。
+    例外:已知 GT 品質差(retrain_merged 稽核出 28 可疑/5 空GT)時,可用 --include-labeled 蓋過。"""
+    d = os.path.dirname(path)
+    parent, base = os.path.dirname(d), os.path.basename(path)
+    stem = os.path.splitext(base)[0]
+    for lab in GT_DIRNAMES:
+        for cand in (os.path.join(parent, lab, base), os.path.join(parent, lab, stem + ".png")):
+            if os.path.exists(cand): return cand
+    return None
+
+
+def file_sha(path, chunk=1 << 20):
+    import hashlib
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        while True:
+            b = f.read(chunk)
+            if not b: break
+            h.update(b)
+    return h.hexdigest()
 
 
 def imread_unicode(path):
@@ -139,19 +189,81 @@ def main():
                     "C:/dev/WoundAI_weights_archive"), "onnx_export"))
     ap.add_argument("--exclude", action="append", default=[],
                     help="路徑含此字串就跳過(例:labels、mask、驗收基準目錄)")
+    ap.add_argument("--recursive", action="store_true",
+                    help="目錄再往下遞迴找影像(預設關,避免把 labels/ 一起吸進來)")
+    ap.add_argument("--list-dirs", action="store_true",
+                    help="只列出 --src 命中的目錄與各自影像張數/有無 GT(找不到檔案時先跑這個)")
+    ap.add_argument("--include-labeled", action="store_true",
+                    help="連已有人工 GT 的影像也產偽標籤(預設排除)。只有在刻意要蓋掉已知有問題的 GT 時才用")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--no-tta", action="store_true", help="關掉翻轉一致性檢查(不建議,那是最強訊號)")
     ap.add_argument("--montage", action="store_true", help="產出目視抽查大圖")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
 
-    files = collect(a.src)
+    if a.list_dirs:
+        from collections import Counter
+        hits = [c for s in a.src for c in ([s] if os.path.isdir(s) else glob.glob(s, recursive=True))]
+        dirs = sorted({c if os.path.isdir(c) else os.path.dirname(c) for c in hits})
+        if not dirs:
+            print(f"✗ --src 完全沒命中。逐段確認路徑是否存在:\n   {a.src}")
+            return 1
+        got = collect(a.src, recursive=a.recursive)
+        cnt = Counter(os.path.dirname(p) for _, p in got)
+        lab = Counter(os.path.dirname(p) for _, p in got if sibling_gt(p))
+        print(f"  {'影像':>5} {'有GT':>5}  目錄")
+        for d in dirs:
+            n, l = cnt.get(d, 0), lab.get(d, 0)
+            flag = "  ← 已標註集,不適合當偽標籤來源" if n and l == n else ""
+            print(f"  {n:>5} {l:>5}  {d}{flag}")
+        tot, totl = sum(cnt.values()), sum(lab.values())
+        print(f"\n共 {len(dirs)} 個目錄、{tot} 張影像,其中 {totl} 張已有人工 GT")
+        if tot and totl == tot:
+            print("\n⚠ **全部都有 GT**——偽標籤是要覆蓋『沒 GT、模型沒看過』的分布,")
+            print("  對已標註集產偽標籤只是複述 student 早就學過的東西,拉不動召回。")
+            print("  請改指向無 GT 的傷口照池。")
+        return 0
+
+    files = collect(a.src, recursive=a.recursive)
+    n_raw = len(files)
     for ex in a.exclude:
         files = [(s, p) for s, p in files if ex not in p.replace("\\", "/")]
+    n_ex = n_raw - len(files)
+
+    # 內容重複(同一張圖在多個資料夾各存一份)→ 只留一份,否則等於對同一樣本加權
+    seen_sha, dedup, n_dup = {}, [], 0
+    for s, p in files:
+        try: sh = file_sha(p)
+        except Exception: sh = p
+        if sh in seen_sha: n_dup += 1; continue
+        seen_sha[sh] = p; dedup.append((s, p))
+    files = dedup
+
+    # 已有人工 GT 的影像:預設排除(偽標籤是要補「沒 GT、沒看過」的分布)
+    labeled = [(s, p) for s, p in files if sibling_gt(p)]
+    if not a.include_labeled:
+        files = [(s, p) for s, p in files if not sibling_gt(p)]
     if a.limit: files = files[:a.limit]
-    print(f"掃到 {len(files)} 張候選影像")
+
+    print(f"掃到 {n_raw} 張;--exclude 濾掉 {n_ex}、內容重複 {n_dup}、"
+          f"已有人工 GT {len(labeled)}{'(依 --include-labeled 保留)' if a.include_labeled else '(已排除)'}"
+          f" → 候選 {len(files)} 張")
     if not files:
-        print("✗ 沒有檔案,檢查 --src"); return 1
+        if labeled and not a.include_labeled:
+            print(f"\n✗ 候選為 0:掃到的 {len(labeled)} 張**全部已經有人工 GT**(旁邊就有 labels/)。")
+            print("   偽標籤的用途是覆蓋『沒有 GT、模型沒看過』的分布——對已標註集產偽標籤,")
+            print("   student 只會複述它早就從真值學過的東西,拉不動召回,還可能洩漏評測子集。")
+            print("   → 請改指向**無 GT 的傷口照池**(臨床收案照、公開資料集未標註部分、歷史拍攝檔)。")
+            print("   → 若是刻意要蓋掉已知有問題的 GT(如 retrain_merged 稽核出的 28 可疑/5 空GT),")
+            print("     才加 --include-labeled,並在 EVIDENCE_LEDGER 說明理由。")
+        else:
+            print("✗ 沒有檔案。排查順序:")
+            print("   1) 加 --list-dirs 看 --src 命中哪些目錄、各有幾張")
+            print("   2) glob 指到目錄也可以(如 `.../**/image`);影像在更深層則加 --recursive")
+            print("   3) 路徑含空白/中文請整串用引號包起來")
+        return 1
+    if labeled and a.include_labeled:
+        print(f"⚠ 其中 {len(labeled)} 張已有人工 GT——確認你是刻意要用偽標籤蓋過既有 GT")
     if a.dry_run:
         for s, p in files[:10]: print("  ", s, "←", p)
         print("  ..." if len(files) > 10 else "")

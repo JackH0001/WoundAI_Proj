@@ -21,23 +21,46 @@
 ⑥ 走 ledger 換模型  ←  ⑤ 未見過 holdout 驗證  ←  ④ 混合重訓（防遺忘）
 ```
 
-### ① 挑來源（最重要的一步）
+### ① 挑來源（最重要的一步，也是目前的瓶頸）
 
-**要**：真實傷口照，越偏離 retrain_merged 分布越好（身體部位、大面積、燒傷、深膚色、低光）。
+**必須是「沒有 GT、模型沒看過」的傷口照。** 有 GT 的影像產偽標籤沒有意義——
+student 早就從真值學過了，老師只是複述一遍。工具會自動排除有 `labels/` 姊妹目錄的影像。
+
 **不要**：
-- `test_wounds_aruco_v2` 那 5 張 —— 它們是 escalate 路由的驗收基準，用了就是**考卷當講義**
+- **已標註訓練集**（`retrain_merged` / `retrain_bottom` / `retrain_2` / `retrain_merged_paired`）
+  —— 2026-07-28 實掃 `批次驗證工具\**\image` 共 375 張，**全部都有 GT**，一張都不合格。
+  其中 `retrain_merged` 就是 student 自己的訓練集，`retrain_bottom` 是評測用的最難子集（用了會洩漏）
+- `test_wounds_aruco_v2` 那 5 張 —— escalate 路由的驗收基準，用了就是**考卷當講義**
 - `傷口面積計測標準_Aruco_V2`（Sim01–05）—— 印刷幾何色塊，不具傷口材質
 - 任何已在 holdout 或 golden 測試集裡的影像
+
+**要去哪裡找**（依可行性排序）：
+
+| 來源 | 量級 | 備註 |
+|---|---|---|
+| 臨床收案照（`clinical_pilot_20_SOP.md`） | 20 起跳，持續累積 | 最有價值：真實分布＋日後還會有真 GT |
+| 公開資料集**未標註**部分（FUSC / AZH 等） | 數百 | 授權須確認（見 `woundai-smp-provenance`） |
+| 歷史拍攝檔（尚未進標註流程的原始照） | ? | 先確認去識別與同意狀態 |
+
+> 目前 archive 裡**沒有現成的無 GT 池**。這條路實質上被「先收臨床照」擋住——
+> 也就是說偽標籤蒸餾的前置條件就是 20 張臨床收案，兩件事不是並行而是有先後。
 
 ```powershell
 $PY = "C:\Users\jack_\AppData\Local\Programs\Python\Python310\python.exe"
 $env:WOUNDAI_ARCHIVE = "C:\dev\WoundAI_weights_archive"
 cd C:\dev\WoundAI_Proj\engineering\phase2
 
-# 先只看會掃到哪些檔，確認沒混進驗收基準
+# ① 先看 --src 命中哪些目錄、各有幾張（找不到檔案時第一個跑這個）
+& $PY distill_pseudo_gen.py --src "$env:WOUNDAI_ARCHIVE\批次驗證工具\**\image" --list-dirs
+
+# ② 再看實際會收哪些檔，確認沒混進驗收基準
 & $PY distill_pseudo_gen.py --src "$env:WOUNDAI_ARCHIVE\批次驗證工具\**\image" `
       --exclude labels --exclude aruco_v2 --exclude 標準 --dry-run
 ```
+
+`--src` 三種寫法都行：目錄、glob 命中目錄（如 `**\image`）、glob 命中檔案。
+影像埋在更深層時加 `--recursive`（預設關，免得把 `labels/` 一起吸進來）。
+掃到 0 張時先用 `--list-dirs` 確認路徑，再看是不是需要 `--recursive`。
 
 ### ② 產偽標籤 + 品質把關
 
