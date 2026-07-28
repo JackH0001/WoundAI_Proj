@@ -5,6 +5,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -123,11 +124,33 @@ fun MeasureValidationEntry(
 private fun DoctorFlywheelSubmit(vm: MeasureViewModel, backend: BackendClient, exudate: Int?) {
     val st by vm.state.collectAsState()
     if (st.result == null) return
+    // 樣本來源必須由人選,**不可預設**:這個畫面同時用來跑範例圖與收臨床照,
+    // 寫死 sample 會讓臨床收案永遠算不進 by_source.clinical;
+    // 預設 clinical 又會讓每次 demo 都污染臨床樣本數。比照滲液做強制輸入防呆。
+    var source by rememberSaveable { mutableStateOf<String?>(null) }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("醫師確認・送出訓練標註(飛輪)", style = MaterialTheme.typography.titleSmall)
         Text("滲液 $exudate · 修邊${if (st.edited) "✓" else "—"} · 存檔${if (st.saved) "✓" else "—"}",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+        Text("樣本來源(必選)", style = MaterialTheme.typography.bodySmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            listOf("clinical" to "臨床", "sample" to "範例", "phantom" to "模擬單").forEach { (v, label) ->
+                val sel = source == v
+                if (sel) Button({ source = v }, Modifier.weight(1f)) { Text(label) }
+                else OutlinedButton({ source = v }, Modifier.weight(1f)) { Text(label) }
+            }
+        }
+        Text(when (source) {
+            "clinical" -> "真實病人傷口——唯一計入臨床收案進度者"
+            "sample" -> "範例/示範圖,不計入臨床樣本數"
+            "phantom" -> "印刷模擬傷口/驗證單,不具傷口材質,不作訓練用"
+            else -> "⚠ 請先選來源:選錯會讓臨床樣本數失真(送件數字誠實與否的關鍵)"
+        }, style = MaterialTheme.typography.bodySmall,
+            color = if (source == null) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onSurfaceVariant)
+
         // 送出狀態放按鈕「上方」,按下即可見
         st.submitStatus?.let {
             Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
@@ -135,11 +158,10 @@ private fun DoctorFlywheelSubmit(vm: MeasureViewModel, backend: BackendClient, e
         Button(
             onClick = {
                 val code = "WD-" + System.currentTimeMillis().toString().takeLast(8)
-                // 這是內建範例圖的驗證入口 → 標 source=sample,不可混入臨床樣本數;
-                // 真實收案畫面請不要傳 source(後端預設 clinical)
                 vm.submitAnnotation(backend, code, exudate,
-                    careNote = "emulator demo confirm", source = "sample")
+                    careNote = "app confirm", source = source)
             },
+            enabled = source != null,
             modifier = Modifier.fillMaxWidth()
         ) { Text("醫師確認・送出標註 → 再訓練佇列") }
     }

@@ -139,8 +139,28 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
             .header("Authorization", "Bearer $jwt")
             .post(obj.toString().toRequestBody("application/json".toMediaType())).build()
         http.newCall(req).execute().use { resp ->
-            return Pair(resp.isSuccessful, (resp.body?.string() ?: "").take(300))
+            val body = resp.body?.string() ?: ""
+            // 直接把 raw JSON 丟給醫師看會變成一整串 \uXXXX 逃脫碼(實機截圖確認過,完全不可讀)
+            // → 解析出 issues 逐條顯示中文
+            return Pair(resp.isSuccessful, summarize(body))
         }
+    }
+
+    /** 把後端回應整理成人看得懂的一行字;解析失敗才退回原文。 */
+    private fun summarize(body: String): String = try {
+        val j = JSONObject(body)
+        when {
+            j.has("issues") -> {
+                val a = j.getJSONArray("issues")
+                (0 until a.length()).joinToString("；") { a.getString(it) }
+            }
+            j.has("error") -> j.getString("error")
+            j.optString("status") == "duplicate_skipped" -> "duplicate:" + j.optString("note")
+            j.has("note") && !j.isNull("note") -> j.getString("note")
+            else -> j.optString("status", body.take(200))
+        }
+    } catch (e: Exception) {
+        body.take(200)
     }
 
     /** 撤回同意 → 後端下架、排除訓練、稽核。 */
