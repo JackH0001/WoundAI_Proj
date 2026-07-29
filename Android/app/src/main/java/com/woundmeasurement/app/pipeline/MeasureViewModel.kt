@@ -67,6 +67,9 @@ class MeasureViewModel(
         private set
     @Volatile var lastSegModel: String? = null
         private set
+    /** 後端提示:AI 空手但色彩分割有料 → 使用者很可能把印刷模擬圖選成了臨床/範例。 */
+    @Volatile var lastPhantomHint: Boolean = false
+        private set
 
     /**
      * 換一張影像時清空所有「上一次分析」的殘留。
@@ -81,7 +84,7 @@ class MeasureViewModel(
         lastCorrectionIou = null
         lastMmPerPx = null
         lastImageId = null; lastImageW = 0; lastImageH = 0
-        lastRoute = null; lastSegModel = null
+        lastRoute = null; lastSegModel = null; lastPhantomHint = false
         // 分析失敗時也要丟掉上一張的原圖,否則修邊入口可能開到「上一位病人」的影像
         if (alsoBitmap) {
             lastBitmap = null; lastImageHash = null; lastSavedId = null; editRaster = null
@@ -184,13 +187,14 @@ class MeasureViewModel(
                 var mmCap: Double? = null
                 var idCap: String? = null; var wCap = 0; var hCap = 0
                 var routeCap: String? = null; var modelCap: String? = null
+                var hintCap = false
                 val r = withContext(Dispatchers.IO) {
                     val jpeg = work.toJpeg()
                     val c = backend.classify(jpeg, cppWork, seg)
                     polyCap = c.woundPolygon
                     mmCap = c.mmPerPx
                     idCap = c.imageId; wCap = c.imageW; hCap = c.imageH
-                    routeCap = c.route; modelCap = c.segModel
+                    routeCap = c.route; modelCap = c.segModel; hintCap = c.phantomHint
                     MeasureResult(
                         areaCm2 = c.areaCm2,
                         tissueFrac = c.tissueFrac,
@@ -208,7 +212,7 @@ class MeasureViewModel(
                 lastCorrectionIou = null   // 新分析→重置修邊修正量
                 lastMmPerPx = mmCap
                 lastImageId = idCap; lastImageW = wCap; lastImageH = hCap
-                lastRoute = routeCap; lastSegModel = modelCap
+                lastRoute = routeCap; lastSegModel = modelCap; lastPhantomHint = hintCap
                 _state.value = MeasureUiState(loading = false, result = r)
             } catch (e: Exception) {
                 clearBackendBinding(alsoBitmap = true)

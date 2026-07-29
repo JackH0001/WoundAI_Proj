@@ -66,6 +66,57 @@ def test_色彩分割不依賴任何模型():
     assert "onnxruntime" not in mod_src and "torch" not in mod_src
 
 
+def test_偏色照片_白平衡後備救得回來_且不動既有基準():
+    """實機踩到:室內冷光＋深陰影會把印刷暗紅推向洋紅(H 掉出 168 的紅色窗)、明度也掉到門檻下。
+    對策是**白平衡後重試**,不是放寬 seg_red 的門檻——放寬會順便收進紫色/膚色陰影,
+    而且直接推翻 EVIDENCE_LEDGER 2026-07-20 的 n=15 實拍基準。"""
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        import pytest; pytest.skip("需 cv2")
+    from verify_area_sheet import seg_red, seg_red_robust
+
+    # 物理模型:像素 = 反射率 × 照度(白平衡誤差與陰影都是乘法,不是加法)
+    refl_wound = np.array([0.545, 0.118, 0.165])
+    refl_paper = np.array([0.96, 0.96, 0.96])
+
+    def shot(illum, gain):
+        il = np.array(illum, float) * gain
+        img = np.zeros((200, 200, 3), np.uint8)
+        img[:, :] = np.clip(refl_paper * il * 255, 0, 255).astype(np.uint8)
+        img[60:140, 60:140] = np.clip(refl_wound * il * 255, 0, 255).astype(np.uint8)
+        return img
+
+    # 一般情境:strict 就夠(不該無謂觸發白平衡)
+    for illum, gain in [((1, 1, 1), 1.0), ((.88, 1, 1.28), 1.0), ((.85, 1, 1.35), .45), ((1.3, 1, .7), 1.0)]:
+        img = shot(illum, gain)
+        assert (seg_red(img)[0] > 0).sum() > 3000, (illum, gain)
+        assert seg_red_robust(img)[2] == "strict", (illum, gain)
+
+    # 極端藍偏 + 深陰影:strict 掛掉,白平衡後備救回
+    bad = shot((0.75, 1.0, 1.55), 0.30)
+    assert (seg_red(bad)[0] > 0).sum() == 0, "此情境本來就該讓 strict 失手,否則測試沒在測東西"
+    m, c, which = seg_red_robust(bad)
+    assert which == "gray_world_wb" and (m > 0).sum() > 3000, (which, int((m > 0).sum()))
+
+
+def test_robust不得改變既有n5基準():
+    """robust 在正常照片上必須與 strict 逐張同值,否則就是偷偷推翻了既有證據。"""
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        import pytest; pytest.skip("需 cv2")
+    from verify_area_sheet import seg_red, seg_red_robust
+    import aruco_calibrate as ac
+    for truth, rgb in _sheets():
+        det = ac.detect_marker(rgb)
+        assert det is not None
+        a_s = float(ac.measure_area_cm2_ratio(seg_red(rgb)[0].astype(np.uint8), det[0], marker_mm=12.0))
+        m, _c, which = seg_red_robust(rgb)
+        a_r = float(ac.measure_area_cm2_ratio(m.astype(np.uint8), det[0], marker_mm=12.0))
+        assert which == "strict" and abs(a_s - a_r) < 1e-6, (truth, a_s, a_r, which)
+
+
 def test_空影像與純白紙回空遮罩():
     """沒有紅色目標時必須回空,不可硬湊一塊出來(會讓驗證單誤差變成假數字)。"""
     try:

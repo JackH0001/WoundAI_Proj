@@ -1226,8 +1226,8 @@ def _load_seg_red():
     pth = os.path.join(_ENG, "phase2")
     if pth not in sys.path: sys.path.insert(0, pth)
     try:
-        from verify_area_sheet import seg_red
-        return seg_red
+        from verify_area_sheet import seg_red_robust
+        return seg_red_robust
     except Exception as e:
         logger.warning(f"seg_red 載入失敗: {e}")
         return None
@@ -1275,18 +1275,34 @@ def classify_wound():
         # (模型權重/訓練集/golden 釘值一律不變 → 對臨床效能零風險)
         phantom = str(request.form.get('seg', 'auto')).lower() == 'color'
         seg_model = _active_model_key(); route = "student"; escalated = False; au_ratio = None; iou_sa = None
+        phantom_pass = None; phantom_hint = False
         if phantom:
             _sr = _load_seg_red()
             if _sr is None:
                 return jsonify({'error': '色彩分割模組不可用(verify_area_sheet 缺)', 'stage': 'init'}), 503
-            _m, _c = _sr(img)
+            _m, _c, phantom_pass = _sr(img)
             mask = _m.astype(bool); conf = 1.0 if mask.any() else 0.0
-            seg_model = "color_hsv(phantom)"; route = "phantom_color(非AI)"
+            seg_model = f"color_hsv(phantom,{phantom_pass})"; route = "phantom_color(非AI)"
         else:
             # Stage2 分割(端上主力 student)
             wound_prob, conf = segment_wound_ai(img)
             thr = float(((_load_ssot().get("models", {}) or {}).get(_active_model_key() or "", {}) or {}).get("threshold", 0.4))
             mask = wound_prob > thr
+            # AI 回空遮罩時,順手用色彩分割探一下:若找得到形狀合理的飽和紅色塊,
+            # 幾乎可以確定使用者把「印刷模擬圖」誤選成了臨床/範例(選錯來源就會走 AI,而 AI 對
+            # 印刷色塊必定空手)。回一個 hint 讓 App 直接提示改選,不要只丟「AI 未偵測到傷口」
+            # 讓人以為是模型爛掉。色彩分割是微秒級,不會拖慢回應。
+            if not mask.any():
+                try:
+                    _sr = _load_seg_red()
+                    if _sr is not None:
+                        _pm, _pc, _pp = _sr(img)
+                        _frac = float((_pm > 0).sum()) / _pm.size
+                        if _pc is not None and 0.001 < _frac < 0.5:
+                            phantom_hint = True
+                            logger.info(f"AI 空遮罩但色彩分割找到 {_frac:.3f} 面積 → 疑似選錯來源(應為模擬圖)")
+                except Exception as _pe:
+                    logger.warning(f"phantom hint 探測略過: {_pe}")
         # 雙軌自動 escalate:難例(碎片/低對比→student 大幅低估)自動改用雲端 A∪U 集成
         # 判難靠「第二意見」(student vs A∪U),因 student 漏 segment 區域機率≈0、無自我訊號
         # phantom 走色彩分割,沒有「第二意見」可言,直接跳過
@@ -1349,6 +1365,9 @@ def classify_wound():
                                        if phantom else None)},
             'stage5_severity': {k: push[k] for k in ('tool','area_subscore','tissue_subscore','exudate_subscore','total_partial_img','total_full','range_full')},
             'phantom_mode': phantom,
+            'phantom_pass': phantom_pass,   # strict / gray_world_wb(偏色時已自動白平衡重試)
+            # true = AI 沒抓到但色彩分割抓得到 → 幾乎確定是把印刷模擬圖誤選成臨床/範例
+            'phantom_hint': phantom_hint,
             'disclaimer': ('【印刷模擬圖模式】分割走決定性 HSV 色彩法、**未使用 AI 模型**;'
                            '面積可作量測鏈驗證,組織/PUSH 為顏料推算,非臨床結果'
                            if phantom else

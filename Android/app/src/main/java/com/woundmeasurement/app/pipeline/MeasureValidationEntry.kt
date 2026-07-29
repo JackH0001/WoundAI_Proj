@@ -122,6 +122,15 @@ fun MeasureValidationEntry(
                 Text(if (case == null) "個案管理（病患・同意書・傷口個案）" else "切換個案")
             }
 
+            // 選錯來源的救援提示:AI 空手但後端色彩分割抓得到 → 這幾乎一定是印刷模擬圖被選成臨床/範例。
+            // 沒有這個提示,使用者只會看到「AI 未偵測到傷口」,誤以為模型壞了而去手畫。
+            if (vm.lastPhantomHint && source != "phantom") {
+                Text("⚠ AI 沒偵測到傷口,但影像中有明顯的印刷色塊——這看起來是**印刷模擬圖**。" +
+                     "請把來源改選「模擬圖」重新載入,會改走色彩分割,初始輪廓一次到位。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error)
+            }
+
             Divider()
             SamplePickerScreen(
                 vm = vm, backend = backend,

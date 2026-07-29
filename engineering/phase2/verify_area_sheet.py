@@ -33,7 +33,11 @@ def imwrite_u(path, img):
 
 
 def seg_red(img_rgb):
-    """分割印刷深紅/暗紅傷口(高S,紅色調)。回最大連通遮罩與其輪廓。"""
+    """分割印刷深紅/暗紅傷口(高S,紅色調)。回最大連通遮罩與其輪廓。
+
+    ⚠ 門檻**不要隨意調**:這組值連同 v2 驗證單產生了 EVIDENCE_LEDGER 2026-07-20 的
+    「實拍 n=15 平均|誤差| 1.9%」證據,改了就等於推翻既有證據。
+    偏色情境請改用 [seg_red_robust](白平衡後重試),而不是放寬這裡。"""
     hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
     h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
     m = (((h < 12) | (h > 168)) & (s > 80) & (v > 40)).astype(np.uint8)
@@ -45,6 +49,35 @@ def seg_red(img_rgb):
     big = max(cnts, key=cv2.contourArea)
     keep = np.zeros_like(m); cv2.drawContours(keep, [big], -1, 1, -1)
     return keep, big
+
+
+def _gray_world(img_rgb):
+    """灰世界白平衡:把三通道均值拉齊。驗證單背景是大片白紙,灰世界假設在此特別成立。"""
+    f = img_rgb.astype(np.float32)
+    means = f.reshape(-1, 3).mean(axis=0)
+    g = float(means.mean())
+    for c in range(3):
+        if means[c] > 1e-6:
+            f[:, :, c] *= (g / means[c])
+    return np.clip(f, 0, 255).astype(np.uint8)
+
+
+def seg_red_robust(img_rgb, min_area_frac=0.0002):
+    """兩段式:先用**原始驗證過的門檻**;分割不到(或小到不合理)才做灰世界白平衡再試一次。
+
+    為什麼是白平衡而不是放寬色相窗:室內冷光/陰影會把暗紅推向洋紅(實測 H 從 177 掉到 162,
+    正好掉出 H>168 的紅色窗)。那是**偏色**問題,治本是把白平衡拉回來;
+    放寬窗口則會順便把紫色/膚色陰影也收進來,而且推翻了 n=15 的既有證據基準。
+
+    回 (遮罩, 輪廓, 用了哪一段) — 第二段成功時呼叫端應標示「已套白平衡」以利追溯。
+    """
+    m, c = seg_red(img_rgb)
+    if c is not None and float((m > 0).sum()) / m.size >= min_area_frac:
+        return m, c, "strict"
+    m2, c2 = seg_red(_gray_world(img_rgb))
+    if c2 is not None and float((m2 > 0).sum()) / m2.size >= min_area_frac:
+        return m2, c2, "gray_world_wb"
+    return m, c, "strict"   # 兩段都失敗:回原始結果(通常是空遮罩)
 
 
 def main():

@@ -30,7 +30,11 @@ data class ClassifyResult(
     val imageId: String? = null,
     val imageW: Int = 0,
     val imageH: Int = 0,
-    val segModel: String? = null
+    val segModel: String? = null,
+    /** true = AI 沒抓到但色彩分割抓得到 → 幾乎確定把印刷模擬圖誤選成了臨床/範例。 */
+    val phantomHint: Boolean = false,
+    /** 模擬圖模式實際用了哪一段:strict / gray_world_wb(偏色時已自動白平衡重試)。 */
+    val phantomPass: String? = null
 )
 
 class BackendClient(private val baseUrl: String, jwt: String = "") {
@@ -99,7 +103,9 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
                 imageId = if (j.isNull("image_id")) null else j.getString("image_id"),
                 imageW = j.optInt("image_w", 0),
                 imageH = j.optInt("image_h", 0),
-                segModel = if (s2.isNull("model")) null else s2.getString("model")
+                segModel = if (s2.isNull("model")) null else s2.getString("model"),
+                phantomHint = j.optBoolean("phantom_hint", false),
+                phantomPass = if (j.isNull("phantom_pass")) null else j.optString("phantom_pass", null)
             )
         }
     }
