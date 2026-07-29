@@ -54,6 +54,27 @@ def main():
     if not bind:
         print("\n總結: 有 FAIL ✗(後端未重啟?image_id/image_w/image_h 是本輪新增)"); return
 
+    # 2b 模擬圖模式:確認執行中的後端**真的**是含 seg=color 的版本。
+    # 這一項專治「改了 app.py 但忘記重啟」——Flask debug=False 不熱載,舊進程會默默忽略 seg 參數,
+    # 表面上一切正常,只有 route 仍是 student 這個線索。
+    with open(a.img, "rb") as f:
+        r2 = requests.post(f"{U}/api/v1/classify", headers=H,
+                           files={"image": ("wound.jpg", f.read() + os.urandom(8), "image/jpeg")},
+                           data={"seg": "color"}, timeout=120)
+    if r2.status_code == 200:
+        j2 = r2.json()
+        pm = j2.get("phantom_mode")
+        rt = (j2.get("stage2_segment") or {}).get("route", "")
+        good = (pm is True) and str(rt).startswith("phantom_color")
+        print(f"seg=color 模擬圖模式: {'PASS' if good else 'FAIL'} "
+              f"(phantom_mode={pm}, route={rt}, pass={j2.get('phantom_pass')})")
+        if not good:
+            print("   → phantom_mode 是 None 代表**後端是舊進程**(改了 app.py 沒重啟);"
+                  "Flask debug=False 不熱載,舊版會忽略 seg 參數")
+        ok &= good
+    else:
+        print("seg=color HTTP", r2.status_code); ok = False
+
     poly = (j.get("stage2_segment") or {}).get("wound_polygon") or []
     if len(poly) < 3:   # AI 空遮罩(OOD)時用一個安全的假多邊形,仍可測資料鏈守門
         poly = [[10, 10], [min(200, iw - 1), 10], [min(200, iw - 1), min(200, ih - 1)], [10, min(200, ih - 1)]]

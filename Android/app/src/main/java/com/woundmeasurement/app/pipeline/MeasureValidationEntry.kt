@@ -122,6 +122,17 @@ fun MeasureValidationEntry(
                 Text(if (case == null) "個案管理（病患・同意書・傷口個案）" else "切換個案")
             }
 
+            // 選了模擬圖卻沒走到色彩分割 → 後端沒收到/不認得 seg=color,幾乎一定是**後端沒重啟**
+            // (Flask debug=False 不熱載,改了 app.py 不重啟就不生效)。
+            // 沒有這個檢查的話,畫面只會顯示「面積 0.00、路由 student」,要靠人去比對 route 才看得出來。
+            if (source == "phantom" && st.result != null &&
+                vm.lastRoute?.startsWith("phantom_color") != true) {
+                Text("⚠ 已選「模擬圖」但後端路由是 ${vm.lastRoute ?: "?"}(應為 phantom_color)——" +
+                     "色彩分割沒有生效,通常是**後端未重啟**(Flask 不熱載)。請重跑 app.py 後再試一次。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error)
+            }
+
             // 選錯來源的救援提示:AI 空手但後端色彩分割抓得到 → 這幾乎一定是印刷模擬圖被選成臨床/範例。
             // 沒有這個提示,使用者只會看到「AI 未偵測到傷口」,誤以為模型壞了而去手畫。
             if (vm.lastPhantomHint && source != "phantom") {
