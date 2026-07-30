@@ -29,8 +29,16 @@ interface MeasurementDao {
     @Query("SELECT * FROM measurements WHERE caseId = :caseId ORDER BY timestamp DESC LIMIT 1")
     suspend fun getLatestByCase(caseId: Long): MeasurementEntity?
 
+    @Query("SELECT * FROM measurements WHERE caseId = :caseId ORDER BY timestamp ASC LIMIT 1")
+    suspend fun getFirstByCase(caseId: Long): MeasurementEntity?
+
     @Query("SELECT COUNT(*) FROM measurements WHERE caseId = :caseId")
     suspend fun getCountByCase(caseId: Long): Int
+
+    /** 最近有量測的個案 id（依最後量測時間排序）。主畫面「最近就診」用。 */
+    @Query("""SELECT caseId FROM measurements WHERE caseId IS NOT NULL
+              GROUP BY caseId ORDER BY MAX(timestamp) DESC LIMIT :limit""")
+    suspend fun getRecentCaseIds(limit: Int): List<Long>
 
     @Query("SELECT * FROM measurements WHERE id = :measurementId")
     suspend fun getMeasurementById(measurementId: Long): MeasurementEntity?

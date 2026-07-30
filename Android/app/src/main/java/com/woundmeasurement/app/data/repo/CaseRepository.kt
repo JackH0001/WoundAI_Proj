@@ -150,7 +150,23 @@ class CaseRepository(
      * 雲端那份不排除的話，資料照樣會進訓練集。
      */
     suspend fun withdrawTraining(patientId: String, reason: String?): List<String> = withContext(Dispatchers.IO) {
-        consents.getActive(patientId)?.let { consents.withdraw(it.id, Date(), reason) }
+        val prev = consents.getActive(patientId)
+        prev?.let { consents.withdraw(it.id, Date(), reason) }
+        // ⚠ `withdraw` 是把**整列**標成撤回,而 getActive/countActiveCare 都濾 withdrawnAt IS NULL
+        //   → 只撤訓練同意會連①照護同意一起失效,病患從此不能量測(流程直接鎖死)。
+        //   雙層同意的語意是「②可撤回、①不受影響」,所以要補簽一筆保留照護、關閉訓練的紀錄。
+        //   舊紀錄仍留著(撤回留痕),稽核看得出「曾經同意訓練、何時撤回」。
+        if (prev?.consentCare == true) {
+            consents.insert(
+                ConsentEntity(
+                    patientId = patientId,
+                    consentCare = true, consentTrain = false,
+                    signaturePng = prev.signaturePng,          // 沿用同一份簽名(同一次簽署的延續)
+                    signerRole = prev.signerRole, witnessStaff = prev.witnessStaff,
+                    templateVersion = prev.templateVersion
+                )
+            )
+        }
         cases.getWdCodesByPatient(patientId)
     }
 
@@ -158,4 +174,85 @@ class CaseRepository(
 
     fun measurementsOfCase(caseId: Long) = measurements.getMeasurementsByCase(caseId)
     suspend fun measurementCount(caseId: Long) = withContext(Dispatchers.IO) { measurements.getCountByCase(caseId) }
+
+    /**
+     * 個案摘要：上次面積、與**首次**相比的變化%、距上次量測天數、總筆數。
+     *
+     * 為什麼跟首次比而不是跟上一次比：臨床看的是「這個傷口有沒有在癒合」，
+     * 那是相對於治療起點的變化；跟上一次比只反映單次波動（拍攝角度、描邊差異都會蓋過真實變化）。
+     */
+    data class CaseSummary(
+        val count: Int,
+        val lastArea: Double?,
+        val firstArea: Double?,
+        val daysSinceLast: Long?
+    ) {
+        /** 相對首次的面積變化%（負值＝縮小＝在癒合）。樣本 <2 或首次面積為 0 時回 null。 */
+        val changePct: Double?
+            get() {
+                val f = firstArea ?: return null
+                val l = lastArea ?: return null
+                if (count < 2 || f <= 0.0) return null
+                return (l - f) / f * 100.0
+            }
+    }
+
+    suspend fun caseSummary(caseId: Long): CaseSummary = withContext(Dispatchers.IO) {
+        val n = measurements.getCountByCase(caseId)
+        val last = measurements.getLatestByCase(caseId)
+        val first = measurements.getFirstByCase(caseId)
+        // coerceAtLeast(0):裝置時鐘回撥會算出負值,顯示「-3 天前」比沒有還糟
+        val days = last?.timestamp?.let {
+            ((Date().time - it.time) / (1000L * 60 * 60 * 24)).coerceAtLeast(0L)
+        }
+        CaseSummary(n, last?.estimatedArea, first?.estimatedArea, days)
+    }
+
+    /**
+     * 最近有量測活動的**開立中**個案（主畫面「最近就診」用；回診時一鍵接續）。
+     * 已結案（癒合／轉出）者不列出——否則護理師會對一個已經收掉的傷口繼續量測。
+     */
+    suspend fun recentCases(limit: Int = 10): List<WoundCaseEntity> = withContext(Dispatchers.IO) {
+        // 多取一些再過濾:結案過濾發生在 SQL LIMIT 之後,
+        // 若最近 10 個剛好都已結案,清單會整頁空白而其實還有開立中的個案。
+        measurements.getRecentCaseIds(limit * 3)
+            .mapNotNull { cases.getById(it) }
+            .filter { it.closedAt == null }
+            .take(limit)
+    }
+
+    /**
+     * 最近就診用的一列資料：個案 + 病患辨識線索 + 是否可量測（①照護同意）。
+     *
+     * 為什麼要帶病患辨識：只顯示「部位・類型 + WD-code」時，同病房兩位病患都有「薦骨・壓瘡」
+     * 就分不出是誰，而 WD-code 是隨機碼、肉眼不可辨 → 量錯個案會永久寫進錯的時間軸。
+     * 但也不能攤明文 PII，故只給**遮蔽後**的病歷號。
+     */
+    data class RecentRow(
+        val case: WoundCaseEntity,
+        val patientHint: String,
+        val canMeasure: Boolean,
+        val summary: CaseSummary
+    )
+
+    suspend fun recentRows(limit: Int = 10): List<RecentRow> = withContext(Dispatchers.IO) {
+        recentCases(limit).mapNotNull { c ->
+            val p = patients.getPatientById(c.patientId) ?: return@mapNotNull null
+            // 病歷號解不開(App 重裝→金鑰失效)時 maskMrn 會回 "—",辨識線索就沒了;
+            // 退回姓名遮蔽,再不行才用個案序號——總之不能讓兩位「薦骨・壓瘡」變得無法區分。
+            val mrn = PhiCrypto.decrypt(p.medicalRecordNumber)
+            val name = PhiCrypto.decrypt(p.name)
+            val hint = when {
+                !mrn.isNullOrBlank() -> PhiCrypto.maskMrn(mrn)
+                !name.isNullOrBlank() -> name.take(1) + "○"
+                else -> "個案 #${c.id}"
+            }
+            RecentRow(
+                case = c,
+                patientHint = hint,
+                canMeasure = consents.countActiveCare(c.patientId) > 0,
+                summary = caseSummary(c.id)
+            )
+        }
+    }
 }

@@ -53,7 +53,7 @@ fun WoundTimelineScreen(
         val areas = asc.mapNotNull { it.estimatedArea }
 
         if (asc.isEmpty()) {
-            Text("尚無紀錄。到「AI 量測驗證(模擬)」量測後,按「存入個案時間軸」即可累積。",
+            Text("尚無紀錄。由主畫面「個案」選定傷口個案 → 量測 → 按「存入個案時間軸」即可累積。",
                 style = MaterialTheme.typography.bodyMedium)
         } else {
             if (areas.size >= 2 && areas.first() > 0.0) {

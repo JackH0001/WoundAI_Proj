@@ -1,5 +1,6 @@
 package com.woundmeasurement.app.pipeline
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -24,7 +25,14 @@ import kotlinx.coroutines.withContext
 @Composable
 fun MeasureValidationEntry(
     backendBaseUrl: String = "http://10.0.2.2:5000",
-    onBack: () -> Unit = {}
+    onBack: () -> Unit = {},
+    /**
+     * true＝**臨床量測**：由個案進入，`source` 鎖定 `clinical` 且不再詢問（已選個案就不可能是範例）。
+     * false＝**快速量測**：不綁個案，只做範例/模擬圖驗證與檢錯，**隱藏「臨床」選項**——
+     * 沒有個案的臨床樣本就是孤兒紀錄，從入口擋掉比事後提示有效。
+     */
+    clinicalMode: Boolean = false,
+    initialCase: com.woundmeasurement.app.data.entity.WoundCaseEntity? = null
 ) {
     val ctx = LocalContext.current
     val db = remember { WoundMeasurementDatabase.getDatabase(ctx) }
@@ -37,11 +45,14 @@ fun MeasureValidationEntry(
     var modelState by remember { mutableStateOf("端上模型載入中…") }
     var editing by remember { mutableStateOf(false) }
     var exudate by remember { mutableStateOf<Int?>(null) }
-    // 樣本來源:載入影像前就要選(決定分割走 AI 還是色彩法),送出標註時沿用同一個值
-    var source by rememberSaveable { mutableStateOf<String?>(null) }
+    // 樣本來源:載入影像前就要選(決定分割走 AI 還是色彩法),送出標註時沿用同一個值。
+    // 臨床模式直接鎖 clinical——已經從個案進來了,再問一次只是多一個選錯的機會。
+    var source by rememberSaveable { mutableStateOf<String?>(if (clinicalMode) "clinical" else null) }
     // Sprint N1:選定的傷口個案與其同意紀錄。臨床收案必須先選個案,
     // 否則量測存不進正確的時間軸、送出的 code 也不穩定(回診串不起來)。
-    var case by remember { mutableStateOf<com.woundmeasurement.app.data.entity.WoundCaseEntity?>(null) }
+    // rememberSaveable:轉螢幕若丟了「切換後的個案」,會悄悄換回進來時那個,接著存檔就寫進錯的時間軸
+    var case by rememberSaveable { mutableStateOf(initialCase) }
+    // 同意一律從 DB 重讀(見下方 LaunchedEffect),不由呼叫端傳入——傳進來的只會是可能過期的快照
     var consent by remember { mutableStateOf<com.woundmeasurement.app.data.entity.ConsentEntity?>(null) }
     var managingCase by remember { mutableStateOf(false) }
 
@@ -58,6 +69,33 @@ fun MeasureValidationEntry(
         // 故「不自動載入」;demo 走後端(不需原生庫)。端上點亮待實機(或加 16KB 對齊庫)驗證。
         modelState = "端上模型:未自動載入(避免模擬器原生庫閃退;demo 走後端模式)"
     }
+
+    var consentLoaded by remember { mutableStateOf(false) }
+    // 同意狀態一律從 DB 重讀。key 除了 case 還要帶 managingCase——
+    // 否則「進量測 → 切換個案頁把同意撤回 → 返回」時 case 沒變、key 沒變,
+    // consent 就是舊快照,閘門會用已撤回的同意繼續放行。
+    LaunchedEffect(case?.id, managingCase) {
+        val c = case
+        if (c != null && !managingCase) {
+            consentLoaded = false
+            // Room/Keystore 例外若不攔會沿 composition 炸掉整個 App,且畫面無線索。
+            // catch 內一律 fail-closed(consent=null → 閘門關閉),不可反過來放行。
+            consent = try { repo.activeConsent(c.patientId) } catch (e: Exception) { null }
+            consentLoaded = true
+        }
+    }
+
+    // ①照護同意是量測的硬前提（`IRB_consent_templates.md:23`）。沒有它連拍照都不該讓按。
+    val careOk = case != null && consentLoaded &&
+        consent?.consentCare == true && consent?.withdrawnAt == null
+
+    // ⚠ 這裡**刻意不做任何釋放**,兩條都試過而且都更糟:
+    //   (a) `seg.release()` 會 close 掉 **process 級**的 OrtEnvironment 單例 →
+    //       反覆進出量測頁等於把整個 App 的 ORT 環境關掉;
+    //   (b) `viewModelScope.cancel()` 會連**存檔與送標註**一起殺掉 →
+    //       醫師按完「存入時間軸」立刻返回,Room 寫入被取消、紀錄靜默消失、畫面已離開連錯誤都看不到。
+    // 殘留的成本只是一個 ViewModel 隨 composition 被 GC;正解是改用 `viewModel()` 讓
+    // onCleared() 自動處理,但那要先補 lifecycle-viewmodel-compose 相依,列為後續。
 
     val st by vm.state.collectAsState()
     // 重要狀態(✅/ℹ️/⚠️)改彈出視窗,點「確認」才關閉
@@ -77,11 +115,24 @@ fun MeasureValidationEntry(
             text = { Text(msg) }
         )
     }
+    // 子畫面各自吃返回鍵:沒有這些的話,在修邊頁按系統返回會直接跳出整個量測流程,
+    // 醫師手畫的遮罩全丟且沒有任何確認。
+    var confirmDiscardEdit by remember { mutableStateOf(false) }
+    BackHandler(enabled = editing || managingCase) {
+        if (editing) confirmDiscardEdit = true else managingCase = false
+    }
+    if (confirmDiscardEdit) AlertDialog(
+        onDismissRequest = { confirmDiscardEdit = false },
+        title = { Text("放棄修邊?") },
+        text = { Text("尚未按「完成修邊」,目前的筆畫會全部捨棄。") },
+        confirmButton = { TextButton({ confirmDiscardEdit = false; editing = false }) { Text("放棄") } },
+        dismissButton = { TextButton({ confirmDiscardEdit = false }) { Text("繼續修邊") } }
+    )
     val eb = vm.lastBitmap
     if (managingCase) {
         CaseSelectScreen(
             repo = repo,
-            onCaseChosen = { c, cs -> case = c; consent = cs; source = "clinical"; managingCase = false },
+            onCaseChosen = { c -> case = c; source = "clinical"; managingCase = false },
             onBack = { managingCase = false }
         )
     } else if (editing && eb != null) {
@@ -108,18 +159,20 @@ fun MeasureValidationEntry(
             Text(loginState, style = MaterialTheme.typography.bodySmall)
             Text(modelState, style = MaterialTheme.typography.bodySmall)
 
-            // ---- Sprint N1:個案綁定列 ----
-            Divider()
-            Text(
-                case?.let { "個案:${it.bodySite}・${it.woundType}  ${it.wdCode}" +
-                        (if (consent?.trainEffective == true) "  訓練同意✓" else "  訓練同意✗(不可送標註)") }
-                    ?: "個案:未選(臨床收案請先選個案;範例/模擬圖可略過)",
-                style = MaterialTheme.typography.bodySmall,
-                color = if (case == null) MaterialTheme.colorScheme.onSurfaceVariant
-                        else MaterialTheme.colorScheme.primary
-            )
-            OutlinedButton({ managingCase = true }, Modifier.fillMaxWidth()) {
-                Text(if (case == null) "個案管理（病患・同意書・傷口個案）" else "切換個案")
+            // ---- 個案綁定列（臨床模式常駐；快速量測不顯示，因為它本來就不綁個案）----
+            if (clinicalMode) {
+                Divider()
+                Text(
+                    case?.let { "個案:${it.bodySite}・${it.woundType}  ${it.wdCode}" +
+                            (if (consent?.trainEffective == true) "  訓練同意✓" else "  訓練同意✗(不可送標註)") }
+                        ?: "⚠ 未選個案:臨床量測必須先選,否則紀錄無法歸戶、代碼也不穩定",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (case == null) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.primary
+                )
+                OutlinedButton({ managingCase = true }, Modifier.fillMaxWidth()) {
+                    Text(if (case == null) "選擇個案" else "切換個案")
+                }
             }
 
             // 選了模擬圖卻沒走到色彩分割 → 後端沒收到/不認得 seg=color,幾乎一定是**後端沒重啟**
@@ -148,9 +201,27 @@ fun MeasureValidationEntry(
                 // AI 空遮罩(如印刷OOD/難例全失敗)也可進修邊:醫師從零手畫,ArUco 尺度(mm/px)仍有效
                 onReview = { if (vm.lastBitmap != null) editing = true },
                 // 量測綁個案 → 時間軸才畫得出單一傷口的癒合曲線
-                onSaveToTimeline = { vm.saveToTimeline(dao, exudate, case, source) },
+                onSaveToTimeline = {
+                    // 存檔同樣受①照護同意管:載入影像後才去撤回同意的話,
+                    // 只擋「載入」那一步是攔不住的(影像已經在手上了)。
+                    if (clinicalMode && !careOk)
+                        vm.reportSubmitBlocked("⚠️ 此病患未取得①照護同意(或已撤回),不得存入病歷")
+                    else vm.saveToTimeline(dao, exudate, case, source)
+                },
                 exudate = exudate, onExudate = { exudate = it },
-                source = source, onSource = { source = it }
+                // 臨床模式 source 已鎖定 → 傳 onSource=null 讓選擇器整組隱藏（少一次必選、也少一次選錯）
+                source = source, onSource = if (clinicalMode) null else ({ s: String -> source = s }),
+                allowClinicalSource = clinicalMode,   // 快速量測不得產生臨床樣本(沒有個案就是孤兒紀錄)
+                // ⚠ 同意閘門放在「真的會產生資料的那一步」,不是只放在入口——
+                // 只擋入口的話,任何新入口(例如最近就診)都可能繞過去。
+                measureEnabled = !clinicalMode || careOk,
+                disabledReason = when {
+                    !clinicalMode -> null
+                    case == null -> "⚠ 請先選擇傷口個案"
+                    // 載入完成前不要指控「未取得同意」——擋住是對的,但訊息是假的
+                    !consentLoaded -> "同意狀態載入中…"
+                    else -> "⚠ 此病患尚未取得①照護同意（或已撤回），不得進行量測。請至個案管理簽署。"
+                }
             )
             // 飛輪送出:滲液已填 + 上一步(修邊確認或存檔)完成後才自動顯示
             if (st.result != null) {

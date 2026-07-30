@@ -1,5 +1,6 @@
 package com.woundmeasurement.app.pipeline
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -26,14 +27,19 @@ import kotlinx.coroutines.launch
 @Composable
 fun CaseSelectScreen(
     repo: CaseRepository,
-    onCaseChosen: (WoundCaseEntity, ConsentEntity?) -> Unit,
-    onBack: () -> Unit = {}
+    /** 選定個案。**刻意不回傳同意**:同意是閘門條件,由使用端從 DB 重讀,傳遞只會多一份過期快照。 */
+    onCaseChosen: (WoundCaseEntity) -> Unit,
+    onBack: () -> Unit = {},
+    /** 開啟該個案的時間軸（只畫這個傷口的癒合曲線）。null 則不顯示時間軸按鈕。 */
+    onTimeline: ((WoundCaseEntity) -> Unit)? = null
 ) {
     val scope = rememberCoroutineScope()
     var patients by remember { mutableStateOf<List<PatientEntity>>(emptyList()) }
     var selected by remember { mutableStateOf<PatientEntity?>(null) }
     var consent by remember { mutableStateOf<ConsentEntity?>(null) }
     var cases by remember { mutableStateOf<List<WoundCaseEntity>>(emptyList()) }
+    // 個案摘要(上次面積/變化%/天數):醫護真正要的決策資訊,只有部位＋代碼看不出傷口在不在癒合
+    var summaries by remember { mutableStateOf<Map<Long, CaseRepository.CaseSummary>>(emptyMap()) }
     var signing by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf<String?>(null) }
 
@@ -48,9 +54,16 @@ fun CaseSelectScreen(
         selected = p
         consent = repo.activeConsent(p.id)
         cases = repo.openCases(p.id)
+        summaries = cases.associate { it.id to repo.caseSummary(it.id) }
     }
 
-    LaunchedEffect(Unit) { patients = repo.listPatients() }
+    LaunchedEffect(Unit) {
+        // Keystore 失效/DB 損毀會從這裡拋,不攔會炸掉整個 App 且畫面無線索
+        try { patients = repo.listPatients() } catch (e: Exception) { msg = "⚠ 讀取病患失敗:${e.message}" }
+    }
+
+    // 簽名頁自己吃返回鍵:否則簽到一半按返回會直接跳出整個個案管理
+    BackHandler(enabled = signing) { signing = false }
 
     if (signing && selected != null) {
         ConsentSignatureScreen(
@@ -58,10 +71,13 @@ fun CaseSelectScreen(
             onCancel = { signing = false },
             onSigned = { care, train, png ->
                 scope.launch {
-                    repo.signConsent(selected!!.id, care, train, png)
-                    reloadPatient(selected!!)
-                    signing = false
-                    msg = "✅ 同意書已簽署（照護${if (care) "✓" else "✗"}・訓練${if (train) "✓" else "✗"}）"
+                    // signConsent → PhiCrypto.encryptBytes 會主動拋(刻意的:不默默存明文簽名)
+                    try {
+                        repo.signConsent(selected!!.id, care, train, png)
+                        reloadPatient(selected!!)
+                        signing = false
+                        msg = "✅ 同意書已簽署（照護${if (care) "✓" else "✗"}・訓練${if (train) "✓" else "✗"}）"
+                    } catch (e: Exception) { msg = "⚠ 簽署失敗:${e.message}"; signing = false }
                 }
             }
         )
@@ -80,9 +96,9 @@ fun CaseSelectScreen(
         Text("病患", style = MaterialTheme.typography.titleSmall)
         patients.forEach { p ->
             val sel = selected?.id == p.id
-            if (sel) Button({ scope.launch { reloadPatient(p) } }, Modifier.fillMaxWidth()) {
+            if (sel) Button({ scope.launch { runCatching { reloadPatient(p) } } }, Modifier.fillMaxWidth()) {
                 Text("${p.name}  ${PhiCrypto.maskMrn(p.medicalRecordNumber)}")
-            } else OutlinedButton({ scope.launch { reloadPatient(p) } }, Modifier.fillMaxWidth()) {
+            } else OutlinedButton({ scope.launch { runCatching { reloadPatient(p) } } }, Modifier.fillMaxWidth()) {
                 Text("${p.name}  ${PhiCrypto.maskMrn(p.medicalRecordNumber)}")
             }
         }
@@ -144,10 +160,12 @@ fun CaseSelectScreen(
             OutlinedButton(
                 onClick = {
                     scope.launch {
+                        try {
                         val codes = repo.withdrawTraining(p.id, "病患要求")
                         reloadPatient(p)
                         msg = "已撤回訓練同意。⚠ 尚須對後端撤回這些代碼:${codes.joinToString()}" +
                               "(本機留痕只是一半,雲端沒排除的話資料照樣會進訓練集)"
+                        } catch (e: Exception) { msg = "⚠ 撤回失敗:${e.message}" }
                     }
                 },
                 modifier = Modifier.fillMaxWidth()
@@ -162,11 +180,37 @@ fun CaseSelectScreen(
                 color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
         cases.forEach { c ->
-            OutlinedButton(
-                onClick = { onCaseChosen(c, consent) },
-                enabled = care,
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("${c.bodySite}・${c.woundType}   ${c.wdCode}") }
+            val s = summaries[c.id]
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                OutlinedButton(
+                    onClick = { onCaseChosen(c) },
+                    enabled = care,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("${c.bodySite}・${c.woundType}   ${c.wdCode}") }
+                // 決策資訊:上次面積、相對首次的變化(負=縮小=在癒合)、距上次天數
+                Text(
+                    if (s == null || s.count == 0) "  尚無量測"
+                    else buildString {
+                        append("  上次 ")
+                        append(s.lastArea?.let { "%.2f cm²".format(it) } ?: "—")
+                        s.changePct?.let { append("・較首次 %+.0f%%".format(it)) }
+                        s.daysSinceLast?.let { append("・$it 天前") }
+                        append("・共 ${s.count} 次")
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = when {
+                        s?.changePct == null -> MaterialTheme.colorScheme.onSurfaceVariant
+                        s.changePct!! < -10 -> MaterialTheme.colorScheme.primary       // 明顯縮小
+                        s.changePct!! > 10 -> MaterialTheme.colorScheme.error          // 明顯變大
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                )
+                if (onTimeline != null && (s?.count ?: 0) > 0) {
+                    TextButton({ onTimeline(c) }, Modifier.fillMaxWidth()) {
+                        Text("查看此傷口時間軸")
+                    }
+                }
+            }
         }
         if (cases.isEmpty() && care) Text("(尚無開立中的傷口個案)",
             style = MaterialTheme.typography.bodySmall,
@@ -179,9 +223,13 @@ fun CaseSelectScreen(
         Button(
             onClick = {
                 scope.launch {
-                    val c = repo.createCase(p.id, site.trim(), wtype.trim())
-                    cases = repo.openCases(p.id); site = ""; wtype = ""
-                    msg = "✅ 已建立個案 ${c.wdCode}(此代碼固定不變,回診沿用同一組)"
+                    // createCase 在 WD-code 連續碰撞時會主動拋
+                    try {
+                        val c = repo.createCase(p.id, site.trim(), wtype.trim())
+                        reloadPatient(p)   // cases 與 summaries 同進同出,避免兩者不同步
+                        site = ""; wtype = ""
+                        msg = "✅ 已建立個案 ${c.wdCode}(此代碼固定不變,回診沿用同一組)"
+                    } catch (e: Exception) { msg = "⚠ 建立個案失敗:${e.message}" }
                 }
             },
             enabled = care && site.isNotBlank() && wtype.isNotBlank(),

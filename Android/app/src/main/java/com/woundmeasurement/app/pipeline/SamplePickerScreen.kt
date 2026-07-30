@@ -31,7 +31,17 @@ fun SamplePickerScreen(
     exudate: Int? = null,
     onExudate: ((Int) -> Unit)? = null,
     source: String? = null,                        // 樣本來源(分析前就要決定,見下方說明)
-    onSource: ((String) -> Unit)? = null
+    /** null＝來源已由呼叫端鎖定(臨床模式),整組選擇器隱藏。 */
+    onSource: ((String) -> Unit)? = null,
+    /** false＝隱藏「臨床」選項。快速量測沒有個案,產生的臨床樣本一律是孤兒紀錄。 */
+    allowClinicalSource: Boolean = true,
+    /**
+     * false＝停用載入影像(相簿/檔案/拍照)。臨床模式在**未取得①照護同意**時必須為 false——
+     * 只靠入口擋不夠：閘門要放在「真的會產生資料的那一步」，否則任何新入口都可能繞過去。
+     */
+    measureEnabled: Boolean = true,
+    /** measureEnabled=false 時顯示的原因。 */
+    disabledReason: String? = null
 ) {
     val ctx = LocalContext.current
     // 模式:false=端上、true=後端。有後端時預設走後端(端上 ONNX 原生庫在模擬器可能不相容)
@@ -78,12 +88,20 @@ fun SamplePickerScreen(
         // 放到送出前才問會太晚(那時已經用錯的分割跑完了),也會讓人重複選兩次。
         if (onSource != null) {
             Text("樣本來源(必選)", style = MaterialTheme.typography.bodySmall)
+            val opts = buildList {
+                if (allowClinicalSource) add("clinical" to "臨床")
+                add("sample" to "範例"); add("phantom" to "模擬圖")
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                listOf("clinical" to "臨床", "sample" to "範例", "phantom" to "模擬圖").forEach { (v, label) ->
+                opts.forEach { (v, label) ->
                     if (source == v) Button({ onSource(v) }, Modifier.weight(1f)) { Text(label) }
                     else OutlinedButton({ onSource(v) }, Modifier.weight(1f)) { Text(label) }
                 }
             }
+            if (!allowClinicalSource) Text(
+                "（快速量測不提供「臨床」：沒有個案綁定的臨床紀錄無法歸戶，請由主畫面「個案」進入）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(when (source) {
                 "clinical" -> "真實病人傷口 · AI 分割 · 計入臨床收案進度"
                 "sample" -> "範例/示範圖 · AI 分割 · 不計入臨床樣本數"
@@ -94,13 +112,16 @@ fun SamplePickerScreen(
                         else MaterialTheme.colorScheme.onSurfaceVariant)
         }
 
+        if (!measureEnabled && disabledReason != null) Text(
+            disabledReason, style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error)
+
+        val canLoad = measureEnabled && (onSource == null || source != null)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button({ pickGallery.launch("image/*") }, Modifier.weight(1f),
-                enabled = onSource == null || source != null) { Text("相簿") }
-            OutlinedButton({ pickFile.launch(arrayOf("image/*")) }, Modifier.weight(1f),
-                enabled = onSource == null || source != null) { Text("檔案") }
-            OutlinedButton({ takePhoto.launch(null) }, Modifier.weight(1f),
-                enabled = onSource == null || source != null) { Text("拍照") }
+            // 臨床現場以「拍照」為主(現場拍攝是常態,事後從相簿補件有壓縮/裁切破壞尺度的風險)
+            Button({ takePhoto.launch(null) }, Modifier.weight(1f), enabled = canLoad) { Text("拍照") }
+            OutlinedButton({ pickGallery.launch("image/*") }, Modifier.weight(1f), enabled = canLoad) { Text("相簿") }
+            OutlinedButton({ pickFile.launch(arrayOf("image/*")) }, Modifier.weight(1f), enabled = canLoad) { Text("檔案") }
         }
         Text("「檔案」可瀏覽 Download 等資料夾(拖入模擬器的新圖選這個;相簿只列已入媒體庫的照片)",
             style = MaterialTheme.typography.bodySmall,

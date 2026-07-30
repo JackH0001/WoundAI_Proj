@@ -1,9 +1,11 @@
 package com.woundmeasurement.app.data.entity
 
+import android.os.Parcelable
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import kotlinx.parcelize.Parcelize
 import java.security.SecureRandom
 import java.util.Date
 
@@ -26,6 +28,7 @@ import java.util.Date
     )],
     indices = [Index(value = ["wdCode"], unique = true), Index("patientId")]
 )
+@Parcelize
 data class WoundCaseEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,
@@ -38,7 +41,7 @@ data class WoundCaseEntity(
     val createdAt: Date = Date(),
     val closedAt: Date? = null,    // 結案(癒合/轉出)
     val notes: String? = null      // 建議記紙本同意書編號,雙軌保險
-) {
+) : Parcelable {
     companion object {
         /**
          * 產生穩定且不易碰撞的 WD-code。
