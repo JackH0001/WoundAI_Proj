@@ -180,7 +180,7 @@ class AdaptiveSegmentationModule: ObservableObject {
         ])
         
         // 光照不均校正
-        let illuminationCorrected = try await correctUneven Illumination(contrastEnhanced)
+        let illuminationCorrected = try await correctUnevenIllumination(contrastEnhanced)
         
         // 噪點抑制
         let denoised = illuminationCorrected.applyingFilter("CINoiseReduction", parameters: [

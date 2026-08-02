@@ -34,7 +34,7 @@ class CloudLocalAlgorithmAnalyzer: ObservableObject {
         let imageName: String
         let analysisDate: Date
         let differences: [DifferenceAnalysis]
-        case overallRecommendation: String
+        let overallRecommendation: String
         let localAdvantages: [String]
         let cloudAdvantages: [String]
         let hybridApproach: String
