@@ -14,7 +14,7 @@ class RealTimeAnalysisModule: ObservableObject {
     private let context = CIContext()
     
     // 校正結果
-    var calibrationResult: CalibrationResult?
+    var calibrationResult: RulerCalibrationResult?
     
     // 即時分析設定
     private var analysisInterval: TimeInterval = 0.8 // 起始間隔（秒）
@@ -397,11 +397,8 @@ struct ShoelaceResult {
     let pointCount: Int
 }
 
-enum ImageJError: Error {
-    case invalidImage
-    case processingFailed
-    case noContoursFound
-}
+// 已移除：ImageJError —— 權威版本在 Modules/ImageJHeadlessProcessor.swift，
+// 且已把本處獨有的 .noContoursFound 併入該版本（聯集，不遺失任何 case）。
 
 // MARK: - 支援結構
 

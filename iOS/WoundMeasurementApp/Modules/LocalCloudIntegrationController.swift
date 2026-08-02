@@ -559,7 +559,7 @@ struct IntegrationResult {
 }
 
 struct SystemRecommendation {
-    let category: RecommendationCategory
+    let category: IntegrationRecommendationCategory
     let priority: PriorityLevel
     let title: String
     let description: String
@@ -567,7 +567,7 @@ struct SystemRecommendation {
     let expectedImprovement: Double
 }
 
-enum RecommendationCategory {
+enum IntegrationRecommendationCategory {
     case accuracy, performance, medicalCompliance, safety, optimization
 }
 

@@ -441,7 +441,7 @@ class AdvancedMLClassificationModule: ObservableObject {
         
         if boundaryAgreement > 0.8 && pixelAgreement > 0.85 {
             // 高一致性：取交集
-            conflictResolution = .intersection
+            conflictResolution = .intersectionOnlyOnlyOnly
             finalSegmentation = try createIntersectionMask(uwmResult.segmentationMask, deepskinResult.segmentationMask)
             consensusConfidence = min(uwmResult.confidence, deepskinResult.confidence) * 1.1
             
@@ -670,118 +670,11 @@ class AdvancedMLClassificationModule: ObservableObject {
 }
 
 // MARK: - 支援資料結構
-
-enum TissueType: String, CaseIterable, Identifiable {
-    case granulation = "granulation"      // 肉芽組織
-    case necrotic = "necrotic"           // 壞死組織  
-    case epithelial = "epithelial"       // 上皮組織
-    case slough = "slough"               // 腐肉組織
-    case healthySkin = "healthy_skin"    // 健康皮膚
-    case exudate = "exudate"             // 滲出物
-    
-    var id: String { rawValue }
-    
-    var displayName: String {
-        switch self {
-        case .granulation: return "肉芽組織"
-        case .necrotic: return "壞死組織"
-        case .epithelial: return "上皮組織"
-        case .slough: return "腐肉組織"
-        case .healthySkin: return "健康皮膚"
-        case .exudate: return "滲出物"
-        }
-    }
-    
-    var healthScore: Double {
-        switch self {
-        case .epithelial: return 1.0      // 最健康
-        case .granulation: return 0.8     // 癒合中
-        case .healthySkin: return 0.9     // 健康
-        case .slough: return 0.4          // 需清創
-        case .necrotic: return 0.1        // 需緊急處理
-        case .exudate: return 0.6         // 感染風險
-        }
-    }
-}
-
-enum TissueColor: String {
-    case red = "red"           // 紅色（肉芽）
-    case pink = "pink"         // 粉紅（上皮）
-    case yellow = "yellow"     // 黃色（腐肉）
-    case black = "black"       // 黑色（壞死）
-    case white = "white"       // 白色（纖維）
-    case green = "green"       // 綠色（感染）
-}
-
-enum VascularityLevel: String {
-    case none = "none"
-    case minimal = "minimal"
-    case moderate = "moderate"
-    case abundant = "abundant"
-}
-
-struct TextureAnalysis {
-    let entropy: Double        // 熵值
-    let contrast: Double       // 對比度
-    let homogeneity: Double    // 同質性
-    let roughness: Double      // 粗糙度
-}
-
-enum HealingStage: String {
-    case inflammatory = "inflammatory"     // 發炎階段
-    case proliferative = "proliferative"  // 增殖階段
-    case remodeling = "remodeling"        // 重塑階段
-    case chronic = "chronic"              // 慢性不癒合
-    case infected = "infected"            // 感染
-}
-
-struct WoundRiskAssessment {
-    let infectionRisk: Double      // 感染風險 0-1
-    let healingPrognosis: Double   // 癒合預後 0-1
-    let treatmentUrgency: Double   // 治療緊急度 0-1
-    let riskFactors: [String]      // 風險因子列表
-    let recommendations: [String]   // 建議事項
-}
-
-enum RecommendedAction {
-    case acceptResult
-    case reviewResult
-    case retakeImage
-    case consultSpecialist
-}
-
-enum ConflictResolutionMethod {
-    case intersection      // 取交集
-    case union            // 取聯集
-    case weightedAverage  // 加權平均
-    case preferPrimary    // 偏好主模型
-    case preferSecondary  // 偏好次模型
-}
-
-enum MLError: LocalizedError {
-    case modelNotLoaded(String)
-    case imagePreprocessingFailed
-    case invalidModelOutput
-    case imageProcessingFailed
-    case tensorProcessingFailed
-    
-    var errorDescription: String? {
-        switch self {
-        case .modelNotLoaded(let modelName):
-            return "\(modelName)模型未正確載入"
-        case .imagePreprocessingFailed:
-            return "影像預處理失敗"
-        case .invalidModelOutput:
-            return "模型輸出格式錯誤"
-        case .imageProcessingFailed:
-            return "影像處理失敗"
-        case .tensorProcessingFailed:
-            return "張量處理失敗"
-        }
-    }
-}
-
-// MARK: - UIImage擴展
+// 已移除：TissueType / TissueColor / VascularityLevel / TextureAnalysis /
+//        HealingStage / WoundRiskAssessment / RecommendedAction /
+//        ConflictResolutionMethod / MLError
+// 這些型別的權威定義在 WoundMeasurementApp/Models/（SSOT）。此處原本各自
+// 重複宣告一份，在單一 module 的 Swift 專案中會直接造成 Invalid redeclaration。
 
 extension UIImage {
     func calculateArea() -> Double {

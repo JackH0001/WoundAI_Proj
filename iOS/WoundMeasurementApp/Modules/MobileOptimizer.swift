@@ -543,7 +543,7 @@ enum SuggestedFix {
 struct OptimizationStrategy {
     let components: [StrategyComponent]
     let expectedImprovementFactor: Double
-    let implementationComplexity: ComplexityLevel
+    let implementationComplexity: ImplementationComplexity
     let riskAssessment: RiskLevel
     let deviceCompatibility: CompatibilityLevel
 }
@@ -578,13 +578,11 @@ enum ImplementationMethod {
     case thermalThrottling
 }
 
-enum ComplexityLevel {
+enum ImplementationComplexity {
     case simple, moderate, complex, veryComplex
 }
 
-enum RiskLevel {
-    case low, medium, high
-}
+// 已移除：RiskLevel —— 權威版本在 Models/WoundTypes.swift。
 
 enum CompatibilityLevel {
     case universal, limited, deviceSpecific

@@ -326,7 +326,7 @@ class MobileImageProcessor: ObservableObject {
         )
     }
     
-    private func simulateMobileDepthCalibration(_ depthData: Data, roi: CGRect) -> CalibrationData? {
+    private func simulateMobileDepthCalibration(_ depthData: Data, roi: CGRect) -> MobileCalibrationData? {
         guard !depthData.isEmpty else { return nil }
         
         // 模擬行動端深度校正計算
@@ -340,7 +340,7 @@ class MobileImageProcessor: ObservableObject {
         // 基於平均深度估算像素比例 (pixels per mm)
         let estimatedPixelsPerMM = calculatePixelsPerMM(at: averageDepth)
         
-        return CalibrationData(
+        return MobileCalibrationData(
             pixelPerMM: estimatedPixelsPerMM,
             distanceToSubject: averageDepth,
             confidence: 0.7,
@@ -464,10 +464,10 @@ enum ImageFormat {
 struct ROIDetectionResult {
     let roi: CGRect
     let confidence: Double
-    let calibrationData: CalibrationData?
+    let calibrationData: MobileCalibrationData?
 }
 
-struct CalibrationData {
+struct MobileCalibrationData {
     let pixelPerMM: Double
     let distanceToSubject: Double
     let confidence: Double

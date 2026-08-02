@@ -211,6 +211,7 @@
 		A1SERV002_BUILD /* PDFReportGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1SERV002 /* PDFReportGenerator.swift */; };
 		A1SERV003_BUILD /* EnhancedPerformanceMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1SERV003 /* EnhancedPerformanceMonitor.swift */; };
 		A1VIEW001 /* AnnotationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FILE001 /* AnnotationView.swift */; };
+		SHIMGP_BUILD /* ImagePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = SHIMGP_REF /* ImagePicker.swift */; };
 		A1VIEW002 /* AnalysisHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FILE002 /* AnalysisHistoryView.swift */; };
 		A1VIEW003 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FILE003 /* SettingsView.swift */; };
 		A1VIEW004 /* WoundVisualizationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FILE004 /* WoundVisualizationView.swift */; };
@@ -268,8 +269,6 @@
 		B1VW009_BUILD /* PerformanceDashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1VW009_REF /* PerformanceDashboardView.swift */; };
 		B1VW010_BUILD /* StandardStickerCalibrationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1VW010_REF /* StandardStickerCalibrationView.swift */; };
 		B1VW011_BUILD /* Wound3DVisualizationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1VW011_REF /* Wound3DVisualizationView.swift */; };
-		B1OCV001_BUILD /* OpenCVSwiftBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1OCV001_REF /* OpenCVSwiftBridge.swift */; };
-		B1ANL001_BUILD /* ExecuteAnalysisReport.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1ANL001_REF /* ExecuteAnalysisReport.swift */; };
 		B1ANL002_BUILD /* ExecuteRealDataAnalysis.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1ANL002_REF /* ExecuteRealDataAnalysis.swift */; };
 		B1UTL001_BUILD /* AreaCalibrationHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1UTL001_REF /* AreaCalibrationHelper.swift */; };
 		B1UTL002_BUILD /* SimulatedAnalysisExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1UTL002_REF /* SimulatedAnalysisExecutor.swift */; };
@@ -320,6 +319,7 @@
 		3D4B7A662B1234567890AAA /* ARSessionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARSessionManager.swift; sourceTree = "<group>"; };
 		A1CDMODELVER /* WoundMeasurementModel.xcdatamodel */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodel; path = WoundMeasurementModel.xcdatamodel; sourceTree = "<group>"; };
 		A1FILE001 /* AnnotationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnnotationView.swift; sourceTree = "<group>"; };
+		SHIMGP_REF /* ImagePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImagePicker.swift; sourceTree = "<group>"; };
 		A1FILE002 /* AnalysisHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisHistoryView.swift; sourceTree = "<group>"; };
 		A1FILE003 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A1FILE004 /* WoundVisualizationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WoundVisualizationView.swift; sourceTree = "<group>"; };
@@ -382,8 +382,6 @@
 		B1VW009_REF /* PerformanceDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceDashboardView.swift; sourceTree = "<group>"; };
 		B1VW010_REF /* StandardStickerCalibrationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StandardStickerCalibrationView.swift; sourceTree = "<group>"; };
 		B1VW011_REF /* Wound3DVisualizationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wound3DVisualizationView.swift; sourceTree = "<group>"; };
-		B1OCV001_REF /* OpenCVSwiftBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenCVSwiftBridge.swift; sourceTree = "<group>"; };
-		B1ANL001_REF /* ExecuteAnalysisReport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecuteAnalysisReport.swift; sourceTree = "<group>"; };
 		B1ANL002_REF /* ExecuteRealDataAnalysis.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecuteRealDataAnalysis.swift; sourceTree = "<group>"; };
 		B1UTL001_REF /* AreaCalibrationHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AreaCalibrationHelper.swift; sourceTree = "<group>"; };
 		B1UTL002_REF /* SimulatedAnalysisExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatedAnalysisExecutor.swift; sourceTree = "<group>"; };
@@ -530,7 +528,6 @@
 		B1ANLGRP /* Analysis */ = {
 			isa = PBXGroup;
 			children = (
-				B1ANL001_REF /* ExecuteAnalysisReport.swift */,
 				B1ANL002_REF /* ExecuteRealDataAnalysis.swift */,
 			);
 			path = Analysis;
@@ -558,7 +555,6 @@
 			children = (
 				A1OCVREFH /* OpenCVCircleDetector.h */,
 				A1OCVREFMM /* OpenCVCircleDetector.mm */,
-				B1OCV001_REF /* OpenCVSwiftBridge.swift */,
 			);
 			path = OpenCV;
 			sourceTree = "<group>";
@@ -578,7 +574,16 @@
 			path = Services;
 			sourceTree = "<group>";
 		};
+		SHAREDGRP /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				SHIMGP_REF /* ImagePicker.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
 		A1VIEWGRP /* Views */ = {
+				SHAREDGRP /* Shared */,
 			isa = PBXGroup;
 			children = (
 				FLYDEMO_REF /* FlywheelDemoView.swift */,
@@ -703,6 +708,7 @@
 				3D4B7A442B1234567890123 /* WoundMeasurementModel.xcdatamodeld in Sources */,
 				3D4B7A2C2B1234567890123 /* ContentView.swift in Sources */,
 				A1VIEW001 /* AnnotationView.swift in Sources */,
+				SHIMGP_BUILD /* ImagePicker.swift in Sources */,
 				3D4B7A382B1234567890123 /* CaptureModule.swift in Sources */,
 				3D4B7A3A2B1234567890123 /* PreProcessingModule.swift in Sources */,
 				3D4B7A3C2B1234567890123 /* QAFilterModule.swift in Sources */,
@@ -785,8 +791,6 @@
 				B1VW009_BUILD /* PerformanceDashboardView.swift in Sources */,
 				B1VW010_BUILD /* StandardStickerCalibrationView.swift in Sources */,
 				B1VW011_BUILD /* Wound3DVisualizationView.swift in Sources */,
-				B1OCV001_BUILD /* OpenCVSwiftBridge.swift in Sources */,
-				B1ANL001_BUILD /* ExecuteAnalysisReport.swift in Sources */,
 				B1ANL002_BUILD /* ExecuteRealDataAnalysis.swift in Sources */,
 				B1UTL001_BUILD /* AreaCalibrationHelper.swift in Sources */,
 				B1UTL002_BUILD /* SimulatedAnalysisExecutor.swift in Sources */,

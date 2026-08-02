@@ -259,7 +259,7 @@ class CloudResultComparator: ObservableObject {
     private func generateEstimatedBJWATResults(imageSignature: String) async throws -> BJWATResults {
         // 基於BJWAT評估標準生成估算值
         return BJWATResults(
-            woundType: .chronicUlcer,
+            woundType: .chronic,
             severity: .moderate,
             confidence: 0.82,
             clinicalValidation: generateBJWATClinicalValidation(),
@@ -270,7 +270,7 @@ class CloudResultComparator: ObservableObject {
     private func generateEstimatedRevPWATResults(imageSignature: String) async throws -> RevPWATResults {
         // 基於revPWAT評估標準生成估算值
         return RevPWATResults(
-            healingStage: .proliferation,
+            healingStage: .proliferative,
             measuredArea: Double.random(in: 2.5...15.8),
             measuredPerimeter: Double.random(in: 8.2...28.6),
             estimatedVolume: Double.random(in: 0.3...4.2),
@@ -426,17 +426,13 @@ struct SegmentationMaskResult {
     let metrics: ValidationMetrics
 }
 
-enum WoundType {
-    case acuteWound, chronicUlcer, diabeticUlcer, pressureUlcer, venousUlcer
-}
+// 已移除：WoundType —— 權威版本在 Models/WoundTypes.swift。
 
 enum WoundSeverity {
     case mild, moderate, severe, critical
 }
 
-enum HealingStage {
-    case inflammation, proliferation, maturation, healed
-}
+// 已移除：HealingStage —— 權威版本在 Models/WoundTypes.swift。
 
 struct TissueAnalysis {
     let necroticPercentage: Double

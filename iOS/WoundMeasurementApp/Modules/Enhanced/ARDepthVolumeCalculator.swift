@@ -592,7 +592,7 @@ class ARDepthVolumeCalculator: ObservableObject {
     private func determineValidationStatus(
         _ reasonability: ReasonabilityCheck,
         _ consistency: ConsistencyCheck,
-        _ accuracy: AccuracyAssessment
+        _ accuracy: VolumeAccuracyAssessment
     ) -> ValidationStatus {
         
         let scores = [reasonability.score, consistency.score, accuracy.overallAccuracy]
@@ -667,7 +667,7 @@ struct VolumeCalculationResult {
     let volumeDeficit: VolumeDeficitMeasurement
     let referencePlane: ReferencePlane
     let depthQuality: DepthQuality
-    let measurementAccuracy: AccuracyAssessment
+    let measurementAccuracy: VolumeAccuracyAssessment
     let uncertaintyEstimate: UncertaintyEstimate
     let reasonabilityCheck: ReasonabilityCheck
     let consistencyCheck: ConsistencyCheck
@@ -683,7 +683,7 @@ struct DepthQuality {
     let calibrationAccuracy: Double
 }
 
-struct AccuracyAssessment {
+struct VolumeAccuracyAssessment {
     let overallAccuracy: Double
     let depthAccuracy: Double
     let segmentationAccuracy: Double
@@ -754,10 +754,10 @@ struct VolumeRegion {
     let region: CGRect
     let volumeCm3: Double
     let averageDepthMm: Double
-    let severity: WoundSeverity
+    let severity: WoundDepthSeverity
 }
 
-enum WoundSeverity {
+enum WoundDepthSeverity {
     case shallow, moderate, deep, critical
 }
 

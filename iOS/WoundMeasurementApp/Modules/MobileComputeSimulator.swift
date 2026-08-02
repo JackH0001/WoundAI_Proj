@@ -14,7 +14,7 @@ class MobileComputeSimulator: ObservableObject {
     @Published var simulationProgress: Double = 0.0
     @Published var validationAccuracy: Double = 0.0
     @Published var optimizationResults: [OptimizationResult] = []
-    @Published var performanceMetrics: PerformanceMetrics?
+    @Published var performanceMetrics: SimulatedPerformanceMetrics?
     
     // 核心處理模組 - 模擬行動端運算
     private let mobileImageProcessor: MobileImageProcessor
@@ -334,8 +334,8 @@ class MobileComputeSimulator: ObservableObject {
         return Double.random(in: 0.4...0.9)
     }
     
-    private func calculatePerformanceMetrics(_ analysisResult: MobileAnalysisResult) -> PerformanceMetrics {
-        return PerformanceMetrics(
+    private func calculatePerformanceMetrics(_ analysisResult: MobileAnalysisResult) -> SimulatedPerformanceMetrics {
+        return SimulatedPerformanceMetrics(
             totalProcessingTime: analysisResult.processingTime,
             memoryPeakUsage: analysisResult.memoryUsage,
             averageCPUUtilization: analysisResult.cpuUtilization,
@@ -374,7 +374,7 @@ struct SimulationResult {
     let mobileAnalysis: MobileAnalysisResult
     let cloudComparison: ValidationResult
     let optimization: OptimizationResult
-    let performanceMetrics: PerformanceMetrics
+    let performanceMetrics: SimulatedPerformanceMetrics
     let timestamp: Date
 }
 
@@ -383,7 +383,7 @@ struct MobilePreprocessedImage {
     let detectedROI: CGRect
     let extractedFeatures: [ImageFeature]
     let depthData: Data
-    let calibrationData: CalibrationData?
+    let calibrationData: MobileCalibrationData?
 }
 
 struct MobileAnalysisResult {
@@ -421,7 +421,7 @@ struct OptimizationResult {
     let optimizationTimestamp: Date
 }
 
-struct PerformanceMetrics {
+struct SimulatedPerformanceMetrics {
     let totalProcessingTime: TimeInterval
     let memoryPeakUsage: Double
     let averageCPUUtilization: Double

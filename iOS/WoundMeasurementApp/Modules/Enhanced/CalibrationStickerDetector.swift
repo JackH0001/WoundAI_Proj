@@ -282,7 +282,7 @@ class CalibrationStickerDetector: ObservableObject {
     }
     
     /// 檢測外圓邊界
-    private func detectOuterCircle(_ image: CIImage) async throws -> DetectedCircle? {
+    private func detectOuterCircle(_ image: CIImage) async throws -> DetectedStickerCircle? {
         // 邊緣檢測
         let edges = image.applyingFilter("CIEdges", parameters: [
             "inputIntensity": 2.0
@@ -306,7 +306,7 @@ class CalibrationStickerDetector: ObservableObject {
     /// 檢測3x3圓形網格模式
     private func detectCircleGridPattern(
         _ image: CIImage, 
-        outerCircle: DetectedCircle
+        outerCircle: DetectedStickerCircle
     ) async throws -> CircleGridPattern {
         
         var detectedCircles: [GridCircle] = []
@@ -557,7 +557,7 @@ struct ArUcoDetectionResult {
 }
 
 struct CircleGridDetectionResult {
-    let outerCircle: DetectedCircle
+    let outerCircle: DetectedStickerCircle
     let gridPattern: CircleGridPattern
     let colorCalibrationPoints: [ColorCalibrationPoint]
     let depthCorrectionPoints: [DepthCorrectionPoint]
@@ -600,7 +600,7 @@ struct CombinedCalibrationResult {
 
 // MARK: - 輔助結構
 
-struct DetectedCircle {
+struct DetectedStickerCircle {
     let center: CGPoint
     let radius: CGFloat
     let confidence: Double

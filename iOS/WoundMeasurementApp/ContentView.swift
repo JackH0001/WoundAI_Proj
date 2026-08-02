@@ -892,41 +892,7 @@ struct DetectionConfig {
 // MARK: - 錯誤類型 (臨時定義，解決編譯問題)
 // 已移至 Models/SharedTypes.swift 統一定義，避免重複
 /*
-enum WoundMeasurementError: Error, LocalizedError {
-    case calibrationRequired
-    case imageProcessingFailed  
-    case segmentationFailed
-    case insufficientQuality
-    case noStickerDetected
-    case invalidImageFormat
-    case cameraNotAvailable
-    case permissionDenied
-    case networkError(String)
-    case unknown(String)
-    case lidarNotAvailable
-    case measurementFailed
-    case classificationFailed
-    case dataSaveFailed
-    
-    var errorDescription: String? {
-        switch self {
-        case .calibrationRequired: return "需要先完成校正"
-        case .imageProcessingFailed: return "圖像處理失敗"
-        case .segmentationFailed: return "傷口分割失敗"
-        case .insufficientQuality: return "圖像品質不足"
-        case .noStickerDetected: return "未檢測到校正貼紙"
-        case .invalidImageFormat: return "無效的圖像格式"
-        case .cameraNotAvailable: return "相機不可用"
-        case .permissionDenied: return "權限被拒絕"
-        case .networkError(let message): return "網路錯誤: \(message)"
-        case .unknown(let message): return "未知錯誤: \(message)"
-        case .lidarNotAvailable: return "此裝置不支援LiDAR功能，將使用標準測量模式"
-        case .measurementFailed: return "測量失敗，請檢查影像品質"
-        case .classificationFailed: return "傷口分類失敗，請重新嘗試"
-        case .dataSaveFailed: return "資料儲存失敗，請檢查儲存空間"
-        }
-    }
-}
+// 已移除：WoundMeasurementError —— 權威版本在 Models/SharedTypes.swift。
 */
 
 struct InitializationError: Error, LocalizedError {
@@ -939,7 +905,7 @@ struct QualityError: Error, LocalizedError {
     var errorDescription: String? { return message }
 }
 
-struct SegmentationError: Error, LocalizedError {
+struct SegmentationFailure: Error, LocalizedError {
     let message: String
     var errorDescription: String? { return message }
 }
@@ -5242,7 +5208,7 @@ extension ContentView {
             return "圖像預處理失敗，請檢查圖像品質和亮度"
         case WoundMeasurementError.calibrationRequired:
             return "校正失敗，請確保校正貼紙清晰可見且完整"
-        case is SegmentationError:
+        case is SegmentationFailure:
             return "傷口分割失敗，請重新拍攝或調整角度"
         case WoundMeasurementError.insufficientQuality:
             return "系統資源不足或圖像品質不符合要求，請重試"

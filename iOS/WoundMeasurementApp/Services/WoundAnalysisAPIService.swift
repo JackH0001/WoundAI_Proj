@@ -79,7 +79,7 @@ class WoundAnalysisAPIService: ObservableObject {
     // MARK: - 主要分析API
     
     /// 使用UWM + Deepskin雙重模型分析傷口
-    func analyzeWoundWithDualModels(image: UIImage, depthData: Data? = nil) async throws -> CloudAnalysisResult {
+    func analyzeWoundWithDualModels(image: UIImage, depthData: Data? = nil) async throws -> DualModelAnalysisResult {
         let startTime = Date()
         
         guard isConnected else {
@@ -156,7 +156,7 @@ class WoundAnalysisAPIService: ObservableObject {
             lastResponseTime = responseTime
         }
         
-        return CloudAnalysisResult(
+        return DualModelAnalysisResult(
             analysisId: analysisResponse.analysisId,
             timestamp: analysisResponse.timestamp,
             processingTime: analysisResponse.processingTime,
@@ -213,7 +213,7 @@ class WoundAnalysisAPIService: ObservableObject {
         depthData: Data,
         cameraIntrinsics: CameraIntrinsics,
         pixelScale: Double
-    ) async -> VolumeCalculationResult {
+    ) async -> DualModelVolumeResult {
         
         // 1. 本地預處理深度資料
         let processedDepthData = preprocessDepthData(depthData, mask: segmentationMask)
@@ -355,13 +355,13 @@ class WoundAnalysisAPIService: ObservableObject {
         return try decoder.decode(CloudVolumeResult.self, from: data)
     }
     
-    private func validateVolumeResult(_ cloudResult: CloudVolumeResult, localDepthData: ProcessedDepthData) -> VolumeCalculationResult {
+    private func validateVolumeResult(_ cloudResult: CloudVolumeResult, localDepthData: ProcessedDepthData) -> DualModelVolumeResult {
         // 基本合理性檢查
         let isReasonable = cloudResult.volume > 0 && 
                           cloudResult.volume < 1000000 &&  // 不超過1立方米
                           cloudResult.confidence > 0.5
         
-        return VolumeCalculationResult(
+        return DualModelVolumeResult(
             volume: cloudResult.volume,
             surfaceArea: cloudResult.surfaceArea,
             averageDepth: cloudResult.averageDepth,
@@ -379,7 +379,7 @@ class WoundAnalysisAPIService: ObservableObject {
         mask: UIImage,
         cameraIntrinsics: CameraIntrinsics,
         pixelScale: Double
-    ) -> VolumeCalculationResult {
+    ) -> DualModelVolumeResult {
         
         // 簡化的本地體積計算（像素積分法）
         var totalVolume: Double = 0.0
@@ -417,7 +417,7 @@ class WoundAnalysisAPIService: ObservableObject {
         // 計算表面積（簡化）
         let surfaceArea = Double(validPixelCount) * pixelScale * pixelScale
         
-        return VolumeCalculationResult(
+        return DualModelVolumeResult(
             volume: totalVolume,
             surfaceArea: surfaceArea,
             averageDepth: avgDepth,
@@ -500,7 +500,7 @@ struct VolumeAnalysisResult: Codable {
     let method: String
 }
 
-struct CloudAnalysisResult {
+struct DualModelAnalysisResult {
     let analysisId: String
     let timestamp: String
     let processingTime: Double
@@ -567,7 +567,7 @@ struct ProcessedDepthData {
     let filteredCount: Int
 }
 
-struct VolumeCalculationResult {
+struct DualModelVolumeResult {
     let volume: Double
     let surfaceArea: Double
     let averageDepth: Double

@@ -5,7 +5,7 @@ import Charts
 
 struct AnalysisHistoryView: View {
     let result: WoundMeasurementResult
-    @State private var historicalData: [HistoricalMeasurement] = []
+    @State private var historicalData: [WoundHistoryPoint] = []
     @State private var selectedTimeRange: TimeRange = .week
     @State private var showingTrendAnalysis = false
     
@@ -100,7 +100,7 @@ struct AnalysisHistoryView: View {
             let area = baseArea * (1.0 - healingProgress * 0.3) + Double.random(in: -1.0...1.0)
             let volume = (result.volume ?? 1.0) * (1.0 - healingProgress * 0.4) + Double.random(in: -0.1...0.1)
             
-            return HistoricalMeasurement(
+            return WoundHistoryPoint(
                 date: date,
                 area: max(0.1, area),
                 volume: max(0.01, volume),
@@ -157,7 +157,7 @@ struct TimeRangeSelector: View {
 
 struct CurrentVsHistoryCard: View {
     let currentResult: WoundMeasurementResult
-    let historicalData: [HistoricalMeasurement]
+    let historicalData: [WoundHistoryPoint]
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -251,7 +251,7 @@ struct CurrentVsHistoryCard: View {
 }
 
 struct TrendChartsView: View {
-    let data: [HistoricalMeasurement]
+    let data: [WoundHistoryPoint]
     let timeRange: AnalysisHistoryView.TimeRange
     @State private var selectedChart: ChartType = .area
     
@@ -341,7 +341,7 @@ struct TrendChartsView: View {
 }
 
 struct StatisticsSummaryView: View {
-    let data: [HistoricalMeasurement]
+    let data: [WoundHistoryPoint]
     let currentResult: WoundMeasurementResult
     
     var body: some View {
@@ -494,7 +494,7 @@ struct StatCard: View {
 }
 
 struct HealingProgressView: View {
-    let data: [HistoricalMeasurement]
+    let data: [WoundHistoryPoint]
     let currentResult: WoundMeasurementResult
     
     var body: some View {
@@ -556,7 +556,7 @@ struct HealingProgressView: View {
 }
 
 struct HealingTimelineView: View {
-    let data: [HistoricalMeasurement]
+    let data: [WoundHistoryPoint]
     
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -598,7 +598,7 @@ struct HealingTimelineView: View {
 }
 
 struct RecommendationsView: View {
-    let data: [HistoricalMeasurement]
+    let data: [WoundHistoryPoint]
     let currentResult: WoundMeasurementResult
     
     var body: some View {
@@ -675,7 +675,7 @@ struct RecommendationsView: View {
 }
 
 struct TrendAnalysisDetailView: View {
-    let data: [HistoricalMeasurement]
+    let data: [WoundHistoryPoint]
     
     var body: some View {
         NavigationView {
@@ -704,7 +704,7 @@ struct TrendAnalysisDetailView: View {
     }
 }
 
-struct HistoricalMeasurement {
+struct WoundHistoryPoint {
     let date: Date
     let area: Double
     let volume: Double

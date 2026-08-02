@@ -56,7 +56,7 @@ struct WoundAnalysisResponse: Codable {
     let woundVolumeCm3: Double?
     let woundType: String?
     let severityScore: Int?
-    let tissueComposition: TissueComposition
+    let tissueComposition: TissueCompositionDTO
     /// Model confidence 0–1 (wsm.onnx + TTA, threshold=0.30)
     let confidence: Double
     let modelVersion: String
@@ -78,7 +78,7 @@ struct WoundAnalysisResponse: Codable {
     }
 }
 
-struct TissueComposition: Codable {
+struct TissueCompositionDTO: Codable {
     let granulation: Double
     let slough: Double
     let necrotic: Double

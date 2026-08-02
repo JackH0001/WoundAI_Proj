@@ -224,7 +224,7 @@ class LocalCloudMirrorEngine: ObservableObject {
     // MARK: - Validation and Comparison
     
     private func validateAgainstCloudModels(localResult: LocalAnalysisResult, 
-                                          cloudResult: CloudSimulationResult) async throws -> ValidationResult {
+                                          cloudResult: CloudSimulationResult) async throws -> SyncValidationResult {
         print("LocalSyncSimulation: 執行對比驗證...")
         
         // 分割準確度對比
@@ -252,7 +252,7 @@ class LocalCloudMirrorEngine: ObservableObject {
             measurement: measurementAccuracy
         )
         
-        return ValidationResult(
+        return SyncValidationResult(
             segmentationAccuracy: segmentationAccuracy,
             classificationAccuracy: classificationAccuracy,
             measurementAccuracy: measurementAccuracy,
@@ -264,7 +264,7 @@ class LocalCloudMirrorEngine: ObservableObject {
     
     // MARK: - Algorithm Optimization
     
-    private func optimizeAlgorithm(validation: ValidationResult, 
+    private func optimizeAlgorithm(validation: SyncValidationResult, 
                                  localAnalysis: LocalAnalysisResult) async throws -> OptimizedAnalysisResult {
         print("LocalSyncSimulation: 執行算法優化...")
         
@@ -402,7 +402,7 @@ enum ModelType: String, CaseIterable {
 struct LocalSimulationResult {
     let localAnalysis: LocalAnalysisResult
     let cloudSimulation: CloudSimulationResult
-    let validation: ValidationResult
+    let validation: SyncValidationResult
     let optimizedAnalysis: OptimizedAnalysisResult
     let medicalAccuracy: Double
     let timestamp: Date
@@ -425,7 +425,7 @@ struct CloudSimulationResult {
     let medicalConfidence: Double
 }
 
-struct ValidationResult {
+struct SyncValidationResult {
     let segmentationAccuracy: Double
     let classificationAccuracy: Double
     let measurementAccuracy: Double

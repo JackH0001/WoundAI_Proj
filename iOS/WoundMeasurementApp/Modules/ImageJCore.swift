@@ -8,7 +8,7 @@ class ImageJCore: ObservableObject {
     // 使用RealTimeAnalysisModule.swift中的引擎定義
     private let segmentationEngine = SegmentationEngine()
     let measurementEngine = MeasurementEngine() // 改為public以供校準模組訪問
-    private var storedCalibrationResult: CalibrationResult?
+    private var storedCalibrationResult: RulerCalibrationResult?
     enum CalibrationSource {
         case sticker
         case lidar
@@ -60,7 +60,7 @@ class ImageJCore: ObservableObject {
     
     // MARK: - 主要測量功能
     
-    func measureWound(_ processedImage: ProcessedImage, calibrationPixelsPerMM: Double? = nil, calibrationResult: CalibrationResult? = nil) async throws -> WoundMeasurement {
+    func measureWound(_ processedImage: ProcessedImage, calibrationPixelsPerMM: Double? = nil, calibrationResult: RulerCalibrationResult? = nil) async throws -> WoundMeasurement {
         print("ImageJCore: 開始 measureWound，圖像尺寸: \(processedImage.image.size)")
         await MainActor.run {
             isProcessing = true

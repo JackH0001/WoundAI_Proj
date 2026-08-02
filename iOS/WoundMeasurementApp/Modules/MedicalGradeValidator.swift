@@ -11,8 +11,8 @@ class MedicalGradeValidator: ObservableObject {
     @Published var validationProgress: Double = 0.0
     @Published var medicalGradeAccuracy: Double = 0.0
     @Published var certificationLevel: CertificationLevel = .none
-    @Published var validationResults: [MedicalValidationResult] = []
-    @Published var complianceStatus: ComplianceStatus = ComplianceStatus()
+    @Published var validationResults: [MedicalValidationSummaryReport] = []
+    @Published var complianceStatus: RegulatoryComplianceChecklist = RegulatoryComplianceChecklist()
     
     // 核心驗證模組
     private let accuracyValidator: AccuracyValidator
@@ -420,7 +420,7 @@ class MedicalGradeValidator: ObservableObject {
         medicalGradeAccuracy = summary.overallAccuracy
         certificationLevel = summary.certificationLevel
         
-        let validationResult = MedicalValidationResult(
+        let validationResult = MedicalValidationSummaryReport(
             timestamp: Date(),
             summary: summary,
             testCount: summary.accuracyAnalysis.individualMetrics.count,
@@ -430,7 +430,7 @@ class MedicalGradeValidator: ObservableObject {
         validationResults.append(validationResult)
         
         // 更新合規狀態
-        complianceStatus = ComplianceStatus(
+        complianceStatus = RegulatoryComplianceChecklist(
             fda: summary.complianceAnalysis.fdaCompliance.isCompliant,
             ceMark: summary.complianceAnalysis.ceMarkCompliance.isCompliant,
             hipaa: summary.complianceAnalysis.hipaaCompliance.isCompliant,
@@ -512,10 +512,10 @@ struct ReliabilityMetric {
 }
 
 struct MedicalSafetyAnalysis {
-    let falsePositiveRisk: RiskAssessment
-    let falseNegativeRisk: RiskAssessment
-    let misdiagnosisRisk: RiskAssessment
-    let patientSafetyRisk: RiskAssessment
+    let falsePositiveRisk: SafetyRiskAssessment
+    let falseNegativeRisk: SafetyRiskAssessment
+    let misdiagnosisRisk: SafetyRiskAssessment
+    let patientSafetyRisk: SafetyRiskAssessment
     let clinicalDecisionSafety: SafetyMetric
     let dataPrivacySafety: SafetyMetric
     let overallSafetyScore: Double
@@ -523,8 +523,8 @@ struct MedicalSafetyAnalysis {
     let recommendationsForSafeUse: [SafetyRecommendation]
 }
 
-struct RiskAssessment {
-    let riskLevel: RiskLevel
+struct SafetyRiskAssessment {
+    let riskLevel: SafetyRiskLevel
     let probability: Double
     let impact: ImpactLevel
     let mitigation: [String]
@@ -538,7 +538,7 @@ struct MedicalComplianceAnalysis {
     let iso13485Compliance: ComplianceMetric
     let iec62304Compliance: ComplianceMetric
     let overallComplianceScore: Double
-    let certificationReadiness: CertificationReadiness
+    let certificationReadiness: ValidatorCertificationReadiness
     let requiredImprovements: [ComplianceImprovement]
 }
 
@@ -564,7 +564,7 @@ enum SafetyClassification {
     case safe, cautionRequired, riskPresent, unsafe
 }
 
-enum RiskLevel {
+enum SafetyRiskLevel {
     case negligible, low, moderate, high, critical
 }
 
@@ -572,7 +572,7 @@ enum AcceptabilityLevel {
     case acceptable, marginal, unacceptable
 }
 
-enum CertificationReadiness {
+enum ValidatorCertificationReadiness {
     case ready, nearReady, requiresWork, notReady
 }
 
@@ -591,7 +591,7 @@ struct MedicalValidationStandards {
     static let current = MedicalValidationStandards()
 }
 
-struct ComplianceStatus {
+struct RegulatoryComplianceChecklist {
     let fda: Bool
     let ceMark: Bool
     let hipaa: Bool
@@ -607,7 +607,7 @@ struct ComplianceStatus {
     }
 }
 
-struct MedicalValidationResult {
+struct MedicalValidationSummaryReport {
     let timestamp: Date
     let summary: MedicalValidationSummary
     let testCount: Int

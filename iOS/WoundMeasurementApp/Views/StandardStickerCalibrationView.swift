@@ -172,7 +172,7 @@ struct StandardStickerCalibrationView: View {
             }
         }
         .sheet(isPresented: $showingImagePicker) {
-            ImagePicker(selectedImage: $selectedImage)
+            ImagePicker(selectedImage: $selectedImage, sourceType: .camera)
         }
     }
     
@@ -337,58 +337,9 @@ struct SimpleCircle {
     let confidence: Double
 }
 
-enum StickerCalibrationError: Error, LocalizedError {
-    case invalidImage
-    case noStickerFound
-    case processingFailed
-    
-    var errorDescription: String? {
-        switch self {
-        case .invalidImage:
-            return "無效的圖像資料"
-        case .noStickerFound:
-            return "未找到校正貼紙"
-        case .processingFailed:
-            return "圖像處理失敗"
-        }
-    }
-}
+// 已移除：StickerCalibrationError —— 權威版本在 Modules/CalibrationStickerModule.swift。
 
-struct ImagePicker: UIViewControllerRepresentable {
-    @Binding var selectedImage: UIImage?
-    
-    func makeUIViewController(context: Context) -> UIImagePickerController {
-        let picker = UIImagePickerController()
-        picker.delegate = context.coordinator
-        picker.sourceType = .camera
-        return picker
-    }
-    
-    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
-    
-    func makeCoordinator() -> Coordinator {
-        Coordinator(self)
-    }
-    
-    class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
-        let parent: ImagePicker
-        
-        init(_ parent: ImagePicker) {
-            self.parent = parent
-        }
-        
-        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
-            if let image = info[.originalImage] as? UIImage {
-                parent.selectedImage = image
-            }
-            picker.dismiss(animated: true)
-        }
-        
-        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
-            picker.dismiss(animated: true)
-        }
-    }
-}
+// 已移除：ImagePicker —— 統一到 Views/Shared/ImagePicker.swift。
 
 #Preview {
     StandardStickerCalibrationView()

@@ -608,7 +608,7 @@ struct ComprehensiveImageQuality {
     let edgeQuality: EdgeQuality
     let noiseCharacteristics: NoiseCharacteristics
     let illuminationAnalysis: IlluminationAnalysis
-    let colorDistribution: ColorDistribution
+    let colorDistribution: ColorAppearanceFeatures
     let textureFeatures: TextureFeatures
     let overallQualityScore: Double
     let qualityGrade: QualityGrade
@@ -652,7 +652,7 @@ struct IlluminationAnalysis {
     let overexposedAreas: Double
 }
 
-struct ColorDistribution {
+struct ColorAppearanceFeatures {
     let colorfulness: Double
     let colorBalance: Double
     let dominantColors: [UIColor]

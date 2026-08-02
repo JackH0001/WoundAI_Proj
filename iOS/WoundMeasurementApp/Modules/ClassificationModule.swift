@@ -360,7 +360,7 @@ class ClassificationModule: ObservableObject {
     private func adjustScoresWithFeatures(
         mlResult: MLClassificationResult,
         colorFeatures: ColorFeatures,
-        textureFeatures: TextureFeatures,
+        textureFeatures: ClassificationTextureFeatures,
         shapeFeatures: ShapeFeatures
     ) -> AdjustedScores {
         
@@ -390,7 +390,7 @@ class ClassificationModule: ObservableObject {
         )
     }
     
-    private func assessInfectionRisk(_ colorFeatures: ColorFeatures, _ textureFeatures: TextureFeatures) -> RiskAssessment {
+    private func assessInfectionRisk(_ colorFeatures: ColorFeatures, _ textureFeatures: ClassificationTextureFeatures) -> RiskAssessment {
         var riskScore = 0.0
         var riskFactors: [String] = []
         
@@ -430,7 +430,7 @@ class ClassificationModule: ObservableObject {
         )
     }
     
-    private func determineHealingStage(_ colorFeatures: ColorFeatures, _ textureFeatures: TextureFeatures, _ shapeFeatures: ShapeFeatures) -> HealingStage {
+    private func determineHealingStage(_ colorFeatures: ColorFeatures, _ textureFeatures: ClassificationTextureFeatures, _ shapeFeatures: ShapeFeatures) -> HealingStage {
         if colorFeatures.darkness > 0.6 {
             return .inflammatory
         } else if colorFeatures.redness > 0.5 && textureFeatures.roughness > 0.5 {
@@ -547,7 +547,7 @@ class ColorAnalyzer {
 }
 
 class TextureAnalyzer {
-    func analyze(_ image: UIImage) async throws -> TextureFeatures {
+    func analyze(_ image: UIImage) async throws -> ClassificationTextureFeatures {
         guard let cgImage = image.cgImage else {
             throw ClassificationError.invalidImage
         }
@@ -571,7 +571,7 @@ class TextureAnalyzer {
         let smoothness = 1.0 - roughness
         let irregularity = calculateIrregularity(cgImage)
         
-        return TextureFeatures(
+        return ClassificationTextureFeatures(
             roughness: roughness,
             smoothness: smoothness,
             irregularity: irregularity,
@@ -668,7 +668,7 @@ struct ColorFeatures {
     let brightness: Double
 }
 
-struct TextureFeatures {
+struct ClassificationTextureFeatures {
     let roughness: Double
     let smoothness: Double
     let irregularity: Double

@@ -38,7 +38,7 @@ struct LocalStickerCalibrationResult {
 
 class RulerCalibrationModule: ObservableObject {
     @Published var isCalibrating = false
-    @Published var calibrationResult: CalibrationResult?
+    @Published var calibrationResult: RulerCalibrationResult?
     @Published var calibrationMethod: CalibrationMethod = .ruler
     
     private let context = CIContext()
@@ -50,7 +50,7 @@ class RulerCalibrationModule: ObservableObject {
         case manual = "手動設定"
     }
     
-    func performCalibration(from image: UIImage, method: CalibrationMethod? = nil) async throws -> CalibrationResult {
+    func performCalibration(from image: UIImage, method: CalibrationMethod? = nil) async throws -> RulerCalibrationResult {
         let selectedMethod = method ?? calibrationMethod
         
         switch selectedMethod {
@@ -65,7 +65,7 @@ class RulerCalibrationModule: ObservableObject {
         }
     }
     
-    private func detectAndCalibrateRuler(from image: UIImage) async throws -> CalibrationResult {
+    private func detectAndCalibrateRuler(from image: UIImage) async throws -> RulerCalibrationResult {
         await MainActor.run {
             isCalibrating = true
         }
@@ -91,7 +91,7 @@ class RulerCalibrationModule: ObservableObject {
         
         let confidence = calculateConfidence(gridPattern: gridPattern, corners: colorCorners)
         
-        let result = CalibrationResult(
+        let result = RulerCalibrationResult(
             pixelPerMM: pixelScale,
             transformMatrix: correctionResult.transformMatrix,
             confidence: confidence,
@@ -109,7 +109,7 @@ class RulerCalibrationModule: ObservableObject {
     }
     
     @MainActor
-    private func detectAndCalibrationSticker(from image: UIImage) async throws -> CalibrationResult {
+    private func detectAndCalibrationSticker(from image: UIImage) async throws -> RulerCalibrationResult {
         await MainActor.run { isCalibrating = true }
         defer { Task { @MainActor in isCalibrating = false } }
 
@@ -127,7 +127,7 @@ class RulerCalibrationModule: ObservableObject {
                 transform = .identity
             }
 
-            let result = CalibrationResult(
+            let result = RulerCalibrationResult(
                 pixelPerMM: best.pixelsPerMM,
                 transformMatrix: transform,
                 confidence: Float(best.confidence),
@@ -141,7 +141,7 @@ class RulerCalibrationModule: ObservableObject {
             print("校正貼紙檢測: 統一路徑失敗，退回基礎圓形檢測 -> \(error.localizedDescription)")
             let basicResult = try await performBasicStickerDetection(from: image)
             let transformMatrix = createTransformMatrix(from: basicResult)
-            let fallback = CalibrationResult(
+            let fallback = RulerCalibrationResult(
                 pixelPerMM: basicResult.pixelsPerMM,
                 transformMatrix: transformMatrix,
                 confidence: Float(basicResult.confidence),
@@ -170,7 +170,7 @@ class RulerCalibrationModule: ObservableObject {
         return CGAffineTransform.identity
     }
     
-    private func performLiDARCalibration(from image: UIImage) async throws -> CalibrationResult {
+    private func performLiDARCalibration(from image: UIImage) async throws -> RulerCalibrationResult {
         // 整合現有的LiDAR校準功能
         // 這裡可以使用ImageJCore中的LiDAR校準模組
         await MainActor.run {
@@ -185,7 +185,7 @@ class RulerCalibrationModule: ObservableObject {
         // 簡化實作，實際會整合LiDARCalibrationModule
         let defaultPixelsPerMM = 10.0 // 基於LiDAR的默認值
         
-        let result = CalibrationResult(
+        let result = RulerCalibrationResult(
             pixelPerMM: defaultPixelsPerMM,
             transformMatrix: CGAffineTransform.identity,
             confidence: 0.8,
@@ -199,7 +199,7 @@ class RulerCalibrationModule: ObservableObject {
         return result
     }
     
-    private func performManualCalibration(from image: UIImage) async throws -> CalibrationResult {
+    private func performManualCalibration(from image: UIImage) async throws -> RulerCalibrationResult {
         await MainActor.run {
             isCalibrating = true
         }
@@ -212,7 +212,7 @@ class RulerCalibrationModule: ObservableObject {
         // 手動校準的默認值，實際應用中會提供UI讓用戶輸入
         let manualPixelsPerMM = 15.0
         
-        let result = CalibrationResult(
+        let result = RulerCalibrationResult(
             pixelPerMM: manualPixelsPerMM,
             transformMatrix: CGAffineTransform.identity,
             confidence: 1.0,
@@ -735,7 +735,7 @@ class RulerCalibrationModule: ObservableObject {
     
 }
 
-struct CalibrationResult {
+struct RulerCalibrationResult {
     let pixelPerMM: Double
     let transformMatrix: CGAffineTransform
     let confidence: Float

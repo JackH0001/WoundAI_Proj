@@ -2,66 +2,10 @@ import SwiftUI
 import UIKit
 import Foundation
 
-// MARK: - Cloud API Types (Temporary - should be in separate file)
-
-struct CloudUploadResponse: Codable {
-    let success: Bool
-    let message: String
-    let annotationId: String
-    let qualityScore: Double
-    let qualityStatus: String
-    let bjwatScore: Int
-    let revpwatScore: Int
-    
-    enum CodingKeys: String, CodingKey {
-        case success
-        case message
-        case annotationId = "annotation_id"
-        case qualityScore = "quality_score"
-        case qualityStatus = "quality_status"
-        case bjwatScore = "bjwat_score"
-        case revpwatScore = "revpwat_score"
-    }
-}
-
-// Mock Cloud API Service for compilation
-class CloudAPIService: ObservableObject {
-    static let shared = CloudAPIService()
-    @Published var isUploading = false
-    @Published var uploadProgress: Double = 0.0
-    
-    private init() {}
-    
-    func authenticate(doctorId: String, password: String) async throws {
-        // Mock authentication
-        try await Task.sleep(nanoseconds: 1_000_000_000)
-    }
-    
-    func uploadAnnotation(annotationData: Data, image: UIImage?, doctorId: String, patientId: String?) async throws -> CloudUploadResponse {
-        // Mock upload with progress
-        await MainActor.run { isUploading = true }
-        
-        for progress in [0.2, 0.4, 0.6, 0.8, 1.0] {
-            try await Task.sleep(nanoseconds: 500_000_000)
-            await MainActor.run { uploadProgress = progress }
-        }
-        
-        await MainActor.run { 
-            isUploading = false
-            uploadProgress = 0.0
-        }
-        
-        return CloudUploadResponse(
-            success: true,
-            message: "上傳成功",
-            annotationId: UUID().uuidString,
-            qualityScore: 0.85,
-            qualityStatus: "良好",
-            bjwatScore: 15,
-            revpwatScore: 65
-        )
-    }
-}
+// 已移除：CloudUploadResponse 與此處的 mock CloudAPIService。
+// 權威定義在 Services/CloudAPIService.swift；保留 mock 會讓 UI 在編譯期綁到
+// 假的服務、執行期卻走真的，是最難查的一類缺陷（本檔的 mock 永遠回傳
+// success: true 與寫死的品質分數，測試會全綠但雲端根本沒收到資料）。
 
 struct AnnotationView: View {
     @StateObject private var annotationManager = WoundAnnotationManager.shared
@@ -267,10 +211,13 @@ struct AnnotationView: View {
         Task {
             do {
                 let response = try await cloudService.uploadAnnotation(
-                    annotationData: annotationData,
-                    image: selectedImage,
-                    doctorId: doctorId,
-                    patientId: patientId.isEmpty ? nil : patientId
+                    CloudUploadRequest(
+                        annotationData: annotationData,
+                        image: selectedImage,
+                        doctorId: doctorId,
+                        patientId: patientId.isEmpty ? nil : patientId,
+                        annotationId: UUID().uuidString
+                    )
                 )
                 
                 await MainActor.run {
@@ -700,42 +647,7 @@ struct EmptyStateView: View {
 
 // MARK: - 影像選擇器
 
-struct ImagePicker: UIViewControllerRepresentable {
-    @Binding var selectedImage: UIImage?
-    @Environment(\.presentationMode) var presentationMode
-    
-    func makeUIViewController(context: Context) -> UIImagePickerController {
-        let picker = UIImagePickerController()
-        picker.delegate = context.coordinator
-        picker.sourceType = .photoLibrary
-        return picker
-    }
-    
-    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
-    
-    func makeCoordinator() -> Coordinator {
-        Coordinator(self)
-    }
-    
-    class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
-        let parent: ImagePicker
-        
-        init(_ parent: ImagePicker) {
-            self.parent = parent
-        }
-        
-        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey : Any]) {
-            if let image = info[.originalImage] as? UIImage {
-                parent.selectedImage = image
-            }
-            parent.presentationMode.wrappedValue.dismiss()
-        }
-        
-        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
-            parent.presentationMode.wrappedValue.dismiss()
-        }
-    }
-}
+// 已移除：ImagePicker —— 統一到 Views/Shared/ImagePicker.swift。
 
 // MARK: - 分享表單
 

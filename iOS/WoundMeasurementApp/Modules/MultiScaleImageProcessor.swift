@@ -66,7 +66,7 @@ class MultiScaleImageProcessor: ObservableObject {
         let startTime = Date()
         
         guard let cgImage = image.cgImage else {
-            throw ProcessingError.invalidImage
+            throw MultiScaleProcessingError.invalidImage
         }
         
         let originalCIImage = CIImage(cgImage: cgImage)
@@ -205,13 +205,13 @@ class MultiScaleImageProcessor: ObservableObject {
     private func applyCanny(_ image: CIImage) async throws -> CIImage {
         // 1. 高斯模糊
         guard let gaussianFilter = CIFilter(name: "CIGaussianBlur") else {
-            throw ProcessingError.filterCreationFailed
+            throw MultiScaleProcessingError.filterCreationFailed
         }
         gaussianFilter.setValue(image, forKey: kCIInputImageKey)
         gaussianFilter.setValue(1.0, forKey: kCIInputRadiusKey)
         
         guard let blurred = gaussianFilter.outputImage else {
-            throw ProcessingError.filterProcessingFailed
+            throw MultiScaleProcessingError.filterProcessingFailed
         }
         
         // 2. 梯度計算 (Sobel算子)
@@ -232,14 +232,14 @@ class MultiScaleImageProcessor: ObservableObject {
         let kernel = CIVector(values: [-1, 0, 1, -2, 0, 2, -1, 0, 1], count: 9)
         
         guard let filter = CIFilter(name: "CIConvolution3X3") else {
-            throw ProcessingError.filterCreationFailed
+            throw MultiScaleProcessingError.filterCreationFailed
         }
         
         filter.setValue(image, forKey: kCIInputImageKey)
         filter.setValue(kernel, forKey: "inputWeights")
         
         guard let output = filter.outputImage else {
-            throw ProcessingError.filterProcessingFailed
+            throw MultiScaleProcessingError.filterProcessingFailed
         }
         
         return output
@@ -250,14 +250,14 @@ class MultiScaleImageProcessor: ObservableObject {
         let kernel = CIVector(values: [-1, -2, -1, 0, 0, 0, 1, 2, 1], count: 9)
         
         guard let filter = CIFilter(name: "CIConvolution3X3") else {
-            throw ProcessingError.filterCreationFailed
+            throw MultiScaleProcessingError.filterCreationFailed
         }
         
         filter.setValue(image, forKey: kCIInputImageKey)
         filter.setValue(kernel, forKey: "inputWeights")
         
         guard let output = filter.outputImage else {
-            throw ProcessingError.filterProcessingFailed
+            throw MultiScaleProcessingError.filterProcessingFailed
         }
         
         return output
@@ -268,46 +268,46 @@ class MultiScaleImageProcessor: ObservableObject {
         
         // X方向梯度平方
         guard let squareXFilter = CIFilter(name: "CIMultiplyCompositing") else {
-            throw ProcessingError.filterCreationFailed
+            throw MultiScaleProcessingError.filterCreationFailed
         }
         squareXFilter.setValue(sobelX, forKey: kCIInputImageKey)
         squareXFilter.setValue(sobelX, forKey: kCIInputBackgroundImageKey)
         
         guard let squaredX = squareXFilter.outputImage else {
-            throw ProcessingError.filterProcessingFailed
+            throw MultiScaleProcessingError.filterProcessingFailed
         }
         
         // Y方向梯度平方
         guard let squareYFilter = CIFilter(name: "CIMultiplyCompositing") else {
-            throw ProcessingError.filterCreationFailed
+            throw MultiScaleProcessingError.filterCreationFailed
         }
         squareYFilter.setValue(sobelY, forKey: kCIInputImageKey)
         squareYFilter.setValue(sobelY, forKey: kCIInputBackgroundImageKey)
         
         guard let squaredY = squareYFilter.outputImage else {
-            throw ProcessingError.filterProcessingFailed
+            throw MultiScaleProcessingError.filterProcessingFailed
         }
         
         // 相加
         guard let addFilter = CIFilter(name: "CIAdditionCompositing") else {
-            throw ProcessingError.filterCreationFailed
+            throw MultiScaleProcessingError.filterCreationFailed
         }
         addFilter.setValue(squaredX, forKey: kCIInputImageKey)
         addFilter.setValue(squaredY, forKey: kCIInputBackgroundImageKey)
         
         guard let sum = addFilter.outputImage else {
-            throw ProcessingError.filterProcessingFailed
+            throw MultiScaleProcessingError.filterProcessingFailed
         }
         
         // 開方 (近似)
         guard let sqrtFilter = CIFilter(name: "CIGammaAdjust") else {
-            throw ProcessingError.filterCreationFailed
+            throw MultiScaleProcessingError.filterCreationFailed
         }
         sqrtFilter.setValue(sum, forKey: kCIInputImageKey)
         sqrtFilter.setValue(0.5, forKey: "inputPower") // 相當於開方
         
         guard let magnitude = sqrtFilter.outputImage else {
-            throw ProcessingError.filterProcessingFailed
+            throw MultiScaleProcessingError.filterProcessingFailed
         }
         
         return magnitude
@@ -337,14 +337,14 @@ class MultiScaleImageProcessor: ObservableObject {
         let kernel = CIVector(values: Array(repeating: 1.0/9.0, count: 9), count: 9)
         
         guard let filter = CIFilter(name: "CIConvolution3X3") else {
-            throw ProcessingError.filterCreationFailed
+            throw MultiScaleProcessingError.filterCreationFailed
         }
         
         filter.setValue(image, forKey: kCIInputImageKey)
         filter.setValue(kernel, forKey: "inputWeights")
         
         guard let output = filter.outputImage else {
-            throw ProcessingError.filterProcessingFailed
+            throw MultiScaleProcessingError.filterProcessingFailed
         }
         
         return output
@@ -355,24 +355,24 @@ class MultiScaleImageProcessor: ObservableObject {
         
         // 計算差值
         guard let subtractFilter = CIFilter(name: "CISubtractBlendMode") else {
-            throw ProcessingError.filterCreationFailed
+            throw MultiScaleProcessingError.filterCreationFailed
         }
         subtractFilter.setValue(image, forKey: kCIInputImageKey)
         subtractFilter.setValue(mean, forKey: kCIInputBackgroundImageKey)
         
         guard let difference = subtractFilter.outputImage else {
-            throw ProcessingError.filterProcessingFailed
+            throw MultiScaleProcessingError.filterProcessingFailed
         }
         
         // 平方
         guard let squareFilter = CIFilter(name: "CIMultiplyCompositing") else {
-            throw ProcessingError.filterCreationFailed
+            throw MultiScaleProcessingError.filterCreationFailed
         }
         squareFilter.setValue(difference, forKey: kCIInputImageKey)
         squareFilter.setValue(difference, forKey: kCIInputBackgroundImageKey)
         
         guard let squared = squareFilter.outputImage else {
-            throw ProcessingError.filterProcessingFailed
+            throw MultiScaleProcessingError.filterProcessingFailed
         }
         
         // 局部均值
@@ -404,7 +404,7 @@ class MultiScaleImageProcessor: ObservableObject {
     private func convertToHSV(_ image: CIImage) async throws -> CIImage {
         // 使用Core Image的色彩空間轉換
         guard let filter = CIFilter(name: "CIHueAdjust") else {
-            throw ProcessingError.filterCreationFailed
+            throw MultiScaleProcessingError.filterCreationFailed
         }
         filter.setValue(image, forKey: kCIInputImageKey)
         filter.setValue(0.0, forKey: kCIInputAngleKey)
@@ -504,7 +504,7 @@ class MultiScaleImageProcessor: ObservableObject {
             }
             
             guard let cgImage = context.createCGImage(image, from: image.extent) else {
-                continuation.resume(throwing: ProcessingError.imageConversionFailed)
+                continuation.resume(throwing: MultiScaleProcessingError.imageConversionFailed)
                 return
             }
             
@@ -559,7 +559,7 @@ class MultiScaleImageProcessor: ObservableObject {
         
         // 加權相加
         guard let combineFilter1 = CIFilter(name: "CIAdditionCompositing") else {
-            throw ProcessingError.filterCreationFailed
+            throw MultiScaleProcessingError.filterCreationFailed
         }
         
         // 先組合紅色特徵和邊緣
@@ -570,12 +570,12 @@ class MultiScaleImageProcessor: ObservableObject {
         combineFilter1.setValue(weightedEdges, forKey: kCIInputBackgroundImageKey)
         
         guard let intermediate = combineFilter1.outputImage else {
-            throw ProcessingError.filterProcessingFailed
+            throw MultiScaleProcessingError.filterProcessingFailed
         }
         
         // 再加入紋理特徵
         guard let combineFilter2 = CIFilter(name: "CIAdditionCompositing") else {
-            throw ProcessingError.filterCreationFailed
+            throw MultiScaleProcessingError.filterCreationFailed
         }
         
         let weightedTexture = try await multiplyImage(normalizedTexture, by: textureWeight)
@@ -584,7 +584,7 @@ class MultiScaleImageProcessor: ObservableObject {
         combineFilter2.setValue(weightedTexture, forKey: kCIInputBackgroundImageKey)
         
         guard let combined = combineFilter2.outputImage else {
-            throw ProcessingError.filterProcessingFailed
+            throw MultiScaleProcessingError.filterProcessingFailed
         }
         
         return combined
@@ -593,7 +593,7 @@ class MultiScaleImageProcessor: ObservableObject {
     private func normalizeImage(_ image: CIImage) async throws -> CIImage {
         // 將圖像值正規化到 0-1 範圍
         guard let filter = CIFilter(name: "CIExposureAdjust") else {
-            throw ProcessingError.filterCreationFailed
+            throw MultiScaleProcessingError.filterCreationFailed
         }
         filter.setValue(image, forKey: kCIInputImageKey)
         filter.setValue(0.0, forKey: kCIInputEVKey)
@@ -603,7 +603,7 @@ class MultiScaleImageProcessor: ObservableObject {
     
     private func multiplyImage(_ image: CIImage, by factor: Float) async throws -> CIImage {
         guard let filter = CIFilter(name: "CIColorMatrix") else {
-            throw ProcessingError.filterCreationFailed
+            throw MultiScaleProcessingError.filterCreationFailed
         }
         filter.setValue(image, forKey: kCIInputImageKey)
         filter.setValue(CIVector(x: CGFloat(factor), y: 0, z: 0, w: 0), forKey: "inputRVector")
@@ -616,7 +616,7 @@ class MultiScaleImageProcessor: ObservableObject {
     private func thresholdImage(_ image: CIImage, threshold: Double) async throws -> CIImage {
         // 二值化處理
         guard let filter = CIFilter(name: "CIColorThreshold") else {
-            throw ProcessingError.filterCreationFailed
+            throw MultiScaleProcessingError.filterCreationFailed
         }
         filter.setValue(image, forKey: kCIInputImageKey)
         filter.setValue(Float(threshold), forKey: "inputThreshold")
@@ -629,18 +629,18 @@ class MultiScaleImageProcessor: ObservableObject {
         
         // 1. 侵蝕
         guard let erodeFilter = CIFilter(name: "CIMorphologyMinimum") else {
-            throw ProcessingError.filterCreationFailed
+            throw MultiScaleProcessingError.filterCreationFailed
         }
         erodeFilter.setValue(image, forKey: kCIInputImageKey)
         erodeFilter.setValue(2.0, forKey: kCIInputRadiusKey)
         
         guard let eroded = erodeFilter.outputImage else {
-            throw ProcessingError.filterProcessingFailed
+            throw MultiScaleProcessingError.filterProcessingFailed
         }
         
         // 2. 膨脹
         guard let dilateFilter = CIFilter(name: "CIMorphologyMaximum") else {
-            throw ProcessingError.filterCreationFailed
+            throw MultiScaleProcessingError.filterCreationFailed
         }
         dilateFilter.setValue(eroded, forKey: kCIInputImageKey)
         dilateFilter.setValue(3.0, forKey: kCIInputRadiusKey)
@@ -651,7 +651,7 @@ class MultiScaleImageProcessor: ObservableObject {
     private func extractContours(_ maskImage: CIImage) async throws -> [WoundContour] {
         // 輪廓提取（簡化實現）
         guard let cgImage = context.createCGImage(maskImage, from: maskImage.extent) else {
-            throw ProcessingError.imageConversionFailed
+            throw MultiScaleProcessingError.imageConversionFailed
         }
         
         // 這裡應該實現真正的輪廓跟蹤算法，如 Suzuki-Abe 算法
@@ -819,7 +819,7 @@ struct WoundMeasurements {
     let aspectRatio: Double
 }
 
-enum ProcessingError: Error {
+enum MultiScaleProcessingError: Error {
     case invalidImage
     case filterCreationFailed
     case filterProcessingFailed

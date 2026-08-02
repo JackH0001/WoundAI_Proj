@@ -825,6 +825,7 @@ enum ImageJError: Error, LocalizedError {
     case processingFailed
     case conversionFailed
     case thresholdCalculationFailed
+    case noContoursFound
     
     var errorDescription: String? {
         switch self {
@@ -834,6 +835,8 @@ enum ImageJError: Error, LocalizedError {
             return "影像處理失敗"
         case .conversionFailed:
             return "圖像格式轉換失敗"
+        case .noContoursFound:
+            return "未找到任何輪廓"
         case .thresholdCalculationFailed:
             return "閾值計算失敗"
         }

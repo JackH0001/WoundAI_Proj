@@ -221,7 +221,7 @@ class AdaptiveSegmentationModule: ObservableObject {
     /// 執行Otsu自適應閾值分割
     private func performOtsuAdaptiveThresholding(
         _ image: UIImage,
-        parameters: AdaptiveParameters
+        parameters: AdaptiveSegmentationParameters
     ) async throws -> ThresholdResult {
         logger.info("執行Otsu自適應閾值分割")
         
@@ -342,7 +342,7 @@ class AdaptiveSegmentationModule: ObservableObject {
         _ image: UIImage,
         thresholdResult: ThresholdResult,
         calibrationData: CalibrationData
-    ) async throws -> MultiScaleSegmentationResult {
+    ) async throws -> AdaptiveMultiScaleResult {
         logger.info("執行多尺度分割策略")
         
         // 生成多個尺度的圖像金字塔
@@ -363,7 +363,7 @@ class AdaptiveSegmentationModule: ObservableObject {
         // 融合多尺度結果
         let fusedResult = try await fuseMultiScaleResults(scaleResults, originalSize: image.size)
         
-        return MultiScaleSegmentationResult(
+        return AdaptiveMultiScaleResult(
             segmentationMask: fusedResult.segmentationMask,
             contours: fusedResult.contours,
             area: fusedResult.area,
@@ -492,8 +492,8 @@ class AdaptiveSegmentationModule: ObservableObject {
     
     // MARK: - 輔助方法
     
-    private func generateAdaptiveParameters(_ quality: ImageQualityAnalysis) -> AdaptiveParameters {
-        return AdaptiveParameters(
+    private func generateAdaptiveParameters(_ quality: ImageQualityAnalysis) -> AdaptiveSegmentationParameters {
+        return AdaptiveSegmentationParameters(
             otsuBlockSize: quality.localVariation > 0.5 ? 64 : 128,
             otsuOverlap: 0.25,
             morphKernelSize: quality.noiseLevel > 0.3 ? 5 : 3,
@@ -540,11 +540,11 @@ struct EnhancedSegmentationResult {
     let calibratedArea: Double // 校準後的實際面積 (cm²)
     let volumeDeficit: VolumeDeficitResult
     let qualityMetrics: AdaptiveSegmentationModule.SegmentationQuality
-    let adaptiveParameters: AdaptiveParameters
+    let adaptiveParameters: AdaptiveSegmentationParameters
     let processingSteps: ProcessingStepsReport
 }
 
-struct AdaptiveParameters {
+struct AdaptiveSegmentationParameters {
     let otsuBlockSize: Int
     let otsuOverlap: Double
     let morphKernelSize: Int
@@ -590,7 +590,7 @@ struct ThresholdResult {
     let qualityScore: Double
 }
 
-struct MultiScaleSegmentationResult {
+struct AdaptiveMultiScaleResult {
     let segmentationMask: UIImage
     let contours: [WoundContour]
     let area: Double

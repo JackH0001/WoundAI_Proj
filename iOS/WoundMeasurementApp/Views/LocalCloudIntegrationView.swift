@@ -103,19 +103,19 @@ struct LocalCloudIntegrationView: View {
             
             // 關鍵指標
             LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3), spacing: 10) {
-                MetricCard(
+                CompactMetricCard(
                     title: "系統準確度",
                     value: "\(String(format: "%.1f%%", integrationController.systemAccuracy * 100))",
                     color: accuracyColor
                 )
                 
-                MetricCard(
+                CompactMetricCard(
                     title: "優化程度",
                     value: "\(String(format: "%.1f%%", integrationController.optimizationLevel * 100))",
                     color: .orange
                 )
                 
-                MetricCard(
+                CompactMetricCard(
                     title: "醫療級評分",
                     value: medicalGradeText,
                     color: medicalGradeColor
@@ -419,7 +419,7 @@ struct LocalCloudIntegrationView: View {
 
 // MARK: - Supporting Views
 
-struct MetricCard: View {
+struct CompactMetricCard: View {
     let title: String
     let value: String
     let color: Color

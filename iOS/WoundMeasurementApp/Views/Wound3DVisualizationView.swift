@@ -156,10 +156,10 @@ struct Wound3DVisualizationView: View {
                 .font(.headline)
             
             LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 2), spacing: 8) {
-                InfoCard(label: "面積", value: "\(woundData.area, specifier: "%.2f") cm²", color: .blue)
-                InfoCard(label: "體積", value: "\(woundData.volume, specifier: "%.3f") cm³", color: .green)
-                InfoCard(label: "深度", value: "\(woundData.maxDepth, specifier: "%.1f") mm", color: .orange)
-                InfoCard(label: "周長", value: "\(woundData.perimeter, specifier: "%.2f") cm", color: .purple)
+                VerticalInfoCard(label: "面積", value: "\(woundData.area, specifier: "%.2f") cm²", color: .blue)
+                VerticalInfoCard(label: "體積", value: "\(woundData.volume, specifier: "%.3f") cm³", color: .green)
+                VerticalInfoCard(label: "深度", value: "\(woundData.maxDepth, specifier: "%.1f") mm", color: .orange)
+                VerticalInfoCard(label: "周長", value: "\(woundData.perimeter, specifier: "%.2f") cm", color: .purple)
             }
         }
     }
@@ -353,7 +353,7 @@ struct WoundVisualizationData {
 }
 
 // MARK: - 信息卡片組件
-struct InfoCard: View {
+struct VerticalInfoCard: View {
     let label: String
     let value: String
     let color: Color

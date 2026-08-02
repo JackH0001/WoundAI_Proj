@@ -34,7 +34,7 @@ class CaptureModule: NSObject, ObservableObject {
     // 數據傳遞功能
     @Published var currentMeasurementData: MeasurementData?
     @Published var segmentationMask: UIImage?
-    @Published var annotationData: AnnotationData?
+    @Published var annotationData: CapturedAnnotationBundle?
     
     // AR框架記憶體管理
     
@@ -458,7 +458,7 @@ class CaptureModule: NSObject, ObservableObject {
         
         // 準備標註數據
         if let record = lastSavedRecord {
-            annotationData = AnnotationData(
+            annotationData = CapturedAnnotationBundle(
                 woundRecord: record,
                 measurementData: currentMeasurementData!,
                 capturedImage: capturedImage,
@@ -516,7 +516,7 @@ class CaptureModule: NSObject, ObservableObject {
     }
     
     /// 獲取用於標註的數據包
-    func getAnnotationData() -> AnnotationData? {
+    func getAnnotationData() -> CapturedAnnotationBundle? {
         guard let data = annotationData else {
             logger.warning("沒有可用的標註數據")
             return nil
@@ -781,7 +781,7 @@ struct MeasurementData {
     let depthData: Data?
 }
 
-struct AnnotationData {
+struct CapturedAnnotationBundle {
     let woundRecord: WoundRecord
     let measurementData: MeasurementData
     let capturedImage: UIImage?
