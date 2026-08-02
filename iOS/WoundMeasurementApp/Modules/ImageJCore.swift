@@ -407,11 +407,9 @@ struct VolumeMeasurement {
     let maxDepth: Double
 }
 
-struct DepthMap {
-    let width: Int
-    let height: Int
-    let depths: [Double]
-}
+// 已移除：struct DepthMap（全樹零參照的死碼）。
+// 它與 Modules/Enhanced/ARDepthVolumeCalculator.swift 裡實際使用中的
+// `typealias DepthMap = UIImage` 撞名。
 
 // 使用RealTimeAnalysisModule.swift中的ImageJError定義
 

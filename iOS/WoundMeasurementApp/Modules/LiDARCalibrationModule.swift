@@ -393,6 +393,11 @@ extension LiDARCalibrationModule {
         }
         
         // 優先使用平滑深度數據，若不可用則回退到原始深度數據
+        // 這裡的 ARDepthData 是 **ARKit 的類別**，不是 App 自己的型別。
+        // 先前 CalibrationStickerDetector 與 ARDepthVolumeCalculator 各宣告了
+        // 一個同名型別把它遮蔽掉，導致下面兩行的指派型別對不上；
+        // 兩者已分別改名為 StickerDepthPayload / CapturedDepthFrame，
+        // 此處因而能正確解析到 ARKit 的 ARDepthData。
         var depthData: ARDepthData
         if let smoothedDepthData = frame.smoothedSceneDepth {
             depthData = smoothedDepthData

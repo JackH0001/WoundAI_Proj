@@ -524,7 +524,7 @@ class AdaptiveSegmentationModule: ObservableObject {
 
 struct CalibrationData {
     let pixelDensityMmPerPixel: Double
-    let depthData: ARDepthData?
+    let depthData: StickerDepthPayload?
     let arucoDetection: ArUcoDetectionResult?
     let circleGridDetection: CircleGridDetectionResult?
     let colorCalibration: ColorCalibrationResult?

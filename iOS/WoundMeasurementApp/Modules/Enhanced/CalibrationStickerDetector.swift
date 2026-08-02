@@ -49,7 +49,7 @@ class CalibrationStickerDetector: ObservableObject {
     /// 執行校正貼紙檢測和校準
     func detectAndCalibrateStickers(
         _ image: UIImage,
-        depthData: ARDepthData? = nil
+        depthData: StickerDepthPayload? = nil
     ) async throws -> CombinedCalibrationResult {
         
         logger.info("開始檢測校正貼紙")
@@ -384,7 +384,7 @@ class CalibrationStickerDetector: ObservableObject {
     /// 執行深度校準
     private func performDepthCalibration(
         image: UIImage,
-        depthData: ARDepthData?,
+        depthData: StickerDepthPayload?,
         arUcoResult: ArUcoDetectionResult,
         circleGridResult: CircleGridDetectionResult
     ) async throws -> DepthCalibrationResult {
@@ -469,7 +469,7 @@ class CalibrationStickerDetector: ObservableObject {
         // 生成校準資料
         let calibrationData = CalibrationData(
             pixelDensityMmPerPixel: finalPixelDensity,
-            depthData: depthCalibration.hasValidDepthData ? ARDepthData() : nil, // 簡化版本
+            depthData: depthCalibration.hasValidDepthData ? StickerDepthPayload() : nil, // 簡化版本
             arucoDetection: arUcoResult,
             circleGridDetection: circleGridResult,
             colorCalibration: colorCalibration
@@ -707,4 +707,7 @@ enum CalibrationError: Error {
 // 需要定義的類型別名和結構
 typealias ColorTransformMatrix = [[Double]]
 typealias WhiteBalanceParams = (temperature: Double, tint: Double)
-typealias ARDepthData = Data // 簡化版本，實際應該使用ARKit的深度資料
+// 佔位型別：本偵測器目前不真的使用深度資料，只是把欄位留著。
+// 原本叫 ARDepthData —— 那會遮蔽 ARKit 同名類別，導致
+// LiDARCalibrationModule 拿 frame.sceneDepth 時型別對不上而無法編譯。
+typealias StickerDepthPayload = Data

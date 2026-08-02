@@ -180,9 +180,9 @@ class ARDepthVolumeCalculator: ObservableObject {
     // MARK: - 深度資料獲取和處理
     
     /// 獲取深度資料
-    private func acquireDepthData(arFrame: ARFrame?) async throws -> ARDepthData {
+    private func acquireDepthData(arFrame: ARFrame?) async throws -> CapturedDepthFrame {
         if let frame = arFrame, let sceneDepth = frame.sceneDepth {
-            return ARDepthData(
+            return CapturedDepthFrame(
                 depthMap: sceneDepth.depthMap,
                 confidenceMap: sceneDepth.confidenceMap,
                 cameraIntrinsics: frame.camera.intrinsics,
@@ -212,7 +212,7 @@ class ARDepthVolumeCalculator: ObservableObject {
     
     /// 深度資料與RGB圖像對齊
     private func alignDepthWithRGB(
-        depthData: ARDepthData,
+        depthData: CapturedDepthFrame,
         segmentationResult: EnhancedSegmentationResult,
         calibrationData: CalibrationData
     ) async throws -> AlignedDepthData {
@@ -609,7 +609,11 @@ class ARDepthVolumeCalculator: ObservableObject {
 
 // MARK: - 資料結構定義
 
-struct ARDepthData {
+/// 從 ARFrame 擷取出來的深度快照。
+/// 原本叫 ARDepthData —— 與 ARKit 的 ARDepthData 同名會把框架型別遮蔽掉；
+/// 這裡存的其實是它的下游產物（depthMap 來自 frame.sceneDepth.depthMap，
+/// 另外附上相機內參與位姿），改名後兩者可以並存。
+struct CapturedDepthFrame {
     let depthMap: CVPixelBuffer
     let confidenceMap: CVPixelBuffer?
     let cameraIntrinsics: simd_float3x3
@@ -801,10 +805,10 @@ enum RiskType {
 // MARK: - 深度捕獲代理
 
 class DepthCaptureDelegate: NSObject, ARSessionDelegate {
-    private let completion: (Result<ARDepthData, Error>) -> Void
+    private let completion: (Result<CapturedDepthFrame, Error>) -> Void
     private var hasCompleted = false
     
-    init(completion: @escaping (Result<ARDepthData, Error>) -> Void) {
+    init(completion: @escaping (Result<CapturedDepthFrame, Error>) -> Void) {
         self.completion = completion
     }
     
@@ -813,7 +817,7 @@ class DepthCaptureDelegate: NSObject, ARSessionDelegate {
         
         if let sceneDepth = frame.sceneDepth {
             hasCompleted = true
-            let depthData = ARDepthData(
+            let depthData = CapturedDepthFrame(
                 depthMap: sceneDepth.depthMap,
                 confidenceMap: sceneDepth.confidenceMap,
                 cameraIntrinsics: frame.camera.intrinsics,
