@@ -222,8 +222,6 @@
 		A1VIEW009_BUILD /* PhotoMeasurementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1VIEW009 /* PhotoMeasurementView.swift */; };
 		A1VIEW010_BUILD /* BatchConfigurationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1VIEW010 /* BatchConfigurationView.swift */; };
 		A1VIEW011_BUILD /* BatchReportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1VIEW011 /* BatchReportView.swift */; };
-		A1XCLINK /* opencv2.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1XCREF /* opencv2.xcframework */; };
-		A1XEMBED /* opencv2.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = A1XCREF /* opencv2.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		B1MOD001_BUILD /* MultiAlgorithmDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD001_REF /* MultiAlgorithmDetector.swift */; };
 		B1MOD002_BUILD /* AdvancedMLClassificationModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD002_REF /* AdvancedMLClassificationModule.swift */; };
 		B1MOD003_BUILD /* SegmentationEngineCoreML.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD003_REF /* SegmentationEngineCoreML.swift */; };
@@ -281,7 +279,6 @@
 			dstPath = "";
 			dstSubfolderSpec = 10;
 			files = (
-				A1XEMBED /* opencv2.xcframework in Embed Frameworks */,
 			);
 			name = "Embed Frameworks";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -289,6 +286,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A1XCCFGREF /* OpenCV.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = OpenCV.xcconfig; path = Config/OpenCV.xcconfig; sourceTree = "<group>"; };
 		3D4B7A262B1234567890123 /* WoundMeasurementApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WoundMeasurementApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3D4B7A292B1234567890123 /* WoundMeasurementApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WoundMeasurementApp.swift; sourceTree = "<group>"; };
 		3D4B7A2B2B1234567890123 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -336,7 +334,6 @@
 		A1VIEW009 /* PhotoMeasurementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoMeasurementView.swift; sourceTree = "<group>"; };
 		A1VIEW010 /* BatchConfigurationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchConfigurationView.swift; sourceTree = "<group>"; };
 		A1VIEW011 /* BatchReportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchReportView.swift; sourceTree = "<group>"; };
-		A1XCREF /* opencv2.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = opencv2.xcframework; sourceTree = "<group>"; };
 		B1MOD001_REF /* MultiAlgorithmDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultiAlgorithmDetector.swift; sourceTree = "<group>"; };
 		B1MOD002_REF /* AdvancedMLClassificationModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdvancedMLClassificationModule.swift; sourceTree = "<group>"; };
 		B1MOD003_REF /* SegmentationEngineCoreML.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SegmentationEngineCoreML.swift; sourceTree = "<group>"; };
@@ -393,7 +390,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A1XCLINK /* opencv2.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -403,6 +399,7 @@
 		3D4B7A1D2B1234567890123 = {
 			isa = PBXGroup;
 			children = (
+				A1XCCFGREF /* OpenCV.xcconfig */,
 				TSTGRP /* WoundMeasurementAppTests */,
 				3D4B7A282B1234567890123 /* WoundMeasurementApp */,
 				3D4B7A272B1234567890123 /* Products */,
@@ -433,7 +430,6 @@
 				3D4B7A2D2B1234567890123 /* Assets.xcassets */,
 				3D4B7A452B1234567890123 /* Info.plist */,
 				3D4B7A2F2B1234567890123 /* Preview Content */,
-				A1XCREF /* opencv2.xcframework */,
 				B1ANLGRP /* Analysis */,
 				B1UTLGRP /* Utils */,
 				B1TSTGRP /* Tests */,
@@ -921,6 +917,7 @@
 		};
 		3D4B7A352B1234567890123 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1XCCFGREF /* OpenCV.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -929,17 +926,7 @@
 				DEVELOPMENT_ASSET_PATHS = "\"WoundMeasurementApp/Preview Content\"";
 				DEVELOPMENT_TEAM = LY2F24ZM68;
 				ENABLE_PREVIEWS = YES;
-				FRAMEWORK_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64",
-					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64_x86_64-simulator",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64/opencv2.framework/Headers",
-					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64_x86_64-simulator/opencv2.framework/Headers",
-				);
 				INFOPLIST_FILE = WoundMeasurementApp/Info.plist;
 				INFOPLIST_KEY_NSCameraUsageDescription = "需要使用相機來拍攝傷口影像";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -952,11 +939,6 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				OTHER_LDFLAGS = (
-					"$(inherited)",
-					"-lstdc++",
-				);
-				OTHER_SWIFT_FLAGS = "$(inherited) -D OPENCV_STATIC";
 				PRODUCT_BUNDLE_IDENTIFIER = com.woundmeasurement.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -968,6 +950,7 @@
 		};
 		3D4B7A362B1234567890123 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1XCCFGREF /* OpenCV.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -976,17 +959,7 @@
 				DEVELOPMENT_ASSET_PATHS = "\"WoundMeasurementApp/Preview Content\"";
 				DEVELOPMENT_TEAM = LY2F24ZM68;
 				ENABLE_PREVIEWS = YES;
-				FRAMEWORK_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64",
-					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64_x86_64-simulator",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64/opencv2.framework/Headers",
-					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64_x86_64-simulator/opencv2.framework/Headers",
-				);
 				INFOPLIST_FILE = WoundMeasurementApp/Info.plist;
 				INFOPLIST_KEY_NSCameraUsageDescription = "需要使用相機來拍攝傷口影像";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -999,11 +972,6 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				OTHER_LDFLAGS = (
-					"$(inherited)",
-					"-lstdc++",
-				);
-				OTHER_SWIFT_FLAGS = "$(inherited) -D OPENCV_STATIC";
 				PRODUCT_BUNDLE_IDENTIFIER = com.woundmeasurement.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;

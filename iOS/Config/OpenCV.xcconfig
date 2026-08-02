@@ -1,0 +1,36 @@
+// ─────────────────────────────────────────────────────────────────────────────
+//  OpenCV = 可選相依（optional dependency）
+//
+//  預設（本檔）不連結 OpenCV：
+//    - 不加入 -framework opencv2、不加入任何 OpenCV 標頭搜尋路徑
+//    - OpenCVCircleDetector.mm 內的 __has_include(<opencv2/imgproc.hpp>) 因此為假，
+//      整檔降級為安全 stub（所有方法回傳 nil／空集合）
+//    - Swift 端 Modules/CalibrationStickerModule.swift 已有
+//      `NSClassFromString("OpenCVCircleDetector") != nil` 判斷與 Core Image Hough
+//      降級路徑，功能面會自動走備援演算法
+//  => CI 不必下載 ~200 MB 的二進位，就能編譯並跑完整個 Swift 層的建置與單元測試。
+//
+//  要啟用真實 OpenCV：
+//    1. 把 opencv2.xcframework 放到 iOS/WoundMeasurementApp/ 之下
+//    2. 執行 iOS/Scripts/link-opencv.sh
+//       → 產生 iOS/Config/OpenCV.local.xcconfig（已 gitignore）覆寫下列變數
+//    下方的 #include? 為「可選引入」：檔案不存在時 Xcode 會安靜忽略，不會報錯。
+//
+//  為什麼用 xcconfig 而不是把 xcframework 直接掛進 Frameworks build phase：
+//    build phase 內的參照在檔案缺席時是硬性連結錯誤，無法有條件停用；xcconfig
+//    的 #include? 可以，且 slice 選擇能用 [sdk=...] 條件寫得比原本「兩個 slice
+//    路徑同時列入 FRAMEWORK_SEARCH_PATHS」更正確（避免連到錯誤架構）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 預設值：空 = 不使用 OpenCV
+OPENCV_FRAMEWORK_SEARCH_PATHS =
+OPENCV_HEADER_SEARCH_PATHS =
+OPENCV_LDFLAGS =
+
+// 由 iOS/Scripts/link-opencv.sh 產生；不存在時安靜忽略
+#include? "OpenCV.local.xcconfig"
+
+// ── 實際套用到 target ────────────────────────────────────────────────────────
+FRAMEWORK_SEARCH_PATHS = $(inherited) $(OPENCV_FRAMEWORK_SEARCH_PATHS)
+HEADER_SEARCH_PATHS = $(inherited) $(OPENCV_HEADER_SEARCH_PATHS)
+OTHER_LDFLAGS = $(inherited) -lstdc++ $(OPENCV_LDFLAGS)

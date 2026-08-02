@@ -1,41 +1,50 @@
-// 模擬器 arm64（Apple Silicon）無對應 OpenCV slice 時降級為安全 stub
+// ─────────────────────────────────────────────────────────────────────────────
+//  OpenCV 為「可選相依」(optional dependency)
+//
+//  找得到標頭    → 走真正的 OpenCV 實作。
+//  找不到標頭    → 整檔降級為安全 stub：所有方法回傳 nil／空集合，
+//                  Swift 端（Modules/CalibrationStickerModule.swift）已用
+//                  NSClassFromString 判斷並改走 Core Image Hough 備援演算法。
+//
+//  舊版是用 TARGET_OS_SIMULATOR && !__x86_64__ 來決定要不要 stub。那個條件在
+//  「有 arm64 模擬器 slice」之後就不成立了，而且它答非所問 —— 真正該問的是
+//  「標頭在不在」，不是「跑在哪個模擬器架構」。改用 __has_include 之後，
+//  CI 不必下載 ~200MB 的二進位就能編譯並跑完整個 Swift 層。
+// ─────────────────────────────────────────────────────────────────────────────
 #import "OpenCVCircleDetector.h"
 #import <UIKit/UIKit.h>
 
 #include <TargetConditionals.h>
-#if TARGET_OS_SIMULATOR && !defined(__x86_64__)
-#define OCV_SIM_ARM64_STUB 1
+
+#if __has_include(<opencv2/imgproc.hpp>)
+  #define WOUNDAI_HAS_OPENCV 1
+#elif __has_include("opencv2/imgproc.hpp")
+  #define WOUNDAI_HAS_OPENCV 2
 #else
-#define OCV_SIM_ARM64_STUB 0
+  #define WOUNDAI_HAS_OPENCV 0
 #endif
 
-// 針對模擬器架構的條件編譯
-#if TARGET_OS_SIMULATOR && defined(__arm64__)
-// Apple Silicon 模擬器特殊處理
+#if WOUNDAI_HAS_OPENCV
+#define WOUNDAI_OPENCV_STUB 0
+#else
+#define WOUNDAI_OPENCV_STUB 1
+#endif
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdocumentation"
+
+#if WOUNDAI_HAS_OPENCV == 1
+  #import <opencv2/imgproc.hpp>
+#elif WOUNDAI_HAS_OPENCV == 2
+  #import "opencv2/imgproc.hpp"
 #endif
 
-#if !OCV_SIM_ARM64_STUB
-  #if __has_include(<opencv2/imgproc.hpp>)
-    #import <opencv2/imgproc.hpp>
-  #else
-    #import "opencv2/imgproc.hpp"
-  #endif
-#endif
-
-#if TARGET_OS_SIMULATOR && defined(__arm64__)
 #pragma clang diagnostic pop
-#endif
-
-#if !OCV_SIM_ARM64_STUB
-using namespace cv;
-#endif
 
 @implementation OpenCVCircleDetector
 
 // 本地 UIImage/Mat 互轉：避免依賴 ios.h 的符號（UIImageToMat/MatToUIImage）
-#if !OCV_SIM_ARM64_STUB
+#if !WOUNDAI_OPENCV_STUB
 static void OCVUIImageToMatLocal(UIImage *image, cv::Mat &outMat) {
     if (!image) { outMat.release(); return; }
     CGImageRef cgImage = image.CGImage;
@@ -117,7 +126,7 @@ static UIImage *OCVMatToUIImageLocal(const cv::Mat &matInput) {
                                cannyThreshold:(double)cannyThresh
                              accumulatorThreshold:(double)accThresh
                                          topN:(NSUInteger)topN {
-#if OCV_SIM_ARM64_STUB
+#if WOUNDAI_OPENCV_STUB
     // 模擬器 arm64 stub：返回空結果，避免連結 OpenCV 符號
     if (!image) { return @[]; }
     return @[];
@@ -302,7 +311,7 @@ static UIImage *OCVMatToUIImageLocal(const cv::Mat &matInput) {
                                cannyThreshold:(double)cannyThresh
                              accumulatorThreshold:(double)accThresh
                                          topN:(NSUInteger)topN {
-#if OCV_SIM_ARM64_STUB
+#if WOUNDAI_OPENCV_STUB
     if (!image) { return @[]; }
     return @[];
 #else
@@ -338,7 +347,7 @@ static UIImage *OCVMatToUIImageLocal(const cv::Mat &matInput) {
                                        useHSVChannel:(BOOL)useHSV
                                     useRGBChannels:(BOOL)useRGB
                                     parameterSweep:(BOOL)enableSweep {
-#if OCV_SIM_ARM64_STUB
+#if WOUNDAI_OPENCV_STUB
     if (!image) { return @[]; }
     return @[];
 #else
@@ -574,7 +583,7 @@ static UIImage *OCVMatToUIImageLocal(const cv::Mat &matInput) {
                        aspectRatio:(double)targetRatio
                          tolerance:(double)tolerance
                               topN:(NSUInteger)topN {
-#if OCV_SIM_ARM64_STUB
+#if WOUNDAI_OPENCV_STUB
     if (!image) { return @[]; }
     return @[];
 #else
@@ -657,7 +666,7 @@ static UIImage *OCVMatToUIImageLocal(const cv::Mat &matInput) {
                                minRadius:(int)minRadius
                                maxRadius:(int)maxRadius
                                     topN:(NSUInteger)topN {
-#if OCV_SIM_ARM64_STUB
+#if WOUNDAI_OPENCV_STUB
     if (!image) { return @[]; }
     return @[];
 #else
@@ -738,7 +747,7 @@ static UIImage *OCVMatToUIImageLocal(const cv::Mat &matInput) {
                                      inRegion:(CGRect)region
                                    colorNames:(NSArray<NSString*>*)colorNames
                                   hsvRanges:(NSArray<NSArray<NSNumber*>*>*)ranges {
-#if OCV_SIM_ARM64_STUB
+#if WOUNDAI_OPENCV_STUB
     if (!image || colorNames.count != ranges.count) { return @[]; }
     return @[];
 #else
@@ -822,7 +831,7 @@ static UIImage *OCVMatToUIImageLocal(const cv::Mat &matInput) {
 + (CGImageRef)applyPerspectiveCorrection:(CGImageRef)image
                              cornerPoints:(NSArray<NSValue*>*)corners
                                targetSize:(CGSize)targetSize {
-#if OCV_SIM_ARM64_STUB
+#if WOUNDAI_OPENCV_STUB
     if (image) CFRetain(image);
     return image;
 #else
@@ -874,7 +883,7 @@ static UIImage *OCVMatToUIImageLocal(const cv::Mat &matInput) {
 // 色彩校正
 + (CGImageRef)applyColorCorrection:(CGImageRef)image
                       colorMatrix:(NSArray<NSArray<NSNumber*>*>*)matrix {
-#if OCV_SIM_ARM64_STUB
+#if WOUNDAI_OPENCV_STUB
     if (image) CFRetain(image);
     return image;
 #else
@@ -945,7 +954,7 @@ static UIImage *OCVMatToUIImageLocal(const cv::Mat &matInput) {
 + (NSDictionary<NSString*, NSNumber*> *)analyzeMaskCGImage:(CGImageRef)image
                                                 maxContours:(NSUInteger)maxContours
                                             simplifyEpsilon:(double)epsilon {
-#if OCV_SIM_ARM64_STUB
+#if WOUNDAI_OPENCV_STUB
     // 模擬器 arm64 stub：避免使用 OpenCV，回傳零統計
     return @{ @"totalArea": @(0.0), @"totalPerimeter": @(0.0), @"contourCount": @(0) };
 #else

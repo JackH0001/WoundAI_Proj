@@ -1,0 +1,140 @@
+name: Build OpenCV xcframework (one-time)
+
+# 一次性 / 手動觸發的 OpenCV iOS xcframework 產生器。
+# 產物供 ios.yml(方案 3:fetch + SHA-256 驗證)下載使用。
+#
+# 為什麼要用 CI 建、而不是在本機建:
+#   OpenCV 4.8.0 內含的第三方 zlib 1.2.13(zutil.h)在 iOS 26 SDK / Xcode 26 上
+#   會因 `#define fdopen(fd,mode) NULL` 與新 SDK 的 fdopen 宣告衝突而無法編譯。
+#   本 workflow 固定在較舊、與 4.8.0 同期的 Xcode 15.x(macos-14)上建置,
+#   third-party libs 可乾淨編譯 —— 因此「保留 4.8.0」(與 Android/Windows/Backend
+#   演算法對齊)同時得到「可重現、可稽核」的產物(對 IEC 62304 供應鏈友善)。
+#
+# 放置位置:.github/workflows/build-opencv-xcframework.yml
+# 觸發:GitHub → Actions → 「Build OpenCV xcframework (one-time)」→ Run workflow
+# 完成後:在該次 run 的 Summary 讀出 SHA-256,填進 ios.yml 的
+#         env.OPENCV_XCFRAMEWORK_SHA256(取代 REPLACE_WITH_REAL_SHA256)。
+
+on:
+  workflow_dispatch:
+    inputs:
+      opencv_version:
+        description: "OpenCV tag to build"
+        default: "4.8.0"
+        required: true
+      deployment_target:
+        description: "iOS minimum deployment target"
+        default: "12.0"
+        required: true
+
+permissions:
+  contents: write   # 需要建立 / 更新存放產物的 Release
+
+jobs:
+  build:
+    runs-on: macos-14
+    env:
+      OPENCV_VERSION: ${{ github.event.inputs.opencv_version }}
+      DEPLOYMENT_TARGET: ${{ github.event.inputs.deployment_target }}
+      RELEASE_TAG: opencv-${{ github.event.inputs.opencv_version }}-ios
+      ASSET: opencv2.xcframework.zip
+    steps:
+      - name: Checkout repo (for gh release context)
+        uses: actions/checkout@v4
+
+      - name: Select an Xcode 15.x toolchain (contemporary with OpenCV 4.8.0)
+        run: |
+          APP=$(ls -d /Applications/Xcode_15*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$APP" ]; then
+            echo "::error::No Xcode 15.x found on this runner. Installed Xcodes:"
+            ls -d /Applications/Xcode_*.app || true
+            echo "Edit this workflow to pick an installed version that can build OpenCV ${OPENCV_VERSION}."
+            exit 1
+          fi
+          echo "Using $APP"
+          sudo xcode-select -switch "$APP"
+          xcodebuild -version
+
+      - name: Clone OpenCV ${{ env.OPENCV_VERSION }}
+        run: git clone --depth 1 --branch "${OPENCV_VERSION}" https://github.com/opencv/opencv
+
+      - name: Patch bundled zlib zutil.h (fdopen 與新版 SDK 衝突)
+        # OpenCV 4.8.0 內含 zlib 1.2.13,其 zutil.h 在
+        #   #if defined(MACOS) || defined(TARGET_OS_MAC)
+        # 之下做 `#define fdopen(fd,mode) NULL`。現代 SDK 在 iOS 上也會把
+        # TARGET_OS_MAC 設為 1,於是這個 macro 誤觸發,與 SDK <stdio.h> 的
+        # fdopen 宣告相撞 → "error: expected identifier"。
+        #
+        # 注意:zlib 不能用 --disable zlib 關掉 —— modules/core/src/persistence.hpp
+        # 第 15 行硬寫 `#define USE_ZLIB 1` 後 `#include <zlib.h>`,core 模組無條件
+        # 依賴 zlib。因此正確做法是保留 zlib、只把這一行有問題的 macro 拿掉。
+        run: |
+          set -euo pipefail
+          f=opencv/3rdparty/zlib/zutil.h
+          before=$(grep -c 'define fdopen(fd,mode) NULL' "$f" || true)
+          echo "matches before: $before"
+          if [ "$before" -gt 0 ]; then
+            sed -i '' '/define fdopen(fd,mode) NULL/d' "$f"
+          fi
+          after=$(grep -c 'define fdopen(fd,mode) NULL' "$f" || true)
+          echo "matches after: $after"
+          test "$after" -eq 0
+
+      - name: Build opencv2.xcframework (core-only; 影像 codec 停用)
+        # iOS 端只用到核心模組與 CoreGraphics 版的 UIImage<->Mat 橋接,
+        # 全樹無 imread/imwrite/imdecode/imencode,故可安全停用所有影像 codec
+        # (產物更小,也避開第三方 libjpeg/libpng/libtiff 在新工具鏈上的編譯地雷)。
+        # zlib 保留 —— 見上一步的說明。
+        run: |
+          python3 opencv/platforms/apple/build_xcframework.py --out ./ocv_out \
+            --iphoneos_archs arm64 --iphonesimulator_archs arm64,x86_64 \
+            --iphoneos_deployment_target "${DEPLOYMENT_TARGET}" \
+            --without objc --without dnn --without gapi \
+            --disable jpeg --disable png --disable tiff \
+            --disable webp --disable openjpeg --disable jasper
+
+      - name: Verify slices (must match ios.yml's Validate step)
+        run: |
+          set -e
+          test -d ocv_out/opencv2.xcframework/ios-arm64/opencv2.framework/Headers
+          test -d ocv_out/opencv2.xcframework/ios-arm64_x86_64-simulator/opencv2.framework/Headers
+          echo "slices OK:"; ls -1 ocv_out/opencv2.xcframework
+
+      - name: Zip + compute SHA-256
+        id: pack
+        run: |
+          cd ocv_out
+          zip -ry "${ASSET}" opencv2.xcframework >/dev/null
+          SHA=$(shasum -a 256 "${ASSET}" | awk '{print $1}')
+          echo "sha256=${SHA}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### OpenCV ${OPENCV_VERSION} xcframework built"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| asset | \`${ASSET}\` |"
+            echo "| SHA-256 | \`${SHA}\` |"
+            echo "| release tag | \`${RELEASE_TAG}\` |"
+            echo ""
+              echo "**Next:** paste the SHA-256 above into \`.github/workflows/ios.yml\` → \`env.OPENCV_XCFRAMEWORK_SHA256\` (replace \`REPLACE_WITH_REAL_SHA256\`), then push. 在那之前 ios.yml 會以 stub 模式建置(綠燈,但不連結 OpenCV)。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload as workflow artifact (fallback download)
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencv2-xcframework
+          path: ocv_out/opencv2.xcframework.zip
+          if-no-files-found: error
+
+      - name: Publish as Release asset (${{ env.RELEASE_TAG }})
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd ocv_out
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" "${ASSET}" --clobber
+          else
+            gh release create "${RELEASE_TAG}" "${ASSET}" \
+              --title "OpenCV ${OPENCV_VERSION} iOS xcframework (core)" \
+              --notes "Built on macos-14 / $(xcodebuild -version | head -1). Core modules only (codecs+zlib disabled). sha256: ${{ steps.pack.outputs.sha256 }}"
+          fi

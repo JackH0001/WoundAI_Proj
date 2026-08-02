@@ -1,0 +1,6 @@
+# OpenCV 可選相依：由 Scripts/link-opencv.sh 產生，不進版控
+Config/OpenCV.local.xcconfig
+
+# OpenCV 二進位（~200MB）。由 CI 依 SHA-256 從 Release asset 取得，
+# 或本機執行 .github/workflows/build-opencv-xcframework.yml 自建。
+WoundMeasurementApp/opencv2.xcframework/
