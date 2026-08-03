@@ -71,11 +71,29 @@ let tok = "";
 const $ = id => document.getElementById(id);
 async function login(){
   $("msg").textContent = "登入中…";
+  // 密碼從剪貼簿貼進來時很容易帶到尾端空白或換行(從終端機複製尤其常見)。
+  // 後端已經會 strip，這裡也先去掉，順便讓下面顯示的長度是使用者真正送出的長度。
+  const user = $("u").value.trim(), pass = $("p").value.trim();
   try{
     const r = await fetch("/api/auth/login", {method:"POST",
       headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({username:$("u").value, password:$("p").value})});
-    if(!r.ok){ $("msg").textContent = "⚠ 帳密不正確（連線本身正常）"; return; }
+      body: JSON.stringify({username:user, password:pass})});
+    if(!r.ok){
+      // ⚠ 不可把所有失敗都說成「帳密不正確」。
+      // 400(格式)、401(帳密)、500(伺服器例外)、503(冷啟動逾時)的處置完全不同，
+      // 混成一句會讓人一直重打密碼，而真正的問題在別的地方。
+      let detail = "";
+      try{ const j = await r.json(); detail = j.error || j.msg || JSON.stringify(j); }
+      catch(_){ detail = await r.text().catch(()=>""); }
+      const hint = r.status===401 ? "帳號或密碼不符"
+                 : r.status===400 ? "送出的格式有誤"
+                 : r.status>=500  ? "後端發生例外，請看 Cloud Run 日誌"
+                 : "";
+      $("msg").innerHTML = `⚠ HTTP ${r.status} ${hint}<br>` +
+        `<span style="color:#8a8a8a">後端回應：${detail||"(無內容)"}　|　` +
+        `你送出的密碼長度 ${pass.length} 字元</span>`;
+      return;
+    }
     tok = (await r.json()).access_token || "";
     $("msg").textContent = tok ? "已登入" : "⚠ 回應沒有 token";
     if(tok) load();
