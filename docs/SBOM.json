@@ -1,0 +1,327 @@
+{
+  "generated": "2026-08-04",
+  "python": [
+    {
+      "name": "flask",
+      "constraint": ">=3.0.0",
+      "installed": "3.1.3",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "flask-cors",
+      "constraint": ">=4.0.0",
+      "installed": "",
+      "license": "MIT"
+    },
+    {
+      "name": "flask-jwt-extended",
+      "constraint": ">=4.6.0",
+      "installed": "4.7.4",
+      "license": "MIT License"
+    },
+    {
+      "name": "numpy",
+      "constraint": ">=1.24.0",
+      "installed": "2.2.6",
+      "license": "BSD License"
+    },
+    {
+      "name": "opencv-python-headless",
+      "constraint": ">=4.8.0",
+      "installed": "4.13.0.92",
+      "license": "Apache Software License"
+    },
+    {
+      "name": "Pillow",
+      "constraint": ">=10.0.0",
+      "installed": "12.2.0",
+      "license": "MIT-CMU"
+    },
+    {
+      "name": "requests",
+      "constraint": ">=2.31.0",
+      "installed": "2.34.2",
+      "license": "Apache Software License"
+    },
+    {
+      "name": "werkzeug",
+      "constraint": ">=3.0.0",
+      "installed": "3.1.8",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "gunicorn",
+      "constraint": ">=21.2.0",
+      "installed": "",
+      "license": "MIT"
+    },
+    {
+      "name": "google-cloud-storage",
+      "constraint": ">=2.14.0",
+      "installed": "",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "onnxruntime",
+      "constraint": ">=1.17.0",
+      "installed": "1.23.2",
+      "license": "MIT License"
+    }
+  ],
+  "android": [
+    {
+      "coordinate": "androidx.core:core-ktx:1.12.0",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.lifecycle:lifecycle-runtime-ktx:2.7.0",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.activity:activity-compose:1.8.2",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.compose.ui:ui",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.compose.ui:ui-graphics",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.compose.ui:ui-tooling-preview",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.compose.material3:material3",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.compose.material:material-icons-extended",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.compose.foundation:foundation",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.camera:camera-core:1.3.1",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.camera:camera-camera2:1.3.1",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.camera:camera-lifecycle:1.3.1",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.camera:camera-view:1.3.1",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.camera:camera-extensions:1.3.1",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "com.quickbirdstudios:opencv:4.5.3.0",
+      "configuration": "implementation",
+      "license": "Apache-2.0（OpenCV 4.5+ 本體與此 Android 包裝皆為 Apache-2.0）",
+      "unused_note": null
+    },
+    {
+      "coordinate": "org.tensorflow:tensorflow-lite:2.14.0",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "org.tensorflow:tensorflow-lite-support:0.4.4",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "org.tensorflow:tensorflow-lite-metadata:0.4.4",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "com.microsoft.onnxruntime:onnxruntime-android:1.18.0",
+      "configuration": "implementation",
+      "license": "MIT",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.room:room-runtime:2.6.1",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.room:room-ktx:2.6.1",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.room:room-compiler:2.6.1",
+      "configuration": "ksp",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "com.squareup.retrofit2:retrofit:2.9.0",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "com.squareup.retrofit2:converter-gson:2.9.0",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "com.squareup.okhttp3:okhttp:4.12.0",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "com.google.code.gson:gson:2.10.1",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "com.github.bumptech.glide:glide:4.16.0",
+      "configuration": "implementation",
+      "license": "BSD-2-Clause + MIT + Apache-2.0（混合，見其 LICENSE）",
+      "unused_note": null
+    },
+    {
+      "coordinate": "com.github.bumptech.glide:compose:1.0.0-beta01",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "com.google.accompanist:accompanist-permissions:0.32.0",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "com.github.PhilJay:MPAndroidChart:v3.1.0",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": "時間軸的趨勢圖改為自繪 Canvas，未再使用"
+    },
+    {
+      "coordinate": "com.journeyapps:zxing-android-embedded:4.3.0",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": "條碼掃描屬 DoctorAuthActivity（已無入口）"
+    },
+    {
+      "coordinate": "com.google.zxing:core:3.5.2",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "com.google.android.material:material:1.11.0",
+      "configuration": "implementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.test.ext:junit:1.1.5",
+      "configuration": "androidTestImplementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.test.espresso:espresso-core:3.5.1",
+      "configuration": "androidTestImplementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.compose.ui:ui-test-junit4",
+      "configuration": "androidTestImplementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.compose.ui:ui-tooling",
+      "configuration": "debugImplementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    },
+    {
+      "coordinate": "androidx.compose.ui:ui-test-manifest",
+      "configuration": "debugImplementation",
+      "license": "Apache-2.0",
+      "unused_note": null
+    }
+  ],
+  "models": [
+    {
+      "name": "student_fp16.onnx",
+      "role": "端上/後端主力分割（蒸餾 student）",
+      "architecture": "segmentation_models_pytorch (qubvel) — MIT",
+      "weights": "本專案自行訓練（蒸餾自 A-UNet / UNet++ 集成）",
+      "training_data": "uwm wound-segmentation + FUSC 公開資料集（授權條款待逐項確認）",
+      "note": "權重為自訓產物，架構為開源 MIT。資料集授權須在正式送審前逐項核對。"
+    },
+    {
+      "name": "a_unet.onnx",
+      "role": "難例升級集成成員 A",
+      "architecture": "UNet (segmentation_models_pytorch) — MIT",
+      "weights": "本專案自行訓練",
+      "training_data": "同上",
+      "note": ""
+    },
+    {
+      "name": "unetpp.onnx",
+      "role": "難例升級集成成員 B",
+      "architecture": "UNet++ (segmentation_models_pytorch) — MIT",
+      "weights": "本專案自行訓練",
+      "training_data": "同上",
+      "note": "推論耗時佔集成路由 63%，是延遲優化的第一目標。"
+    }
+  ]
+}

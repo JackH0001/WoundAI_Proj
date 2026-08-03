@@ -147,9 +147,79 @@ def read_jsonl(path: str, with_bad: bool = False):
     return (out, bad) if with_bad else out
 
 
+# ── 稽核軌跡的雜湊鏈 ──────────────────────────────────────────────────
+#
+# 「append-only」原本只是一個**約定**：大家說好不刪不改。約定擋不住手滑，也無法向
+# IRB 稽核員證明「這份紀錄從沒被動過」——他只能選擇相信你。
+#
+# 雜湊鏈把它變成可驗證的事實：每一筆都帶著前一筆的雜湊，改動任何一筆、刪掉任何一筆、
+# 或調換順序，後面每一筆的鏈結都會對不上，而且**指得出第一個斷點在哪**。
+#
+# ⚠ 誠實邊界:雜湊鏈能**偵測**竄改,不能**阻止**。有寫入權限的人仍可整條重算。
+# 要做到不可竄改需要物件儲存的保留政策(WORM),見 harden_bucket.ps1——
+# 那是另一個層次的控制,兩者互補而非替代。
+AUDIT_CHAIN_FIELDS = ("seq", "ts", "actor", "action", "code", "result", "prev")
+
+
+def _audit_hash(rec: dict) -> str:
+    """對紀錄的正規化形式取雜湊。欄位順序固定,不含 hash 自身。"""
+    payload = json.dumps({k: rec.get(k) for k in AUDIT_CHAIN_FIELDS},
+                         ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def audit(actor: str, action: str, code: str, result: str):
-    append_jsonl(AUDIT, {"ts": utc_now(), "actor": actor,
-                         "action": action, "code": code, "result": result})
+    prev_recs = read_jsonl(AUDIT)
+    last = prev_recs[-1] if prev_recs else None
+    rec = {
+        "seq": (last.get("seq", len(prev_recs) - 1) + 1) if last else 0,
+        "ts": utc_now(), "actor": actor, "action": action, "code": code, "result": result,
+        # 鏈首用固定字串,讓「第一筆」與「前面被刪光了」可以區分開來
+        "prev": (last or {}).get("hash") or "GENESIS",
+    }
+    rec["hash"] = _audit_hash(rec)
+    append_jsonl(AUDIT, rec)
+
+
+def verify_audit_chain(audit_path=None):
+    """驗證稽核軌跡的完整性。回 (ok, 問題清單, 統計)。
+
+    分開回報三種異常,因為處置完全不同:
+      - `hash_mismatch`  紀錄內容被改過
+      - `broken_link`    前一筆被刪除或順序被調換
+      - `fork`           兩筆指向同一個前驅(多實例並行寫入,或有人補塞紀錄)
+    """
+    recs = read_jsonl(audit_path or AUDIT)
+    issues, seen_prev = [], {}
+    prev_hash = "GENESIS"
+    for i, r in enumerate(recs):
+        # 舊格式(雜湊鏈導入前)的紀錄沒有 hash 欄位,跳過但要計數——
+        # 靜默忽略會讓「整條鏈其實沒在驗」看起來像通過
+        if "hash" not in r:
+            issues.append({"index": i, "kind": "legacy_no_hash",
+                           "detail": "雜湊鏈導入前的舊紀錄,無法驗證", "ts": r.get("ts")})
+            prev_hash = "GENESIS"   # 舊紀錄之後重新起鏈
+            continue
+        if _audit_hash(r) != r.get("hash"):
+            issues.append({"index": i, "kind": "hash_mismatch",
+                           "detail": "紀錄內容與其雜湊不符(內容被改過)", "ts": r.get("ts")})
+        if r.get("prev") != prev_hash:
+            issues.append({"index": i, "kind": "broken_link",
+                           "detail": "prev 指向 %s,但前一筆的 hash 是 %s(前一筆被刪或順序被調換)"
+                                     % (str(r.get("prev"))[:12], str(prev_hash)[:12]),
+                           "ts": r.get("ts")})
+        p = r.get("prev")
+        if p in seen_prev and p != "GENESIS":
+            issues.append({"index": i, "kind": "fork",
+                           "detail": "與第 %d 筆指向同一個前驅(並行寫入或被補塞)" % seen_prev[p],
+                           "ts": r.get("ts")})
+        seen_prev[p] = i
+        prev_hash = r.get("hash")
+    stats = {"total": len(recs), "issues": len(issues),
+             "head": prev_hash if recs else "GENESIS",
+             "kinds": {k: sum(1 for x in issues if x["kind"] == k)
+                       for k in {x["kind"] for x in issues}}}
+    return (len(issues) == 0, issues, stats)
 
 
 def poly_sig(poly):

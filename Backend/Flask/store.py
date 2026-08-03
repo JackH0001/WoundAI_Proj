@@ -44,6 +44,8 @@
     WOUNDAI_STORE=gcs
     WOUNDAI_GCS_BUCKET=my-bucket   # gcs 時必填
     WOUNDAI_GCS_PREFIX=flywheel    # 選填，預設 flywheel
+    WOUNDAI_AUDIT_BUCKET=my-audit  # 選填。設了的話 audit.jsonl 改寫入這個桶
+                                   # （該桶應設保留政策/WORM，見 harden_bucket.ps1）
 """
 import io
 import json
@@ -141,12 +143,34 @@ class GcsStore(Store):
     也不會因為缺它而讓整個模組 import 失敗。
     """
 
-    def __init__(self, bucket: str, prefix: str = "flywheel"):
+    # 走**獨立稽核桶**的鍵。
+    #
+    # 為什麼要分桶：GCS 的保留政策（WORM）是桶層級，無法只套在某個前綴上。
+    # 套在主桶會連影像一起鎖住——而影像必須刪得掉（撤回同意、保存期限）。
+    # 稽核軌跡則相反，它必須刪不掉。兩種需求互斥，只能分桶。
+    #
+    # 沒有這段路由的話，稽核桶就只是一個空的、有保留政策的桶——看起來合規，
+    # 實際上稽核紀錄還是寫在刪得掉的主桶裡。
+    AUDIT_KEYS = ("audit.jsonl",)
+
+    def __init__(self, bucket: str, prefix: str = "flywheel", audit_bucket: str = None):
         from google.cloud import storage  # noqa: 延後 import，見 docstring
         self._client = storage.Client()
         self._bucket = self._client.bucket(bucket)
         self._bucket_name = bucket
         self.prefix = prefix.strip("/")
+        self._audit_bucket_name = audit_bucket or None
+        self._audit_bucket = self._client.bucket(audit_bucket) if audit_bucket else None
+
+    def _is_audit(self, key: str) -> bool:
+        k = key.strip("/")
+        return any(k == a or k.startswith(a + "/") for a in self.AUDIT_KEYS)
+
+    def _target(self, key: str):
+        """(bucket 物件, bucket 名稱)。稽核鍵在有設定稽核桶時走那一個。"""
+        if self._audit_bucket is not None and self._is_audit(key):
+            return self._audit_bucket, self._audit_bucket_name
+        return self._bucket, self._bucket_name
 
     def _k(self, key: str) -> str:
         return "%s/%s" % (self.prefix, key.strip("/")) if self.prefix else key.strip("/")
@@ -154,15 +178,17 @@ class GcsStore(Store):
     def append_line(self, key: str, line: str) -> None:
         # 一筆一個物件。不做 read-modify-write：那會在多實例下靜默吃掉紀錄，
         # 而這條路徑同時承載稽核軌跡，遺失是不可接受的。
+        bucket, _ = self._target(key)
         name = "%s/%s" % (self._k(key), _record_name())
-        self._bucket.blob(name).upload_from_string(
+        bucket.blob(name).upload_from_string(
             line.rstrip("\n") + "\n", content_type="application/json")
 
     def read_lines(self, key: str):
         # 物件名以零填充的奈秒時間戳開頭 → 字典序＝時間序，
         # 這正是 withdraw/restore 重播所依賴的順序。
+        _, bname = self._target(key)
         base = self._k(key) + "/"
-        blobs = sorted(self._client.list_blobs(self._bucket_name, prefix=base),
+        blobs = sorted(self._client.list_blobs(bname, prefix=base),
                        key=lambda b: b.name)
         out = []
         for b in blobs:
@@ -174,19 +200,25 @@ class GcsStore(Store):
         return out
 
     def put_blob(self, key: str, data: bytes) -> None:
-        self._bucket.blob(self._k(key)).upload_from_file(
+        bucket, _ = self._target(key)
+        bucket.blob(self._k(key)).upload_from_file(
             io.BytesIO(data), content_type="image/jpeg")
 
     def get_blob(self, key: str):
-        b = self._bucket.blob(self._k(key))
+        bucket, _ = self._target(key)
+        b = bucket.blob(self._k(key))
         if not b.exists():
             return None
         return b.download_as_bytes()
 
     def exists(self, key: str) -> bool:
-        return self._bucket.blob(self._k(key)).exists()
+        bucket, _ = self._target(key)
+        return bucket.blob(self._k(key)).exists()
 
     def move(self, src: str, dst: str) -> bool:
+        # 稽核鍵不該被 move；真的發生就是有人想搬走軌跡，讓它明確失敗而不是靜默照做。
+        if self._is_audit(src) or self._is_audit(dst):
+            raise PermissionError("稽核軌跡不可搬移")
         s = self._bucket.blob(self._k(src))
         if not s.exists():
             return False
@@ -197,12 +229,16 @@ class GcsStore(Store):
         return True
 
     def list_keys(self, prefix: str):
+        _, bname = self._target(prefix)
         base = self._k(prefix).rstrip("/") + "/"
         n = len(self.prefix) + 1 if self.prefix else 0
-        return sorted(b.name[n:] for b in self._client.list_blobs(self._bucket_name, prefix=base))
+        return sorted(b.name[n:] for b in self._client.list_blobs(bname, prefix=base))
 
     def describe(self) -> str:
-        return "gcs://%s/%s" % (self._bucket_name, self.prefix)
+        d = "gcs://%s/%s" % (self._bucket_name, self.prefix)
+        if self._audit_bucket_name:
+            d += " (稽核→gcs://%s，WORM)" % self._audit_bucket_name
+        return d
 
 
 _ACTIVE = None
@@ -218,7 +254,10 @@ def get_store(root: str = None) -> Store:
         bucket = os.environ.get("WOUNDAI_GCS_BUCKET")
         if not bucket:
             raise RuntimeError("WOUNDAI_STORE=gcs 但缺 WOUNDAI_GCS_BUCKET")
-        _ACTIVE = GcsStore(bucket, os.environ.get("WOUNDAI_GCS_PREFIX", "flywheel"))
+        # 稽核桶為選填。沒設就退回主桶——功能正常，但稽核軌跡是刪得掉的，
+        # describe() 會誠實反映這件事（不會顯示 WORM 字樣）。
+        _ACTIVE = GcsStore(bucket, os.environ.get("WOUNDAI_GCS_PREFIX", "flywheel"),
+                           os.environ.get("WOUNDAI_AUDIT_BUCKET") or None)
     else:
         _ACTIVE = LocalStore(root or os.environ.get("WOUNDAI_FLYWHEEL_DIR") or "flywheel")
     return _ACTIVE
