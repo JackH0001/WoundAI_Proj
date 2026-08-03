@@ -29,7 +29,10 @@ import com.woundmeasurement.app.data.database.WoundMeasurementDatabase
 import com.woundmeasurement.app.data.entity.WoundCaseEntity
 import com.woundmeasurement.app.data.repo.CaseRepository
 import com.woundmeasurement.app.pipeline.CaseSelectScreen
+import com.woundmeasurement.app.data.entity.MeasurementEntity
+import com.woundmeasurement.app.data.store.LocalImageStore
 import com.woundmeasurement.app.pipeline.MeasureValidationEntry
+import com.woundmeasurement.app.pipeline.MeasurementReviewScreen
 import com.woundmeasurement.app.pipeline.RecentActivityScreen
 import com.woundmeasurement.app.pipeline.WoundTimelineScreen
 
@@ -96,11 +99,22 @@ fun WoundMeasurementApp() {
     // 從 DB 重讀(傳遞只會多一份可能過期的快照,而且會出現「case 屬 A、consent 屬 B」的脆弱狀態)。
     // rememberSaveable(需 @Parcelize):轉螢幕若丟了 case,量測到一半的結果會被靜默彈回個案清單
     var chosenCase by rememberSaveable { mutableStateOf<WoundCaseEntity?>(null) }
+    // 從時間軸點進來要檢視/重修的那一筆。刻意用 remember(不 saveable):
+    // MeasurementEntity 未 Parcelable,轉螢幕就退回時間軸重新點,比硬塞序列化安全。
+    var reviewRecord by remember { mutableStateOf<MeasurementEntity?>(null) }
+    val imageStore = remember { LocalImageStore(context) }
+
+    // 保存期限清理:結案逾 90 天者刪影像但**保留面積與趨勢**(病歷不可因逾期而毀)。
+    // 放 App 啟動時跑一次;失敗不影響使用(下次啟動再試)。
+    LaunchedEffect(Unit) {
+        runCatching { repo.purgeExpiredImages(imageStore, days = 90) }
+    }
 
     // 系統返回鍵:沒有這個的話,在任何子畫面按返回都直接結束 App
     BackHandler(enabled = currentScreen != "main") {
         currentScreen = when (currentScreen) {
             "measure", "timeline" -> backTo
+            "review" -> "timeline"
             else -> "main"
         }
     }
@@ -128,9 +142,17 @@ fun WoundMeasurementApp() {
             if (c != null) WoundTimelineScreen(
                 onBack = { currentScreen = backTo },
                 caseId = c.id,
-                caseLabel = "${c.bodySite}・${c.woundType} ${c.wdCode}"
+                caseLabel = "${c.bodySite}・${c.woundType} ${c.wdCode}",
+                // 點單筆 → 回頭修邊/補送標註,不必重測
+                onOpenRecord = { m -> reviewRecord = m; currentScreen = "review" }
             // caseId=null 會退回全域混畫的趨勢圖——那正是設計文件明文禁止的圖表,寧可退回上一頁
             ) else LaunchedEffect(Unit) { currentScreen = backTo }
+        }
+        "review" -> {
+            val r = reviewRecord
+            if (r != null) MeasurementReviewScreen(
+                record = r, onBack = { reviewRecord = null; currentScreen = "timeline" }
+            ) else LaunchedEffect(Unit) { currentScreen = "timeline" }
         }
         "recent" -> RecentActivityScreen(
             repo = repo,

@@ -311,7 +311,12 @@ class MeasureViewModel(
         dao: MeasurementDao,
         exudate: Int?,
         case: com.woundmeasurement.app.data.entity.WoundCaseEntity? = null,
-        source: String? = null
+        source: String? = null,
+        /**
+         * 給了就把 work 影像加密存本機。**這是「回頭修邊」與「補送標註不必重測」的前提**——
+         * v2 時 imagePath 一直是空字串,離開量測頁影像與輪廓就都沒了。
+         */
+        imageStore: com.woundmeasurement.app.data.store.LocalImageStore? = null
     ) {
         val r = _state.value.result ?: return
         _state.value = _state.value.copy(submitStatus = "存入時間軸中…")
@@ -320,7 +325,11 @@ class MeasureViewModel(
                 fun pct(k: String) = ((r.tissueFrac[k] ?: 0.0) * 100).toInt()
                 val notes = "PUSH ${r.push.partial ?: "-"}; 肉芽${pct("granulation")}% 腐肉${pct("slough")}% 壞死${pct("necrosis")}%; 滲液${exudate ?: "-"}; route ${r.route}" +
                         (lastCorrectionIou?.let { "; 修邊IoU %.2f".format(it) } ?: "")
+                val polyJson = lastPolygon.takeIf { it.isNotEmpty() }?.let { pts ->
+                    pts.joinToString(",", "[", "]") { "[${it.getOrElse(0){0}},${it.getOrElse(1){0}}]" }
+                }
                 val (id, updatedRow) = withContext(Dispatchers.IO) {
+                    val imgName = if (imageStore != null) lastBitmap?.let { imageStore.save(it) } else null
                     val existId = lastSavedId
                     val exist = existId?.let { dao.getMeasurementById(it) }
                     if (exist != null) {
@@ -334,7 +343,17 @@ class MeasureViewModel(
                             isPatientIdentified = (case?.patientId ?: exist.patientId) != null,
                             caseId = case?.id ?: exist.caseId, wdCode = case?.wdCode ?: exist.wdCode,
                             imageId = lastImageId ?: exist.imageId, mmPerPx = lastMmPerPx ?: exist.mmPerPx,
-                            route = lastRoute ?: exist.route, source = source ?: exist.source
+                            route = lastRoute ?: exist.route, source = source ?: exist.source,
+                            // 修邊後再存 → 輪廓要更新(這正是補送標註要用的 GT)
+                            gtPolygon = polyJson ?: exist.gtPolygon,
+                            imageW = (lastImageW.takeIf { it > 0 }) ?: exist.imageW,
+                            imageH = (lastImageH.takeIf { it > 0 }) ?: exist.imageH,
+                            exudate = exudate ?: exist.exudate,
+                            correctionIou = lastCorrectionIou ?: exist.correctionIou,
+                            // 同一次影像重存:沿用既有檔案,剛存的那份要刪掉免得變孤兒檔
+                            imagePath = if (exist.imagePath.isNotEmpty()) {
+                                imgName?.let { imageStore?.delete(it) }; exist.imagePath
+                            } else (imgName ?: exist.imagePath)
                         ))
                         Pair(exist.id, true)
                     } else {
@@ -348,13 +367,18 @@ class MeasureViewModel(
                             woundType = "AI(${r.route})",
                             quality = "backend",
                             processingTime = 0L,
-                            imagePath = "",
+                            imagePath = imgName ?: "",
                             dataPath = "",
                             notes = notes,
                             // 綁定個案與雲端影像:本機病歷與飛輪樣本靠 wdCode/imageId 對得起來
                             caseId = case?.id, wdCode = case?.wdCode,
                             imageId = lastImageId, mmPerPx = lastMmPerPx,
-                            route = lastRoute, source = source
+                            route = lastRoute, source = source,
+                            gtPolygon = polyJson,
+                            imageW = lastImageW.takeIf { it > 0 },
+                            imageH = lastImageH.takeIf { it > 0 },
+                            exudate = exudate,
+                            correctionIou = lastCorrectionIou
                         ))
                         Pair(nid, false)
                     }

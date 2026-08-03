@@ -32,7 +32,7 @@ import com.woundmeasurement.app.data.converter.DateConverter
         WoundCaseEntity::class,
         ConsentEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 @TypeConverters(DateConverter::class)
@@ -113,6 +113,28 @@ abstract class WoundMeasurementDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v2 → v3：讓時間軸的單筆紀錄**自己就足以補送標註與回頭修邊**。
+         *
+         * v2 只存了面積與 `imageId`，沒存 GT 輪廓 → 醫師重簽同意後要補送訓練標註，
+         * 只能整個重測一遍（輪廓只活在記憶體，離開量測頁就沒了）。
+         * 影像本體不進 DB，改存在 app 私有目錄的加密檔（`LocalImageStore`），
+         * `imagePath` 存檔名——v2 時它一直是空字串。
+         *
+         * 同樣全是加法，不動既有資料。
+         */
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `measurements` ADD COLUMN `gtPolygon` TEXT")
+                db.execSQL("ALTER TABLE `measurements` ADD COLUMN `imageW` INTEGER")
+                db.execSQL("ALTER TABLE `measurements` ADD COLUMN `imageH` INTEGER")
+                db.execSQL("ALTER TABLE `measurements` ADD COLUMN `exudate` INTEGER")
+                db.execSQL("ALTER TABLE `measurements` ADD COLUMN `correctionIou` REAL")
+                // NOT NULL + DEFAULT：既有列會被填 0(false)，符合「舊紀錄未曾送出標註」的事實
+                db.execSQL("ALTER TABLE `measurements` ADD COLUMN `annotationSubmitted` INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun getDatabase(context: Context): WoundMeasurementDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -120,7 +142,7 @@ abstract class WoundMeasurementDatabase : RoomDatabase() {
                     WoundMeasurementDatabase::class.java,
                     "wound_measurement_database"
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     // 刻意不加 fallbackToDestructiveMigration:寧可在開發期因缺 migration 而崩潰,
                     // 也不要在醫護手機上默默刪光病歷。
                     .build()

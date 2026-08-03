@@ -222,6 +222,35 @@ class CaseRepository(
     }
 
     /**
+     * 保存期限清理：**結案逾 [days] 天的個案，刪影像但保留量測數值與趨勢**。
+     *
+     * 為什麼這樣切（對應 `IRB_consent_templates.md:57`「逾期即下架/銷毀」）：
+     *  - 影像是最敏感的 PHI，也最佔空間，逾期就該清；
+     *  - 面積、PUSH、時間戳是**病歷**，不能因為逾期而毀掉（那是另一種違規）。
+     *  - **開立中的個案一律保留**——還要跟蹤癒合。
+     *
+     * 回傳刪掉的影像數。呼叫端請在 App 啟動或開時間軸時跑一次。
+     */
+    suspend fun purgeExpiredImages(
+        store: com.woundmeasurement.app.data.store.LocalImageStore,
+        days: Int = 90
+    ): Int = withContext(Dispatchers.IO) {
+        val cutoff = Date(System.currentTimeMillis() - days.toLong() * 24 * 60 * 60 * 1000)
+        var n = 0
+        for (m in measurements.getExpiredWithImages(cutoff)) {
+            store.delete(m.imagePath)
+            measurements.clearImagePath(m.id)
+            n++
+        }
+        n
+    }
+
+    /** 該個案還可補送標註的筆數（時間軸提示用）。 */
+    suspend fun pendingAnnotationCount(caseId: Long): Int = withContext(Dispatchers.IO) {
+        measurements.getPendingAnnotation(caseId).size
+    }
+
+    /**
      * 最近就診用的一列資料：個案 + 病患辨識線索 + 是否可量測（①照護同意）。
      *
      * 為什麼要帶病患辨識：只顯示「部位・類型 + WD-code」時，同病房兩位病患都有「薦骨・壓瘡」

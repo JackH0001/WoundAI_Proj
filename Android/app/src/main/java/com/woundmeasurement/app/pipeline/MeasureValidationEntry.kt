@@ -38,6 +38,7 @@ fun MeasureValidationEntry(
     val db = remember { WoundMeasurementDatabase.getDatabase(ctx) }
     val dao = remember { db.measurementDao() }
     val repo = remember { com.woundmeasurement.app.data.repo.CaseRepository.from(db) }
+    val imageStore = remember { com.woundmeasurement.app.data.store.LocalImageStore(ctx) }
     val seg = remember { OnnxSegmentationModule(ctx) }
     val vm = remember { MeasureViewModel(WoundAnalyzer(seg), null) }
     val backend = remember { BackendClient(backendBaseUrl) }
@@ -206,7 +207,7 @@ fun MeasureValidationEntry(
                     // 只擋「載入」那一步是攔不住的(影像已經在手上了)。
                     if (clinicalMode && !careOk)
                         vm.reportSubmitBlocked("⚠️ 此病患未取得①照護同意(或已撤回),不得存入病歷")
-                    else vm.saveToTimeline(dao, exudate, case, source)
+                    else vm.saveToTimeline(dao, exudate, case, source, imageStore)
                 },
                 exudate = exudate, onExudate = { exudate = it },
                 // 臨床模式 source 已鎖定 → 傳 onSource=null 讓選擇器整組隱藏（少一次必選、也少一次選錯）

@@ -52,5 +52,21 @@ data class MeasurementEntity(
     val mmPerPx: Double? = null,
     val route: String? = null,
     /** clinical / sample / phantom / external。與飛輪 source 同義。 */
-    val source: String? = null
+    val source: String? = null,
+    // ---- v3：讓「回頭修邊」與「補送標註」不必重測一遍 ----
+    /**
+     * 醫師修邊後的 GT 輪廓，JSON `[[x,y],…]`，座標空間＝[imageW]×[imageH]。
+     *
+     * ⚠ 這是 v2 漏掉的關鍵欄位：先前輪廓只活在 `MeasureViewModel.lastPolygon`（記憶體），
+     * 離開量測頁就消失 → 重簽同意後要補送訓練標註，只能整個重測。
+     */
+    val gtPolygon: String? = null,
+    val imageW: Int? = null,
+    val imageH: Int? = null,
+    /** 醫師輸入的滲液 0–3（PUSH 子分）。補送標註時要一起帶。 */
+    val exudate: Int? = null,
+    /** 修邊後與 AI 原始遮罩的 IoU（1.0＝未改）。 */
+    val correctionIou: Double? = null,
+    /** 是否已送出訓練標註（避免重複送、也讓時間軸看得出哪幾筆進了飛輪）。 */
+    val annotationSubmitted: Boolean = false
 )

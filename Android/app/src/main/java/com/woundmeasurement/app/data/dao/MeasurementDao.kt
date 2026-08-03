@@ -35,6 +35,29 @@ interface MeasurementDao {
     @Query("SELECT COUNT(*) FROM measurements WHERE caseId = :caseId")
     suspend fun getCountByCase(caseId: Long): Int
 
+    // ---- v3：保存期限清理與補送標註 ----
+    /**
+     * 結案逾 N 天、且**還留著影像**的量測。保存期限清理用。
+     * 只刪影像不刪列：面積與趨勢是病歷，不能因為逾期就毀掉。
+     */
+    @Query("""SELECT m.* FROM measurements m JOIN wound_cases c ON c.id = m.caseId
+              WHERE c.closedAt IS NOT NULL AND c.closedAt < :cutoff
+                AND m.imagePath IS NOT NULL AND m.imagePath != ''""")
+    suspend fun getExpiredWithImages(cutoff: Date): List<MeasurementEntity>
+
+    /** 清掉影像路徑（實體檔由 LocalImageStore 刪）。 */
+    @Query("UPDATE measurements SET imagePath = '' WHERE id = :id")
+    suspend fun clearImagePath(id: Long)
+
+    /** 該個案還沒送出訓練標註、且具備補送條件（有輪廓與影像綁定）的紀錄。 */
+    @Query("""SELECT * FROM measurements WHERE caseId = :caseId
+              AND annotationSubmitted = 0 AND gtPolygon IS NOT NULL AND imageId IS NOT NULL
+              ORDER BY timestamp DESC""")
+    suspend fun getPendingAnnotation(caseId: Long): List<MeasurementEntity>
+
+    @Query("UPDATE measurements SET annotationSubmitted = 1 WHERE id = :id")
+    suspend fun markAnnotationSubmitted(id: Long)
+
     /** 最近有量測的個案 id（依最後量測時間排序）。主畫面「最近就診」用。 */
     @Query("""SELECT caseId FROM measurements WHERE caseId IS NOT NULL
               GROUP BY caseId ORDER BY MAX(timestamp) DESC LIMIT :limit""")
