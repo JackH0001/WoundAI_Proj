@@ -114,6 +114,10 @@ private class RasterState(
         mask = move(mask); tissue = move(tissue); orig = move(orig)
         rx0 -= gL / mScale; ry0 -= gT / mScale
         mw = nw; mh = nh
+        // ⚠ 舊 overlay 必須明確回收再配新的。ARGB_8888 在 2200² 是 19.4 MB;
+        // 只丟參照的話要等 GC 決定何時回收,而擴張常常是連續發生的(筆刷一路往外畫),
+        // 新舊兩份同時在 heap 上就是 39 MB 的瞬時尖峰 —— 低階機正是在這裡當掉。
+        overlay.recycle()
         overlay = Bitmap.createBitmap(mw, mh, Bitmap.Config.ARGB_8888)
         syncAll()
         return true
@@ -223,6 +227,35 @@ fun WoundEditScreen(
     class Snap(val m: ByteArray, val t: ByteArray, val mw: Int, val mh: Int, val rx0: Float, val ry0: Float)
     val undo = remember(st) { mutableStateListOf<Snap>() }
     val redo = remember(st) { mutableStateListOf<Snap>() }
+
+    /**
+     * undo 深度改由**位元組預算**決定，不再固定 8 筆。
+     *
+     * 每筆快照是 `mask + tissue` 兩份 `mw*mh` 陣列。小傷口時遮罩可能只有 400²＝0.32 MB／筆，
+     * 8 筆才 2.6 MB；但遮罩會隨筆刷擴張，到上限 2200² 時單筆就是 **9.7 MB**，8 筆＝77 MB，
+     * 再加上活動中的 mask/tissue/orig（14.5 MB）與 ARGB overlay（19.4 MB）、
+     * 從 DB 載回的全尺寸點陣圖（約 12 MB），峰值超過 120 MB。
+     * minSdk 24 的裝置點陣圖在 Java heap 上，低階機的 heap 上限就在這個量級——
+     * **而大面積傷口正是最需要修邊的情境**，會當在最不該當的時候。
+     *
+     * 這裡用固定的記憶體預算換取「小傷口 undo 很深、大傷口 undo 較淺但絕不 OOM」。
+     * 上限仍保留 8（小遮罩時不會無限成長），下限保 2 —— 只剩 1 步可復原太難用，
+     * 而 2 筆在 2200² 是 19.4 MB，仍在安全範圍。
+     */
+    val undoBudgetBytes = 24 * 1024 * 1024
+    fun maxUndoDepth(): Int {
+        val perSnap = st.mw.toLong() * st.mh * 2      // mask + tissue
+        if (perSnap <= 0) return 8
+        return ((undoBudgetBytes / perSnap).toInt()).coerceIn(2, 8)
+    }
+    /** 加入一筆快照並依目前預算修剪最舊的。redo 堆疊同樣要受限——它一樣是整份遮罩複本。 */
+    fun push(stack: MutableList<Snap>, s: Snap) {
+        stack.add(s)
+        val cap = maxUndoDepth()
+        while (stack.size > cap) stack.removeAt(0)
+    }
+    /** 新的一筆編輯：進 undo，並讓 redo 失效（分岔後的未來已不成立）。 */
+    fun pushUndo(s: Snap) { push(undo, s); redo.clear() }
     fun snap() = Snap(st.mask.copyOf(), st.tissue.copyOf(), st.mw, st.mh, st.rx0, st.ry0)
     fun restore(s: Snap): Boolean {
         if (s.mw != st.mw || s.mh != st.mh) return false   // 擴張後尺寸不同→無法還原(已於擴張時清空)
@@ -318,9 +351,8 @@ fun WoundEditScreen(
                         },
                         onDragEnd = {
                             strokeSnapshot?.let {
-                                if (it.mw == st.mw && it.mh == st.mh) {   // 擴張過的舊快照丟棄
-                                    if (undo.size >= 8) undo.removeAt(0); undo.add(it); redo.clear()
-                                }
+                                // 擴張過的舊快照尺寸不同，還原會錯位 → 丟棄
+                                if (it.mw == st.mw && it.mh == st.mh) pushUndo(it)
                             }
                             strokeSnapshot = null; last = null; cursor = null
                         },
@@ -379,13 +411,14 @@ fun WoundEditScreen(
             OutlinedButton({
                 if (undo.isNotEmpty()) {
                     val cur = snap()
-                    if (restore(undo.removeAt(undo.lastIndex))) { redo.add(cur); version++ }
+                    if (restore(undo.removeAt(undo.lastIndex))) { push(redo, cur); version++ }
                 }
             }, enabled = undo.isNotEmpty(), modifier = Modifier.weight(1f), contentPadding = PaddingValues(2.dp)) { Text("↺") }
             OutlinedButton({
                 if (redo.isNotEmpty()) {
                     val cur = snap()
-                    if (restore(redo.removeAt(redo.lastIndex))) { undo.add(cur); version++ }
+                    // 這裡不能用 pushUndo：它會清掉 redo，等於按一次「重做」就再也重做不了下一步
+                    if (restore(redo.removeAt(redo.lastIndex))) { push(undo, cur); version++ }
                 }
             }, enabled = redo.isNotEmpty(), modifier = Modifier.weight(1f), contentPadding = PaddingValues(2.dp)) { Text("↩") }
         }

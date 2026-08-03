@@ -1,0 +1,29 @@
+# Dockerfile 的 `COPY . .` 會把整個目錄放進映像層。
+# 映像會被推到容器登錄檔並長期保存 —— 病人影像一旦進去，之後刪 flywheel/ 也拿不回來，
+# 因為它已經在某個映像層裡了。
+#
+# 與 .gcloudignore 內容刻意保持一致：兩者的觸發時機不同
+#（.gcloudignore 管「上傳到 Cloud Build」，.dockerignore 管「進入映像層」），
+# 只設一個就會留下另一條路。
+
+flywheel/
+uploads/
+processed/
+*.db
+*.sqlite
+*.sqlite3
+logs/
+*.log
+
+.git/
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+.env
+.DS_Store
+nginx.conf
+tools/

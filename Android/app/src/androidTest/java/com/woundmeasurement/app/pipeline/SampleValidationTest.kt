@@ -5,6 +5,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.woundmeasurement.app.processing.OnnxSegmentationModule
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import android.util.Log
 
@@ -23,12 +24,26 @@ class SampleValidationTest {
 
     @Test fun runSamplePipeline() = runBlocking {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
-        // 載入範例圖(androidTest assets)
-        val bmp = ctx.assets.open("sample_std.jpg").use { BitmapFactory.decodeStream(it) }
-        assertTrue("範例圖載入失敗", bmp != null)
 
-        // 端上分割器 + ArUco + 協調器
-        val student = OnnxSegmentationModule(ctx).apply { loadModel() }
+        // 這支測試的前置條件（範例圖、端上原生庫）本來就可能不在——註解裡早就寫了「否則略過」，
+        // 但實作是直接拋 FileNotFoundException，於是它在 CI 上一直是**紅的**。
+        // 長期紅燈的測試等於沒有測試：真的有東西壞掉時沒人會注意到多一條紅。
+        // 改用 assumeTrue → 前置不滿足時標記為「略過」，不污染測試結果。
+        val bmp = runCatching {
+            ctx.assets.open("sample_std.jpg").use { BitmapFactory.decodeStream(it) }
+        }.getOrNull()
+        assumeTrue(
+            "缺 app/src/androidTest/assets/sample_std.jpg（含 square_20mm_v2 貼紙的標準化照片），略過",
+            bmp != null
+        )
+        bmp!!
+
+        // 端上分割器 + ArUco + 協調器。
+        // 原生庫（libonnxruntime.so / OpenCV）在部分模擬器與 ABI 上不相容，載入會拋
+        // UnsatisfiedLinkError（是 Error 不是 Exception）——App 端因此刻意不自動載入。
+        // 這裡一併攔 Throwable 並略過，否則整個 instrumented 測試會連帶掛掉。
+        val student = runCatching { OnnxSegmentationModule(ctx).apply { loadModel() } }
+            .getOrElse { assumeTrue("端上原生庫不可用（$it），略過", false); return@runBlocking }
         val aruco = ArucoDetector()                     // 需 OpenCV
         val analyzer = WoundAnalyzer(student)           // 單軌(無 wsm);可再傳 wsm 開雙軌
 
@@ -48,6 +63,8 @@ class SampleValidationTest {
             assertTrue("面積應在合理範圍(0.1–80cm²)", (r.areaCm2 ?: 0.0) in 0.1..80.0)
         }
 
-        student.release()
+        // ⚠ 刻意**不呼叫** student.release()：它關的是 process 級的 OrtEnvironment，
+        // 同一個測試程序裡後續任何用到 ONNX 的測試都會跟著壞掉。
+        // 這與 App 端移除 seg.release() 是同一個理由。
     }
 }

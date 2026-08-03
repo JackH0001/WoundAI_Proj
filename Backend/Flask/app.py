@@ -82,21 +82,37 @@ try:
 except Exception:
     pass
 
-# 預設帳號（正式環境應改為資料庫驗證）
-_USERS = {
-    'admin': {
-        'password_hash': hashlib.sha256(
-            os.environ.get('ADMIN_PASSWORD', 'woundai-admin').encode()
-        ).hexdigest(),
-        'role': 'admin'
-    },
-    'clinician': {
-        'password_hash': hashlib.sha256(
-            os.environ.get('CLINICIAN_PASSWORD', 'woundai-clinician').encode()
-        ).hexdigest(),
-        'role': 'clinician'
-    }
-}
+# C0 唯讀主控台(/console)。掛在同一個 Flask，不另外部署——
+# 多一個服務就多一套權限、憑證與稽核要對，而這一版只是把既有的 stats 端點畫成一頁。
+try:
+    from api_console import console_bp
+    app.register_blueprint(console_bp)
+except Exception as _ce:
+    print(f"主控台未載入: {_ce}")
+
+# ── 帳號 ────────────────────────────────────────────────────────────────
+#
+# 密碼**只從環境變數/Secret 讀取**，程式碼裡沒有可用的預設值。
+#
+# 先前是 `os.environ.get('ADMIN_PASSWORD', 'woundai-admin')` ——「有預設值」在本機很方便，
+# 但那個預設值同時也是**上線後沒設環境變數時實際生效的密碼**，而它就寫在公開 repo 裡。
+# 服務只在區網時後果有限；一旦放上 Cloud Run 這種公開網址，等於把門開著還附上鑰匙。
+#
+# 沒設環境變數時的行為是**該帳號不存在**（而不是退回預設密碼）。啟動時會警告，
+# 讓「忘了設」變成看得見的失敗，而不是看不見的漏洞。
+#
+# ⚠ 這仍是單純的密碼驗證，不是完整的身分方案。正解是院內 SSO/OIDC 發短效 token，
+# 讓 App 與後端都不碰長效密碼。列為後續。
+_ENV_ONLY_ACCOUNTS = [('admin', 'ADMIN_PASSWORD'), ('clinician', 'CLINICIAN_PASSWORD')]
+_USERS = {}
+for _u, _env in _ENV_ONLY_ACCOUNTS:
+    _pw = os.environ.get(_env)
+    if _pw:
+        _USERS[_u] = {'password_hash': hashlib.sha256(_pw.encode()).hexdigest(),
+                      'role': 'admin' if _u == 'admin' else 'clinician'}
+if not _USERS:
+    print("⚠ 未設定任何帳號密碼環境變數（ADMIN_PASSWORD / CLINICIAN_PASSWORD），"
+          "所有登入都會失敗。本機開發請先 set ADMIN_PASSWORD=<自訂密碼>。")
 
 # 創建必要目錄
 for folder in ['uploads', 'processed', 'models', 'logs']:
@@ -1268,13 +1284,15 @@ def classify_wound():
                 logger.info(f"影像 {image_id} 已撤回訓練同意:不存檔、不發 image_id")
                 image_id = None
             else:
-                os.makedirs(_fw.IMAGES_DIR, exist_ok=True)
-                _imgp = os.path.join(_fw.IMAGES_DIR, image_id + '.jpg')
-                image_reused = os.path.exists(_imgp)
+                # 經儲存抽象層寫入(本機檔案或雲端物件儲存)。Cloud Run 的容器檔案系統是
+                # 暫時的,直接寫檔的話實例一回收影像就消失,而標註端只會回「後端查無影像」。
+                _key = 'images/%s.jpg' % image_id
+                _st = _fw._store()
+                image_reused = _st.exists(_key)
                 if not image_reused:
-                    with open(_imgp, 'wb') as _f: _f.write(data.tobytes())
-                if not os.path.exists(_imgp):
-                    raise IOError("寫檔後檔案不存在")
+                    _st.put_blob(_key, data.tobytes())
+                if not _st.exists(_key):
+                    raise IOError("寫入後物件不存在")
                 if image_reused:
                     logger.info(f"影像 {image_id} 先前已上傳過(重複量測同一張圖)")
         except Exception as _ie:

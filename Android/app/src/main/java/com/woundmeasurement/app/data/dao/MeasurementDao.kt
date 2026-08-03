@@ -10,7 +10,16 @@ interface MeasurementDao {
     
     @Query("SELECT * FROM measurements ORDER BY timestamp DESC")
     fun getAllMeasurements(): Flow<List<MeasurementEntity>>
-    
+
+    /**
+     * 一次性全表讀取（非 Flow）。給遷移測試與資料匯出用。
+     *
+     * UI **不要**用這個：時間軸必須依個案分組（`getMeasurementsByCase`），
+     * 全表撈會把不同病患、不同部位的傷口混成同一條趨勢線。
+     */
+    @Query("SELECT * FROM measurements ORDER BY timestamp DESC")
+    suspend fun getAllMeasurementsOnce(): List<MeasurementEntity>
+
     @Query("SELECT * FROM measurements WHERE patientId = :patientId ORDER BY timestamp DESC")
     fun getMeasurementsByPatient(patientId: String): Flow<List<MeasurementEntity>>
     

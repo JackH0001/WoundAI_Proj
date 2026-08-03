@@ -28,6 +28,7 @@ import com.woundmeasurement.app.camera.ImageQualityAssessor
 import com.woundmeasurement.app.data.database.WoundMeasurementDatabase
 import com.woundmeasurement.app.data.entity.WoundCaseEntity
 import com.woundmeasurement.app.data.repo.CaseRepository
+import com.woundmeasurement.app.pipeline.BackendSettingsScreen
 import com.woundmeasurement.app.pipeline.CaseSelectScreen
 import com.woundmeasurement.app.data.entity.MeasurementEntity
 import com.woundmeasurement.app.data.store.LocalImageStore

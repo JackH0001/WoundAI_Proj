@@ -101,10 +101,33 @@ def validate_annotation(d: dict, require_image: bool = True):
     return (len(issues) == 0, issues)
 
 
+def _store():
+    """目前的儲存實作(本機檔案或雲端物件儲存)。見 store.py。"""
+    import store as _st
+    return _st.get_store(FLYWHEEL_DIR)
+
+
+def _key(path: str) -> str:
+    """把呼叫端傳的路徑換算成儲存層的鍵。
+
+    這樣抽象化就不必改動任何呼叫端——它們照樣傳 QUEUE / WITHDRAWN / AUDIT 這些路徑常數，
+    只是底下換成了可插拔的實作。
+
+    ⚠ **飛輪目錄以外的絕對路徑原樣保留**，不可退化成檔名。
+    測試與匯出腳本會傳入暫存目錄的絕對路徑（`effective_queue(queue_path=...)` 等），
+    換算成相對鍵之後會被解析到 `FLYWHEEL_DIR` 底下——讀到的是產線資料而不是測試資料，
+    測試會以「找不到剛寫入的紀錄」這種難以歸因的方式失敗（實際發生過 13 條）。
+    `LocalStore` 收到絕對路徑就直接用；雲端模式在產線只會拿到相對鍵，不受影響。
+    """
+    p = os.path.abspath(path)
+    root = os.path.abspath(FLYWHEEL_DIR)
+    if p == root or p.startswith(root + os.sep):
+        return os.path.relpath(p, root).replace(os.sep, "/")
+    return p
+
+
 def append_jsonl(path: str, rec: dict):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    _store().append_line(_key(path), json.dumps(rec, ensure_ascii=False))
 
 
 def read_jsonl(path: str, with_bad: bool = False):
@@ -112,17 +135,15 @@ def read_jsonl(path: str, with_bad: bool = False):
     讓統計把它算進 malformed(否則 append-only 稽核軌跡的破損無從察覺,
     且一行是合法 JSON 但非物件時 effective_queue 會 AttributeError)。"""
     out, bad = [], 0
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line: continue
-                try:
-                    rec = json.loads(line)
-                except Exception:
-                    bad += 1; continue
-                if isinstance(rec, dict): out.append(rec)
-                else: bad += 1
+    for line in _store().read_lines(_key(path)):
+        line = line.strip()
+        if not line: continue
+        try:
+            rec = json.loads(line)
+        except Exception:
+            bad += 1; continue
+        if isinstance(rec, dict): out.append(rec)
+        else: bad += 1
     return (out, bad) if with_bad else out
 
 
@@ -191,7 +212,7 @@ def withdrawn_keys(withdrawn_path=None):
 def is_quarantined(image_id, quarantine_dir=None):
     """影像是否在隔離區。classify 重複上傳同一張已撤回的照片時,不可把它復活寫回 images/。"""
     if not image_id or not ID_RE.match(str(image_id)): return False
-    return os.path.exists(os.path.join(quarantine_dir or QUARANTINE_DIR, f"{image_id}.jpg"))
+    return _store().exists(_key(os.path.join(quarantine_dir or QUARANTINE_DIR, f"{image_id}.jpg")))
 
 
 def is_consent_blocked(image_id, withdrawn_path=None, quarantine_dir=None):
@@ -233,7 +254,7 @@ def effective_queue(queue_path=None, images_dir=None, withdrawn_path=None, sourc
             stats["withdrawn"] += 1; continue
         if not (r.get("doctor_verified") and r.get("deidentified") and r.get("consent_train")):
             stats["consent_invalid"] += 1; continue
-        if not os.path.exists(os.path.join(images_dir, str(iid) + ".jpg")):
+        if not _store().exists(_key(os.path.join(images_dir, str(iid) + ".jpg"))):
             stats["image_file_missing"] += 1; continue
         if keep is not None and rec_source(r) not in keep:
             stats["other_source"] += 1; continue
@@ -256,11 +277,8 @@ def quarantine_image(image_id, images_dir=None, quarantine_dir=None):
     實體銷毀另走資料刪除程序(需留紀錄)。回 True 表示有搬動。"""
     if not image_id or not ID_RE.match(str(image_id)): return False
     src = os.path.join(images_dir or IMAGES_DIR, f"{image_id}.jpg")
-    if not os.path.exists(src): return False
-    dst_dir = quarantine_dir or QUARANTINE_DIR
-    os.makedirs(dst_dir, exist_ok=True)
-    shutil.move(src, os.path.join(dst_dir, f"{image_id}.jpg"))
-    return True
+    dst = os.path.join(quarantine_dir or QUARANTINE_DIR, f"{image_id}.jpg")
+    return _store().move(_key(src), _key(dst))
 
 
 # ---- Flask Blueprint(import flask 失敗時不影響純函式測試) ----
@@ -298,7 +316,7 @@ try:
             return jsonify({"error": "標註不符上傳規範", "issues": [msg]}), 400
 
         # 影像必須真的在後端(classify 時已存);沒有像素的 GT 不可訓練 → 直接擋
-        if not os.path.exists(os.path.join(IMAGES_DIR, image_id + ".jpg")):
+        if not _store().exists(_key(os.path.join(IMAGES_DIR, image_id + ".jpg"))):
             msg = (f"後端查無影像 {image_id}。可能是:(a) 未先呼叫 /api/v1/classify、"
                    f"(b) 後端曾清空 flywheel/images、(c) 這是舊版 App 產生的紀錄。"
                    f"請重新以後端模式量測一次再送出")
@@ -377,10 +395,9 @@ try:
             imgs.add(str(d["image_id"]))
         restored = []
         for i in sorted(imgs):
-            src = os.path.join(QUARANTINE_DIR, f"{i}.jpg")
-            if os.path.exists(src):
-                os.makedirs(IMAGES_DIR, exist_ok=True)
-                shutil.move(src, os.path.join(IMAGES_DIR, f"{i}.jpg")); restored.append(i)
+            if _store().move(_key(os.path.join(QUARANTINE_DIR, f"{i}.jpg")),
+                             _key(os.path.join(IMAGES_DIR, f"{i}.jpg"))):
+                restored.append(i)
         append_jsonl(WITHDRAWN, {"code": code, "action": "restore", "image_ids": sorted(imgs),
                                  "restored_at": utc_now(), "actor": actor,
                                  "note": d.get("note")})
@@ -397,10 +414,10 @@ try:
         `?source=clinical` 可只看臨床樣本(收案進度以此為準,不含範例/模擬影像)。"""
         src = request.args.get("source")
         _, stats = effective_queue(source=(src or None))
-        stats["images_on_disk"] = len([f for f in os.listdir(IMAGES_DIR)
-                                       if f.endswith(".jpg")]) if os.path.isdir(IMAGES_DIR) else 0
-        stats["quarantined"] = len([f for f in os.listdir(QUARANTINE_DIR)
-                                    if f.endswith(".jpg")]) if os.path.isdir(QUARANTINE_DIR) else 0
+        st = _store()
+        stats["images_on_disk"] = len([k for k in st.list_keys("images") if k.endswith(".jpg")])
+        stats["quarantined"] = len([k for k in st.list_keys("quarantine") if k.endswith(".jpg")])
+        stats["store"] = st.describe()
         return jsonify(stats), 200
 except ImportError:
     flywheel_bp = None  # 無 flask 環境(僅跑純函式測試)
