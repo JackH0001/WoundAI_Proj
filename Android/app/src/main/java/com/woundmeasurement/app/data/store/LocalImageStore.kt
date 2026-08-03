@@ -15,11 +15,14 @@ import java.util.UUID
  *  - **回頭重新修邊做不到**（修邊需要與 polygon 同一座標空間的那張圖）；
  *  - 重簽同意後要補送標註，只能整個重測一遍。
  *
- * 存哪一張：**送給後端 classify 的那張 work 影像（長邊 ≤2048）**，不是相機原圖。
- * 因為 `gt_polygon` 與 `image_w/h` 的座標空間就是它；存原圖反而對不上。
+ * 存哪一張：**當次修邊所用的那張畫布**——後端路徑是送去 classify 的 work 影像（長邊 ≤2048），
+ * 端上路徑則是相機原圖。關鍵不在「哪一張」，而在**它必須與 `gtPolygon` / `imageW,imageH`
+ * 同一個座標空間**；`MeasureViewModel.saveToTimeline` 因此一律以本次畫布重存、不沿用舊檔
+ * （沿用會產生「圖是原圖、輪廓是 work 空間」的紀錄，回頭修邊時面積會被靜默高估數倍）。
  *
- * 為什麼加密：傷口影像是 PHI。app 私有目錄雖然其他 App 讀不到，但
- *  (a) root/備份萃取拿得走，(b) `filesDir` 不在 `backup_rules.xml` 排除的 `database` domain 內。
+ * 為什麼加密：傷口影像是 PHI。app 私有目錄雖然其他 App 讀不到，但 root 或 adb 萃取拿得走。
+ * （`backup_rules.xml` / `data_extraction_rules.xml` 已排除整個 file domain，
+ *  所以雲端備份不是本輪的破口——加密防的是實體取得裝置與 root。）
  * 用 [PhiCrypto.encryptBytes]（Keystore AES-GCM，金鑰不可匯出）→ 檔案外流也是密文。
  * 代價：不能直接餵給 Glide/ImageDecoder，必須先解密到記憶體（見 [loadThumbnail]）。
  *

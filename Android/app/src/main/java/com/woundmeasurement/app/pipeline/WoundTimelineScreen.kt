@@ -100,7 +100,7 @@ fun WoundTimelineScreen(
             Divider()
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
                 // 依「新→舊」顯示,但變化%要跟時間上的前一次比,所以用 asc 的索引來查前值
-                items(measurements) { m ->
+                items(measurements, key = { it.id }) { m ->
                     val idx = asc.indexOfFirst { it.id == m.id }
                     val prevArea = if (idx > 0) asc[idx - 1].estimatedArea else null
                     TimelineRow(
@@ -124,12 +124,21 @@ private fun TimelineRow(
 ) {
     // 縮圖在背景解密＋降採樣;不快取整張 2048 影像(清單捲幾列就 OOM)
     var thumb by remember(m.id, m.imagePath) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    // 要分辨「還在解」與「解不開」:兩者都畫「…」的話,App 重裝/還原備份使 Keystore 金鑰換新後,
+    // 整條時間軸會停在一排「…」,看起來像永遠載入中,而實際是影像已不可解密。
+    var thumbState by remember(m.id, m.imagePath) { mutableStateOf(0) } // 0=載入中 1=成功 2=失敗/無檔
+    // File.exists() 是 syscall,放在 composition 裡等於每次重組都在主執行緒打磁碟 → 一併移到 IO
+    var fileOk by remember(m.id, m.imagePath) { mutableStateOf(false) }
     LaunchedEffect(m.id, m.imagePath) {
-        thumb = withContext(kotlinx.coroutines.Dispatchers.IO) {
-            runCatching { imageStore.loadThumbnail(m.imagePath, 200) }.getOrNull()
+        val r = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val ok = imageStore.exists(m.imagePath)
+            ok to (if (ok) runCatching { imageStore.loadThumbnail(m.imagePath, 200) }.getOrNull() else null)
         }
+        fileOk = r.first
+        thumb = r.second
+        thumbState = if (r.second != null) 1 else 2
     }
-    val canOpen = onOpen != null && imageStore.exists(m.imagePath) && m.imageW != null
+    val canOpen = onOpen != null && fileOk && m.imageW != null
 
     ElevatedCard(
         Modifier.fillMaxWidth().then(
@@ -178,8 +187,14 @@ private fun TimelineRow(
                     bitmap = t.asImageBitmap(), contentDescription = "傷口縮圖",
                     contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()
                 ) else Text(
-                    // 影像可能因保存期限清理或 v3 之前的舊紀錄而不存在
-                    if (m.imagePath.isEmpty()) "無影像" else "…",
+                    when {
+                        // v3 之前的舊紀錄從未存過影像
+                        m.imagePath.isEmpty() -> "無影像"
+                        thumbState == 0 -> "…"
+                        // 檔案還在卻解不開 = 金鑰換新(App 重裝／還原備份);與「已依保存期限清除」是兩回事
+                        fileOk -> "無法解密"
+                        else -> "已清除"
+                    },
                     fontSize = 10.sp, textAlign = TextAlign.Center,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

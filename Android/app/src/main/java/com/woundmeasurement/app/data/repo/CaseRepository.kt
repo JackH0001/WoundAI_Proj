@@ -238,9 +238,14 @@ class CaseRepository(
         val cutoff = Date(System.currentTimeMillis() - days.toLong() * 24 * 60 * 60 * 1000)
         var n = 0
         for (m in measurements.getExpiredWithImages(cutoff)) {
-            store.delete(m.imagePath)
-            measurements.clearImagePath(m.id)
-            n++
+            // ⚠ 順序是「先清 DB 路徑,再刪檔」,不可反過來。
+            // 反過來的話,程序在兩步之間被殺(或 Room 拋例外被外層 runCatching 吞掉)會留下
+            // 「imagePath 非空但檔案不存在」的死路徑 → 時間軸每次都嘗試解碼失敗,縮圖永遠停在「…」,
+            // 看起來像卡住而不是「影像已依保存期限清除」。
+            // 這個順序最壞情況只是留下一個沒人引用的孤兒密文檔(下一輪 GC 可回收),
+            // 而檔名是 UUID、內容是密文,留著不會多洩漏什麼。
+            runCatching { measurements.clearImagePath(m.id) }
+                .onSuccess { store.delete(m.imagePath); n++ }
         }
         n
     }

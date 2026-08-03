@@ -350,11 +350,22 @@ class MeasureViewModel(
                             imageH = (lastImageH.takeIf { it > 0 }) ?: exist.imageH,
                             exudate = exudate ?: exist.exudate,
                             correctionIou = lastCorrectionIou ?: exist.correctionIou,
-                            // 同一次影像重存:沿用既有檔案,剛存的那份要刪掉免得變孤兒檔
-                            imagePath = if (exist.imagePath.isNotEmpty()) {
-                                imgName?.let { imageStore?.delete(it) }; exist.imagePath
-                            } else (imgName ?: exist.imagePath)
+                            // ⚠ 影像**一律以本次畫布重存**,絕不沿用舊檔。
+                            //
+                            // 舊作法是「已有檔就沿用、刪掉剛存的」,看起來省事,但同一張照片先走端上
+                            // (畫布＝相機原圖,可能 4000px)、再切後端(畫布＝work ≤2048px)時:
+                            // quickHash 比對的是**原圖**,兩次相同 → lastSavedId 保留 → 走這條 update 分支
+                            // → 檔案還是 4000px 的原圖,而下面的 gtPolygon/imageW/imageH 已更新成 2048 空間。
+                            // 後果:回頭修邊時輪廓縮在左上角(醫師只會覺得「AI 框錯了」,不會想到是座標空間),
+                            // 而重算面積是拿 2048 空間的 mmPerPx 去乘 4000 空間的像素數 → 高估 (4000/2048)²≈3.8 倍,
+                            // 且這個錯誤會**靜默**寫進 estimatedArea 汙染癒合趨勢。
+                            // 多存一份幾百 KB 的密文,換掉整類「圖與輪廓不同空間」的錯誤,這筆帳很划算。
+                            imagePath = imgName ?: exist.imagePath
                         ))
+                        // 先寫 DB 再刪舊檔:順序反過來的話,update 失敗就會留下指向不存在檔案的死路徑。
+                        if (imgName != null && exist.imagePath.isNotEmpty() && exist.imagePath != imgName) {
+                            imageStore?.delete(exist.imagePath)
+                        }
                         Pair(exist.id, true)
                     } else {
                         val nid = dao.insertMeasurement(MeasurementEntity(

@@ -280,12 +280,12 @@ try:
             return jsonify({"error": "標註不符上傳規範", "issues": issues}), 400
 
         image_id = str(d.get("image_id"))
-        # 影像必須真的在後端(classify 時已存);沒有像素的 GT 不可訓練 → 直接擋
-        if not os.path.exists(os.path.join(IMAGES_DIR, image_id + ".jpg")):
-            msg = f"後端查無影像 {image_id}(請先呼叫 /api/v1/classify 取得 image_id;或該影像已因撤回同意隔離)"
-            audit(actor, "annotation_rejected", d.get("code", "?"), msg)
-            return jsonify({"error": "標註不符上傳規範", "issues": [msg]}), 400
 
+        # ⚠ 同意檢查必須排在「影像是否存在」**之前**。
+        # 撤回同意會把影像移進 quarantine/,所以撤回後的補送必然先撞上 os.path.exists() 失敗,
+        # 回給醫師與寫進 audit.jsonl 的理由就變成「後端查無影像」——技術上沒錯,但那是
+        # **錯誤的拒絕理由**:稽核軌跡看不出這筆是因撤回同意而被擋(IRB 要看的正是這件事),
+        # 醫師也會誤以為是上傳壞掉而反覆重送。先查同意,理由才會是真正的原因。
         wd_codes, wd_imgs = withdrawn_keys()
         # 端點與 effective_queue 的排除規則必須一致(code ∪ image_id),
         # 否則會出現「端點回 200 已入佇列、匯出時卻算 withdrawn 靜默丟掉」的假成功。
@@ -294,6 +294,14 @@ try:
         if d.get("code") in wd_codes: blocked.append(f"代碼 {d.get('code')} 已撤回訓練同意")
         if blocked:
             msg = ";".join(blocked) + "。重新取得同意請先呼叫 /api/v1/consent/restore"
+            audit(actor, "annotation_rejected", d.get("code", "?"), msg)
+            return jsonify({"error": "標註不符上傳規範", "issues": [msg]}), 400
+
+        # 影像必須真的在後端(classify 時已存);沒有像素的 GT 不可訓練 → 直接擋
+        if not os.path.exists(os.path.join(IMAGES_DIR, image_id + ".jpg")):
+            msg = (f"後端查無影像 {image_id}。可能是:(a) 未先呼叫 /api/v1/classify、"
+                   f"(b) 後端曾清空 flywheel/images、(c) 這是舊版 App 產生的紀錄。"
+                   f"請重新以後端模式量測一次再送出")
             audit(actor, "annotation_rejected", d.get("code", "?"), msg)
             return jsonify({"error": "標註不符上傳規範", "issues": [msg]}), 400
 

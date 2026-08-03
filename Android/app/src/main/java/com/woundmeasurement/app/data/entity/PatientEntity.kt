@@ -30,6 +30,13 @@ data class PatientEntity(
     val registrationTime: Date,
     val lastVisitTime: Date? = null,
     val notes: String? = null,
-    /** 病歷號的不可逆雜湊（SHA-256 加鹽），查重用。新增病患時以 `PhiCrypto.hashMrn()` 填入。 */
+    /**
+     * 病歷號的不可逆雜湊，查重用。以 `PhiCrypto.hashMrn()` 填入。
+     *
+     * ⚠ 實作是 **Keystore HMAC-SHA256**（金鑰不可匯出），**不是**「加鹽 SHA-256」。
+     * 這個區別是實質的：病歷號熵極低（院內多為固定長度數字），而鹽寫在原始碼裡對攻擊者是公開的，
+     * 字典攻擊幾秒就能反查回明文；HMAC 的金鑰躺在 Keystore 無法取出，才擋得住離線爆破。
+     * （稽核文件對照時會查這一條，請勿把註解改回「加鹽 SHA-256」。）
+     */
     val mrnHash: String? = null
 )
