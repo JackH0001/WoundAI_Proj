@@ -20,6 +20,11 @@ param(
     [Parameter(Mandatory = $true)][string]$Bucket,
     [string]$Region = "asia-east1",
     [string]$Service = "woundai-backend",
+    # 稽核專用桶（WORM）。預設沿用 harden_bucket.ps1 -Audit 的命名慣例。
+    # ⚠ 一定要當成部署參數帶進來：`--set-env-vars` 是**整組覆蓋**，
+    # 用 `run services update --update-env-vars` 另外設的值會在下次部署時被洗掉，
+    # 而症狀是「稽核紀錄悄悄寫回刪得掉的主桶」——沒有錯誤、沒有警告。
+    [string]$AuditBucket = "$Bucket-audit",
     [switch]$Setup
 )
 
@@ -174,6 +179,19 @@ Invoke-GCloud storage buckets add-iam-policy-binding "gs://$Bucket" `
 if ($LASTEXITCODE -ne 0) { Warn "授權儲存桶失敗——服務會起得來，但第一次量測寫影像時會 403" }
 else { Write-Host "  ✓ 可讀寫儲存桶：gs://$Bucket" }
 
+# 稽核桶（若已由 harden_bucket.ps1 -Audit 建立）。桶不存在就略過——
+# 沒有稽核桶時後端會退回主桶，功能正常但稽核紀錄是刪得掉的，health 的 store 欄位會誠實反映。
+Invoke-GCloud storage buckets describe "gs://$AuditBucket" --format="value(name)" 2>$null | Out-Null
+if ($LASTEXITCODE -eq 0) {
+    Invoke-GCloud storage buckets add-iam-policy-binding "gs://$AuditBucket" `
+        --member="serviceAccount:$runSa" --role="roles/storage.objectAdmin" --quiet | Out-Null
+    if ($LASTEXITCODE -eq 0) { Write-Host "  ✓ 可寫入稽核桶：gs://$AuditBucket" }
+    else { Warn "授權稽核桶失敗——稽核紀錄會寫不進去" }
+} else {
+    Warn "稽核桶 gs://$AuditBucket 不存在，稽核紀錄將寫入主桶（刪得掉）。"
+    Warn "  建立方式： .\harden_bucket.ps1 -ProjectId $ProjectId -Bucket $Bucket -Audit"
+}
+
 Say "部署到 Cloud Run（$Region）"
 # 參數理由見 docs/deploy_cloudrun.md §4：
 #   memory 2Gi  — 難例集成同時載三個 ONNX 模型；1Gi 會被 OOM kill 且不留例外
@@ -190,7 +208,7 @@ Invoke-GCloud run deploy $Service `
     --concurrency 4 `
     --min-instances 0 `
     --max-instances 3 `
-    --set-env-vars "WOUNDAI_STORE=gcs,WOUNDAI_GCS_BUCKET=$Bucket,WOUNDAI_GCS_PREFIX=flywheel" `
+    --set-env-vars "WOUNDAI_STORE=gcs,WOUNDAI_GCS_BUCKET=$Bucket,WOUNDAI_GCS_PREFIX=flywheel,WOUNDAI_AUDIT_BUCKET=$AuditBucket" `
     --set-secrets "ADMIN_PASSWORD=woundai-admin-password:latest,JWT_SECRET_KEY=woundai-jwt-secret:latest"
 Assert-GCloudOk "Cloud Run 部署"
 
@@ -211,6 +229,12 @@ try {
         Warn "❌ 儲存後端是 [$($h.store)]，不是 GCS。Cloud Run 的容器檔案系統是暫時的，"
         Warn "   佇列與影像會在實例回收時消失。請確認 WOUNDAI_STORE=gcs 已設定。"
     } else { Write-Host "  ✓ 儲存後端：$($h.store)" }
+    # 稽核桶接上時 describe() 會帶 WORM 字樣。設了環境變數卻沒帶，
+    # 幾乎必然是「只換了環境變數沒重建映像」——舊映像的程式碼不認得這個變數。
+    if ($h.store -notlike "*WORM*") {
+        Warn "ℹ 稽核紀錄寫在主桶（刪得掉）。若已建稽核桶卻仍顯示此訊息，"
+        Warn "   請確認是用 deploy_cloudrun.ps1 重建映像，而不是只跑 run services update。"
+    } else { Write-Host "  ✓ 稽核軌跡寫入 WORM 桶" }
 } catch {
     Warn "健康檢查失敗（首次冷啟動可能較久，稍後重試）：$_"
 }
