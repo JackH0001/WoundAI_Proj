@@ -70,6 +70,15 @@ class MeasureViewModel(
     /** 後端提示:AI 空手但色彩分割有料 → 使用者很可能把印刷模擬圖選成了臨床/範例。 */
     @Volatile var lastPhantomHint: Boolean = false
         private set
+    /**
+     * 後端提示:這批**完全相同的位元組**先前已上傳過。
+     *
+     * 真實回診照片不可能與上次逐位元相同,所以臨床模式看到 true 幾乎必然是重複量測同一張範例圖。
+     * 實測發生過:在臨床個案裡選了先前用過的範例圖 → 那筆以 `source=clinical` 進了訓練佇列,
+     * 同時讓該傷口的癒合曲線變成「兩張不同的傷口相比」而顯示假的 ↓38%。
+     */
+    @Volatile var lastImageReused: Boolean = false
+        private set
 
     /**
      * 換一張影像時清空所有「上一次分析」的殘留。
@@ -84,7 +93,7 @@ class MeasureViewModel(
         lastCorrectionIou = null
         lastMmPerPx = null
         lastImageId = null; lastImageW = 0; lastImageH = 0
-        lastRoute = null; lastSegModel = null; lastPhantomHint = false
+        lastRoute = null; lastSegModel = null; lastPhantomHint = false; lastImageReused = false
         // 分析失敗時也要丟掉上一張的原圖,否則修邊入口可能開到「上一位病人」的影像
         if (alsoBitmap) {
             lastBitmap = null; lastImageHash = null; lastSavedId = null; editRaster = null
@@ -187,7 +196,7 @@ class MeasureViewModel(
                 var mmCap: Double? = null
                 var idCap: String? = null; var wCap = 0; var hCap = 0
                 var routeCap: String? = null; var modelCap: String? = null
-                var hintCap = false
+                var hintCap = false; var reusedCap = false
                 val r = withContext(Dispatchers.IO) {
                     val jpeg = work.toJpeg()
                     val c = backend.classify(jpeg, cppWork, seg)
@@ -195,6 +204,7 @@ class MeasureViewModel(
                     mmCap = c.mmPerPx
                     idCap = c.imageId; wCap = c.imageW; hCap = c.imageH
                     routeCap = c.route; modelCap = c.segModel; hintCap = c.phantomHint
+                    reusedCap = c.imageReused
                     MeasureResult(
                         areaCm2 = c.areaCm2,
                         tissueFrac = c.tissueFrac,
@@ -213,6 +223,7 @@ class MeasureViewModel(
                 lastMmPerPx = mmCap
                 lastImageId = idCap; lastImageW = wCap; lastImageH = hCap
                 lastRoute = routeCap; lastSegModel = modelCap; lastPhantomHint = hintCap
+                lastImageReused = reusedCap
                 _state.value = MeasureUiState(loading = false, result = r)
             } catch (e: Exception) {
                 clearBackendBinding(alsoBitmap = true)

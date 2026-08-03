@@ -1251,6 +1251,15 @@ def classify_wound():
         # 訓練集影像關聯:內容雜湊存檔(去重),回傳 image_id 供標註綁定(無像素的 GT 無法訓練)
         import hashlib as _hl
         image_id = _hl.sha1(data.tobytes()).hexdigest()[:16]
+        # 這批**完全相同的位元組**先前是否已上傳過。
+        #
+        # 為什麼要回報:真實回診照片不可能與上次一模一樣(光線、角度、時間戳都會變),
+        # 所以「同一個 image_id 再次出現」幾乎必然是**重複量測同一張示範/範例圖**。
+        # 這是唯一能從後端可靠偵測「範例圖被當成臨床樣本送進來」的訊號——實測就發生過:
+        # 醫師在臨床個案裡選了一張先前用過的範例圖,結果那筆以 source=clinical 進了訓練佇列,
+        # 同時把該傷口的癒合曲線變成「兩張不同的傷口相比」而顯示假的 ↓38%。
+        # 後端不擋(它無從得知臨床上是否真有正當理由),只誠實回報,由 App 在臨床模式下警示。
+        image_reused = False
         try:
             import api_flywheel as _fw
             # 已撤回同意的影像不可因為「再上傳一次」就復活寫回 images/(那等於繞過撤回);
@@ -1261,10 +1270,13 @@ def classify_wound():
             else:
                 os.makedirs(_fw.IMAGES_DIR, exist_ok=True)
                 _imgp = os.path.join(_fw.IMAGES_DIR, image_id + '.jpg')
-                if not os.path.exists(_imgp):
+                image_reused = os.path.exists(_imgp)
+                if not image_reused:
                     with open(_imgp, 'wb') as _f: _f.write(data.tobytes())
                 if not os.path.exists(_imgp):
                     raise IOError("寫檔後檔案不存在")
+                if image_reused:
+                    logger.info(f"影像 {image_id} 先前已上傳過(重複量測同一張圖)")
         except Exception as _ie:
             # 存檔失敗卻照發 image_id → 客戶端拿到幽靈 ID,送標註時被擋且訊息誤導
             logger.warning(f"影像存檔失敗,不發 image_id: {_ie}")
@@ -1353,6 +1365,9 @@ def classify_wound():
             # 飛輪資料鏈:image_id 綁後端已存影像;image_w/h = wound_polygon 與醫師修邊 GT 的座標空間
             # (缺尺寸則 polygon 無法柵格化成遮罩 → 樣本不可訓練,見 api_flywheel 稽核註記)
             'image_id': image_id, 'image_w': int(W), 'image_h': int(H),
+            # 同一批位元組先前已上傳過 → 幾乎必然是重複量測同一張範例/示範圖。
+            # App 在臨床模式看到 true 要警示:那多半不是這次回診拍的照片。
+            'image_reused': bool(image_reused),
             'stage2_segment': {'model': seg_model, 'wound_ratio': round(float(mask.mean()), 4), 'confidence': round(conf, 4),
                                'route': route, 'escalated': escalated, 'au_area_ratio': au_ratio, 'iou_student_au': iou_sa,
                                'wound_polygon': wound_poly},

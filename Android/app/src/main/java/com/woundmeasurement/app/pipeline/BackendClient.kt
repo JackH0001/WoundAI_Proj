@@ -33,6 +33,13 @@ data class ClassifyResult(
     val segModel: String? = null,
     /** true = AI 沒抓到但色彩分割抓得到 → 幾乎確定把印刷模擬圖誤選成了臨床/範例。 */
     val phantomHint: Boolean = false,
+    /**
+     * 這批完全相同的位元組後端先前已收過。
+     *
+     * 真實回診照片不可能與上次逐位元相同（光線、角度、時間戳都會變），
+     * 所以臨床模式下出現 true 幾乎必然是**重複量測同一張範例／示範圖**。
+     */
+    val imageReused: Boolean = false,
     /** 模擬圖模式實際用了哪一段:strict / gray_world_wb(偏色時已自動白平衡重試)。 */
     val phantomPass: String? = null
 )
@@ -58,6 +65,34 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
             if (tok.isEmpty()) return false
             jwt = tok
             return true
+        }
+    }
+
+    /**
+     * 飛輪佇列健康度(GET /api/v1/flywheel/stats)。回 (成功, 訊息)。需先 [login]。
+     *
+     * 設定頁用它顯示**臨床收案進度**:`by_source.clinical` 就是 n=20 的分母來源。
+     * 特別把 clinical 與其他來源分開顯示——範例/模擬圖走同一條管線收進來,
+     * 混在一起看會讓收案進度看起來比實際多。
+     */
+    fun flywheelStats(): Pair<Boolean, String> {
+        val req = Request.Builder().url("$baseUrl/api/v1/flywheel/stats")
+            .header("Authorization", "Bearer $jwt").get().build()
+        http.newCall(req).execute().use { resp ->
+            val body = resp.body?.string() ?: ""
+            if (!resp.isSuccessful) return Pair(false, summarize(body))
+            return try {
+                val s = JSONObject(body).optJSONObject("stats") ?: JSONObject(body)
+                val bySrc = s.optJSONObject("by_source")
+                Pair(true, buildString {
+                    append("可訓練 ${s.optInt("trainable")} 筆／佇列共 ${s.optInt("total")} 筆\n")
+                    if (bySrc != null) append(
+                        "臨床 ${bySrc.optInt("clinical")}・範例 ${bySrc.optInt("sample")}" +
+                        "・模擬圖 ${bySrc.optInt("phantom")}・外部 ${bySrc.optInt("external")}\n")
+                    append("已撤回 ${s.optInt("withdrawn")}・被取代 ${s.optInt("superseded")}")
+                    append("・孤兒GT ${s.optInt("orphan_no_image")}・影像遺失 ${s.optInt("image_file_missing")}")
+                })
+            } catch (e: Exception) { Pair(false, "回應解析失敗：${e.message}") }
         }
     }
 
@@ -105,6 +140,7 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
                 imageH = j.optInt("image_h", 0),
                 segModel = if (s2.isNull("model")) null else s2.getString("model"),
                 phantomHint = j.optBoolean("phantom_hint", false),
+                imageReused = j.optBoolean("image_reused", false),
                 // isNull() 已涵蓋「鍵不存在」與「值為 JSON null」兩種情形,故此處可直接 getString。
                 // 不用 optString(name, null):org.json 把 fallback 宣告為非 null,傳 null 會讓
                 // Kotlin 推導出 Nothing? 而發出型別警告(執行期雖可行,但那是靠平台型別的漏洞)。

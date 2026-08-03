@@ -24,7 +24,14 @@ import kotlinx.coroutines.withContext
  */
 @Composable
 fun MeasureValidationEntry(
-    backendBaseUrl: String = "http://10.0.2.2:5000",
+    /**
+     * null＝**從設定讀**（正常路徑）。傳值只給測試與預覽覆寫用。
+     *
+     * ⚠ 這裡曾經是 `= "http://10.0.2.2:5000"` 的硬編碼預設值。`10.0.2.2` 是模擬器專用的
+     * loopback 別名，真機上不存在——而 n=20 臨床收案必須在真機做。留著這個預設值等於
+     * 「在醫院現場一定失敗，且只會顯示『後端未連線』」。
+     */
+    backendBaseUrl: String? = null,
     onBack: () -> Unit = {},
     /**
      * true＝**臨床量測**：由個案進入，`source` 鎖定 `clinical` 且不再詢問（已選個案就不可能是範例）。
@@ -41,7 +48,10 @@ fun MeasureValidationEntry(
     val imageStore = remember { com.woundmeasurement.app.data.store.LocalImageStore(ctx) }
     val seg = remember { OnnxSegmentationModule(ctx) }
     val vm = remember { MeasureViewModel(WoundAnalyzer(seg), null) }
-    val backend = remember { BackendClient(backendBaseUrl) }
+    val baseUrl = remember(backendBaseUrl) {
+        backendBaseUrl ?: com.woundmeasurement.app.data.store.AppSettings.backendUrl(ctx)
+    }
+    val backend = remember(baseUrl) { BackendClient(baseUrl) }
     var loginState by remember { mutableStateOf("後端登入中…") }
     var modelState by remember { mutableStateOf("端上模型載入中…") }
     var editing by remember { mutableStateOf(false) }
@@ -57,13 +67,22 @@ fun MeasureValidationEntry(
     var consent by remember { mutableStateOf<com.woundmeasurement.app.data.entity.ConsentEntity?>(null) }
     var managingCase by remember { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) {
-        loginState = try {
-            val ok = withContext(Dispatchers.IO) { backend.login("admin", "woundai-admin") }
-            if (ok) "✅ 後端已連線(admin) — 可切「後端」模式驗證"
-            else "⚠️ 後端登入失敗(請確認 app.py 已啟動於主機 5000)"
+    LaunchedEffect(baseUrl) {
+        // ⚠ 憑證改由「設定」頁存在本機(Keystore 加密),**不再硬編碼**。
+        // 先前是 login("admin","woundai-admin")——明文編進 APK,反編譯就拿得到,
+        // 帶去醫院等於把後端鑰匙一起帶出門。
+        val settings = com.woundmeasurement.app.data.store.AppSettings
+        val u = settings.backendUser(ctx)
+        val p = settings.backendPassword(ctx)
+        loginState = if (u.isBlank() || p.isBlank()) {
+            "⚠️ 尚未設定後端帳密 — 請到主畫面「設定」填入後端位址與帳號密碼"
+        } else try {
+            val ok = withContext(Dispatchers.IO) { backend.login(u, p) }
+            // 「連不上」與「帳密錯」是兩種處置,訊息要分開(現場才知道要調網路還是調帳號)
+            if (ok) "✅ 後端已連線($u) @ $baseUrl"
+            else "⚠️ 連得到後端但帳密不正確 — 請到「設定」確認帳號密碼"
         } catch (e: Exception) {
-            "⚠️ 後端連線錯誤:${e.message}"
+            "⚠️ 連不到後端 $baseUrl：${e.message}\n請到「設定」確認位址，並檢查 app.py 是否啟動、是否同網段"
         }
         // 端上 ONNX 原生庫(libonnxruntime.so)在部分模擬器/裝置(16KB 分頁/ABI)不相容,
         // 自動載入會拋 UnsatisfiedLinkError(Error 非 Exception,攔不到)→ App 閃退。
@@ -192,6 +211,23 @@ fun MeasureValidationEntry(
             if (vm.lastPhantomHint && source != "phantom") {
                 Text("⚠ AI 沒偵測到傷口,但影像中有明顯的印刷色塊——這看起來是**印刷模擬圖**。" +
                      "請把來源改選「模擬圖」重新載入,會改走色彩分割,初始輪廓一次到位。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error)
+            }
+
+            // 範例圖被當成臨床樣本的偵測。
+            //
+            // 後端以內容 sha1 當 image_id,回報這批位元組先前是否已上傳過。真實回診照不可能與上次
+            // 逐位元相同(光線、角度、時間戳都會變),所以臨床模式看到這個訊號,幾乎必然是選到了
+            // 先前用過的範例/示範圖。實測後果有兩層,兩層都是靜默的:
+            //   (a) 訓練集:該筆以 source=clinical 進佇列 → 灌水臨床收案進度、拿非臨床影像去訓練;
+            //   (b) 病歷:時間軸把兩張不同的傷口畫成一條癒合曲線(實測顯示過假的「↓38%」)。
+            // 程式無法判斷照片裡是不是真人,但「同一批位元組再次出現」是可靠且可實作的代理訊號。
+            // 不硬擋(臨床上可能有正當的重新分析需求),但要讓醫師看得見並主動確認。
+            if (clinicalMode && vm.lastImageReused) {
+                Text("⚠ 這張影像後端先前已收過(逐位元相同)。回診照片不可能與上次完全一樣——" +
+                     "這多半是**先前用過的範例圖**。若確實如此請勿存入病歷:" +
+                     "它會被計入臨床收案進度,也會讓這個傷口的癒合曲線變成兩張不同傷口相比。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.error)
             }

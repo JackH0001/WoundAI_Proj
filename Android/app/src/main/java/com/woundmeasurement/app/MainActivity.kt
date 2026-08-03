@@ -162,7 +162,7 @@ fun WoundMeasurementApp() {
         )
         // 非臨床：範例/模擬圖驗證與檢錯（不綁個案，隱藏「臨床」來源）
         "quick" -> MeasureValidationEntry(clinicalMode = false, onBack = { currentScreen = "main" })
-        "settings" -> SettingsScreen(onBack = { currentScreen = "main" })
+        "settings" -> BackendSettingsScreen(onBack = { currentScreen = "main" })
         else -> Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -178,7 +178,7 @@ fun WoundMeasurementApp() {
             MainButton("個案（病患・同意書・傷口個案・量測）") { currentScreen = "cases" }
             MainButton("最近就診") { currentScreen = "recent" }
             MainButton("快速量測（範例／模擬圖・不綁個案）") { currentScreen = "quick" }
-            MainButton("設定（開發中：後端連線・佇列健康度・匯出）") { currentScreen = "settings" }
+            MainButton("設定（後端連線・帳號・佇列健康度）") { currentScreen = "settings" }
             Text(
                 "臨床量測請由「個案」進入：紀錄才會歸戶到正確的傷口，代碼也才穩定（回診沿用同一組）。",
                 fontSize = 13.sp,
@@ -316,11 +316,18 @@ fun HistoryScreen(onBack: () -> Unit) {
     }
 }
 
+/**
+ * ⚠ **2026-08-03 起已無入口** — 由 [com.woundmeasurement.app.pipeline.BackendSettingsScreen] 取代
+ * （後端位址可設定、憑證加密存本機、連線測試、飛輪佇列健康度）。
+ *
+ * 保留空殼只是為了讓還在引用 `R.string.settings` 的地方不必一次改完；確認無引用後應整段刪除。
+ */
+@Deprecated("改用 BackendSettingsScreen", level = DeprecationLevel.WARNING)
 @Composable
 fun SettingsScreen(onBack: () -> Unit) {
     Column(modifier = Modifier.fillMaxSize().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Text(stringResource(id = R.string.settings), fontSize = 20.sp, fontWeight = FontWeight.Bold)
-        Text("本頁尚未實作（規劃：後端連線狀態・飛輪佇列健康度・資料匯出）", modifier = Modifier.padding(16.dp))
+        Text("此頁已由「後端連線設定」取代。", modifier = Modifier.padding(16.dp))
         Button(onClick = onBack) { Text(stringResource(id = R.string.back_to_main)) }
     }
 }
