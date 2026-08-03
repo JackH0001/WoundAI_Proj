@@ -106,7 +106,11 @@ except Exception as _ce:
 _ENV_ONLY_ACCOUNTS = [('admin', 'ADMIN_PASSWORD'), ('clinician', 'CLINICIAN_PASSWORD')]
 _USERS = {}
 for _u, _env in _ENV_ONLY_ACCOUNTS:
-    _pw = os.environ.get(_env)
+    # ⚠ 一律 strip()。幾乎所有密鑰佈署方式都會在值尾端留下換行：
+    # `echo pw | gcloud secrets create --data-file=-`、PowerShell 管線的 CRLF、
+    # 編輯器存檔自動補的 newline……而症狀是「密碼看起來完全正確卻登不進去」，
+    # 因為肉眼看不到那個 \n。與其要求每個佈署路徑都完美，不如在這裡容忍它。
+    _pw = (os.environ.get(_env) or "").strip()
     if _pw:
         _USERS[_u] = {'password_hash': hashlib.sha256(_pw.encode()).hexdigest(),
                       'role': 'admin' if _u == 'admin' else 'clinician'}
@@ -314,11 +318,21 @@ def login():
     username = data.get('username', '')
     password = data.get('password', '')
 
+    # 型別防禦：客戶端把 password 送成陣列/數字時，原本會在 .encode() 直接 AttributeError
+    # → 500 Internal Server Error，而那看起來像後端壞了。實際發生過:PowerShell 把多行的
+    # `gcloud secrets versions access` 輸出當成 string[]，ConvertTo-Json 就序列化成 JSON 陣列。
+    # 格式錯誤是客戶端的問題，要回 400 並說清楚，不是 500。
+    if not isinstance(username, str) or not isinstance(password, str):
+        return jsonify({'error': 'username/password 必須是字串',
+                        'hint': '收到的型別為 %s / %s' % (type(username).__name__,
+                                                        type(password).__name__)}), 400
+
     user = _USERS.get(username)
     if not user:
         return jsonify({'error': '帳號或密碼錯誤'}), 401
 
-    password_hash = hashlib.sha256(password.encode()).hexdigest()
+    # 與 _USERS 建立時一致地 strip：兩邊都容忍尾端換行，否則只有一邊容忍會更難查
+    password_hash = hashlib.sha256(password.strip().encode()).hexdigest()
     if password_hash != user['password_hash']:
         return jsonify({'error': '帳號或密碼錯誤'}), 401
 
@@ -331,18 +345,45 @@ def login():
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    """健康檢查端點"""
+    """健康檢查端點。
+
+    ⚠ **降級模式必須在這裡現形。**
+    先前這支只回 `status: healthy`，而「模型載不進來、退回 HSV 色彩法」只寫在啟動日誌裡。
+    結果是雲端部署漏裝 onnxruntime 時，健康檢查一路綠燈、API 照常回 200 並給出面積——
+    只是那個數字來自完全不同的演算法。**會回答的錯誤比不會回答的錯誤危險得多**，
+    因為沒有人會去查一個「看起來正常」的服務。
+
+    所以：模型沒載到就回 `status: degraded`，並明說影響。監控與主控台都看得到。
+    """
+    model_ready = wound_segmentation_model is not None
+    degraded = not model_ready
     status = {
-        'status': 'healthy',
+        'status': 'degraded' if degraded else 'healthy',
         'timestamp': datetime.now().isoformat(),
         'services': {
             'imagej': IMAGEJ_AVAILABLE and imagej_instance is not None,
-            'tensorflow': TENSORFLOW_AVAILABLE and wound_segmentation_model is not None,
+            'onnxruntime': ONNX_AVAILABLE,
+            'tensorflow': TENSORFLOW_AVAILABLE,
+            'segmentation_model': model_ready,
             'database': True
         },
+        'store': None,
         'version': '1.0.0'
     }
-    
+    if degraded:
+        status['degraded_reason'] = (
+            '無可用的 ML 分割模型，已退回 HSV 色彩法。面積與組織判讀不具臨床參考價值。'
+            + ('（onnxruntime 未安裝——請確認 requirements.txt）' if not ONNX_AVAILABLE
+               else '（onnxruntime 可用但模型未載入——請確認 models/ 內有 .onnx）')
+        )
+    # 儲存後端也一併回報：WOUNDAI_STORE 沒設成 gcs 時，Cloud Run 的資料會隨實例回收消失，
+    # 而那同樣是「一切看起來正常，直到某天統計歸零」。
+    try:
+        import api_flywheel as _fw
+        status['store'] = _fw._store().describe()
+    except Exception as _e:
+        status['store'] = 'unavailable: %s' % _e
+
     return jsonify(status)
 
 @app.route('/api/analyze', methods=['POST'])
