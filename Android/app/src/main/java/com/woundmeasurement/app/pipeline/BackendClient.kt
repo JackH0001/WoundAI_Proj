@@ -105,7 +105,10 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
                 imageH = j.optInt("image_h", 0),
                 segModel = if (s2.isNull("model")) null else s2.getString("model"),
                 phantomHint = j.optBoolean("phantom_hint", false),
-                phantomPass = if (j.isNull("phantom_pass")) null else j.optString("phantom_pass", null)
+                // isNull() 已涵蓋「鍵不存在」與「值為 JSON null」兩種情形,故此處可直接 getString。
+                // 不用 optString(name, null):org.json 把 fallback 宣告為非 null,傳 null 會讓
+                // Kotlin 推導出 Nothing? 而發出型別警告(執行期雖可行,但那是靠平台型別的漏洞)。
+                phantomPass = if (j.isNull("phantom_pass")) null else j.getString("phantom_pass")
             )
         }
     }

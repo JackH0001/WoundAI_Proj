@@ -30,14 +30,25 @@ class LocalImageStore(context: Context) {
 
     private val dir = File(context.filesDir, "wound_images").apply { if (!exists()) mkdirs() }
 
-    /** 存檔並回傳相對檔名（寫進 `MeasurementEntity.imagePath`）。失敗回 null，呼叫端須容許沒有影像。 */
-    fun save(jpeg: ByteArray): String? = try {
-        val name = "img_${UUID.randomUUID()}.enc"
-        val enc = PhiCrypto.encryptBytes(jpeg) ?: return null
-        File(dir, name).writeBytes(enc)
-        name
-    } catch (e: Exception) {
-        null
+    /**
+     * 存檔並回傳相對檔名（寫進 `MeasurementEntity.imagePath`）。失敗回 null，呼叫端須容許沒有影像。
+     *
+     * ⚠ 這裡刻意用 **block body**：Kotlin 不允許在 expression body（`= try {...}`）裡 `return`，
+     * 而加密失敗時必須早退——不能讓明文或空檔案落地。
+     */
+    fun save(jpeg: ByteArray): String? {
+        return try {
+            val enc = PhiCrypto.encryptBytes(jpeg)
+            if (enc == null) {
+                null
+            } else {
+                val name = "img_${UUID.randomUUID()}.enc"
+                File(dir, name).writeBytes(enc)
+                name
+            }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     /** 存 Bitmap（內部先壓成 JPEG q90；work 影像本來就是從 JPEG 來的，再壓一次差異可忽略）。 */
