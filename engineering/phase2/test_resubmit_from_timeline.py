@@ -68,7 +68,12 @@ def main():
     JWTManager(app)
     app.register_blueprint(fw.flywheel_bp)
     with app.app_context():
-        tok = create_access_token(identity="dr_test")
+        # ⚠ 一定要帶 role。RBAC S1 之後，缺角色的 token 一律 fail-closed（403）——
+        # 這條測試曾因此整批失敗，而那正是預期行為：舊 token 不該還能送標註。
+        # 補送標註屬醫師權限，所以這裡用 physician。
+        tok = create_access_token(
+            identity="default:dr_test",
+            additional_claims={"role": "physician", "org": "default", "user": "dr_test"})
     cli = app.test_client()
     HDR = {"Authorization": "Bearer " + tok}
 

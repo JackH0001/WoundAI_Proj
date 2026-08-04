@@ -44,6 +44,27 @@ data class ClassifyResult(
     val phantomPass: String? = null
 )
 
+/**
+ * 登入後拿到的身分。**這只是給 UI 用的**——真正的閘門在伺服器端。
+ *
+ * ⚠ App 依 [perms] 隱藏或停用功能是為了讓人看得懂自己能做什麼，
+ * 不是存取控制。APK 可以被反編譯、HTTP 請求可以直接偽造，
+ * 所以每一項權限在後端都有對應的檢查（見 docs/rbac_design.md §5）。
+ */
+data class LoginIdentity(
+    val identity: String,     // <org>:<user>
+    val org: String,
+    val user: String,
+    val role: String,         // physician / nurse / assistant / engineer / admin
+    val roleZh: String,
+    val displayName: String?,
+    val perms: Set<String>
+) {
+    fun can(perm: String) = perm in perms
+    /** 標題列顯示用。共用手機時最常見的錯誤是用上一個人的登入做事——看得到才會發現。 */
+    fun label() = "${displayName ?: user}（$roleZh）"
+}
+
 class BackendClient(private val baseUrl: String, jwt: String = "") {
     // escalate 的 classify 需跑 student+A∪U 兩模型,首次冷啟>10s;拉長逾時避免 timeout
     private val http = OkHttpClient.Builder()
@@ -54,16 +75,31 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
         .build()
     @Volatile private var jwt: String = jwt
 
+    /** 登入後的身分；未登入為 null。 */
+    @Volatile var identity: LoginIdentity? = null
+        private set
+
     /** 登入取得 JWT(後端 /api/auth/login)。成功回 true 並存 token 供後續呼叫。同步阻塞,請於 IO 執行。 */
     fun login(username: String, password: String): Boolean {
         val body = JSONObject(mapOf("username" to username, "password" to password)).toString()
             .toRequestBody("application/json".toMediaType())
         val req = Request.Builder().url("$baseUrl/api/auth/login").post(body).build()
         http.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) return false
-            val tok = JSONObject(resp.body!!.string()).optString("access_token", "")
-            if (tok.isEmpty()) return false
+            if (!resp.isSuccessful) { identity = null; return false }
+            val j = JSONObject(resp.body!!.string())
+            val tok = j.optString("access_token", "")
+            if (tok.isEmpty()) { identity = null; return false }
             jwt = tok
+            val pa = j.optJSONArray("perms")
+            identity = LoginIdentity(
+                identity = j.optString("identity", username),
+                org = j.optString("org", "default"),
+                user = j.optString("user", username),
+                role = j.optString("role", ""),
+                roleZh = j.optString("role_zh", j.optString("role", "")),
+                displayName = if (j.isNull("display_name")) null else j.optString("display_name"),
+                perms = buildSet { if (pa != null) for (i in 0 until pa.length()) add(pa.getString(i)) }
+            )
             return true
         }
     }

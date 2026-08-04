@@ -12,6 +12,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import android.content.Intent
+import android.net.Uri
 import com.woundmeasurement.app.data.store.AppSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -35,6 +37,14 @@ import kotlinx.coroutines.withContext
  * - **佇列健康度按來源拆開**。`by_source.clinical` 才是 n=20 的分母；
  *   範例與模擬圖走同一條管線收進來，混在一起看會讓收案進度虛胖。
  */
+/** 以外部瀏覽器開啟。失敗（無瀏覽器）時靜默略過——這是輔助入口，不該讓設定頁崩潰。 */
+private fun openUrl(ctx: android.content.Context, url: String) {
+    runCatching {
+        ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+}
+
 @Composable
 fun BackendSettingsScreen(onBack: () -> Unit) {
     val ctx = LocalContext.current
@@ -48,6 +58,7 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
     var testing by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<String?>(null) }
     var stats by remember { mutableStateOf<String?>(null) }
+    var me by remember { mutableStateOf<LoginIdentity?>(null) }
 
     val onEmulator = remember { AppSettings.looksLikeEmulator() }
     val loopbackOnDevice = !onEmulator && AppSettings.isEmulatorLoopback(url)
@@ -135,8 +146,11 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
                                 // 「連不上」與「連得上但帳密錯」要分開講:在醫院現場這是兩種完全不同的處置
                                 //（改網段/防火牆 vs 改帳密），合成一句「登入失敗」只會讓人亂試。
                                 try {
-                                    if (c.login(u, p))
-                                        Triple(true, "✅ 連線成功，帳密正確（$u）", c.flywheelStats())
+                                    if (c.login(u, p)) {
+                                        me = c.identity
+                                        Triple(true, "✅ 連線成功（${c.identity?.label() ?: u}）",
+                                               c.flywheelStats())
+                                    }
                                     else Triple(
                                         false,
                                         "⚠ 連得到後端，但**帳密不正確**。位址沒問題，請確認帳號密碼。", null)
@@ -155,6 +169,32 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
                 },
                 enabled = !testing, modifier = Modifier.weight(1f)
             ) { Text(if (testing) "測試中…" else "連線測試") }
+        }
+
+        me?.let { u ->
+            Divider()
+            Text("目前身分", style = MaterialTheme.typography.titleSmall)
+            Text("${u.label()}　${u.identity}", style = MaterialTheme.typography.bodyMedium)
+
+            // 主控台連結依角色分流。
+            //
+            // ⚠ **GCP 專案權限 ≠ 應用程式權限**。給臨床角色 GCP Console 的入口，
+            // 會誘導人去申請 IAM——而有了 IAM 就能直接讀儲存桶裡的原始傷口影像、
+            // 看 Secret、刪資源，完全繞過本 App 所有閘門。
+            // 臨床角色的正確目的地是我們自己的 /console：唯讀、只顯示去識別資料。
+            if (u.can("flywheel.stats")) {
+                OutlinedButton({ openUrl(ctx, "$url/console") }, Modifier.fillMaxWidth()) {
+                    Text("開啟飛輪主控台（唯讀・去識別）")
+                }
+            }
+            if (u.can("gcp.console")) {
+                OutlinedButton({ openUrl(ctx, "https://console.cloud.google.com/run?project=woundai-jackh001") },
+                    Modifier.fillMaxWidth()) { Text("開啟 GCP 雲端主控台（需 Google 帳號授權）") }
+                Text("GCP 主控台需要你的 Google 帳號另具 IAM 權限；沒有的話會顯示權限不足。" +
+                     "它與 App 的角色是兩套獨立的權限系統。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
 
         result?.let {

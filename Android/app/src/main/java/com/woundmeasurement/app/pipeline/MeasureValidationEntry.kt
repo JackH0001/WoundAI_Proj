@@ -55,6 +55,8 @@ fun MeasureValidationEntry(
     }
     val backend = remember(baseUrl) { BackendClient(baseUrl) }
     var loginState by remember { mutableStateOf("後端登入中…") }
+    /** 登入身分。null＝尚未登入 → 一律以「最少權限」呈現（fail-closed）。 */
+    var me by remember { mutableStateOf<LoginIdentity?>(null) }
     var modelState by remember { mutableStateOf("端上模型載入中…") }
     var editing by remember { mutableStateOf(false) }
     var exudate by remember { mutableStateOf<Int?>(null) }
@@ -83,7 +85,7 @@ fun MeasureValidationEntry(
         } else try {
             val ok = withContext(Dispatchers.IO) { backend.login(u, p) }
             // 登入成功本身就把容器叫醒了，順手記下時間，讓下方的冷啟動提示判斷得準。
-            if (ok) BackendWarmup.ping(ctx)
+            if (ok) { me = backend.identity; BackendWarmup.ping(ctx) } else me = null
             // 「連不上」與「帳密錯」是兩種處置,訊息要分開(現場才知道要調網路還是調帳號)
             if (ok) "✅ 後端已連線($u) @ $baseUrl"
             else "⚠️ 連得到後端但帳密不正確 — 請到「設定」確認帳號密碼"
@@ -221,6 +223,21 @@ fun MeasureValidationEntry(
                     color = MaterialTheme.colorScheme.error)
             }
 
+            // 共用手機時最常見的錯誤是「用上一個人的登入做事」。身分常駐顯示才會被發現。
+            me?.let { u ->
+                Text("👤 ${u.label()}", style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary)
+                if (clinicalMode && !u.can("gt.verify")) Text(
+                    "此角色可量測與存入病歷，但**修邊不會產生「醫師已驗證」**，也不得送訓練標註。" +
+                    "GT 的背書須由醫師完成——這是後端強制的，換帳號才會改變。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (clinicalMode && !u.can("record.save")) Text(
+                    "⚠ 此角色不得存入個案時間軸，請由護理師或醫師完成存檔。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error)
+            }
+
             // 冷啟動提示。Cloud Run 閒置會縮到零，第一次量測要等容器載入 82MB 模型。
             // 不講的話醫師會以為是 App 當掉——而它其實正在正常運作，只是第一次比較久。
             if (BackendWarmup.sinceLastOkMs() > 15 * 60 * 1000L) {
@@ -285,6 +302,13 @@ fun MeasureValidationEntry(
                 onReview = { if (vm.lastBitmap != null) editing = true },
                 // 量測綁個案 → 時間軸才畫得出單一傷口的癒合曲線
                 onSaveToTimeline = {
+                    // UI 閘門只是為了給出可讀的理由；真正的拒絕在後端（見 docs/rbac_design.md §5）。
+                    if (clinicalMode && me != null && !me!!.can("record.save")) {
+                        vm.reportSubmitBlocked(
+                            "⚠️ 角色「${me!!.roleZh}」不得存入個案時間軸。\n" +
+                            "請由護理師或醫師完成存檔（量測結果不會遺失）。")
+                        return@SamplePickerScreen
+                    }
                     // 快速量測：把原始影像另存一份到共用相簿，供事後比對或匯入個案。
                     // ⚠ **只有** sample/phantom 會真的寫入——GalleryExport 自己會拒絕其他來源，
                     // 因為共用相簿不受本 App 的加密、保存期限與撤回同意約束。

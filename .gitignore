@@ -71,3 +71,15 @@ Backend/Flask/uploads/
 Backend/Flask/processed/
 uploads/
 processed/
+
+# 部署時從 engineering/ 複製的模組副本（Docker 建置上下文只有 Backend/Flask）。
+# 不進版控：同一份程式碼放兩個地方，遲早有人只改了其中一個。
+Backend/Flask/vendor/
+
+# 發布簽章與產出的 APK。金鑰外流＝別人可以發佈「看起來是你們的」更新。
+Android/keystore.properties
+Android/_dist/
+
+# 開通帳號時產生的明文密碼清單；以及帳號檔（含 PBKDF2 雜湊，仍屬敏感）。
+Backend/Flask/accounts_*.csv
+Backend/Flask/flywheel/users.jsonl

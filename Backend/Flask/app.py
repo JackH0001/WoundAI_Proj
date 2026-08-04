@@ -85,38 +85,31 @@ except Exception:
 # C0 唯讀主控台(/console)。掛在同一個 Flask，不另外部署——
 # 多一個服務就多一套權限、憑證與稽核要對，而這一版只是把既有的 stats 端點畫成一頁。
 try:
+    from api_users import users_bp
+    app.register_blueprint(users_bp)
+except Exception as _ue:
+    print(f"帳號管理端點未載入: {_ue}")
+
+try:
     from api_console import console_bp
     app.register_blueprint(console_bp)
 except Exception as _ce:
     print(f"主控台未載入: {_ce}")
 
-# ── 帳號 ────────────────────────────────────────────────────────────────
+# ── 帳號與角色（RBAC S1）────────────────────────────────────────────
 #
-# 密碼**只從環境變數/Secret 讀取**，程式碼裡沒有可用的預設值。
-#
-# 先前是 `os.environ.get('ADMIN_PASSWORD', 'woundai-admin')` ——「有預設值」在本機很方便，
-# 但那個預設值同時也是**上線後沒設環境變數時實際生效的密碼**，而它就寫在公開 repo 裡。
-# 服務只在區網時後果有限；一旦放上 Cloud Run 這種公開網址，等於把門開著還附上鑰匙。
-#
-# 沒設環境變數時的行為是**該帳號不存在**（而不是退回預設密碼）。啟動時會警告，
-# 讓「忘了設」變成看得見的失敗，而不是看不見的漏洞。
-#
-# ⚠ 這仍是單純的密碼驗證，不是完整的身分方案。正解是院內 SSO/OIDC 發短效 token，
-# 讓 App 與後端都不碰長效密碼。列為後續。
-_ENV_ONLY_ACCOUNTS = [('admin', 'ADMIN_PASSWORD'), ('clinician', 'CLINICIAN_PASSWORD')]
-_USERS = {}
-for _u, _env in _ENV_ONLY_ACCOUNTS:
-    # ⚠ 一律 strip()。幾乎所有密鑰佈署方式都會在值尾端留下換行：
-    # `echo pw | gcloud secrets create --data-file=-`、PowerShell 管線的 CRLF、
-    # 編輯器存檔自動補的 newline……而症狀是「密碼看起來完全正確卻登不進去」，
-    # 因為肉眼看不到那個 \n。與其要求每個佈署路徑都完美，不如在這裡容忍它。
-    _pw = (os.environ.get(_env) or "").strip()
-    if _pw:
-        _USERS[_u] = {'password_hash': hashlib.sha256(_pw.encode()).hexdigest(),
-                      'role': 'admin' if _u == 'admin' else 'clinician'}
-if not _USERS:
-    print("⚠ 未設定任何帳號密碼環境變數（ADMIN_PASSWORD / CLINICIAN_PASSWORD），"
-          "所有登入都會失敗。本機開發請先 set ADMIN_PASSWORD=<自訂密碼>。")
+# 帳號改由 `auth_users` 管理（存在儲存層、PBKDF2 雜湊、可停用、帶角色）。
+# 環境變數只保留 **bootstrap** 用途：全新部署時沒有任何帳號，而帳號管理端點
+# 本身需要 admin 才能用——沒有這個出口就是雞生蛋。
+# 一旦帳號檔裡有任何帳號，環境變數就完全不再生效（否則它會變成永久後門）。
+try:
+    import auth_users
+    _boot = auth_users.bootstrap_from_env()
+    if _boot:
+        print("已由環境變數建立初始管理者 default:admin（後續請用帳號管理端點新增使用者）")
+except Exception as _ae:
+    auth_users = None
+    print(f"⚠ 帳號模組載入失敗，所有登入都會失敗: {_ae}")
 
 # 創建必要目錄
 for folder in ['uploads', 'processed', 'models', 'logs']:
@@ -313,7 +306,7 @@ analysis_service = WoundAnalysisService()
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
-    """取得 JWT Token（username + password）"""
+    """取得 JWT。body: {username, password[, org]}。username 可用 `org:user` 或純 user。"""
     data = request.get_json(silent=True) or {}
     username = data.get('username', '')
     password = data.get('password', '')
@@ -326,21 +319,49 @@ def login():
         return jsonify({'error': 'username/password 必須是字串',
                         'hint': '收到的型別為 %s / %s' % (type(username).__name__,
                                                         type(password).__name__)}), 400
+    if auth_users is None:
+        return jsonify({'error': '帳號模組不可用'}), 503
 
-    user = _USERS.get(username)
-    if not user:
-        return jsonify({'error': '帳號或密碼錯誤'}), 401
+    # 一律 strip：幾乎所有密鑰佈署方式都會在值尾端留下換行，而症狀是
+    # 「密碼看起來完全正確卻登不進去」，因為肉眼看不到那個 \n。
+    username, password = username.strip(), password.strip()
+    if ':' in username:
+        org, user = username.split(':', 1)
+    else:
+        org, user = (data.get('org') or auth_users.DEFAULT_ORG).strip(), username
 
-    # 與 _USERS 建立時一致地 strip：兩邊都容忍尾端換行，否則只有一邊容忍會更難查
-    password_hash = hashlib.sha256(password.strip().encode()).hexdigest()
-    if password_hash != user['password_hash']:
+    rec, why = auth_users.authenticate(org, user, password)
+    ident = auth_users.identity(org, user)
+    if rec is None:
+        # ⚠ 對外只給一種訊息。分開回「帳號不存在」與「密碼錯誤」等於送人一份帳號列舉工具。
+        # 真正的原因記在稽核裡，供事後分析與偵測暴力嘗試。
+        try:
+            import api_flywheel as _fw
+            _fw.audit(ident, 'login_failed', '-', why)
+        except Exception:
+            pass
+        logger.warning(f"登入失敗 {ident}: {why}")
         return jsonify({'error': '帳號或密碼錯誤'}), 401
 
     token = create_access_token(
-        identity=username,
-        additional_claims={'role': user['role']}
+        identity=ident,
+        # role 進 JWT：端點據此授權。org 一併帶著，S2 加機構隔離時不必改 token 格式。
+        additional_claims={'role': rec['role'], 'org': org, 'user': user}
     )
-    return jsonify({'access_token': token, 'role': user['role']}), 200
+    try:
+        import api_flywheel as _fw
+        _fw.audit(ident, 'login', '-', f"role={rec['role']}")
+    except Exception:
+        pass
+    return jsonify({
+        'access_token': token,
+        'role': rec['role'],
+        'role_zh': auth_users.ROLES.get(rec['role'], rec['role']),
+        'org': org, 'user': user, 'identity': ident,
+        'display_name': rec.get('display_name'),
+        # App 依此決定畫面呈現。**這只是輔助**——真正的閘門在每個端點的伺服器端檢查。
+        'perms': sorted([k for k in auth_users.PERMS if auth_users.can(rec['role'], k)]),
+    }), 200
 
 
 @app.route('/api/health', methods=['GET'])

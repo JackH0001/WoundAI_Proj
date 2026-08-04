@@ -158,7 +158,10 @@ def read_jsonl(path: str, with_bad: bool = False):
 # ⚠ 誠實邊界:雜湊鏈能**偵測**竄改,不能**阻止**。有寫入權限的人仍可整條重算。
 # 要做到不可竄改需要物件儲存的保留政策(WORM),見 harden_bucket.ps1——
 # 那是另一個層次的控制,兩者互補而非替代。
-AUDIT_CHAIN_FIELDS = ("seq", "ts", "actor", "action", "code", "result", "prev")
+# role/org 也進雜湊鏈:稽核要回答的是「**誰、以什麼身分**做了什麼」。
+# 角色只查當下的帳號設定是不夠的——使用者的角色日後可能變更,
+# 而那不該讓歷史紀錄的意義跟著改變。
+AUDIT_CHAIN_FIELDS = ("seq", "ts", "actor", "role", "org", "action", "code", "result", "prev")
 
 
 def _audit_hash(rec: dict) -> str:
@@ -168,12 +171,17 @@ def _audit_hash(rec: dict) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def audit(actor: str, action: str, code: str, result: str):
+def audit(actor: str, action: str, code: str, result: str,
+          role: str = None, org: str = None):
     prev_recs = read_jsonl(AUDIT)
     last = prev_recs[-1] if prev_recs else None
+    # actor 是 `<org>:<user>`；org 沒另外傳就從中拆出來，讓舊呼叫端不必全部改。
+    if org is None and isinstance(actor, str) and ":" in actor:
+        org = actor.split(":", 1)[0]
     rec = {
         "seq": (last.get("seq", len(prev_recs) - 1) + 1) if last else 0,
-        "ts": utc_now(), "actor": actor, "action": action, "code": code, "result": result,
+        "ts": utc_now(), "actor": actor, "role": role, "org": org,
+        "action": action, "code": code, "result": result,
         # 鏈首用固定字串,讓「第一筆」與「前面被刪光了」可以區分開來
         "prev": (last or {}).get("hash") or "GENESIS",
     }
@@ -354,17 +362,55 @@ def quarantine_image(image_id, images_dir=None, quarantine_dir=None):
 # ---- Flask Blueprint(import flask 失敗時不影響純函式測試) ----
 try:
     from flask import Blueprint, request, jsonify
-    from flask_jwt_extended import jwt_required, get_jwt_identity
+    from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
     flywheel_bp = Blueprint("flywheel", __name__)
+
+    def _who():
+        """(identity, role, org)。JWT 裡沒有 role 的舊 token 一律視為無權限。"""
+        c = get_jwt() or {}
+        return (get_jwt_identity() or "unknown", c.get("role"), c.get("org"))
+
+    def _can(role, perm):
+        try:
+            import auth_users
+            return auth_users.can(role, perm)
+        except Exception:
+            # 權限模組載不進來時 **fail-closed**。放行才是危險的那一邊——
+            # 一個載不到權限表的服務不該假設「大家都可以」。
+            return False
 
     @flywheel_bp.route("/api/v1/annotation", methods=["POST"])
     @jwt_required()
     def post_annotation():
         d = request.get_json(silent=True) or {}
+        actor, role, org = _who()
+
+        # ⚠ **doctor_verified 由伺服器依角色決定,不採信客戶端送來的值。**
+        #
+        #   effective = client_says AND (role 具 gt.verify 權限)
+        #
+        # 客戶端說 false 時我們相信它(那是保守方向);說 true 時必須由角色背書。
+        # 只有 physician 具 gt.verify——護理師、助理、工程師按下「完成修邊」時
+        # 紀錄照樣更新面積與輪廓,只是不會產生「醫師已驗證」的背書。
+        #
+        # 這一段刻意放在 validate_annotation **之前**:讓驗證看到的是修正後的值,
+        # 否則非醫師送 true 會通過驗證、之後才被降級,錯誤訊息會變得莫名其妙。
+        if d.get("doctor_verified") and not _can(role, "gt.verify"):
+            audit(actor, "annotation_rejected", d.get("code", "?"),
+                  f"角色 {role} 不具醫師確認權限,doctor_verified 被伺服器否決", role, org)
+            return jsonify({"error": "權限不足",
+                            "issues": ["只有醫師（physician）可以送出經確認的訓練標註。"
+                                       f"目前登入角色為 {role}。"
+                                       "護理師/助理仍可量測與存入病歷,但 GT 的背書須由醫師完成。"]}), 403
+        if not _can(role, "annotation.submit"):
+            audit(actor, "annotation_rejected", d.get("code", "?"),
+                  f"角色 {role} 不具送標註權限", role, org)
+            return jsonify({"error": "權限不足",
+                            "issues": [f"角色 {role} 不得送出訓練標註（僅醫師可）。"]}), 403
+
         ok, issues = validate_annotation(d)
-        actor = get_jwt_identity() or "unknown"
         if not ok:
-            audit(actor, "annotation_rejected", d.get("code", "?"), ";".join(issues))
+            audit(actor, "annotation_rejected", d.get("code", "?"), ";".join(issues), role, org)
             return jsonify({"error": "標註不符上傳規範", "issues": issues}), 400
 
         image_id = str(d.get("image_id"))
@@ -382,7 +428,7 @@ try:
         if d.get("code") in wd_codes: blocked.append(f"代碼 {d.get('code')} 已撤回訓練同意")
         if blocked:
             msg = ";".join(blocked) + "。重新取得同意請先呼叫 /api/v1/consent/restore"
-            audit(actor, "annotation_rejected", d.get("code", "?"), msg)
+            audit(actor, "annotation_rejected", d.get("code", "?"), msg, role, org)
             return jsonify({"error": "標註不符上傳規範", "issues": [msg]}), 400
 
         # 影像必須真的在後端(classify 時已存);沒有像素的 GT 不可訓練 → 直接擋
@@ -390,13 +436,14 @@ try:
             msg = (f"後端查無影像 {image_id}。可能是:(a) 未先呼叫 /api/v1/classify、"
                    f"(b) 後端曾清空 flywheel/images、(c) 這是舊版 App 產生的紀錄。"
                    f"請重新以後端模式量測一次再送出")
-            audit(actor, "annotation_rejected", d.get("code", "?"), msg)
+            audit(actor, "annotation_rejected", d.get("code", "?"), msg, role, org)
             return jsonify({"error": "標註不符上傳規範", "issues": [msg]}), 400
 
         exact, same_img = find_duplicate(QUEUE, image_id, d.get("gt_polygon"))
         # 已撤回的舊紀錄不算重複(否則重新取得同意後永遠補不回來)
         if exact is not None and exact.get("code") not in wd_codes:
-            audit(actor, "annotation_duplicate", d.get("code", "?"), f"同影像同遮罩已在佇列({exact.get('code')})")
+            audit(actor, "annotation_duplicate", d.get("code", "?"),
+                  f"同影像同遮罩已在佇列({exact.get('code')})", role, org)
             return jsonify({"status": "duplicate_skipped", "code": d.get("code"),
                             "note": "相同影像的相同遮罩已在再訓練佇列,已自動略過(避免重複樣本)"}), 200
 
@@ -407,13 +454,15 @@ try:
         rec["poly_sig"] = poly_sig(d.get("gt_polygon"))
         rec["supersedes"] = [r.get("code") for r in same_img] or None
         rec["actor"] = actor
+        rec["role"] = role
+        rec["org"] = org        # 現在只有一個值也要寫:事後補欄位=舊紀錄全是 null
         rec["received_at"] = utc_now()
         append_jsonl(QUEUE, rec)
         note = None
         if same_img:
             note = f"同影像已有 {len(same_img)} 筆舊標註,本筆視為醫師修訂版,匯出時只取最新"
-            audit(actor, "annotation_revised", rec["code"], note)
-        audit(actor, "annotation_enqueued", rec["code"], "ok")
+            audit(actor, "annotation_revised", rec["code"], note, role, org)
+        audit(actor, "annotation_enqueued", rec["code"], "ok", role, org)
         return jsonify({"status": "enqueued", "code": rec["code"], "queue": "retrain",
                         "image_id": image_id, "note": note}), 200
 
@@ -422,7 +471,10 @@ try:
     def post_withdraw():
         d = request.get_json(silent=True) or {}
         code = d.get("code")
-        actor = get_jwt_identity() or "unknown"
+        actor, role, org = _who()
+        if not _can(role, "patient.manage"):
+            return jsonify({"error": "權限不足",
+                            "issues": [f"角色 {role} 不得撤回同意（僅醫師/護理師）。"]}), 403
         if not code:
             return jsonify({"error": "缺 code"}), 400
         # 撤回涵蓋整張影像:由 code 回查其 image_id(可能多張,受試者多次回診),連同呼叫端直接指定者
@@ -482,6 +534,10 @@ try:
     def get_stats():
         """佇列健康度:總筆數 / 孤兒 / 格式錯 / 影像遺失 / 已撤回 / 同意失效 / 被取代 / 可訓練。
         `?source=clinical` 可只看臨床樣本(收案進度以此為準,不含範例/模擬影像)。"""
+        _a, _r, _o = _who()
+        if not _can(_r, "flywheel.stats"):
+            return jsonify({"error": "權限不足",
+                            "issues": [f"角色 {_r} 不得查看佇列健康度。"]}), 403
         src = request.args.get("source")
         _, stats = effective_queue(source=(src or None))
         st = _store()
