@@ -32,7 +32,7 @@ import com.woundmeasurement.app.data.converter.DateConverter
         WoundCaseEntity::class,
         ConsentEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 @TypeConverters(DateConverter::class)
@@ -135,6 +135,22 @@ abstract class WoundMeasurementDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v3 → v4：`doctor_verified` 的真值落地。
+         *
+         * 先前送往飛輪的 `doctor_verified` 是硬編碼 true，而醫師在修邊頁按「取消」之後
+         * 仍可存檔與送出——等於一筆從未被人看過的 AI 輸出會以「醫師已驗證」進入訓練集。
+         *
+         * 既有列一律填 **0（未驗證）**。這在語意上是保守但正確的：那些紀錄產生時
+         * 系統並沒有記錄醫師是否確認過，填 1 等於憑空捏造一個驗證事實。
+         * 代價是舊紀錄無法補送訓練標註——那正是應該的，寧可少一筆也不要一筆假的。
+         */
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `measurements` ADD COLUMN `doctorVerified` INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun getDatabase(context: Context): WoundMeasurementDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -142,7 +158,7 @@ abstract class WoundMeasurementDatabase : RoomDatabase() {
                     WoundMeasurementDatabase::class.java,
                     "wound_measurement_database"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     // 刻意不加 fallbackToDestructiveMigration:寧可在開發期因缺 migration 而崩潰,
                     // 也不要在醫護手機上默默刪光病歷。
                     .build()

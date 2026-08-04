@@ -108,7 +108,8 @@ class MigrationTest {
         Room.databaseBuilder(ctx, WoundMeasurementDatabase::class.java, TEST_DB)
             .addMigrations(
                 WoundMeasurementDatabase.MIGRATION_1_2,
-                WoundMeasurementDatabase.MIGRATION_2_3
+                WoundMeasurementDatabase.MIGRATION_2_3,
+                WoundMeasurementDatabase.MIGRATION_3_4
             )
             // 刻意**不加** fallbackToDestructiveMigration：這個測試存在的意義就是抓住
             // 「缺 Migration 導致資料被清空」。加了它，測試會靜默通過而資料早就沒了。
@@ -143,6 +144,9 @@ class MigrationTest {
             assertEquals(null, sorted[0].gtPolygon)
             assertEquals(null, sorted[0].imageW)
             assertEquals(false, sorted[0].annotationSubmitted)
+            // v4：既有列一律視為「未經醫師確認」。填 true 等於憑空捏造一個驗證事實——
+            // 那些紀錄產生時，系統根本沒有記錄醫師是否確認過。
+            assertEquals(false, sorted[0].doctorVerified)
         } finally {
             room.close()
         }

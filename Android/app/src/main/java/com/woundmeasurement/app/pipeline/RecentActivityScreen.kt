@@ -60,7 +60,7 @@ fun RecentActivityScreen(
             Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
         }
         if (loaded && error == null && rows.isEmpty()) {
-            Text("尚無量測紀錄。請由主畫面「個案」建立病患與傷口個案後開始量測。",
+            Text("尚無量測紀錄。請由主畫面「個案」建立病患與個案傷口後開始量測。",
                 style = MaterialTheme.typography.bodyMedium)
         }
 

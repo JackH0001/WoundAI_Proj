@@ -42,6 +42,15 @@ fun CaseSelectScreen(
     var summaries by remember { mutableStateOf<Map<Long, CaseRepository.CaseSummary>>(emptyMap()) }
     var signing by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf<String?>(null) }
+    /**
+     * 目前選取的個案傷口。
+     *
+     * 先前點一下傷口就**直接跳到量測**，於是「選取」這個狀態根本不存在——
+     * 時間軸只能靠底下一個小小的文字按鈕進入，而且新增表單永遠佔著版面。
+     * 改成兩段式（選取 → 決定要量測還是看時間軸）之後，畫面在選取時可以收起新增表單，
+     * 而且「這個傷口我要做什麼」變成一個明確的選擇，不是靠按到哪一顆按鈕決定。
+     */
+    var selectedCaseId by remember { mutableStateOf<Long?>(null) }
 
     // 新增病患欄位
     var newName by remember { mutableStateOf("") }
@@ -51,6 +60,9 @@ fun CaseSelectScreen(
     var wtype by remember { mutableStateOf("") }
 
     suspend fun reloadPatient(p: PatientEntity) {
+        // 換病患一定要清掉傷口選取，否則畫面會停在上一位病患的傷口摘要上——
+        // 那種錯誤在臨床上很危險：看起來像是這位病患的資料。
+        if (selected?.id != p.id) selectedCaseId = null
         selected = p
         consent = repo.activeConsent(p.id)
         cases = repo.openCases(p.id)
@@ -62,8 +74,16 @@ fun CaseSelectScreen(
         try { patients = repo.listPatients() } catch (e: Exception) { msg = "⚠ 讀取病患失敗:${e.message}" }
     }
 
-    // 簽名頁自己吃返回鍵:否則簽到一半按返回會直接跳出整個個案管理
-    BackHandler(enabled = signing) { signing = false }
+    // 返回鍵逐層退出:簽名 → 傷口選取 → 病患選取 → 才真的離開。
+    // 全部一次退掉的話,使用者按返回只是想「取消選取」卻整個跳出個案管理,
+    // 回來還要重走一次選病患與同意檢查。
+    BackHandler(enabled = signing || selectedCaseId != null || selected != null) {
+        when {
+            signing -> signing = false
+            selectedCaseId != null -> selectedCaseId = null
+            else -> { selected = null; consent = null; cases = emptyList() }
+        }
+    }
 
     if (signing && selected != null) {
         ConsentSignatureScreen(
@@ -96,16 +116,25 @@ fun CaseSelectScreen(
         Text("病患", style = MaterialTheme.typography.titleSmall)
         patients.forEach { p ->
             val sel = selected?.id == p.id
-            if (sel) Button({ scope.launch { runCatching { reloadPatient(p) } } }, Modifier.fillMaxWidth()) {
-                Text("${p.name}  ${PhiCrypto.maskMrn(p.medicalRecordNumber)}")
-            } else OutlinedButton({ scope.launch { runCatching { reloadPatient(p) } } }, Modifier.fillMaxWidth()) {
-                Text("${p.name}  ${PhiCrypto.maskMrn(p.medicalRecordNumber)}")
+            // 再點一次＝取消選取。沒有這個的話，選錯病患只能返回上一頁重進，
+            // 而在臨床現場「退出再進」通常意味著要重走一次同意檢查。
+            val toggle = {
+                if (sel) { selected = null; consent = null; cases = emptyList(); selectedCaseId = null }
+                else scope.launch { runCatching { reloadPatient(p) } }
+                Unit
             }
+            val label = "${p.name}  ${PhiCrypto.maskMrn(p.medicalRecordNumber)}" +
+                        (if (sel) "   ✓" else "")
+            if (sel) Button(toggle, Modifier.fillMaxWidth()) { Text(label) }
+            else OutlinedButton(toggle, Modifier.fillMaxWidth()) { Text(label) }
         }
         if (patients.isEmpty()) Text("(尚無病患,請於下方新增)",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
 
+        // 選定病患後收起新增表單：收案時的動作是「選既有病患」，
+        // 而「新增」只在建檔那一次用得到。兩者同時攤在畫面上只是讓人多滑一段。
+        if (selected == null) {
         OutlinedTextField(newName, { newName = it }, label = { Text("姓名") },
             singleLine = true, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(newMrn, { newMrn = it }, label = { Text("病歷號") },
@@ -135,6 +164,11 @@ fun CaseSelectScreen(
         Text("姓名與病歷號以裝置金鑰加密後存於本機,**不會上傳雲端**;雲端只看得到 WD-代碼。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            Text("（已選定病患。再點一次可取消選取並新增其他病患）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
 
         val p = selected
         if (p != null) {
@@ -173,20 +207,25 @@ fun CaseSelectScreen(
         }
 
         Divider()
-        // ---------- 傷口個案 ----------
-        Text("傷口個案", style = MaterialTheme.typography.titleSmall)
+        // ---------- 個案傷口 ----------
+        Text("個案傷口", style = MaterialTheme.typography.titleSmall)
         if (!care) {
-            Text("⚠ 需先取得①照護同意才能建立個案與量測",
+            Text("⚠ 需先取得①照護同意才能建立傷口與量測",
                 color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
         cases.forEach { c ->
             val s = summaries[c.id]
+            val picked = selectedCaseId == c.id
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                OutlinedButton(
-                    onClick = { onCaseChosen(c) },
-                    enabled = care,
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("${c.bodySite}・${c.woundType}   ${c.wdCode}") }
+                // 點一下＝選取(不再直接跳量測)，再點一次＝取消選取。
+                val toggleCase = {
+                    selectedCaseId = if (picked) null else c.id
+                }
+                if (picked) Button(toggleCase, Modifier.fillMaxWidth(), enabled = care) {
+                    Text("${c.bodySite}・${c.woundType}   ${c.wdCode}   ✓")
+                } else OutlinedButton(toggleCase, Modifier.fillMaxWidth(), enabled = care) {
+                    Text("${c.bodySite}・${c.woundType}   ${c.wdCode}")
+                }
                 // 決策資訊:上次面積、相對首次的變化(負=縮小=在癒合)、距上次天數
                 Text(
                     if (s == null || s.count == 0) "  尚無量測"
@@ -205,17 +244,31 @@ fun CaseSelectScreen(
                         else -> MaterialTheme.colorScheme.onSurfaceVariant
                     }
                 )
-                if (onTimeline != null && (s?.count ?: 0) > 0) {
-                    TextButton({ onTimeline(c) }, Modifier.fillMaxWidth()) {
-                        Text("查看此傷口時間軸")
+                // 選取後才展開動作。把「量測」與「看時間軸」並列成明確的選擇，
+                // 而不是靠使用者記得哪一顆按鈕會跳去哪裡。
+                if (picked) {
+                    Button({ onCaseChosen(c) }, Modifier.fillMaxWidth(), enabled = care) {
+                        Text("開始量測")
                     }
+                    if (onTimeline != null) {
+                        OutlinedButton({ onTimeline(c) }, Modifier.fillMaxWidth()) {
+                            Text(if ((s?.count ?: 0) > 0) "查看此傷口時間軸（${s?.count} 次）"
+                                 else "查看此傷口時間軸（尚無紀錄）")
+                        }
+                    }
+                    Text("（再點一次上方傷口可取消選取，並顯示「新增個案傷口」）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
-        if (cases.isEmpty() && care) Text("(尚無開立中的傷口個案)",
+        if (cases.isEmpty() && care) Text("(尚無開立中的傷口)",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
 
+        // 選定傷口後收起新增表單。回診時的動作是「選既有傷口」，
+        // 新增只在第一次建立時用得到——兩者同時攤開只是讓人多滑一段。
+        if (selectedCaseId == null) {
         OutlinedTextField(site, { site = it }, label = { Text("部位(如 薦骨/右足跟)") },
             singleLine = true, enabled = care, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(wtype, { wtype = it }, label = { Text("類型(如 壓瘡/糖尿病足)") },
@@ -228,13 +281,14 @@ fun CaseSelectScreen(
                         val c = repo.createCase(p.id, site.trim(), wtype.trim())
                         reloadPatient(p)   // cases 與 summaries 同進同出,避免兩者不同步
                         site = ""; wtype = ""
-                        msg = "✅ 已建立個案 ${c.wdCode}(此代碼固定不變,回診沿用同一組)"
-                    } catch (e: Exception) { msg = "⚠ 建立個案失敗:${e.message}" }
+                        msg = "✅ 已建立傷口 ${c.wdCode}(此代碼固定不變,回診沿用同一組)"
+                    } catch (e: Exception) { msg = "⚠ 建立失敗:${e.message}" }
                 }
             },
             enabled = care && site.isNotBlank() && wtype.isNotBlank(),
             modifier = Modifier.fillMaxWidth()
-        ) { Text("＋新增傷口個案") }
+        ) { Text("＋新增個案傷口") }
+        }
         }   // end if (p != null)
 
         Divider()

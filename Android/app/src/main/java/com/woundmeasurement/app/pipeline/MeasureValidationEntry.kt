@@ -39,7 +39,9 @@ fun MeasureValidationEntry(
      * 沒有個案的臨床樣本就是孤兒紀錄，從入口擋掉比事後提示有效。
      */
     clinicalMode: Boolean = false,
-    initialCase: com.woundmeasurement.app.data.entity.WoundCaseEntity? = null
+    initialCase: com.woundmeasurement.app.data.entity.WoundCaseEntity? = null,
+    /** 快速量測專用：查看未歸戶紀錄。臨床模式不顯示（那些紀錄都在個案時間軸裡）。 */
+    onViewQuickHistory: (() -> Unit)? = null
 ) {
     val ctx = LocalContext.current
     val db = remember { WoundMeasurementDatabase.getDatabase(ctx) }
@@ -66,6 +68,8 @@ fun MeasureValidationEntry(
     // 同意一律從 DB 重讀(見下方 LaunchedEffect),不由呼叫端傳入——傳進來的只會是可能過期的快照
     var consent by remember { mutableStateOf<com.woundmeasurement.app.data.entity.ConsentEntity?>(null) }
     var managingCase by remember { mutableStateOf(false) }
+    /** 最近一次寫進共用相簿的相對路徑（快速量測才會有值）。 */
+    var galleryPath by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(baseUrl) {
         // ⚠ 憑證改由「設定」頁存在本機(Keystore 加密),**不再硬編碼**。
@@ -78,6 +82,8 @@ fun MeasureValidationEntry(
             "⚠️ 尚未設定後端帳密 — 請到主畫面「設定」填入後端位址與帳號密碼"
         } else try {
             val ok = withContext(Dispatchers.IO) { backend.login(u, p) }
+            // 登入成功本身就把容器叫醒了，順手記下時間，讓下方的冷啟動提示判斷得準。
+            if (ok) BackendWarmup.ping(ctx)
             // 「連不上」與「帳密錯」是兩種處置,訊息要分開(現場才知道要調網路還是調帳號)
             if (ok) "✅ 後端已連線($u) @ $baseUrl"
             else "⚠️ 連得到後端但帳密不正確 — 請到「設定」確認帳號密碼"
@@ -215,6 +221,32 @@ fun MeasureValidationEntry(
                     color = MaterialTheme.colorScheme.error)
             }
 
+            // 冷啟動提示。Cloud Run 閒置會縮到零，第一次量測要等容器載入 82MB 模型。
+            // 不講的話醫師會以為是 App 當掉——而它其實正在正常運作，只是第一次比較久。
+            if (BackendWarmup.sinceLastOkMs() > 15 * 60 * 1000L) {
+                Text("ℹ 後端可能處於休眠（雲端閒置會自動縮容）。第一次量測約需 10–30 秒喚醒，之後即正常。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+
+            // 醫師修邊確認狀態。**取消不算確認** —— 先前按取消後畫面仍留著 AI 的原始輪廓，
+            // 而「存入時間軸」與「送訓練標註」照樣可按，等於把沒人看過的 AI 輸出
+            // 當成人工 GT。存檔仍允許（那是一筆合法的 AI 初步量測紀錄），
+            // 但**送訓練標註必須擋下**，並且要讓醫師看得出現在是什麼狀態。
+            if (st.result != null) {
+                if (vm.lastDoctorVerified) {
+                    Text("✓ 已完成醫師修邊確認 — 可送訓練標註",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary)
+                } else {
+                    Text("尚未完成醫師修邊確認：此結果為 AI 原始輸出。" +
+                         "可存入時間軸作為初步量測，但**不得送訓練標註**——" +
+                         "訓練集的 GT 必須來自人的判斷。請按「醫師確認・修邊」並完成（按取消不算）。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error)
+                }
+            }
+
             // 範例圖被當成臨床樣本的偵測。
             //
             // 後端以內容 sha1 當 image_id,回報這批位元組先前是否已上傳過。真實回診照不可能與上次
@@ -232,6 +264,20 @@ fun MeasureValidationEntry(
                     color = MaterialTheme.colorScheme.error)
             }
 
+            if (!clinicalMode) {
+                galleryPath?.let {
+                    Text("🖼 原始影像已存入相簿：$it",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary)
+                }
+                onViewQuickHistory?.let { go ->
+                    OutlinedButton(go, Modifier.fillMaxWidth()) { Text("查看快速量測紀錄（未歸戶）") }
+                }
+                Text("快速量測的紀錄不屬於任何個案，不會出現在個案時間軸，也不計入臨床收案進度。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+
             Divider()
             SamplePickerScreen(
                 vm = vm, backend = backend,
@@ -239,6 +285,16 @@ fun MeasureValidationEntry(
                 onReview = { if (vm.lastBitmap != null) editing = true },
                 // 量測綁個案 → 時間軸才畫得出單一傷口的癒合曲線
                 onSaveToTimeline = {
+                    // 快速量測：把原始影像另存一份到共用相簿，供事後比對或匯入個案。
+                    // ⚠ **只有** sample/phantom 會真的寫入——GalleryExport 自己會拒絕其他來源，
+                    // 因為共用相簿不受本 App 的加密、保存期限與撤回同意約束。
+                    if (!clinicalMode) {
+                        vm.lastBitmap?.let { bmp ->
+                            val rel = com.woundmeasurement.app.data.store.GalleryExport
+                                .saveForQuickMeasure(ctx, bmp, source)
+                            if (rel != null) galleryPath = rel
+                        }
+                    }
                     // 存檔同樣受①照護同意管:載入影像後才去撤回同意的話,
                     // 只擋「載入」那一步是攔不住的(影像已經在手上了)。
                     if (clinicalMode && !careOk)
@@ -254,7 +310,7 @@ fun MeasureValidationEntry(
                 measureEnabled = !clinicalMode || careOk,
                 disabledReason = when {
                     !clinicalMode -> null
-                    case == null -> "⚠ 請先選擇傷口個案"
+                    case == null -> "⚠ 請先選擇個案傷口"
                     // 載入完成前不要指控「未取得同意」——擋住是對的,但訊息是假的
                     !consentLoaded -> "同意狀態載入中…"
                     else -> "⚠ 此病患尚未取得①照護同意（或已撤回），不得進行量測。請至個案管理簽署。"
@@ -309,7 +365,7 @@ private fun DoctorFlywheelSubmit(
         if (source == "phantom") Text(
             "⚠ 模擬圖樣本僅供量測鏈驗證,不計入臨床樣本數、不作模型訓練",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-        if (!caseOk) Text("⚠ 臨床樣本需先選傷口個案(代碼要穩定,回診才串得起來)",
+        if (!caseOk) Text("⚠ 臨床樣本需先選個案傷口(代碼要穩定,回診才串得起來)",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         if (caseOk && !trainOk) Text("⚠ 此病患未勾選②訓練同意(或已撤回),不得送出訓練標註",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)

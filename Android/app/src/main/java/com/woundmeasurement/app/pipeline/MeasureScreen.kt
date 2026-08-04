@@ -32,9 +32,18 @@ fun MeasureScreen(
                 val g = pct(r.tissueFrac["granulation"]); val s = pct(r.tissueFrac["slough"]); val n = pct(r.tissueFrac["necrosis"])
                 ElevatedCard(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("面積：" + (r.areaCm2?.let { "%.2f cm²".format(it) } ?: "未校正(無貼紙)"),
+                        Text("面積：" + (r.areaCm2?.let { "%.2f cm²".format(it) } ?: "未校正(未偵測到校正標記)"),
                             fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                        Text("PUSH：" + (r.push.partial?.toString() ?: "-") +
+                        if (r.areaCm2 == null) Text(
+                        // 只說「未校正」等於把問題丟回給不知道原因的人。
+                        // ArUco 偵測失敗最常見的是標記太遠——實測時貼紙離傷口太遠就抓不到。
+                        "⚠ 沒有面積：偵測不到 ArUco 校正標記，所有面積相關數值（含 PUSH 面積子分）皆不可用。\n" +
+                        "常見原因：① 標記離傷口太遠或太小（請貼近傷口，佔畫面約 1/6 以上）" +
+                        "② 標記有反光、摺痕或被遮住 ③ 拍攝角度過斜使標記變形。\n" +
+                        "請重新貼近拍攝；沒有標記就沒有尺度，面積無法回推。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error)
+                    Text("PUSH：" + (r.push.partial?.toString() ?: "-") +
                             (r.push.full?.let { "（含滲液 $it）" } ?: "（滲液待醫師輸入）"))
                         Text("組織：肉芽 $g · 腐肉 $s · 壞死 $n")
                         Text("路由：${r.route} · 信心 ${"%.0f".format(r.confidence * 100)}%")

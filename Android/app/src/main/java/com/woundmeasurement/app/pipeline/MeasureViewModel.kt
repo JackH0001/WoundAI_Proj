@@ -44,6 +44,17 @@ class MeasureViewModel(
     // 醫師修邊後與原始遮罩的 IoU(修正幅度;1.0=未改),隨標註送出
     @Volatile var lastCorrectionIou: Double? = null
         private set
+    /**
+     * 醫師是否**真的按下「完成修邊」**（而非取消或根本沒進修邊頁）。
+     *
+     * ⚠ 這是 `doctor_verified` 的真值來源。先前它在 BackendClient 裡硬編碼 true，
+     * 而修邊頁按「取消」之後畫面仍留著 AI 的原始輪廓、存檔與送出照樣可按——
+     * 於是一筆從未被人看過的 AI 輸出會以「醫師已驗證」的身分進入訓練集。
+     * 飛輪的整個前提是 GT 來自人的判斷；這個旗標一旦說謊，
+     * 後續所有以它為基礎的模型評估都失去意義。
+     */
+    @Volatile var lastDoctorVerified: Boolean = false
+        private set
     // 同一次影像去重存檔:影像雜湊 + 已存的 row id(同影像重存→更新同筆,不新增)
     @Volatile private var lastImageHash: Int? = null
     @Volatile private var lastSavedId: Long? = null
@@ -94,6 +105,7 @@ class MeasureViewModel(
         lastMmPerPx = null
         lastImageId = null; lastImageW = 0; lastImageH = 0
         lastRoute = null; lastSegModel = null; lastPhantomHint = false; lastImageReused = false
+        lastDoctorVerified = false   // 新影像＝尚未經醫師確認,不可沿用上一張的驗證狀態
         // 分析失敗時也要丟掉上一張的原圖,否則修邊入口可能開到「上一位病人」的影像
         if (alsoBitmap) {
             lastBitmap = null; lastImageHash = null; lastSavedId = null; editRaster = null
@@ -220,6 +232,7 @@ class MeasureViewModel(
                 bindImage(identity = bitmap, canvas = work)   // 編輯/顯示用縮圖(polygon 座標即此圖座標)
                 lastPolygon = polyCap
                 lastCorrectionIou = null   // 新分析→重置修邊修正量
+                lastDoctorVerified = false // 新分析→醫師尚未確認
                 lastMmPerPx = mmCap
                 lastImageId = idCap; lastImageW = wCap; lastImageH = hCap
                 lastRoute = routeCap; lastSegModel = modelCap; lastPhantomHint = hintCap
@@ -255,6 +268,13 @@ class MeasureViewModel(
         if (poly.isEmpty()) {
             _state.value = _state.value.copy(submitStatus = "⚠️ 無傷口輪廓可送(請先量測)"); return
         }
+        // 醫師沒按過「完成修邊」就送出 = 把 AI 的原始輸出當成人工 GT 灌進訓練集。
+        // 後端也會擋（doctor_verified=false → 400），但在這裡就擋下才給得出有用的訊息。
+        if (!lastDoctorVerified) {
+            _state.value = _state.value.copy(
+                submitStatus = "⚠️ 尚未完成醫師修邊確認,不得送訓練標註。\n" +
+                               "請按「醫師確認・修邊」並完成後再送(按取消不算確認)。"); return
+        }
         // 端上模式(未經後端 classify)沒有 image_id → 送了也只是孤兒 GT,先擋
         if (lastImageId.isNullOrEmpty()) {
             _state.value = _state.value.copy(
@@ -269,7 +289,7 @@ class MeasureViewModel(
                         imageId = lastImageId, imageW = lastImageW, imageH = lastImageH,
                         mmPerPx = lastMmPerPx, route = lastRoute, segModel = lastSegModel,
                         correctionIou = lastCorrectionIou, careNote = careNote, source = source,
-                        consentTrain = consentTrain
+                        consentTrain = consentTrain, doctorVerified = lastDoctorVerified
                     )
                 }
                 _state.value = _state.value.copy(
@@ -296,6 +316,8 @@ class MeasureViewModel(
     ) {
         lastPolygon = edited
         lastCorrectionIou = correctionIou
+        // 只有走到這裡（按下「完成修邊」）才算醫師確認過。取消不會呼叫本函式。
+        lastDoctorVerified = true
         val r = _state.value.result
         val updated = if (r != null) {
             val frac = tissue ?: r.tissueFrac
@@ -361,6 +383,8 @@ class MeasureViewModel(
                             imageH = (lastImageH.takeIf { it > 0 }) ?: exist.imageH,
                             exudate = exudate ?: exist.exudate,
                             correctionIou = lastCorrectionIou ?: exist.correctionIou,
+                            // 只增不減:同一筆若曾經確認過,重存(未再修邊)不應把它退回未確認
+                            doctorVerified = lastDoctorVerified || exist.doctorVerified,
                             // ⚠ 影像**一律以本次畫布重存**,絕不沿用舊檔。
                             //
                             // 舊作法是「已有檔就沿用、刪掉剛存的」,看起來省事,但同一張照片先走端上
@@ -400,7 +424,8 @@ class MeasureViewModel(
                             imageW = lastImageW.takeIf { it > 0 },
                             imageH = lastImageH.takeIf { it > 0 },
                             exudate = exudate,
-                            correctionIou = lastCorrectionIou
+                            correctionIou = lastCorrectionIou,
+                            doctorVerified = lastDoctorVerified
                         ))
                         Pair(nid, false)
                     }

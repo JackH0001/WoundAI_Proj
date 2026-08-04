@@ -68,5 +68,18 @@ data class MeasurementEntity(
     /** 修邊後與 AI 原始遮罩的 IoU（1.0＝未改）。 */
     val correctionIou: Double? = null,
     /** 是否已送出訓練標註（避免重複送、也讓時間軸看得出哪幾筆進了飛輪）。 */
-    val annotationSubmitted: Boolean = false
+    val annotationSubmitted: Boolean = false,
+    /**
+     * 醫師是否**真的完成過修邊確認**（按下「完成修邊」，而非取消）。
+     *
+     * ⚠ 這是送往飛輪的 `doctor_verified` 的**真值來源**，先前是硬編碼 true。
+     * 醫師在修邊頁按「取消」後，畫面上仍留著 AI 的原始輪廓，而存檔與送出照樣可按——
+     * 於是一筆從未被人看過的 AI 輸出會以「醫師已驗證」的身分進入訓練集。
+     * 那不只是資料品質問題：整個飛輪的前提就是 GT 來自人的判斷，
+     * 這個欄位一旦說謊，後續所有以它為基礎的模型評估都失去意義。
+     *
+     * 刻意用獨立欄位而非從 [correctionIou] 是否為 null 反推：後者是「修正幅度」，
+     * 語意不同且在從時間軸重新修邊時刻意不覆寫，拿來當驗證旗標會在某天悄悄錯掉。
+     */
+    val doctorVerified: Boolean = false
 )

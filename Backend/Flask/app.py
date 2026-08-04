@@ -356,7 +356,12 @@ def health_check():
     所以：模型沒載到就回 `status: degraded`，並明說影響。監控與主控台都看得到。
     """
     model_ready = wound_segmentation_model is not None
-    degraded = not model_ready
+    # classify 端點還需要 engineering 的組織分類與 PUSH 模組。它們在容器裡是
+    # 部署時複製的 vendor/ 副本——漏了複製的話，**只有 classify 會 503**，
+    # 而健康檢查依舊全綠（實際發生過：登入 200、stats 200、classify 503）。
+    # 健康檢查要涵蓋「主要功能真的能用」，不只是「行程還活著」。
+    classify_ready = _load_classify_mods() is not None
+    degraded = (not model_ready) or (not classify_ready)
     status = {
         'status': 'degraded' if degraded else 'healthy',
         'timestamp': datetime.now().isoformat(),
@@ -365,17 +370,25 @@ def health_check():
             'onnxruntime': ONNX_AVAILABLE,
             'tensorflow': TENSORFLOW_AVAILABLE,
             'segmentation_model': model_ready,
+            'classify_modules': classify_ready,
             'database': True
         },
         'store': None,
         'version': '1.0.0'
     }
     if degraded:
-        status['degraded_reason'] = (
-            '無可用的 ML 分割模型，已退回 HSV 色彩法。面積與組織判讀不具臨床參考價值。'
-            + ('（onnxruntime 未安裝——請確認 requirements.txt）' if not ONNX_AVAILABLE
-               else '（onnxruntime 可用但模型未載入——請確認 models/ 內有 .onnx）')
-        )
+        reasons = []
+        if not model_ready:
+            reasons.append(
+                '無可用的 ML 分割模型，已退回 HSV 色彩法。面積與組織判讀不具臨床參考價值。'
+                + ('（onnxruntime 未安裝——請確認 requirements.txt）' if not ONNX_AVAILABLE
+                   else '（onnxruntime 可用但模型未載入——請確認 models/ 內有 .onnx）'))
+        if not classify_ready:
+            reasons.append(
+                'classify 所需的 engineering 模組載不進來（wound_classifier / clinical_rules '
+                '/ aruco_calibrate），/api/v1/classify 會回 503。'
+                '容器內請確認部署時已把它們複製到 vendor/。')
+        status['degraded_reason'] = ' ｜ '.join(reasons)
     # 儲存後端也一併回報：WOUNDAI_STORE 沒設成 gcs 時，Cloud Run 的資料會隨實例回收消失，
     # 而那同樣是「一切看起來正常，直到某天統計歸零」。
     try:
@@ -1253,12 +1266,29 @@ def retrain_models_async():
 
 # ===== 分類/嚴重度端點(PUSH 量表 + 組織 v2;方案1+3 接線) =====
 _ENG = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "engineering"))
+# 容器內的 engineering 模組副本。
+#
+# ⚠ Docker 的建置上下文只有 `Backend/Flask/`，`../../engineering` 在映像裡**不存在**。
+# 本機開發時 app.py 從 repo 相對路徑載得到，所以這個問題在本機完全看不出來——
+# 直到部署上雲，classify 端點才以 `No module named 'wound_classifier'` 回 503。
+# 部署腳本會在建置前把需要的模組複製到 `vendor/`（見 deploy_cloudrun.ps1）。
+#
+# 搜尋順序刻意是「先 repo、後 vendor」：本機開發要用**正在編輯的那一份**，
+# 而不是某次部署留下的舊副本。vendor/ 因此也不進版控——同一份程式碼放兩個地方，
+# 遲早會有人只改了其中一個。
+_VENDOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor")
+
+
+def _classify_search_paths():
+    return [os.path.join(_ENG, s) for s in ("phase2", "phase1")] + [_VENDOR]
+
+
 def _load_classify_mods():
     """延遲載入 engineering 的 wound_classifier(v2)/clinical_rules(PUSH)/aruco;失敗回 None。"""
     import sys
-    for sub in ("phase2", "phase1"):
-        pth = os.path.join(_ENG, sub)
-        if pth not in sys.path: sys.path.insert(0, pth)
+    for pth in _classify_search_paths():
+        if os.path.isdir(pth) and pth not in sys.path:
+            sys.path.insert(0, pth)
     try:
         from wound_classifier import tissue_proxy_v2
         from clinical_rules import push_score
@@ -1280,8 +1310,11 @@ def _load_seg_red():
     本函式即 verify_area_sheet.seg_red,已在同批驗證單實拍 n=15 上達 **平均|誤差| 1.9%**
     (EVIDENCE_LEDGER 2026-07-20),遠優於模型且不會隨訓練漂移。"""
     import sys
-    pth = os.path.join(_ENG, "phase2")
-    if pth not in sys.path: sys.path.insert(0, pth)
+    # 與 _load_classify_mods 用同一組搜尋路徑：容器裡沒有 ../../engineering，
+    # 只有部署時複製過去的 vendor/。少寫這一行的話，模擬圖路由會單獨壞掉。
+    for pth in _classify_search_paths():
+        if os.path.isdir(pth) and pth not in sys.path:
+            sys.path.insert(0, pth)
     try:
         from verify_area_sheet import seg_red_robust
         return seg_red_robust
@@ -1394,6 +1427,20 @@ def classify_wound():
                         mask = au_mask; route = "cloud_escalated(AU)"; escalated = True; seg_model = "ensemble.AU"
             except Exception as _e:
                 logger.warning(f"escalate 略過: {_e}")
+
+        # ⚠ phantom_hint 必須在**最終遮罩定案後**重新評估。
+        #
+        # 它是在 student 跑完、escalate 之前算的：student 回空遮罩 → hint=True。
+        # 但緊接著 A∪U 集成常常救得回來（實測 route=cloud_escalated(AU)、面積 12.05 cm²、
+        # 信心 100%），此時畫面卻仍顯示「AI 沒偵測到傷口，這看起來是印刷模擬圖」。
+        #
+        # 這不只是訊息不準——它會把醫師導向**錯誤的操作**：提示叫他改選「模擬圖」，
+        # 而模擬圖走的是 HSV 色彩分割。拿色彩分割去量真實傷口照，得到的是紅色區域而非傷口，
+        # 面積會錯得離譜卻照樣回 200。誤導性的提示比沒有提示更危險。
+        if phantom_hint and mask.any():
+            logger.info("最終遮罩非空(route=%s) → 撤銷 phantom_hint(集成已救回,不是模擬圖)", route)
+            phantom_hint = False
+
         # Stage3 校正面積:優先 ArUco,否則 cm_per_pixel(手動)
         area_cm2 = None; calib = "none"; mm_per_px = None
         if _ac is not None:

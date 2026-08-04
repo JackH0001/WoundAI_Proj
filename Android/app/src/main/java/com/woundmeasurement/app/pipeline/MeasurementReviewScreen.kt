@@ -156,6 +156,8 @@ fun MeasurementReviewScreen(
                         estimatedArea = finalArea,
                         // AI 空手、醫師從零畫出傷口的情形:hasWound 原本會停在 false
                         hasWound = (finalArea ?: 0.0) > 0.0 || cur.hasWound,
+                        // 走到這裡代表醫師按了「完成修邊」（取消不會呼叫 onDone）
+                        doctorVerified = true,
                         // ⚠ correctionIou **刻意不覆寫**。它的定義是「與 AI 原始遮罩的 IoU」,
                         // 是評估模型修正幅度的指標並會送進飛輪(BackendClient correction_iou)。
                         // 從本畫面進來時,修邊的起點是**已經修過的 GT** 而非 AI 原圖遮罩,
@@ -221,6 +223,8 @@ fun MeasurementReviewScreen(
                 cur.annotationSubmitted -> "此筆已送出過訓練標註。重新修邊後可再送（雲端會視為醫師修訂版）。"
                 cur.gtPolygon == null -> "⚠ 此筆沒有 GT 輪廓，不能補送（請先重新修邊）。"
                 cur.imageId == null -> "⚠ 此筆沒有後端影像綁定（當初可能走端上模式），不能補送。"
+                !cur.doctorVerified -> "⚠ 此筆未經醫師完成修邊確認，不得送訓練標註。\n" +
+                    "請先按「重新修邊」並完成（按取消不算確認）。舊版紀錄一律視為未確認。"
                 !trainOk -> "⚠ 此病患未取得②訓練同意（或已撤回），不得送出。"
                 !loggedIn -> "⚠ 後端未連線或尚未設定帳密 — 請到主畫面「設定」填入後端位址與帳號密碼（目前：$baseUrl）。"
                 else -> "可補送：後端靠 image_id 就找得到當初的影像，**不需要重新上傳或重測**。"
@@ -232,7 +236,7 @@ fun MeasurementReviewScreen(
         Button(
             onClick = { confirmSubmit = true },
             enabled = !cur.annotationSubmitted && cur.gtPolygon != null && cur.imageId != null &&
-                      cur.wdCode != null && trainOk && loggedIn,
+                      cur.wdCode != null && cur.doctorVerified && trainOk && loggedIn,
             modifier = Modifier.fillMaxWidth()
         ) { Text("補送訓練標註 → 再訓練佇列") }
 
@@ -290,7 +294,10 @@ fun MeasurementReviewScreen(
                                 imageId = cur.imageId, imageW = cur.imageW ?: 0, imageH = cur.imageH ?: 0,
                                 mmPerPx = cur.mmPerPx, route = cur.route, segModel = null,
                                 correctionIou = cur.correctionIou, careNote = "resubmit from timeline",
-                                source = cur.source ?: "clinical", consentTrain = okNow
+                                source = cur.source ?: "clinical", consentTrain = okNow,
+                                // 真值來自本機紀錄。v3 以前的舊紀錄一律 false（當時系統沒記錄
+                                // 醫師是否確認過，填 true 等於憑空捏造一個驗證事實）。
+                                doctorVerified = cur.doctorVerified
                             )
                         }
                     }

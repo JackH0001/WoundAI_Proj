@@ -27,10 +27,46 @@ android {
         }
     }
 
+    // ── 發布簽章 ────────────────────────────────────────────────────────
+    //
+    // 金鑰與密碼放在 **repo 之外**的 keystore.properties（見 build_release.ps1）。
+    // 檔案不存在時整段跳過——這樣沒有金鑰的人仍然 build 得動 debug，CI 也不會壞。
+    //
+    // ⚠ 絕不把 storePassword 寫進 build.gradle。它會進版控，而這是公開協作 repo；
+    //    簽章金鑰外流等於別人可以發佈「看起來是你們的」更新覆蓋使用者的安裝。
+    signingConfigs {
+        release {
+            def propsFile = rootProject.file("keystore.properties")
+            if (propsFile.exists()) {
+                def props = new Properties()
+                propsFile.withInputStream { props.load(it) }
+                storeFile file(props['storeFile'])
+                storePassword props['storePassword']
+                keyAlias props['keyAlias']
+                keyPassword props['keyPassword']
+            }
+        }
+    }
+
     buildTypes {
         release {
+            // ⚠ minifyEnabled 維持 false。
+            // ONNX Runtime 與 OpenCV 大量走 JNI / 反射，R8 會把它們用得到的類別剝掉，
+            // 症狀是**只有 release 版才閃退**，而且堆疊指向被混淆過的名字。
+            // 要開的話必須先補 proguard-rules 並在真機完整跑過一輪量測，不是改一行就好。
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // 有金鑰才簽；沒有的話 assembleRelease 會產生 unsigned APK（裝不起來，但至少建得過）
+            if (rootProject.file("keystore.properties").exists()) {
+                signingConfig signingConfigs.release
+            }
+        }
+        debug {
+            // 測試者拿到的若是 debug 版，adb 可以 run-as 讀 App 私有目錄、也可以附加除錯器。
+            // PII 與影像仍是 Keystore 密文（金鑰不可匯出），但**執行中的記憶體內容擋不住**。
+            // 所以：debug 版只給範例／模擬圖驗證用，真實個案一律用 release 版。
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
         }
     }
     

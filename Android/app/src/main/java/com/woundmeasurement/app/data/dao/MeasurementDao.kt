@@ -20,6 +20,17 @@ interface MeasurementDao {
     @Query("SELECT * FROM measurements ORDER BY timestamp DESC")
     suspend fun getAllMeasurementsOnce(): List<MeasurementEntity>
 
+    /**
+     * 未歸戶紀錄（`caseId IS NULL`）——快速量測產生的那些。
+     *
+     * 這類紀錄不屬於任何傷口個案，所以不會出現在任何個案時間軸裡。先前它們存進 DB 之後
+     * 就**再也叫不出來**（使用者反映「照片消失、只剩數據，不知道存到哪」）。
+     * 給它一個明確的入口，比讓它們無聲堆積在資料庫裡好——後者遲早變成沒人知道
+     * 是什麼、也不敢刪的資料。
+     */
+    @Query("SELECT * FROM measurements WHERE caseId IS NULL ORDER BY timestamp DESC")
+    fun getUnassignedMeasurements(): kotlinx.coroutines.flow.Flow<List<MeasurementEntity>>
+
     @Query("SELECT * FROM measurements WHERE patientId = :patientId ORDER BY timestamp DESC")
     fun getMeasurementsByPatient(patientId: String): Flow<List<MeasurementEntity>>
     

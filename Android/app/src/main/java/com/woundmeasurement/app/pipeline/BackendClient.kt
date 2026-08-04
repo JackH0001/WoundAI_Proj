@@ -165,7 +165,16 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
          * ⚠ 這裡曾經硬編碼 true——等於每筆送出都謊稱已取得訓練同意,而實際上沒人勾過。
          * 呼叫端沒有有效同意就不該呼叫本函式;真的呼叫了,後端也會以 400 擋下。
          */
-        consentTrain: Boolean
+        consentTrain: Boolean,
+        /**
+         * 醫師是否**真的完成過修邊確認**。
+         *
+         * ⚠ 這裡曾經硬編碼 `true`——與 `consent_train` 是同一類缺陷：
+         * App 對後端聲稱了它沒有驗證過的事。醫師在修邊頁按「取消」後仍可送出，
+         * 於是一筆從未被人看過的 AI 輸出會以「醫師已驗證」的身分進入訓練集。
+         * 飛輪的整個前提是 GT 來自人的判斷，這個欄位說謊會讓後續所有模型評估失去意義。
+         */
+        doctorVerified: Boolean
     ): Pair<Boolean, String> {
         // 沒有 image_id/尺寸就送出 = 產生孤兒 GT(後端會 400)。提早在端上擋下並給明確訊息。
         if (imageId.isNullOrEmpty() || imageW <= 0 || imageH <= 0) {
@@ -179,7 +188,7 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
             .put("code", code)
             .put("gt_polygon", poly)
             .put("exudate", if (exudate != null) exudate else JSONObject.NULL)
-            .put("doctor_verified", true)
+            .put("doctor_verified", doctorVerified)   // 真值來自 MeasureViewModel.lastDoctorVerified
             .put("deidentified", true)
             .put("consent_train", consentTrain)   // 由本機同意紀錄決定,不再硬編碼
             .put("image_id", imageId)

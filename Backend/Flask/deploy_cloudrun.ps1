@@ -25,6 +25,11 @@ param(
     # 用 `run services update --update-env-vars` 另外設的值會在下次部署時被洗掉，
     # 而症狀是「稽核紀錄悄悄寫回刪得掉的主桶」——沒有錯誤、沒有警告。
     [string]$AuditBucket = "$Bucket-audit",
+    # 記憶體上限。2Gi 足夠一般路由（只載 student），但**難例升級路由會再載入
+    # a_unet 與 unetpp**，三個 ONNX session 同時在記憶體裡加上 OpenCV 與影像緩衝
+    # 就可能超過 2Gi。Cloud Run 的 OOM 會直接殺掉容器 → 客戶端看到 503，
+    # 而且**不會留下任何 Python traceback**，是最難自行歸因的一種失敗。
+    [string]$Memory = "4Gi",
     [switch]$Setup
 )
 
@@ -192,6 +197,41 @@ if ($LASTEXITCODE -eq 0) {
     Warn "  建立方式： .\harden_bucket.ps1 -ProjectId $ProjectId -Bucket $Bucket -Audit"
 }
 
+# ── 複製 engineering 模組到 vendor/ ───────────────────────────────────
+#
+# ⚠ Docker 的建置上下文只有 `Backend/Flask/`。app.py 從 `../../engineering` 載入
+# 組織分類與 PUSH 模組——那條路徑在**映像裡不存在**。本機開發完全看不出問題，
+# 直到部署上雲，classify 才以 `No module named 'wound_classifier'` 回 503，
+# 而登入與 stats 都是 200，健康檢查也全綠。
+#
+# vendor/ **不進版控**：同一份程式碼放兩個地方，遲早有人只改了其中一個。
+# 每次部署重新複製，來源永遠是 engineering/ 那一份。
+Say "複製 engineering 模組到 vendor/"
+$vendor = Join-Path $PSScriptRoot "vendor"
+$engRoot = Join-Path $PSScriptRoot "..\..\engineering"
+$needed = @(
+    "phase2\wound_classifier.py",
+    "phase1\clinical_rules.py",
+    "phase2\aruco_calibrate.py",
+    "phase2\verify_area_sheet.py",
+    "phase0\preprocessing.json"
+)
+if (Test-Path $vendor) { Remove-Item $vendor -Recurse -Force }
+New-Item -ItemType Directory -Path $vendor | Out-Null
+$missing = @()
+foreach ($rel in $needed) {
+    $src = Join-Path $engRoot $rel
+    if (Test-Path $src) {
+        Copy-Item $src (Join-Path $vendor (Split-Path $rel -Leaf)) -Force
+        Write-Host "  ✓ $(Split-Path $rel -Leaf)"
+    } else { $missing += $rel }
+}
+if ($missing) {
+    # 缺檔就中止。讓它在這裡大聲失敗，而不是部署完才在手機上看到 503——
+    # 那時候要從「分析失敗」一路追到「建置上下文不含 engineering/」，成本高得多。
+    throw "engineering 缺少必要模組，classify 會在雲端 503：`n  " + ($missing -join "`n  ")
+}
+
 Say "部署到 Cloud Run（$Region）"
 # 參數理由見 docs/deploy_cloudrun.md §4：
 #   memory 2Gi  — 難例集成同時載三個 ONNX 模型；1Gi 會被 OOM kill 且不留例外
@@ -202,7 +242,7 @@ Invoke-GCloud run deploy $Service `
     --source . `
     --region $Region `
     --allow-unauthenticated `
-    --memory 2Gi `
+    --memory $Memory `
     --cpu 2 `
     --timeout 120 `
     --concurrency 4 `
@@ -224,6 +264,11 @@ try {
         Warn "❌ 後端處於降級模式：$($h.degraded_reason)"
         Warn "   量測結果不具臨床參考價值。請確認 requirements.txt 含 onnxruntime 且 models/ 內有 .onnx。"
     } else { Write-Host "  ✓ 分割模型已載入（非降級模式）" }
+    # classify 模組單獨檢查：登入與 stats 會照常 200，只有量測會 503，
+    # 光看 status 綠燈是抓不到的（實際發生過）。
+    if ($h.services.classify_modules -ne $true) {
+        Warn "❌ classify 模組未載入 —— /api/v1/classify 會回 503（量測會失敗）"
+    } else { Write-Host "  ✓ classify 模組已載入（組織分類 / PUSH / ArUco）" }
     # 儲存後端必須是 gcs，否則資料會隨 Cloud Run 實例回收而消失且無任何錯誤
     if ($h.store -notlike "gcs://*") {
         Warn "❌ 儲存後端是 [$($h.store)]，不是 GCS。Cloud Run 的容器檔案系統是暫時的，"

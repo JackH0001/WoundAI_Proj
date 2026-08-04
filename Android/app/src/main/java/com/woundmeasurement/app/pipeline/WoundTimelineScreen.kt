@@ -48,23 +48,40 @@ fun WoundTimelineScreen(
      */
     caseId: Long? = null,
     caseLabel: String? = null,
+    /**
+     * true＝只列**未歸戶**（`caseId IS NULL`）的紀錄，也就是快速量測產生的那些。
+     * 它們不屬於任何個案，先前存進 DB 後就再也叫不出來。
+     */
+    unassignedOnly: Boolean = false,
     /** 點縮圖／「重新修邊」→ 回頭編輯該筆並可補送標註。null 則不顯示該入口。 */
     onOpenRecord: ((MeasurementEntity) -> Unit)? = null
 ) {
     val ctx = LocalContext.current
     val dao = remember { WoundMeasurementDatabase.getDatabase(ctx).measurementDao() }
     val imageStore = remember { LocalImageStore(ctx) }
-    val flow = remember(caseId) {
-        if (caseId != null) dao.getMeasurementsByCase(caseId) else dao.getAllMeasurements()
+    val flow = remember(caseId, unassignedOnly) {
+        when {
+            caseId != null -> dao.getMeasurementsByCase(caseId)
+            unassignedOnly -> dao.getUnassignedMeasurements()
+            else -> dao.getAllMeasurements()
+        }
     }
     val measurements by flow.collectAsState(initial = emptyList())
     val fmt = remember { SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()) }
     val fmtShort = remember { SimpleDateFormat("MM/dd", Locale.getDefault()) }
 
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(if (caseId != null) "傷口時間軸 — ${caseLabel ?: "個案 #$caseId"}"
-             else "傷口時間軸 / 歷史紀錄(全部)", style = MaterialTheme.typography.titleLarge)
-        if (caseId == null) Text(
+        Text(when {
+            caseId != null -> "傷口時間軸 — ${caseLabel ?: "個案 #$caseId"}"
+            unassignedOnly -> "快速量測紀錄（未歸戶）"
+            else -> "傷口時間軸 / 歷史紀錄(全部)"
+        }, style = MaterialTheme.typography.titleLarge)
+        if (unassignedOnly) Text(
+            "這些是快速量測（範例／模擬圖）的紀錄，不屬於任何個案傷口，" +
+            "因此不會出現在個案時間軸，也不計入臨床收案進度。趨勢圖在此無意義（不同影像混在一起）。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        else if (caseId == null) Text(
             "⚠ 未指定個案:此處把所有量測混在一起,趨勢線不代表任何單一傷口。請由個案管理進入。",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
 
@@ -77,10 +94,10 @@ fun WoundTimelineScreen(
             style = MaterialTheme.typography.bodyMedium)
 
         if (asc.isEmpty()) {
-            Text("尚無紀錄。由主畫面「個案」選定傷口個案 → 量測 → 按「存入個案時間軸」即可累積。",
+            Text("尚無紀錄。由主畫面「個案」選定個案傷口 → 量測 → 按「存入個案時間軸」即可累積。",
                 style = MaterialTheme.typography.bodyMedium)
         } else {
-            if (areas.size >= 2 && areas.first() > 0.0) {
+            if (!unassignedOnly && areas.size >= 2 && areas.first() > 0.0) {
                 val delta = (areas.last() - areas.first()) / areas.first() * 100.0
                 val dir = if (delta <= 0) "↓" else "↑"
                 Text("面積趨勢:%.2f → %.2f cm²  (較首次 %s%.0f%%)"
@@ -90,7 +107,7 @@ fun WoundTimelineScreen(
                             else if (delta >= 10) MaterialTheme.colorScheme.error
                             else MaterialTheme.colorScheme.onSurface)
             }
-            if (areas.size >= 2) {
+            if (!unassignedOnly && areas.size >= 2) {
                 AreaTrendChart(
                     areas = areas,
                     labels = asc.mapNotNull { m -> m.estimatedArea?.let { fmtShort.format(m.timestamp) } },

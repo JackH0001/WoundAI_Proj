@@ -109,13 +109,17 @@ fun WoundMeasurementApp() {
     // 放 App 啟動時跑一次;失敗不影響使用(下次啟動再試)。
     LaunchedEffect(Unit) {
         runCatching { repo.purgeExpiredImages(imageStore, days = 90) }
+        // 背景喚醒 Cloud Run（min-instances=0 時冷啟動 10–30 秒）。
+        // 放在**開 App 的當下**而不是量測前：使用者接下來要選病患、確認同意、選傷口，
+        // 那段時間足夠容器啟動完成。量測前才喚醒等於把等待搬到最不能等的那一刻。
+        runCatching { com.woundmeasurement.app.pipeline.BackendWarmup.ping(context) }
     }
 
     // 系統返回鍵:沒有這個的話,在任何子畫面按返回都直接結束 App
     BackHandler(enabled = currentScreen != "main") {
         currentScreen = when (currentScreen) {
             "measure", "timeline" -> backTo
-            "review" -> "timeline"
+            "review" -> if (backTo == "quickHistory") "quickHistory" else "timeline"
             else -> "main"
         }
     }
@@ -152,7 +156,11 @@ fun WoundMeasurementApp() {
         "review" -> {
             val r = reviewRecord
             if (r != null) MeasurementReviewScreen(
-                record = r, onBack = { reviewRecord = null; currentScreen = "timeline" }
+                record = r,
+                onBack = {
+                    reviewRecord = null
+                    currentScreen = if (backTo == "quickHistory") "quickHistory" else "timeline"
+                }
             ) else LaunchedEffect(Unit) { currentScreen = "timeline" }
         }
         "recent" -> RecentActivityScreen(
@@ -162,7 +170,18 @@ fun WoundMeasurementApp() {
             onBack = { currentScreen = "main" }
         )
         // 非臨床：範例/模擬圖驗證與檢錯（不綁個案，隱藏「臨床」來源）
-        "quick" -> MeasureValidationEntry(clinicalMode = false, onBack = { currentScreen = "main" })
+        // 快速量測（範例／模擬圖）。它產生的紀錄 caseId=null，不屬於任何個案，
+        // 先前存進 DB 後就再也叫不出來——所以這裡要給一個明確的查看入口。
+        "quick" -> MeasureValidationEntry(
+            clinicalMode = false,
+            onBack = { currentScreen = "main" },
+            onViewQuickHistory = { currentScreen = "quickHistory" }
+        )
+        "quickHistory" -> WoundTimelineScreen(
+            onBack = { currentScreen = "quick" },
+            unassignedOnly = true,
+            onOpenRecord = { m -> reviewRecord = m; backTo = "quickHistory"; currentScreen = "review" }
+        )
         "settings" -> BackendSettingsScreen(onBack = { currentScreen = "main" })
         else -> Column(
             modifier = Modifier
@@ -176,7 +195,7 @@ fun WoundMeasurementApp() {
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(bottom = 24.dp)
             )
-            MainButton("個案（病患・同意書・傷口個案・量測）") { currentScreen = "cases" }
+            MainButton("個案（病患・同意書・個案傷口・量測）") { currentScreen = "cases" }
             MainButton("最近就診") { currentScreen = "recent" }
             MainButton("快速量測（範例／模擬圖・不綁個案）") { currentScreen = "quick" }
             MainButton("設定（後端連線・帳號・佇列健康度）") { currentScreen = "settings" }
