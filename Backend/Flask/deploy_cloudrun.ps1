@@ -30,7 +30,11 @@ param(
     # 就可能超過 2Gi。Cloud Run 的 OOM 會直接殺掉容器 → 客戶端看到 503，
     # 而且**不會留下任何 Python traceback**，是最難自行歸因的一種失敗。
     [string]$Memory = "4Gi",
-    [switch]$Setup
+    [switch]$Setup,
+    # 只跑部署後驗證，跳過建置與部署。
+    # 存在的理由很實際：驗證段本身出錯時（例如用了某個 PowerShell 版本沒有的參數），
+    # 若要重跑就得再等一次五分鐘的映像重建 —— 那個成本會讓人乾脆不驗。
+    [switch]$VerifyOnly
 )
 
 # ⚠ 刻意**不設** $ErrorActionPreference = "Stop"。
@@ -59,34 +63,76 @@ function Warn($msg) { Write-Host "⚠ $msg" -ForegroundColor Yellow }
 function Invoke-GCloud {
     & $script:GCLOUD @args
 }
+# ⚠ **不可**用 `Invoke-WebRequest -SkipHttpErrorCheck`。
+# 那是 PowerShell 7+ 才有的參數；Windows PowerShell 5.1（多數人手上的版本）會丟
+# 「找不到符合參數名稱 'SkipHttpErrorCheck' 的參數」。
+#
+# 這件事之所以嚴重，不是因為檢查跑不動，而是因為**它會假裝跑過了**：
+# 原本的「舊預設密碼」檢查把呼叫包在 try/catch 裡，catch 分支直接印
+# 「✓ 舊預設密碼已失效」——參數錯誤被 catch 吃掉，於是不論後端是什麼狀態
+# 都會印出綠勾。一個永遠會通過的安全檢查比沒有檢查更糟：它讓人**停止懷疑**。
+#
+# 這支 helper 把三種結果分開回報，5.1 與 7+ 都適用：
+#   Code > 0  伺服器有回應（不論 2xx/4xx/5xx）
+#   Code = 0  根本沒連上（DNS / 逾時 / TLS）—— 絕不可當成「被拒絕」
+function Get-HttpResult {
+    param([string]$Uri, [string]$Method = "GET", [string]$Body,
+          [string]$ContentType = "application/json", [int]$TimeoutSec = 60)
+    $p = @{ Uri = $Uri; Method = $Method; TimeoutSec = $TimeoutSec
+            UseBasicParsing = $true; ErrorAction = "Stop" }
+    if ($Body) { $p.Body = $Body; $p.ContentType = $ContentType }
+    try {
+        $r = Invoke-WebRequest @p
+        return [pscustomobject]@{ Code = [int]$r.StatusCode; Content = [string]$r.Content; Reached = $true }
+    } catch {
+        $resp = $_.Exception.Response
+        if ($null -ne $resp) {
+            $code = 0
+            try { $code = [int]$resp.StatusCode } catch { }
+            if ($code -eq 0) { try { $code = [int]$resp.StatusCode.value__ } catch { } }
+            $body2 = ""
+            if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $body2 = [string]$_.ErrorDetails.Message }
+            return [pscustomobject]@{ Code = $code; Content = $body2; Reached = ($code -gt 0) }
+        }
+        return [pscustomobject]@{ Code = 0; Content = $_.Exception.Message; Reached = $false }
+    }
+}
+
 function Assert-GCloudOk($what) {
     if ($LASTEXITCODE -ne 0) { throw "$what 失敗（gcloud 退出碼 $LASTEXITCODE）。上面的訊息是原因。" }
 }
 
-# ── 出發前檢查 ───────────────────────────────────────────────────────
-# 這兩個檔案是病人影像不進容器映像的唯一防線。缺了就中止——
-# 映像一旦推上登錄檔，之後刪 flywheel/ 也拿不回來，因為它已經在某個映像層裡。
-Say "檢查建置上下文"
-foreach ($f in @(".gcloudignore", ".dockerignore")) {
-    if (-not (Test-Path $f)) { throw "缺 $f。沒有它，flywheel/ 的傷口影像會被上傳並烤進映像。中止。" }
-}
-if ((Get-Content .gcloudignore -Raw) -notmatch "flywheel") {
-    throw ".gcloudignore 沒有排除 flywheel/。中止。"
-}
-Write-Host "  ✓ flywheel/ 與 *.db 已排除"
+# -VerifyOnly 時整段建置流程跳過。這裡不是「加速」——是讓驗證能獨立重跑，
+# 因為一個要等五分鐘才能重試的檢查，實務上等於沒有檢查。
+if (-not $VerifyOnly) {
 
-Say "確認專案與帳單"
-Invoke-GCloud config set project $ProjectId | Out-Null
-# 帳單沒綁的話 Cloud Run 會以權限錯誤失敗，而訊息完全不會提到「帳單」——
-# 那是這條流程最常卡住也最難自行歸因的一步，所以先檢查再說。
-$billing = Invoke-GCloud billing projects describe $ProjectId --format "value(billingEnabled)" 2>$null
-if ($LASTEXITCODE -ne 0) {
-    # 查詢本身失敗（多半是 Cloud Billing API 未啟用或帳號無 billing.viewer 權限）。
-    # 這與「確定沒綁」是兩件事，不可混為一談——後者要去綁，前者要去開 API 或要權限。
-    Warn "無法查詢帳單狀態（可能是 Cloud Billing API 未啟用或權限不足）。跳過檢查，直接嘗試部署。"
-    Warn "若部署以權限錯誤失敗，請先執行： gcloud.cmd billing projects link $ProjectId --billing-account=<ACCOUNT_ID>"
-} elseif ($billing -ne "True") {
-    throw @"
+    # ── 出發前檢查 ───────────────────────────────────────────────────────
+    # 這兩個檔案是病人影像不進容器映像的唯一防線。缺了就中止——
+    # 映像一旦推上登錄檔，之後刪 flywheel/ 也拿不回來，因為它已經在某個映像層裡。
+    Say "檢查建置上下文"
+    foreach ($f in @(".gcloudignore", ".dockerignore")) {
+        if (-not (Test-Path $f)) { throw "缺 $f。沒有它，flywheel/ 的傷口影像會被上傳並烤進映像。中止。" }
+    }
+    if ((Get-Content .gcloudignore -Raw) -notmatch "flywheel") {
+        throw ".gcloudignore 沒有排除 flywheel/。中止。"
+    }
+    Write-Host "  ✓ flywheel/ 與 *.db 已排除"
+
+    Say "確認專案與帳單"
+    Invoke-GCloud config set project $ProjectId | Out-Null
+    # 帳單沒綁的話 Cloud Run 會以權限錯誤失敗，而訊息完全不會提到「帳單」——
+    # 那是這條流程最常卡住也最難自行歸因的一步，所以先檢查再說。
+    $billing = Invoke-GCloud billing projects describe $ProjectId --format "value(billingEnabled)" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        # 查詢本身失敗（多半是 Cloud Billing API 未啟用或帳號無 billing.viewer 權限）。
+        # 這與「確定沒綁」是兩件事，不可混為一談——後者要去綁，前者要去開 API 或要權限。
+        Warn "無法查詢帳單狀態（可能是 Cloud Billing API 未啟用或權限不足）。跳過檢查，直接嘗試部署。"
+        Warn "若部署以權限錯誤失敗，請先執行： gcloud.cmd billing projects link $ProjectId --billing-account=<ACCOUNT_ID>"
+    } elseif ($billing -ne "True") {
+        # ⚠ here-string 的結束標記 "@ **必須頂到行首**，不能有任何縮排。
+        # 縮排的話 PowerShell 找不到結尾，會把後面整份腳本都當成字串內容，
+        # 而錯誤訊息會是遙遠某處的「缺少 '}'」——完全指不到這裡。
+        throw @"
 專案 $ProjectId 尚未連結帳單帳戶，Cloud Run 無法部署。
 （免費額度仍需綁定帳單帳戶；額度內不會扣款。）
 
@@ -95,164 +141,181 @@ if ($LASTEXITCODE -ne 0) {
 
 綁好之後重跑本腳本。
 "@
-}
-Write-Host "  ✓ 帳單已連結"
-
-if ($Setup) {
-    Say "開啟必要的 GCP 服務"
-    Invoke-GCloud services enable run.googleapis.com artifactregistry.googleapis.com `
-        storage.googleapis.com cloudbuild.googleapis.com secretmanager.googleapis.com
-
-    Say "建立儲存桶 gs://$Bucket（$Region，統一存取控管）"
-    # 統一存取控管：關掉物件層級 ACL，權限只由 IAM 決定。
-    # 混用兩套權限模型是「以為關了其實還開著」最常見的來源。
-    Invoke-GCloud storage buckets create "gs://$Bucket" --location=$Region --uniform-bucket-level-access 2>$null
-    if ($LASTEXITCODE -ne 0) { Warn "儲存桶已存在或建立失敗，繼續" }
-
-    Say "產生密碼與 JWT 金鑰並存入 Secret Manager"
-    # ⚠ **已存在就不重新產生**。
-    # 重跑 -Setup 是常態（第一次部署失敗、修完再跑一次），若每次都新增一個版本，
-    # 密碼就會在使用者不知情的情況下換掉——他手上抄的那組突然失效，
-    # 而症狀是「App 顯示帳密不正確」，完全看不出是重跑腳本造成的。
-    $chars = (48..57) + (65..90) + (97..122)
-    Invoke-GCloud secrets describe woundai-admin-password 2>$null | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        Warn "密碼 secret 已存在，沿用現有的（不重新產生）。"
-        Write-Host "  取回： gcloud.cmd secrets versions access latest --secret=woundai-admin-password"
-    } else {
-        $pw = -join ($chars | Get-Random -Count 32 | ForEach-Object { [char]$_ })
-        # ⚠ **不可**用 `$pw | gcloud ... --data-file=-`。
-        # PowerShell 送進管線時會在字串尾端補 CRLF，於是 Secret Manager 存的其實是
-        # `<密碼>\r\n`。後果有兩層：容器拿到的 ADMIN_PASSWORD 帶著換行；而使用者用
-        # `gcloud secrets versions access` 取回時 PowerShell 會把它切成**多行陣列**，
-        # `ConvertTo-Json` 再把陣列序列化成 JSON list，後端就收到 list 而不是字串 → 500。
-        # 改用 WriteAllText 寫暫存檔（不補換行），用完立刻刪除。
-        $tmp = [IO.Path]::GetTempFileName()
-        try {
-            [IO.File]::WriteAllText($tmp, $pw, (New-Object Text.UTF8Encoding $false))
-            & $script:GCLOUD secrets create woundai-admin-password --data-file=$tmp --replication-policy=automatic
-            Assert-GCloudOk "建立密碼 secret"
-        } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
-        Write-Host "`n" -NoNewline
-        Write-Host "═══════════════════════════════════════════════" -ForegroundColor Green
-        Write-Host " 後端密碼（App 設定頁要填，只顯示這一次）：" -ForegroundColor Green
-        Write-Host "   帳號：admin"
-        Write-Host "   密碼：$pw"
-        Write-Host "═══════════════════════════════════════════════" -ForegroundColor Green
-        Warn "現在就記下來。之後可用 gcloud.cmd secrets versions access latest --secret=woundai-admin-password 取回。"
     }
-    Invoke-GCloud secrets describe woundai-jwt-secret 2>$null | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        $jwtKey = -join ($chars | Get-Random -Count 48 | ForEach-Object { [char]$_ })
-        $tmp2 = [IO.Path]::GetTempFileName()
-        try {
-            [IO.File]::WriteAllText($tmp2, $jwtKey, (New-Object Text.UTF8Encoding $false))
-            & $script:GCLOUD secrets create woundai-jwt-secret --data-file=$tmp2 --replication-policy=automatic
-            Assert-GCloudOk "建立 JWT secret"
-        } finally { Remove-Item $tmp2 -Force -ErrorAction SilentlyContinue }
+    Write-Host "  ✓ 帳單已連結"
+
+    if ($Setup) {
+        Say "開啟必要的 GCP 服務"
+        Invoke-GCloud services enable run.googleapis.com artifactregistry.googleapis.com `
+            storage.googleapis.com cloudbuild.googleapis.com secretmanager.googleapis.com
+
+        Say "建立儲存桶 gs://$Bucket（$Region，統一存取控管）"
+        # 統一存取控管：關掉物件層級 ACL，權限只由 IAM 決定。
+        # 混用兩套權限模型是「以為關了其實還開著」最常見的來源。
+        Invoke-GCloud storage buckets create "gs://$Bucket" --location=$Region --uniform-bucket-level-access 2>$null
+        if ($LASTEXITCODE -ne 0) { Warn "儲存桶已存在或建立失敗，繼續" }
+
+        Say "產生密碼與 JWT 金鑰並存入 Secret Manager"
+        # ⚠ **已存在就不重新產生**。
+        # 重跑 -Setup 是常態（第一次部署失敗、修完再跑一次），若每次都新增一個版本，
+        # 密碼就會在使用者不知情的情況下換掉——他手上抄的那組突然失效，
+        # 而症狀是「App 顯示帳密不正確」，完全看不出是重跑腳本造成的。
+        $chars = (48..57) + (65..90) + (97..122)
+        Invoke-GCloud secrets describe woundai-admin-password 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Warn "密碼 secret 已存在，沿用現有的（不重新產生）。"
+            Write-Host "  取回： gcloud.cmd secrets versions access latest --secret=woundai-admin-password"
+        } else {
+            $pw = -join ($chars | Get-Random -Count 32 | ForEach-Object { [char]$_ })
+            # ⚠ **不可**用 `$pw | gcloud ... --data-file=-`。
+            # PowerShell 送進管線時會在字串尾端補 CRLF，於是 Secret Manager 存的其實是
+            # `<密碼>\r\n`。後果有兩層：容器拿到的 ADMIN_PASSWORD 帶著換行；而使用者用
+            # `gcloud secrets versions access` 取回時 PowerShell 會把它切成**多行陣列**，
+            # `ConvertTo-Json` 再把陣列序列化成 JSON list，後端就收到 list 而不是字串 → 500。
+            # 改用 WriteAllText 寫暫存檔（不補換行），用完立刻刪除。
+            $tmp = [IO.Path]::GetTempFileName()
+            try {
+                [IO.File]::WriteAllText($tmp, $pw, (New-Object Text.UTF8Encoding $false))
+                & $script:GCLOUD secrets create woundai-admin-password --data-file=$tmp --replication-policy=automatic
+                Assert-GCloudOk "建立密碼 secret"
+            } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+            Write-Host "`n" -NoNewline
+            Write-Host "═══════════════════════════════════════════════" -ForegroundColor Green
+            Write-Host " 後端密碼（App 設定頁要填，只顯示這一次）：" -ForegroundColor Green
+            Write-Host "   帳號：admin"
+            Write-Host "   密碼：$pw"
+            Write-Host "═══════════════════════════════════════════════" -ForegroundColor Green
+            Warn "現在就記下來。之後可用 gcloud.cmd secrets versions access latest --secret=woundai-admin-password 取回。"
+        }
+        Invoke-GCloud secrets describe woundai-jwt-secret 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            $jwtKey = -join ($chars | Get-Random -Count 48 | ForEach-Object { [char]$_ })
+            $tmp2 = [IO.Path]::GetTempFileName()
+            try {
+                [IO.File]::WriteAllText($tmp2, $jwtKey, (New-Object Text.UTF8Encoding $false))
+                & $script:GCLOUD secrets create woundai-jwt-secret --data-file=$tmp2 --replication-policy=automatic
+                Assert-GCloudOk "建立 JWT secret"
+            } finally { Remove-Item $tmp2 -Force -ErrorAction SilentlyContinue }
+        }
     }
-}
 
-# ── 執行服務帳號的授權 ─────────────────────────────────────────────────
-#
-# ⚠ **建立 secret 不等於 Cloud Run 讀得到它。**
-# Cloud Run 的 revision 是以「執行服務帳號」的身分跑的（預設是 Compute Engine 預設 SA），
-# 而那個帳號預設**沒有**讀取 Secret Manager 的權限。少了這一步，部署會在最後一刻失敗，
-# 訊息是一長串 `Permission denied on secret ... secret_key_ref`。
-#
-# 儲存桶同理，但更陰險：桶權限缺了**不會讓部署失敗**，服務照樣起來，
-# 直到第一次有人量測時才在寫入影像的那一行炸掉 —— 使用者看到的是「後端錯誤」，
-# 日誌裡是 403，而部署當下一切正常。所以兩個授權放在一起、每次部署都跑（本身冪等）。
-Say "授權 Cloud Run 執行服務帳號"
-$projNum = Invoke-GCloud projects describe $ProjectId --format "value(projectNumber)"
-if (-not $projNum) { throw "取不到專案編號，無法授權執行服務帳號。" }
-$runSa = "$projNum-compute@developer.gserviceaccount.com"
-Write-Host "  服務帳號：$runSa"
+    # ── 執行服務帳號的授權 ─────────────────────────────────────────────────
+    #
+    # ⚠ **建立 secret 不等於 Cloud Run 讀得到它。**
+    # Cloud Run 的 revision 是以「執行服務帳號」的身分跑的（預設是 Compute Engine 預設 SA），
+    # 而那個帳號預設**沒有**讀取 Secret Manager 的權限。少了這一步，部署會在最後一刻失敗，
+    # 訊息是一長串 `Permission denied on secret ... secret_key_ref`。
+    #
+    # 儲存桶同理，但更陰險：桶權限缺了**不會讓部署失敗**，服務照樣起來，
+    # 直到第一次有人量測時才在寫入影像的那一行炸掉 —— 使用者看到的是「後端錯誤」，
+    # 日誌裡是 403，而部署當下一切正常。所以兩個授權放在一起、每次部署都跑（本身冪等）。
+    Say "授權 Cloud Run 執行服務帳號"
+    $projNum = Invoke-GCloud projects describe $ProjectId --format "value(projectNumber)"
+    if (-not $projNum) { throw "取不到專案編號，無法授權執行服務帳號。" }
+    $runSa = "$projNum-compute@developer.gserviceaccount.com"
+    Write-Host "  服務帳號：$runSa"
 
-foreach ($s in @("woundai-admin-password", "woundai-jwt-secret")) {
-    Invoke-GCloud secrets add-iam-policy-binding $s `
-        --member="serviceAccount:$runSa" `
-        --role="roles/secretmanager.secretAccessor" --quiet | Out-Null
-    if ($LASTEXITCODE -ne 0) { Warn "授權 secret $s 失敗（若非 -Setup 首次執行可忽略）" }
-    else { Write-Host "  ✓ 可讀取 secret：$s" }
-}
+    foreach ($s in @("woundai-admin-password", "woundai-jwt-secret")) {
+        Invoke-GCloud secrets add-iam-policy-binding $s `
+            --member="serviceAccount:$runSa" `
+            --role="roles/secretmanager.secretAccessor" --quiet | Out-Null
+        if ($LASTEXITCODE -ne 0) { Warn "授權 secret $s 失敗（若非 -Setup 首次執行可忽略）" }
+        else { Write-Host "  ✓ 可讀取 secret：$s" }
+    }
 
-# objectAdmin：飛輪需要建立（存影像）、讀取、列出，以及**刪除**——
-# 撤回同意時把影像移進 quarantine，在物件儲存是「複製再刪除」，只有讀寫是不夠的。
-Invoke-GCloud storage buckets add-iam-policy-binding "gs://$Bucket" `
-    --member="serviceAccount:$runSa" --role="roles/storage.objectAdmin" --quiet | Out-Null
-if ($LASTEXITCODE -ne 0) { Warn "授權儲存桶失敗——服務會起得來，但第一次量測寫影像時會 403" }
-else { Write-Host "  ✓ 可讀寫儲存桶：gs://$Bucket" }
-
-# 稽核桶（若已由 harden_bucket.ps1 -Audit 建立）。桶不存在就略過——
-# 沒有稽核桶時後端會退回主桶，功能正常但稽核紀錄是刪得掉的，health 的 store 欄位會誠實反映。
-Invoke-GCloud storage buckets describe "gs://$AuditBucket" --format="value(name)" 2>$null | Out-Null
-if ($LASTEXITCODE -eq 0) {
-    Invoke-GCloud storage buckets add-iam-policy-binding "gs://$AuditBucket" `
+    # objectAdmin：飛輪需要建立（存影像）、讀取、列出，以及**刪除**——
+    # 撤回同意時把影像移進 quarantine，在物件儲存是「複製再刪除」，只有讀寫是不夠的。
+    Invoke-GCloud storage buckets add-iam-policy-binding "gs://$Bucket" `
         --member="serviceAccount:$runSa" --role="roles/storage.objectAdmin" --quiet | Out-Null
-    if ($LASTEXITCODE -eq 0) { Write-Host "  ✓ 可寫入稽核桶：gs://$AuditBucket" }
-    else { Warn "授權稽核桶失敗——稽核紀錄會寫不進去" }
+    if ($LASTEXITCODE -ne 0) { Warn "授權儲存桶失敗——服務會起得來，但第一次量測寫影像時會 403" }
+    else { Write-Host "  ✓ 可讀寫儲存桶：gs://$Bucket" }
+
+    # 稽核桶（若已由 harden_bucket.ps1 -Audit 建立）。桶不存在就略過——
+    # 沒有稽核桶時後端會退回主桶，功能正常但稽核紀錄是刪得掉的，health 的 store 欄位會誠實反映。
+    Invoke-GCloud storage buckets describe "gs://$AuditBucket" --format="value(name)" 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Invoke-GCloud storage buckets add-iam-policy-binding "gs://$AuditBucket" `
+            --member="serviceAccount:$runSa" --role="roles/storage.objectAdmin" --quiet | Out-Null
+        if ($LASTEXITCODE -eq 0) { Write-Host "  ✓ 可寫入稽核桶：gs://$AuditBucket" }
+        else { Warn "授權稽核桶失敗——稽核紀錄會寫不進去" }
+    } else {
+        Warn "稽核桶 gs://$AuditBucket 不存在，稽核紀錄將寫入主桶（刪得掉）。"
+        Warn "  建立方式： .\harden_bucket.ps1 -ProjectId $ProjectId -Bucket $Bucket -Audit"
+    }
+
+    # ── 複製 engineering 模組到 vendor/ ───────────────────────────────────
+    #
+    # ⚠ Docker 的建置上下文只有 `Backend/Flask/`。app.py 從 `../../engineering` 載入
+    # 組織分類與 PUSH 模組——那條路徑在**映像裡不存在**。本機開發完全看不出問題，
+    # 直到部署上雲，classify 才以 `No module named 'wound_classifier'` 回 503，
+    # 而登入與 stats 都是 200，健康檢查也全綠。
+    #
+    # vendor/ **不進版控**：同一份程式碼放兩個地方，遲早有人只改了其中一個。
+    # 每次部署重新複製，來源永遠是 engineering/ 那一份。
+    Say "複製 engineering 模組到 vendor/"
+    $vendor = Join-Path $PSScriptRoot "vendor"
+    $engRoot = Join-Path $PSScriptRoot "..\..\engineering"
+    $needed = @(
+        "phase2\wound_classifier.py",
+        "phase1\clinical_rules.py",
+        "phase2\aruco_calibrate.py",
+        "phase2\verify_area_sheet.py",
+        "phase0\preprocessing.json"
+    )
+    if (Test-Path $vendor) { Remove-Item $vendor -Recurse -Force }
+    New-Item -ItemType Directory -Path $vendor | Out-Null
+    $missing = @()
+    foreach ($rel in $needed) {
+        $src = Join-Path $engRoot $rel
+        if (Test-Path $src) {
+            Copy-Item $src (Join-Path $vendor (Split-Path $rel -Leaf)) -Force
+            Write-Host "  ✓ $(Split-Path $rel -Leaf)"
+        } else { $missing += $rel }
+    }
+    if ($missing) {
+        # 缺檔就中止。讓它在這裡大聲失敗，而不是部署完才在手機上看到 503——
+        # 那時候要從「分析失敗」一路追到「建置上下文不含 engineering/」，成本高得多。
+        throw "engineering 缺少必要模組，classify 會在雲端 503：`n  " + ($missing -join "`n  ")
+    }
+
+    Say "部署到 Cloud Run（$Region）"
+    # 參數理由見 docs/deploy_cloudrun.md §4：
+    #   memory 2Gi  — 難例集成同時載三個 ONNX 模型；1Gi 會被 OOM kill 且不留例外
+    #   cpu 2       — 實測難例集成 796 ms；1 vCPU 會翻倍到使用者會放棄的程度
+    #   concurrency 4 — 推論是 CPU-bound，預設 80 會讓請求擠在兩顆核心上
+    #   max-instances 3 — 成本上限，避免被掃描機器人打到無限擴張
+    Invoke-GCloud run deploy $Service `
+        --source . `
+        --region $Region `
+        --allow-unauthenticated `
+        --memory $Memory `
+        --cpu 2 `
+        --timeout 120 `
+        --concurrency 4 `
+        --min-instances 0 `
+        --max-instances 3 `
+        --set-env-vars "WOUNDAI_STORE=gcs,WOUNDAI_GCS_BUCKET=$Bucket,WOUNDAI_GCS_PREFIX=flywheel,WOUNDAI_AUDIT_BUCKET=$AuditBucket" `
+        --set-secrets "ADMIN_PASSWORD=woundai-admin-password:latest,JWT_SECRET_KEY=woundai-jwt-secret:latest"
+    Assert-GCloudOk "Cloud Run 部署"
+
+
 } else {
-    Warn "稽核桶 gs://$AuditBucket 不存在，稽核紀錄將寫入主桶（刪得掉）。"
-    Warn "  建立方式： .\harden_bucket.ps1 -ProjectId $ProjectId -Bucket $Bucket -Audit"
+    Say "只跑驗證（-VerifyOnly，跳過建置與部署）"
+    Invoke-GCloud config set project $ProjectId | Out-Null
 }
 
-# ── 複製 engineering 模組到 vendor/ ───────────────────────────────────
-#
-# ⚠ Docker 的建置上下文只有 `Backend/Flask/`。app.py 從 `../../engineering` 載入
-# 組織分類與 PUSH 模組——那條路徑在**映像裡不存在**。本機開發完全看不出問題，
-# 直到部署上雲，classify 才以 `No module named 'wound_classifier'` 回 503，
-# 而登入與 stats 都是 200，健康檢查也全綠。
-#
-# vendor/ **不進版控**：同一份程式碼放兩個地方，遲早有人只改了其中一個。
-# 每次部署重新複製，來源永遠是 engineering/ 那一份。
-Say "複製 engineering 模組到 vendor/"
-$vendor = Join-Path $PSScriptRoot "vendor"
-$engRoot = Join-Path $PSScriptRoot "..\..\engineering"
-$needed = @(
-    "phase2\wound_classifier.py",
-    "phase1\clinical_rules.py",
-    "phase2\aruco_calibrate.py",
-    "phase2\verify_area_sheet.py",
-    "phase0\preprocessing.json"
-)
-if (Test-Path $vendor) { Remove-Item $vendor -Recurse -Force }
-New-Item -ItemType Directory -Path $vendor | Out-Null
-$missing = @()
-foreach ($rel in $needed) {
-    $src = Join-Path $engRoot $rel
-    if (Test-Path $src) {
-        Copy-Item $src (Join-Path $vendor (Split-Path $rel -Leaf)) -Force
-        Write-Host "  ✓ $(Split-Path $rel -Leaf)"
-    } else { $missing += $rel }
-}
-if ($missing) {
-    # 缺檔就中止。讓它在這裡大聲失敗，而不是部署完才在手機上看到 503——
-    # 那時候要從「分析失敗」一路追到「建置上下文不含 engineering/」，成本高得多。
-    throw "engineering 缺少必要模組，classify 會在雲端 503：`n  " + ($missing -join "`n  ")
-}
-
-Say "部署到 Cloud Run（$Region）"
-# 參數理由見 docs/deploy_cloudrun.md §4：
-#   memory 2Gi  — 難例集成同時載三個 ONNX 模型；1Gi 會被 OOM kill 且不留例外
-#   cpu 2       — 實測難例集成 796 ms；1 vCPU 會翻倍到使用者會放棄的程度
-#   concurrency 4 — 推論是 CPU-bound，預設 80 會讓請求擠在兩顆核心上
-#   max-instances 3 — 成本上限，避免被掃描機器人打到無限擴張
-Invoke-GCloud run deploy $Service `
-    --source . `
-    --region $Region `
-    --allow-unauthenticated `
-    --memory $Memory `
-    --cpu 2 `
-    --timeout 120 `
-    --concurrency 4 `
-    --min-instances 0 `
-    --max-instances 3 `
-    --set-env-vars "WOUNDAI_STORE=gcs,WOUNDAI_GCS_BUCKET=$Bucket,WOUNDAI_GCS_PREFIX=flywheel,WOUNDAI_AUDIT_BUCKET=$AuditBucket" `
-    --set-secrets "ADMIN_PASSWORD=woundai-admin-password:latest,JWT_SECRET_KEY=woundai-jwt-secret:latest"
-Assert-GCloudOk "Cloud Run 部署"
-
+# ⚠ Cloud Run 一個服務有**兩個等價網址**：
+#   舊式 https://<服務>-<雜湊>-<區碼>.a.run.app
+#   新式 https://<服務>-<專案編號>.<區域>.run.app   ← gcloud deploy 印的是這個
+# `value(status.url)` 回的是舊式，於是腳本最後印的網址與部署過程印的不同，
+# 而使用者手上 App 設定的又是另一個 —— 三個都能用，但看起來像是「網址變了」，
+# 會讓人跑去改一個根本不需要改的設定。統一取新式。
 $url = Invoke-GCloud run services describe $Service --region $Region --format "value(status.url)"
+$allUrls = @((Invoke-GCloud run services describe $Service --region $Region `
+              --format "value(status.urls[])" 2>$null) -split '[;,\s]+') |
+           Where-Object { $_ -like "https://*" } | Select-Object -Unique
+$preferred = $allUrls | Where-Object { $_ -like "*.$Region.run.app" } | Select-Object -First 1
+if ($preferred) { $url = $preferred }
 
 Say "部署後驗證"
 try {
@@ -287,16 +350,15 @@ try {
 # 舊的公開預設密碼必須已經失效。這條檢查存在的理由：
 # 密碼曾經硬編碼在公開 repo 裡，如果 secret 沒掛好而程式又留著預設值，
 # 服務就會用一個全世界都知道的密碼對外開放。
-try {
-    $r = Invoke-WebRequest "$url/api/auth/login" -Method POST -ContentType "application/json" `
-        -Body '{"username":"admin","password":"woundai-admin"}' -SkipHttpErrorCheck -TimeoutSec 60
-    if ($r.StatusCode -eq 200) {
-        Warn "❌ 舊的公開預設密碼仍可登入！請立即檢查 ADMIN_PASSWORD secret 是否正確掛載。"
-    } else {
-        Write-Host "  ✓ 舊預設密碼已失效（HTTP $($r.StatusCode)）"
-    }
-} catch {
-    Write-Host "  ✓ 舊預設密碼已失效"
+$r = Get-HttpResult -Uri "$url/api/auth/login" -Method POST `
+     -Body '{"username":"admin","password":"woundai-admin"}'
+if (-not $r.Reached) {
+    # 連不上 ≠ 密碼失效。這兩者絕不可混為一談 —— 混了就是一個永遠會過的檢查。
+    Warn "⚠ 無法連線，**舊預設密碼未經驗證**（不是通過）：$($r.Content)"
+} elseif ($r.Code -eq 200) {
+    Warn "❌ 舊的公開預設密碼仍可登入！請立即檢查 ADMIN_PASSWORD secret 是否正確掛載。"
+} else {
+    Write-Host "  ✓ 舊預設密碼已失效（HTTP $($r.Code)）"
 }
 
 # 管理端點必須 fail-closed。
@@ -307,28 +369,31 @@ try {
 # 部署當下用「不帶 token」打一次，是唯一能在事故前抓到它的時機。
 Say "管理端點存取控制"
 foreach ($ep in @("/api/v1/users", "/api/v1/audit")) {
-    try {
-        $r = Invoke-WebRequest "$url$ep" -SkipHttpErrorCheck -TimeoutSec 60
-        if ($r.StatusCode -eq 200) {
-            Warn "❌ $ep 未帶 token 竟回 200 —— 這是公開的帳號/稽核資料，請立即檢查 @jwt_required。"
-        } elseif ($r.StatusCode -in @(401, 422)) {
-            Write-Host "  ✓ $ep 未帶 token → HTTP $($r.StatusCode)（拒絕）"
-        } elseif ($r.StatusCode -eq 404) {
-            Warn "⚠ $ep 回 404 —— 這版映像沒有管理端點。若剛加了功能，請確認是重建映像而非只更新環境變數。"
-        } else {
-            Write-Host "  ✓ $ep 未帶 token → HTTP $($r.StatusCode)"
-        }
-    } catch { Warn "  ⚠ $ep 檢查失敗：$_" }
+    $r = Get-HttpResult -Uri "$url$ep"
+    if (-not $r.Reached) {
+        Warn "⚠ $ep 連不上，**未經驗證**：$($r.Content)"
+    } elseif ($r.Code -eq 200) {
+        Warn "❌ $ep 未帶 token 竟回 200 —— 帳號清單/稽核是公開的，請立即檢查 @jwt_required。"
+    } elseif ($r.Code -eq 404) {
+        Warn "⚠ $ep 回 404 —— 這版映像沒有管理端點。若剛加了功能，請確認是重建映像而非只更新環境變數。"
+    } else {
+        Write-Host "  ✓ $ep 未帶 token → HTTP $($r.Code)（拒絕）"
+    }
 }
-try {
-    $c = Invoke-WebRequest "$url/console" -SkipHttpErrorCheck -TimeoutSec 60
-    $hasAdmin = $c.Content -match 'id="userbox"'
-    if ($c.StatusCode -eq 200 -and $hasAdmin) {
-        Write-Host "  ✓ /console 含管理分區（帳號管理・稽核・系統狀態）"
-    } elseif ($c.StatusCode -eq 200) {
-        Warn "⚠ /console 可開，但沒有管理分區 —— 這版映像是舊的主控台。"
-    } else { Warn "⚠ /console → HTTP $($c.StatusCode)" }
-} catch { Warn "  ⚠ /console 檢查失敗：$_" }
+$c = Get-HttpResult -Uri "$url/console"
+if (-not $c.Reached) {
+    Warn "⚠ /console 連不上，**未經驗證**：$($c.Content)"
+} elseif ($c.Code -eq 200 -and $c.Content -match 'id="userbox"') {
+    Write-Host "  ✓ /console 含管理分區（帳號管理・稽核・系統狀態）"
+} elseif ($c.Code -eq 200) {
+    Warn "⚠ /console 可開，但沒有管理分區 —— 這版映像是舊的主控台。"
+} else {
+    Warn "⚠ /console → HTTP $($c.Code)"
+}
+
+if ($allUrls.Count -gt 1) {
+    Write-Host "`n（此服務有多個等價網址，任一皆可：$($allUrls -join '  ')）"
+}
 
 Write-Host "`n服務網址　：$url" -ForegroundColor Green
 Write-Host "管理主控台：$url/console" -ForegroundColor Green

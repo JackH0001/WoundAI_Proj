@@ -364,4 +364,7 @@ async function resetPw(u){
 def console_page():
     # 頁面本身不含資料，所以不必驗證；資料一律要帶 JWT 才拿得到。
     # 這樣就不用為主控台再造一套 session/cookie，也少一個可以被繞過的入口。
-    return Response(_PAGE, mimetype="text/html; charset=utf-8")
+    # ⚠ 用 content_type 而非 mimetype。Flask 會**再補一次** charset 到 mimetype 上，
+    # 於是標頭變成 `text/html; charset=utf-8; charset=utf-8`（實測如此）。
+    # 瀏覽器容忍，但重複參數在嚴格的解析器（代理、掃描器）上是未定義行為。
+    return Response(_PAGE, content_type="text/html; charset=utf-8")
