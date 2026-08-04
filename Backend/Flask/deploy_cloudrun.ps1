@@ -310,12 +310,22 @@ if (-not $VerifyOnly) {
 # `value(status.url)` 回的是舊式，於是腳本最後印的網址與部署過程印的不同，
 # 而使用者手上 App 設定的又是另一個 —— 三個都能用，但看起來像是「網址變了」，
 # 會讓人跑去改一個根本不需要改的設定。統一取新式。
+#
+# ⚠ **不要相信欄位名，要相信打得通。**
+# 第一版用 `--format "value(status.urls[])"` 挑新式網址，但那個欄位在部分 gcloud
+# 版本根本不存在——查詢靜默回空字串，偏好邏輯無聲失效，於是又印回舊式網址。
+# 這種「查一個不存在的欄位」不會報錯，只會安靜地什麼都不做，是最難察覺的一類 bug。
+# 改成：依文件規則組出新式網址，**實際打一次 /api/health**，200 才採用。
 $url = Invoke-GCloud run services describe $Service --region $Region --format "value(status.url)"
-$allUrls = @((Invoke-GCloud run services describe $Service --region $Region `
-              --format "value(status.urls[])" 2>$null) -split '[;,\s]+') |
-           Where-Object { $_ -like "https://*" } | Select-Object -Unique
-$preferred = $allUrls | Where-Object { $_ -like "*.$Region.run.app" } | Select-Object -First 1
-if ($preferred) { $url = $preferred }
+$altUrl = $null
+$projNumForUrl = Invoke-GCloud projects describe $ProjectId --format "value(projectNumber)"
+if ($projNumForUrl) {
+    $newStyle = "https://$Service-$projNumForUrl.$Region.run.app"
+    if ($newStyle -ne $url) {
+        $probe = Get-HttpResult -Uri "$newStyle/api/health" -TimeoutSec 30
+        if ($probe.Code -eq 200) { $altUrl = $url; $url = $newStyle }
+    }
+}
 
 Say "部署後驗證"
 try {
@@ -391,8 +401,9 @@ if (-not $c.Reached) {
     Warn "⚠ /console → HTTP $($c.Code)"
 }
 
-if ($allUrls.Count -gt 1) {
-    Write-Host "`n（此服務有多個等價網址，任一皆可：$($allUrls -join '  ')）"
+if ($altUrl) {
+    # 兩個都印出來。使用者手上 App 可能設的是任一個，看到「只有一個」會以為要改設定。
+    Write-Host "`n（另一個等價網址：$altUrl —— 同一個服務，兩者皆可用，不必改 App 設定）"
 }
 
 Write-Host "`n服務網址　：$url" -ForegroundColor Green
