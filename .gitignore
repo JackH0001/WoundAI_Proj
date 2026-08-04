@@ -83,3 +83,14 @@ Android/_dist/
 # 開通帳號時產生的明文密碼清單；以及帳號檔（含 PBKDF2 雜湊，仍屬敏感）。
 Backend/Flask/accounts_*.csv
 Backend/Flask/flywheel/users.jsonl
+
+# 從手機拉下來的螢幕截圖。
+#
+# 這一條的理由與其他排除項不同：截圖**看起來只是 UI 畫面**，所以最容易被順手加進版控。
+# 但傷口量測 App 的截圖幾乎必然含傷口影像，個案畫面還會含病患姓名與病歷號——
+# 那正是整個架構最努力不讓它離開手機的兩樣東西。
+# 一旦推上公開 repo，git 歷史裡就永遠拿得回來，改 .gitignore 也救不了。
+# 要在 issue 或文件裡放畫面，請先手動去識別，再明確地 `git add -f` 那一張。
+_screenshots/
+screenshots/
+Screenshots/

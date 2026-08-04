@@ -303,6 +303,7 @@ async function loadUsers(){
       <td style="color:#8a8a8a">${esc((u.created_at||"").slice(0,10))}</td>
       <td class="${u.disabled?'bad':'ok'}">${u.disabled?"已停用":"啟用中"}</td>
       <td style="white-space:nowrap">
+        <button onclick="renameUser('${esc(u.user)}')">改名</button>
         <button onclick="toggleUser('${esc(u.user)}')">${u.disabled?"啟用":"停用"}</button>
         <button onclick="resetPw('${esc(u.user)}')">重設密碼</button>
       </td></tr>`).join("") +
@@ -330,6 +331,23 @@ async function createUser(){
     $("nu").value = ""; $("nn").value = "";
     loadUsers();
   }catch(e){ alert("建立失敗：" + e.message); }
+}
+
+// 改名走瀏覽器是有理由的：瀏覽器一律以 UTF-8 送出請求主體，
+// 而 PowerShell 5.1 的 Invoke-RestMethod 不帶 charset 時會用 ISO-8859-1，
+// 把中文名整批變成「?」且**不報任何錯**（2026-08-04 十組帳號就是這樣壞的）。
+// 這一頁因此是修顯示名稱最不會出事的地方。
+async function renameUser(u){
+  const rec = users.find(x => x.user === u);
+  if(!rec) return;
+  const name = prompt("新的顯示名稱（請用編號式，例如「護理師 05」，不要填真實姓名）：",
+                      rec.display_name || "");
+  if(name === null) return;
+  try{
+    // 不傳 password → 沿用既有雜湊；不傳 disabled → 沿用目前狀態。
+    await api("/api/v1/users", {body: JSON.stringify({user:u, role:rec.role, display_name:name})});
+    loadUsers(); if(perms.includes("audit.read")) loadAudit();
+  }catch(e){ alert("失敗：" + e.message); }
 }
 
 async function toggleUser(u){
