@@ -189,15 +189,18 @@ def audit(actor: str, action: str, code: str, result: str,
     append_jsonl(AUDIT, rec)
 
 
-def verify_audit_chain(audit_path=None):
+def verify_audit_chain(audit_path=None, recs=None):
     """驗證稽核軌跡的完整性。回 (ok, 問題清單, 統計)。
+
+    `recs` 可傳入已讀好的紀錄以避免重複讀取——GCS 後端下每次 read 都要列舉
+    整個前綴的物件，主控台同時要「列表」與「驗鏈」時讀兩遍會明顯變慢。
 
     分開回報三種異常,因為處置完全不同:
       - `hash_mismatch`  紀錄內容被改過
       - `broken_link`    前一筆被刪除或順序被調換
       - `fork`           兩筆指向同一個前驅(多實例並行寫入,或有人補塞紀錄)
     """
-    recs = read_jsonl(audit_path or AUDIT)
+    recs = read_jsonl(audit_path or AUDIT) if recs is None else recs
     issues, seen_prev = [], {}
     prev_hash = "GENESIS"
     for i, r in enumerate(recs):

@@ -182,8 +182,25 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
             // 會誘導人去申請 IAM——而有了 IAM 就能直接讀儲存桶裡的原始傷口影像、
             // 看 Secret、刪資源，完全繞過本 App 所有閘門。
             // 臨床角色的正確目的地是我們自己的 /console：唯讀、只顯示去識別資料。
-            if (u.can("flywheel.stats")) {
-                OutlinedButton({ openUrl(ctx, "$url/console") }, Modifier.fillMaxWidth()) {
+            // 同一個 /console，但依角色展開不同分區——所以按鈕文字也要講清楚
+            // 按下去會看到什麼。管理者看到的是會**改變授權狀態**的介面，
+            // 用「唯讀」當標籤會讓人以為隨便按都沒關係。
+            if (u.can("user.manage") || u.can("audit.read")) {
+                OutlinedButton({ openUrl(ctx, AppSettings.normalizeUrl(url) + "/console") },
+                    Modifier.fillMaxWidth()) {
+                    Text(if (u.can("user.manage")) "開啟管理主控台（帳號管理・稽核・系統狀態）"
+                         else "開啟主控台（稽核・系統狀態・佇列）")
+                }
+                if (u.can("user.manage")) Text(
+                    "帳號管理在瀏覽器而不在 App：開帳號要看得到完整清單與稽核軌跡，" +
+                    "手機版面塞不下；而且**新密碼只顯示一次**，需要能立刻複製貼上傳給本人。" +
+                    "刪除刻意不提供——稽核軌跡引用著那些識別碼，離職請停用。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else if (u.can("flywheel.stats")) {
+                OutlinedButton({ openUrl(ctx, AppSettings.normalizeUrl(url) + "/console") },
+                    Modifier.fillMaxWidth()) {
                     Text("開啟飛輪主控台（唯讀・去識別）")
                 }
             }

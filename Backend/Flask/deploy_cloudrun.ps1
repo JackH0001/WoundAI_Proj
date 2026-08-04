@@ -299,6 +299,45 @@ try {
     Write-Host "  ✓ 舊預設密碼已失效"
 }
 
-Write-Host "`n服務網址：$url" -ForegroundColor Green
-Write-Host "主控台　：$url/console"
-Write-Host "`n下一步：App 主畫面 →「設定」→ 後端位址填上面的網址（含 https://）→ 帳號 admin + 上面的密碼 → 儲存 → 連線測試。"
+# 管理端點必須 fail-closed。
+#
+# 這條檢查的存在理由很具體：新增一個路由時忘了掛 @jwt_required 是最容易犯、
+# 也最不容易被發現的錯——本機測試時瀏覽器帶著 token，一切正常；
+# 上線後它就是一個**任何人都能列出所有帳號**的公開端點。
+# 部署當下用「不帶 token」打一次，是唯一能在事故前抓到它的時機。
+Say "管理端點存取控制"
+foreach ($ep in @("/api/v1/users", "/api/v1/audit")) {
+    try {
+        $r = Invoke-WebRequest "$url$ep" -SkipHttpErrorCheck -TimeoutSec 60
+        if ($r.StatusCode -eq 200) {
+            Warn "❌ $ep 未帶 token 竟回 200 —— 這是公開的帳號/稽核資料，請立即檢查 @jwt_required。"
+        } elseif ($r.StatusCode -in @(401, 422)) {
+            Write-Host "  ✓ $ep 未帶 token → HTTP $($r.StatusCode)（拒絕）"
+        } elseif ($r.StatusCode -eq 404) {
+            Warn "⚠ $ep 回 404 —— 這版映像沒有管理端點。若剛加了功能，請確認是重建映像而非只更新環境變數。"
+        } else {
+            Write-Host "  ✓ $ep 未帶 token → HTTP $($r.StatusCode)"
+        }
+    } catch { Warn "  ⚠ $ep 檢查失敗：$_" }
+}
+try {
+    $c = Invoke-WebRequest "$url/console" -SkipHttpErrorCheck -TimeoutSec 60
+    $hasAdmin = $c.Content -match 'id="userbox"'
+    if ($c.StatusCode -eq 200 -and $hasAdmin) {
+        Write-Host "  ✓ /console 含管理分區（帳號管理・稽核・系統狀態）"
+    } elseif ($c.StatusCode -eq 200) {
+        Warn "⚠ /console 可開，但沒有管理分區 —— 這版映像是舊的主控台。"
+    } else { Warn "⚠ /console → HTTP $($c.StatusCode)" }
+} catch { Warn "  ⚠ /console 檢查失敗：$_" }
+
+Write-Host "`n服務網址　：$url" -ForegroundColor Green
+Write-Host "管理主控台：$url/console" -ForegroundColor Green
+Write-Host @"
+
+下一步
+  1. 管理者：瀏覽器開 $url/console → 以 admin 登入 → 展開「帳號管理／稽核軌跡／系統狀態」
+     （操作手冊：docs/admin_operations.md）
+  2. 臨床測試者：App 主畫面 →「設定」→ 後端位址填上面的網址（含 https://）
+     → 填各自的帳號密碼 → 儲存 → 連線測試
+  3. 批次開通帳號：.\provision_users.ps1 -BaseUrl $url
+"@

@@ -75,24 +75,57 @@ $jwt | gcloud secrets create woundai-jwt-secret --data-file=- --replication-poli
 
 ## 4. 部署
 
+**用腳本，不要手打 gcloud。** 腳本除了部署還會做建置上下文檢查（確認病人影像不會被烤進映像）、
+服務帳號授權、以及**六項部署後驗證**——那些驗證抓到過三次「部署成功但服務其實壞了」的情況。
+
 ```powershell
 cd C:\dev\WoundAI_Proj\Backend\Flask
+.\deploy_cloudrun.ps1 -ProjectId woundai-jackh001 -Bucket woundai-flywheel-jackh001
+```
 
+第一次（或換專案）才加 `-Setup`：開 API、建桶、產生並存入密碼與 JWT 金鑰。
+
+<details>
+<summary>等效的手打指令（僅供理解腳本在做什麼）</summary>
+
+```powershell
 gcloud run deploy woundai-backend `
   --source . `
   --region asia-east1 `
   --allow-unauthenticated `
-  --memory 2Gi `
+  --memory 4Gi `
   --cpu 2 `
   --timeout 120 `
   --concurrency 4 `
   --min-instances 0 `
   --max-instances 3 `
-  --set-env-vars "WOUNDAI_STORE=gcs,WOUNDAI_GCS_BUCKET=<你的桶名>,WOUNDAI_GCS_PREFIX=flywheel" `
+  --set-env-vars "WOUNDAI_STORE=gcs,WOUNDAI_GCS_BUCKET=<你的桶名>,WOUNDAI_GCS_PREFIX=flywheel,WOUNDAI_AUDIT_BUCKET=<你的桶名>-audit" `
   --set-secrets "ADMIN_PASSWORD=woundai-admin-password:latest,JWT_SECRET_KEY=woundai-jwt-secret:latest"
 ```
 
+⚠ 兩個容易漏掉、且**漏掉不會有任何錯誤訊息**的地方：
+
+- **`WOUNDAI_AUDIT_BUCKET`**：漏了的話稽核紀錄改寫在主桶——刪得掉，
+  WORM 保護等於沒有，而雜湊鏈本來就擋不住整份重寫。
+- **`--set-env-vars` 是整組覆蓋**：漏列任何一個既有變數就等於把它刪掉。
+  用 `run services update --update-env-vars` 單獨補設也不行——那**不會重建映像**，
+  舊映像的程式碼根本不認得新變數（實際踩過）。
+
+</details>
+
 部署完會給一個網址，形如 `https://woundai-backend-xxxxx.asia-east1.run.app`。
+
+### 部署後驗證（腳本自動跑）
+
+| 檢查 | 沒過代表 |
+|---|---|
+| `/api/health` 非 degraded | ONNX 或模型沒載到 → **面積數值不可作臨床用途**，但服務照回 200 |
+| `classify_modules` 為 true | `/api/v1/classify` 會 503（登入與 stats 仍正常，只看整體綠燈抓不到） |
+| `store` 是 `gcs://` | 資料會隨實例回收無聲消失 |
+| `store` 含 WORM | 稽核桶沒接上 |
+| 舊公開預設密碼失效 | secret 沒掛好，服務用一個公開 repo 裡的密碼對外開放 |
+| `/api/v1/users`、`/api/v1/audit` 未帶 token 回 401/422 | **忘了掛 `@jwt_required`** —— 帳號清單與稽核變成公開端點 |
+| `/console` 含管理分區 | 這版映像是舊的主控台 |
 
 ### 這些參數為什麼是這樣
 
@@ -145,6 +178,17 @@ gcloud billing budgets create --billing-account=<帳單ID> `
   這比任何密碼都有效。
 
 ---
+
+## 5.5 管理入口
+
+部署完成後，管理者的入口是 **`<服務網址>/console`**——不需要 App、不需要 GCP 帳號。
+
+登入後依角色展開：帳號管理（僅管理者）、稽核軌跡與系統狀態（工程師／管理者）、
+飛輪佇列（臨床角色亦可）。操作說明見 **`docs/admin_operations.md`**。
+
+⚠ **不要給臨床角色 GCP IAM。** GCP 專案權限與 App 角色是兩套獨立系統：
+有 IAM 的人能直接讀桶裡的原始傷口影像、看 Secret、刪資源，繞過 App 所有閘門。
+臨床角色的正確目的地永遠是 `/console`。
 
 ## 6. App 端設定
 
