@@ -393,8 +393,8 @@ foreach ($ep in @("/api/v1/users", "/api/v1/audit")) {
 $c = Get-HttpResult -Uri "$url/console"
 if (-not $c.Reached) {
     Warn "⚠ /console 連不上，**未經驗證**：$($c.Content)"
-} elseif ($c.Code -eq 200 -and $c.Content -match 'id="userbox"') {
-    Write-Host "  ✓ /console 含管理分區（帳號管理・稽核・系統狀態）"
+} elseif ($c.Code -eq 200 -and $c.Content -match 'id="tab-users"' -and $c.Content -match 'id="tab-audit"') {
+    Write-Host "  ✓ /console 含四個管理頁籤（Dashboard・系統狀態・稽核・帳號）"
 } elseif ($c.Code -eq 200) {
     Warn "⚠ /console 可開，但沒有管理分區 —— 這版映像是舊的主控台。"
 } else {

@@ -161,6 +161,16 @@ class GcsStore(Store):
         self.prefix = prefix.strip("/")
         self._audit_bucket_name = audit_bucket or None
         self._audit_bucket = self._client.bucket(audit_bucket) if audit_bucket else None
+        # append-only 鍵的增量快取：{(bucket, base): {"names": [...], "lines": [...]}}
+        #
+        # 為什麼需要：每一次 append 是一個獨立物件（見 append_line 的理由），
+        # 所以讀一份一萬筆的稽核軌跡＝**一萬次 GET**。主控台每開一次頁就付這個代價。
+        # 而這些鍵是 append-only 的，舊物件的內容不會變 —— 已經讀過的就不必再讀。
+        #
+        # 快取只在同一個 Cloud Run 實例內有效；列舉仍然每次都做，
+        # 所以其他實例寫入的新紀錄一定看得到（正確性不依賴快取）。
+        self._line_cache = {}
+        self._CACHE_MAX_LINES = 200_000
 
     def _is_audit(self, key: str) -> bool:
         k = key.strip("/")
@@ -190,13 +200,34 @@ class GcsStore(Store):
         base = self._k(key) + "/"
         blobs = sorted(self._client.list_blobs(bname, prefix=base),
                        key=lambda b: b.name)
-        out = []
-        for b in blobs:
+        names = [b.name for b in blobs]
+
+        # 增量讀取：只下載沒讀過的物件。
+        #
+        # ⚠ 只有在快取的名稱清單是目前清單的**前綴**時才成立。
+        # 不是前綴就代表有物件被刪除或改名 —— append-only 的前提被打破了，
+        # 這時寧可整份重讀，也不要拿一份可能已經對不上的紀錄去驗雜湊鏈。
+        ck = (bname, base)
+        c = self._line_cache.get(ck)
+        start, out = 0, []
+        if c and c["names"] and len(c["names"]) <= len(names) \
+                and names[:len(c["names"])] == c["names"]:
+            start, out = len(c["names"]), list(c["lines"])
+
+        for b in blobs[start:]:
             try:
                 text = b.download_as_bytes().decode("utf-8")
             except Exception:
+                # 讀不到就整份放棄快取：快取裡少一筆會讓之後每次都算在對的位置上，
+                # 而稽核鏈對「少一筆」的表現是後面全部 broken_link —— 假警報比慢更糟。
+                self._line_cache.pop(ck, None)
                 continue
             out.extend([ln for ln in text.split("\n") if ln.strip()])
+
+        if len(out) <= self._CACHE_MAX_LINES:
+            self._line_cache[ck] = {"names": names, "lines": list(out)}
+        else:
+            self._line_cache.pop(ck, None)
         return out
 
     def put_blob(self, key: str, data: bytes) -> None:

@@ -25,6 +25,7 @@ import json
 import shutil
 import tempfile
 import importlib
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FLASK_DIR = os.path.abspath(os.path.join(HERE, "..", "..", "Backend", "Flask"))
@@ -163,7 +164,7 @@ def main():
     clin = {r: get("/api/v1/audit", r)[0] for r in ("physician", "nurse", "assistant")}
     check("5d 臨床角色讀不到稽核", set(clin.values()) == {403}, clin)
 
-    # ── 6 帳號異動有進稽核，且雜湊鏈完整 ──────────────────────────
+    # ── 6 帳號異動有進稽核，且可歸屬 ────────────────────────────
     acts = [e["action"] for e in a["entries"]]
     check("6  帳號異動寫入稽核（user_upsert）", "user_upsert" in acts, sorted(set(acts)))
     check("6b 稽核記到「誰」開的帳號（actor 可歸屬）",
@@ -171,48 +172,108 @@ def main():
               if e["action"] == "user_upsert"))
     check("6c 稽核記到密碼是否被變更（pw_changed）",
           any("pw_changed=True" in (e.get("result") or "") for e in a["entries"]))
-    check("6d 雜湊鏈完整", a.get("chain_ok") is True, a.get("chain_issues"))
-    check("6e 回傳鏈頭雜湊供外部錨定", len(a.get("chain_head") or "") == 64)
+    check("6d 新到舊排序（最新的在最前面）",
+          len(a["entries"]) > 1 and a["entries"][0]["seq"] > a["entries"][-1]["seq"])
 
-    # 被拒絕的越權嘗試也要留痕——「誰試圖越權」和「誰成功越權」一樣重要
-    _, a_all = get("/api/v1/audit?limit=500", "admin")
-    check("6f 新到舊排序（最新的在最前面）",
-          len(a_all["entries"]) > 1
-          and a_all["entries"][0]["seq"] > a_all["entries"][-1]["seq"])
+    # ── 7 鏈驗證是「選用」而非每次都跑 ────────────────────────────
+    #
+    # 驗證是 O(n) 且沒有取巧空間。若跟著每次開頁跑，紀錄累積後主控台會慢到沒人想開，
+    # 而不開的主控台等於沒有稽核。所以預設不驗，只回 O(1) 的 head。
+    check("7  預設不做鏈驗證（verified 為 null）", a.get("verified") is None, a.get("verified"))
+    check("7b 預設仍回 head（O(1)，最後一筆的 hash）", len(a.get("head") or "") == 64)
 
-    # ── 7 先驗鏈再過濾（否則會回報假的 broken_link） ───────────────
-    s, f = get("/api/v1/audit?action=user_upsert", "admin")
-    check("7  依動作過濾可用", s == 200 and f["entries"]
-          and {e["action"] for e in f["entries"]} == {"user_upsert"})
-    check("7b 過濾後 chain_ok 仍為 True —— 驗鏈用完整紀錄，不是過濾後的子集"
-          "（反過來會產生假的竄改警報）", f.get("chain_ok") is True, f.get("chain_issues"))
-    check("7c 過濾不影響 total（total 是全量）", f.get("total") == a.get("total"), (f.get("total"), a.get("total")))
+    s, v = get("/api/v1/audit?verify=1", "admin")
+    ver = v.get("verified") or {}
+    check("7c verify=1 才驗鏈且通過", s == 200 and ver.get("ok") is True, ver.get("issues"))
+    check("7d 驗證結果可錨定（head + 時間 + 驗證者）",
+          len(ver.get("head") or "") == 64 and ver.get("verified_at")
+          and (ver.get("verified_by") or "").startswith("default:"), ver.get("verified_at"))
+    _, a2 = get("/api/v1/audit?limit=5", "admin")
+    check("7e 驗證動作本身也進稽核（audit_verify）",
+          any(e["action"] == "audit_verify" for e in a2["entries"]),
+          [e["action"] for e in a2["entries"]])
 
-    # 竄改偵測仍然有效（確認上面的 chain_ok 不是因為驗證被關掉）
+    # ── 8 分頁與篩選 ──────────────────────────────────────────────
+    _, p1 = get("/api/v1/audit?limit=2&offset=0", "admin")
+    _, p2 = get("/api/v1/audit?limit=2&offset=2", "admin")
+    check("8  分頁：limit 生效", len(p1["entries"]) == 2, len(p1["entries"]))
+    check("8b offset 從**最新**往回數（第二頁的 seq 全部小於第一頁）",
+          min(e["seq"] for e in p1["entries"]) > max(e["seq"] for e in p2["entries"]),
+          ([e["seq"] for e in p1["entries"]], [e["seq"] for e in p2["entries"]]))
+    check("8c limit 有上限（防止一次拉爆記憶體）",
+          get("/api/v1/audit?limit=99999", "admin")[1]["limit"] == 500)
+
+    # ⚠ 基準要**當下重取**。稽核是 append-only 且這支測試自己也在寫紀錄
+    # （驗證、匯出都會留痕），拿前面某一次的回應當基準必然對不上——
+    # 那會測出一個假的失敗，然後有人跑去「修」一個沒有壞的功能。
+    _, base = get("/api/v1/audit?limit=1", "admin")
+    _, f = get("/api/v1/audit?action=user_upsert", "admin")
+    check("8d 依動作篩選", f["entries"] and {e["action"] for e in f["entries"]} == {"user_upsert"})
+    check("8e matched 是篩選後、total 是全量（兩者要分得開，否則分頁會算錯頁數）",
+          f["matched"] < f["total"], (f["matched"], f["total"]))
+    check("8f 選單選項從**全量**算，不隨篩選縮小（否則選了就再也切不回去）",
+          set(f["actions"]) == set(base["actions"]) and len(f["actions"]) > 1, f["actions"])
+
+    _, fa = get("/api/v1/audit?actor=default:t_admin", "admin")
+    check("8g 依操作者篩選", fa["entries"]
+          and {e["actor"] for e in fa["entries"]} == {"default:t_admin"})
+    _, fr = get("/api/v1/audit?role=admin", "admin")
+    check("8h 依角色篩選", fr["entries"] and {e["role"] for e in fr["entries"]} == {"admin"})
+
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    _, d1 = get("/api/v1/audit?since=%s&until=%s" % (today, today), "admin")
+    _, d0 = get("/api/v1/audit?until=2000-01-01", "admin")
+    check("8i 日期區間：今日有紀錄", d1["matched"] > 0, d1["matched"])
+    check("8j 日期區間：迄日在紀錄之前 → 0 筆（until 不可被忽略）", d0["matched"] == 0, d0["matched"])
+
+    # ── 9 CSV 匯出 ────────────────────────────────────────────────
+    r = cli.get("/api/v1/audit?format=csv&action=user_upsert", headers=HDR["admin"])
+    raw = r.get_data()
+    check("9  CSV 匯出", r.status_code == 200 and "text/csv" in r.headers.get("Content-Type", ""))
+    check("9b 帶 attachment 檔名", "attachment" in r.headers.get("Content-Disposition", ""))
+    check("9c 有 UTF-8 BOM —— 少了它 Excel 會用系統字碼頁開，中文全變亂碼",
+          raw.startswith(b"\xef\xbb\xbf"))
+    body = raw.decode("utf-8-sig")
+    check("9d 欄位齊全且含 hash（沒有 hash 的匯出無法離線驗鏈）",
+          body.splitlines()[0].split(",")[:3] == ["seq", "ts", "actor"] and "hash" in body.splitlines()[0])
+    check("9e 只匯出符合篩選的紀錄", all("user_upsert" in ln for ln in body.splitlines()[1:] if ln.strip()))
+    _, a3 = get("/api/v1/audit?limit=5", "admin")
+    check("9f 匯出動作本身進稽核（誰把稽核帶走了，和誰做了什麼一樣重要）",
+          any(e["action"] == "audit_export" for e in a3["entries"]),
+          [e["action"] for e in a3["entries"]])
+
+    # ── 10 竄改偵測仍然有效（確認上面的通過不是因為驗證被關掉） ──
     p = os.path.join(tmp, "audit.jsonl")
     lines = open(p, encoding="utf-8").read().splitlines()
     d = json.loads(lines[1]); d["result"] = "被竄改的內容"
     lines[1] = json.dumps(d, ensure_ascii=False)
     open(p, "w", encoding="utf-8").write("\n".join(lines) + "\n")
-    _, t = get("/api/v1/audit", "admin")
-    check("7d 竄改任一筆內容 → chain_ok 轉 False 並指出位置",
-          t.get("chain_ok") is False
-          and any(i["kind"] == "hash_mismatch" for i in t["chain_issues"]),
-          t.get("chain_issues"))
+    _, t = get("/api/v1/audit?verify=1", "admin")
+    tv = t.get("verified") or {}
+    check("10 竄改任一筆內容 → 驗證轉 False 並指出位置",
+          tv.get("ok") is False and any(i["kind"] == "hash_mismatch" for i in tv["issues"]),
+          tv.get("issues"))
 
-    # ── 8 主控台頁面本身不含資料 ──────────────────────────────────
+    # ── 11 主控台頁面本身不含資料 ────────────────────────────────
     page = cli.get("/console")
     html = page.get_data(as_text=True)
-    check("8  /console 可開（不需 token，頁面是靜態的）", page.status_code == 200)
-    check("8b 頁面含依角色展開的三個管理分區",
-          all(x in html for x in ('id="userbox"', 'id="auditbox"', 'id="sysbox"')))
-    check("8c 三個分區預設 class=hide（未登入不展開）", html.count('class="hide"') >= 3)
-    check("8d 頁面原始碼不含任何帳號或密碼（資料一律靠 token 取）",
+    check("11 /console 可開（不需 token，頁面是靜態的）", page.status_code == 200)
+    check("11b Content-Type 只有一組 charset",
+          page.headers.get("Content-Type", "").count("charset") == 1,
+          page.headers.get("Content-Type"))
+    check("11c 四個頁籤區塊都在",
+          all(('id="tab-%s"' % t) in html for t in ("dash", "sys", "audit", "users")))
+    check("11d 側欄四個項目都在",
+          all(('data-tab="%s"' % t) in html for t in ("dash", "sys", "audit", "users")))
+    check("11e 頁籤預設隱藏（未登入不展開）", html.count('class="hide"') >= 4)
+    check("11f 頁面原始碼不含任何帳號或密碼（資料一律靠 token 取）",
           pw2 not in html and "ns09" not in html)
-    check("8e 前端 perms 來自後端回傳，不自行推導角色能力",
-          "perms = j.perms" in html)
+    check("11g 前端 perms 來自後端回傳，不自行推導角色能力", "perms = j.perms" in html)
+    check("11h 頁籤權限對應表在前端也對得上後端",
+          'TABS = {dash:"flywheel.stats", sys:"audit.read", audit:"audit.read", users:"user.manage"}'
+          in html)
 
-    # ── 9 參數防呆 ────────────────────────────────────────────────
+    # ── 12 參數防呆 ───────────────────────────────────────────────
     bad = [
         ({"user": "NS10", "role": "nurse", "password": "x" * 12}, "大寫帳號"),
         ({"user": "ns10", "role": "boss", "password": "x" * 12}, "不存在的角色"),
@@ -223,7 +284,7 @@ def main():
     got = {}
     for body, why2 in bad:
         got[why2] = post("/api/v1/users", "admin", body)[0]
-    check("9  不合法的帳號參數全部擋下（400）", set(got.values()) == {400}, got)
+    check("12 不合法的帳號參數全部擋下（400）", set(got.values()) == {400}, got)
 
     shutil.rmtree(tmp, ignore_errors=True)
     print()
