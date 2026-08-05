@@ -24,6 +24,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FLYWHEEL_DIR = os.environ.get("WOUNDAI_FLYWHEEL_DIR") or os.path.join(HERE, "flywheel")
 QUEUE = os.path.join(FLYWHEEL_DIR, "retrain_queue.jsonl")
 WITHDRAWN = os.path.join(FLYWHEEL_DIR, "withdrawn.jsonl")
+# 誤送排除。**與 withdrawn.jsonl 分開存，這不是潔癖。**
+#
+# 「病患撤回訓練同意」與「操作者送錯了」在 IRB 眼中是完全不同的兩件事：
+# 前者是受試者行使權利，必須出現在同意管理的統計裡；後者是一次操作失誤。
+# 用 withdraw 去標記一個誤送，IRB 報告上就會出現一筆**根本沒發生過的撤回**——
+# 而那份報告的可信度正是整個飛輪存在的理由。
+#
+# 這與先前「拒絕理由要是『已撤回同意』而不是『查無影像』」是同一條原則：
+# 稽核紀錄的價值在於它說的是真正發生的事。
+RETRACTED = os.path.join(FLYWHEEL_DIR, "retracted.jsonl")
 AUDIT = os.path.join(FLYWHEEL_DIR, "audit.jsonl")
 IMAGES_DIR = os.path.join(FLYWHEEL_DIR, "images")
 QUARANTINE_DIR = os.path.join(FLYWHEEL_DIR, "quarantine")
@@ -320,37 +330,124 @@ def effective_queue(queue_path=None, images_dir=None, withdrawn_path=None, sourc
     images_dir = images_dir or IMAGES_DIR
     wd_codes, wd_imgs = withdrawn_keys(withdrawn_path)
     recs, bad = read_jsonl(queue_path, with_bad=True)
-    stats = {"total": len(recs) + bad, "orphan_no_image": 0, "malformed": bad, "image_file_missing": 0,
-             "withdrawn": 0, "consent_invalid": 0, "superseded": 0, "other_source": 0, "trainable": 0}
-    latest = {}
-    for r in recs:
-        iid = r.get("image_id")
-        if not iid:
-            stats["orphan_no_image"] += 1; continue
-        # 匯出端不盲信端點:欄位/格式/同意狀態一律重驗(--queue 可指向任意檔)
-        if not ID_RE.match(str(iid)) or not r.get("image_w") or not r.get("image_h") \
-                or len(r.get("gt_polygon") or []) < 3 or not CODE_RE.match(str(r.get("code") or "")):
-            stats["malformed"] += 1; continue
-        if r.get("code") in wd_codes or iid in wd_imgs:
-            stats["withdrawn"] += 1; continue
-        if not (r.get("doctor_verified") and r.get("deidentified") and r.get("consent_train")):
-            stats["consent_invalid"] += 1; continue
-        if not _store().exists(_key(os.path.join(images_dir, str(iid) + ".jpg"))):
-            stats["image_file_missing"] += 1; continue
-        if keep is not None and rec_source(r) not in keep:
-            stats["other_source"] += 1; continue
-        prev = latest.get(iid)
-        if prev is not None: stats["superseded"] += 1
-        # received_at 遞增(UTC) → 後到者為醫師最新修訂。
-        # 用 `or ""` 而非 get 預設值:顯式 null 會變字串 "None",而 "None" > "2026-..."(字典序)
-        # 會讓沒有時間戳的那筆永遠勝出。
-        if prev is None or (r.get("received_at") or "") >= (prev.get("received_at") or ""):
-            latest[iid] = r
-    out = list(latest.values())
+    tagged = classify_queue(recs, images_dir, wd_codes, wd_imgs, keep=keep)
+
+    stats = {"total": len(recs) + bad, "malformed": bad}
+    for k in RECORD_STATUS:
+        stats.setdefault(k, 0)
+    for _, st in tagged:
+        stats[st] = stats.get(st, 0) + 1
+    out = [r for r, st in tagged if st == "trainable"]
     stats["trainable"] = len(out)
     # 分項:臨床樣本數不可被範例/模擬影像灌水(送件數字誠實與否的關鍵)
     stats["by_source"] = {s: sum(1 for r in out if rec_source(r) == s) for s in SOURCES}
     return out, stats
+
+
+# 誤送排除的理由分類。**刻意不含「撤回同意」**——那要走 /api/v1/consent/withdraw。
+RETRACT_REASONS = {
+    "mis_submitted": "誤送（不該送出這一筆）",
+    "wrong_source":  "來源標錯（範例／模擬圖被當成臨床）",
+    "poor_quality":  "影像不可用（模糊、對焦錯、標記不完整）",
+    "duplicate":     "重複送出",
+    "other":         "其他（請填 note）",
+}
+
+
+def retracted_images(retracted_path=None):
+    """目前處於「已排除」狀態的 image_id 集合。
+
+    重播整份 jsonl：`retract` 加入、`unretract` 移除。與 withdrawn 一樣**不刪除歷史紀錄**——
+    「排除又還原」本身就是稽核要看的東西，改寫檔案會讓那段過程消失。
+    """
+    out = set()
+    for r in read_jsonl(retracted_path or RETRACTED):
+        iid = r.get("image_id")
+        if not iid:
+            continue
+        if r.get("action") == "unretract":
+            out.discard(iid)
+        else:
+            out.add(iid)
+    return out
+
+
+# 逐筆狀態。**effective_queue 與 /flywheel/records 共用這一份判斷**——
+# 兩邊各寫一次的話，「統計說可訓練、清單說被排除」這種矛盾遲早出現，
+# 而那會讓人不知道該相信哪一個數字。
+def classify_queue(recs, images_dir=None, wd_codes=None, wd_imgs=None,
+                   rt_imgs=None, keep=None):
+    """回 [(rec, status)]。status 見 RECORD_STATUS。"""
+    images_dir = images_dir or IMAGES_DIR
+    if wd_codes is None or wd_imgs is None:
+        wd_codes, wd_imgs = withdrawn_keys()
+    if rt_imgs is None:
+        rt_imgs = retracted_images()
+
+    prelim, best = [], {}
+    for i, r in enumerate(recs):
+        iid = r.get("image_id")
+        if not iid:
+            st = "orphan_no_image"
+        elif not ID_RE.match(str(iid)) or not r.get("image_w") or not r.get("image_h") \
+                or len(r.get("gt_polygon") or []) < 3 or not CODE_RE.match(str(r.get("code") or "")):
+            st = "malformed"
+        # 撤回同意排在最前：它是受試者的權利，任何其他理由都不該蓋過它的可見性。
+        elif r.get("code") in wd_codes or iid in wd_imgs:
+            st = "withdrawn"
+        elif iid in rt_imgs:
+            st = "retracted"
+        elif not (r.get("doctor_verified") and r.get("deidentified") and r.get("consent_train")):
+            st = "consent_invalid"
+        elif not _store().exists(_key(os.path.join(images_dir, str(iid) + ".jpg"))):
+            st = "image_file_missing"
+        elif keep is not None and rec_source(r) not in keep:
+            st = "other_source"
+        else:
+            st = "candidate"
+        prelim.append(st)
+        if st == "candidate":
+            # received_at 遞增(UTC) → 後到者為醫師最新修訂。
+            # 用 `or ""` 而非 get 預設值:顯式 null 會變字串 "None",而 "None" > "2026-..."
+            #（字典序）會讓沒有時間戳的那筆永遠勝出。
+            ra = r.get("received_at") or ""
+            cur = best.get(iid)
+            if cur is None or ra >= cur[0]:
+                best[iid] = (ra, i)
+    winners = {i for _, i in best.values()}
+    return [(r, ("trainable" if i in winners else "superseded") if st == "candidate" else st)
+            for i, (r, st) in enumerate(zip(recs, prelim))]
+
+
+RECORD_STATUS = {
+    "trainable":       "可訓練",
+    "superseded":      "被較新的修訂版取代",
+    "withdrawn":       "已撤回訓練同意",
+    "retracted":       "已標記排除（誤送等）",
+    "consent_invalid": "三同意未齊",
+    "image_file_missing": "後端查無影像",
+    "malformed":       "欄位或格式不合",
+    "orphan_no_image": "孤兒 GT（無 image_id）",
+    "other_source":    "來源不在篩選範圍",
+}
+
+
+def poly_area_cm2(poly, mm_per_px):
+    """多邊形面積（cm²）。算不出來回 None——**不要回 0**：
+    0 看起來像「量到了但很小」，None 才看得出是「沒有這個數字」。"""
+    try:
+        pts = [(float(x), float(y)) for x, y in (poly or [])]
+        if len(pts) < 3 or not mm_per_px:
+            return None
+        a = 0.0
+        for i in range(len(pts)):
+            x1, y1 = pts[i]
+            x2, y2 = pts[(i + 1) % len(pts)]
+            a += x1 * y2 - x2 * y1
+        px2 = abs(a) / 2.0
+        return round(px2 * (float(mm_per_px) ** 2) / 100.0, 2)
+    except Exception:
+        return None
 
 
 def quarantine_image(image_id, images_dir=None, quarantine_dir=None):
@@ -468,6 +565,160 @@ try:
         audit(actor, "annotation_enqueued", rec["code"], "ok", role, org)
         return jsonify({"status": "enqueued", "code": rec["code"], "queue": "retrain",
                         "image_id": image_id, "note": note}), 200
+
+
+    @flywheel_bp.route("/api/v1/retract", methods=["POST"])
+    @jwt_required()
+    def post_retract():
+        """誤送排除。**與撤回同意是兩件事，端點也分開。**
+
+        撤回同意是受試者行使權利；誤送是操作者的失誤。用 withdraw 去標記一次失誤，
+        IRB 報告上就會出現一筆根本沒發生過的撤回——而那份報告的可信度，
+        正是整個飛輪存在的理由。
+
+        誰可以排除：
+          - 醫師：**只能排除自己送的**（`rec["actor"] == 你`）
+          - 管理者：任何一筆
+
+        佇列是 append-only，所以這裡不刪任何東西：寫一筆 `retract` 紀錄，
+        影像移進 quarantine/（不再進任何資料集），原本的佇列紀錄原封不動留著。
+        「誰在什麼時候以什麼理由排除了哪一筆」本身就是稽核要看的內容。
+        """
+        d = request.get_json(silent=True) or {}
+        actor, role, org = _who()
+        is_admin = _can(role, "user.manage")
+        if not (is_admin or _can(role, "annotation.submit")):
+            return jsonify({"error": "權限不足",
+                            "issues": [f"角色 {role} 不得標記排除（僅醫師排除自己的、管理者排除任何一筆）。"]}), 403
+
+        image_id = str(d.get("image_id") or "")
+        reason = str(d.get("reason") or "")
+        note = (d.get("note") or "").strip()
+        issues = []
+        if not ID_RE.match(image_id):
+            issues.append("image_id 格式不合（應為 16 位小寫十六進位）")
+        if reason not in RETRACT_REASONS:
+            issues.append("reason 須為 %s 之一" % "／".join(RETRACT_REASONS))
+        if reason == "other" and not note:
+            issues.append("reason=other 時必須填 note——「其他」而沒有說明，"
+                          "等於這筆排除在稽核上無法解釋")
+        if issues:
+            return jsonify({"error": "參數不合", "issues": issues}), 400
+
+        mine = [r for r in read_jsonl(QUEUE) if r.get("image_id") == image_id]
+        if not mine:
+            return jsonify({"error": "查無此紀錄", "issues": [f"佇列中沒有 image_id {image_id}"]}), 404
+        owners = {r.get("actor") for r in mine}
+        if not is_admin and owners != {actor}:
+            audit(actor, "retract_denied", mine[0].get("code", "?"),
+                  f"嘗試排除他人送出的紀錄（送出者 {sorted(owners)}）", role, org)
+            return jsonify({"error": "權限不足",
+                            "issues": ["只能排除自己送出的紀錄。這一筆是其他人送的，"
+                                       "請聯絡管理者。"]}), 403
+
+        code = mine[-1].get("code")
+        append_jsonl(RETRACTED, {
+            "image_id": image_id, "code": code, "action": "retract",
+            "reason": reason, "reason_zh": RETRACT_REASONS[reason], "note": note,
+            "actor": actor, "role": role, "org": org, "ts": utc_now(),
+        })
+        moved = quarantine_image(image_id)
+        audit(actor, "record_retract", code or "?",
+              "理由=%s%s；影像隔離=%s；影響 %d 筆"
+              % (reason, ("（%s）" % note if note else ""), moved, len(mine)), role, org)
+        return jsonify({
+            "status": "retracted", "image_id": image_id, "code": code,
+            "reason": reason, "reason_zh": RETRACT_REASONS[reason],
+            "affected": len(mine), "quarantined": moved,
+            "effect": "該影像的所有標註一律排除於訓練集與統計，影像移入 quarantine/。"
+                      "佇列為 append-only 稽核軌跡故原紀錄保留（不竄改）。"
+                      "**這不是撤回同意**——同意狀態未變更。",
+        }), 200
+
+    @flywheel_bp.route("/api/v1/unretract", methods=["POST"])
+    @jwt_required()
+    def post_unretract():
+        """還原誤送排除。**僅管理者。**
+
+        「排除」本身也可能按錯，沒有還原路徑的話那就是死局。
+        但不開放給醫師自己還原：能自行排除又自行還原，等於這個標記可以被反覆翻面，
+        稽核上就看不出最終狀態是誰決定的。
+        """
+        d = request.get_json(silent=True) or {}
+        actor, role, org = _who()
+        if not _can(role, "user.manage"):
+            return jsonify({"error": "權限不足", "issues": ["僅管理者可還原排除。"]}), 403
+        image_id = str(d.get("image_id") or "")
+        if not ID_RE.match(image_id):
+            return jsonify({"error": "image_id 格式不合"}), 400
+        if image_id not in retracted_images():
+            return jsonify({"error": "這一筆並未被排除", "image_id": image_id}), 400
+        note = (d.get("note") or "").strip()
+        append_jsonl(RETRACTED, {"image_id": image_id, "action": "unretract",
+                                 "note": note, "actor": actor, "role": role,
+                                 "org": org, "ts": utc_now()})
+        back = _store().move(_key(os.path.join(QUARANTINE_DIR, image_id + ".jpg")),
+                             _key(os.path.join(IMAGES_DIR, image_id + ".jpg")))
+        audit(actor, "record_unretract", image_id, f"還原排除；影像復原={back}；{note}", role, org)
+        return jsonify({"status": "unretracted", "image_id": image_id, "restored": back}), 200
+
+    @flywheel_bp.route("/api/v1/flywheel/records", methods=["GET"])
+    @jwt_required()
+    def get_records():
+        """我的送件清單。
+
+        ⚠ **範圍限制在伺服器端，不看客戶端參數。**
+        非管理者／工程師一律只看得到自己 `actor` 的紀錄，就算送 `scope=all` 也一樣——
+        「前端只顯示自己的」不是隔離，那只是沒有畫出來而已。
+
+        回傳仍是**去識別**的：`WD-` 代碼、遮罩、面積、來源、路由。沒有姓名、沒有影像。
+        """
+        actor, role, org = _who()
+        if not _can(role, "flywheel.stats"):
+            return jsonify({"error": "權限不足"}), 403
+        may_see_all = _can(role, "audit.read")          # 工程師／管理者
+        scope = request.args.get("scope", "mine")
+        all_scope = may_see_all and scope == "all"
+
+        recs = read_jsonl(QUEUE)
+        tagged = classify_queue(recs)
+        rt = retracted_images()
+        rt_meta = {}
+        for r in read_jsonl(RETRACTED):
+            if r.get("action") == "unretract":
+                rt_meta.pop(r.get("image_id"), None)
+            else:
+                rt_meta[r.get("image_id")] = r
+
+        f_status = request.args.get("status")
+        out = []
+        for r, st in tagged:
+            if not all_scope and r.get("actor") != actor:
+                continue
+            if f_status and st != f_status:
+                continue
+            meta = rt_meta.get(r.get("image_id")) or {}
+            out.append({
+                "code": r.get("code"), "image_id": r.get("image_id"),
+                "received_at": r.get("received_at"), "source": rec_source(r),
+                "route": r.get("route"), "status": st,
+                "status_zh": RECORD_STATUS.get(st, st),
+                "doctor_verified": bool(r.get("doctor_verified")),
+                "area_cm2": poly_area_cm2(r.get("gt_polygon"), r.get("mm_per_px")),
+                "actor": r.get("actor"), "role": r.get("role"),
+                # 只有自己送的（或管理者）才需要知道能不能排除；直接算好，
+                # 免得前端自己推導一套規則然後跟後端對不上。
+                "can_retract": (st != "retracted") and
+                               (_can(role, "user.manage") or r.get("actor") == actor),
+                "retract_reason": meta.get("reason_zh"), "retract_note": meta.get("note"),
+                "retracted_by": meta.get("actor"),
+            })
+        out.reverse()       # 新到舊
+        return jsonify({
+            "records": out, "scope": "all" if all_scope else "mine",
+            "may_see_all": may_see_all, "actor": actor,
+            "reasons": RETRACT_REASONS, "statuses": RECORD_STATUS,
+        }), 200
 
     @flywheel_bp.route("/api/v1/consent/withdraw", methods=["POST"])
     @jwt_required()

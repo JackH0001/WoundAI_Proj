@@ -59,6 +59,9 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
     var result by remember { mutableStateOf<String?>(null) }
     var stats by remember { mutableStateOf<String?>(null) }
     var me by remember { mutableStateOf<LoginIdentity?>(null) }
+    // 連線測試成功時留下這個 client（帶著有效 token），「開啟主控台」才拿得到一次性登入碼。
+    var client by remember { mutableStateOf<BackendClient?>(null) }
+    var opening by remember { mutableStateOf(false) }
 
     val onEmulator = remember { AppSettings.looksLikeEmulator() }
     val loopbackOnDevice = !onEmulator && AppSettings.isEmulatorLoopback(url)
@@ -148,6 +151,7 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
                                 try {
                                     if (c.login(u, p)) {
                                         me = c.identity
+                                        client = c
                                         Triple(true, "✅ 連線成功（${c.identity?.label() ?: u}）",
                                                c.flywheelStats())
                                     }
@@ -185,9 +189,37 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
             // 同一個 /console，但依角色展開不同分區——所以按鈕文字也要講清楚
             // 按下去會看到什麼。管理者看到的是會**改變授權狀態**的介面，
             // 用「唯讀」當標籤會讓人以為隨便按都沒關係。
+            // 開啟主控台：先跟後端要一個**一次性登入碼**，附在 URL fragment 帶過去，
+            // 瀏覽器那邊自動換成 session，醫師不必再打一次密碼。
+            //
+            // ⚠ 絕不可改成把 jwt 放進查詢字串：Cloud Run 會把完整 URL 寫進 Cloud Logging，
+            // token 就以明文留在日誌裡，效期還有 24 小時。fragment 不會送到伺服器。
+            //
+            // 拿不到代碼時仍然開啟網址，只是要手動登入——比整個按鈕失效好。
+            fun openConsole(tab: String?) {
+                val base = AppSettings.normalizeUrl(url)
+                opening = true
+                scope.launch {
+                    val code = withContext(Dispatchers.IO) { client?.oneTimeCode() }
+                    opening = false
+                    val frag = when {
+                        code != null && tab != null -> "#c=$code&t=$tab"
+                        code != null -> "#c=$code"
+                        tab != null -> "#$tab"
+                        else -> ""
+                    }
+                    if (code == null) result = "ℹ 取不到一次性登入碼，已開啟主控台但需手動登入。"
+                    openUrl(ctx, "$base/console$frag")
+                }
+            }
+
+            if (u.can("flywheel.stats")) {
+                OutlinedButton({ openConsole("recs") }, Modifier.fillMaxWidth(), enabled = !opening) {
+                    Text(if (opening) "準備登入…" else "開啟「我的送件」（可自行標記排除誤送）")
+                }
+            }
             if (u.can("user.manage") || u.can("audit.read")) {
-                OutlinedButton({ openUrl(ctx, AppSettings.normalizeUrl(url) + "/console") },
-                    Modifier.fillMaxWidth()) {
+                OutlinedButton({ openConsole(null) }, Modifier.fillMaxWidth(), enabled = !opening) {
                     Text(if (u.can("user.manage")) "開啟管理主控台（帳號管理・稽核・系統狀態）"
                          else "開啟主控台（稽核・系統狀態・佇列）")
                 }
@@ -198,12 +230,11 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-            } else if (u.can("flywheel.stats")) {
-                OutlinedButton({ openUrl(ctx, AppSettings.normalizeUrl(url) + "/console") },
-                    Modifier.fillMaxWidth()) {
-                    Text("開啟飛輪主控台（唯讀・去識別）")
-                }
             }
+            Text("主控台以一次性登入碼自動登入（60 秒有效、用過即失效，且放在網址的 # 之後——" +
+                 "那一段不會送到伺服器，因此不會留在雲端日誌裡）。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (u.can("gcp.console")) {
                 OutlinedButton({ openUrl(ctx, "https://console.cloud.google.com/run?project=woundai-jackh001") },
                     Modifier.fillMaxWidth()) { Text("開啟 GCP 雲端主控台（需 Google 帳號授權）") }

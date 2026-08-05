@@ -7,7 +7,7 @@
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from flask_jwt_extended import (
-    JWTManager, create_access_token, jwt_required,
+    JWTManager, create_access_token, jwt_required, decode_token,
     get_jwt_identity, get_jwt
 )
 import numpy as np
@@ -73,6 +73,62 @@ app.config.update(
 )
 
 jwt = JWTManager(app)
+
+
+# ── 一次性登入碼（App →「開啟主控台」按鈕的自動登入） ─────────────────────
+#
+# 需求：醫師在 App 裡按一下就進到瀏覽器的主控台，不必再打一次密碼。
+#
+# ⚠ **最直覺的做法（把 access token 放進網址查詢字串）是不能做的。**
+# Cloud Run 會把完整的請求 URL 寫進 Cloud Logging——token 就這樣以明文躺在日誌裡，
+# 任何具 log viewer 權限的人都能複製它去冒用那位醫師的身分，效期還有 24 小時。
+# 這條路徑安靜、可稽核性為零，是最糟的一種洩漏。
+#
+# 這裡的做法：
+#   1. 代碼放在 **URL fragment**（`#c=...`）。fragment **不會送到伺服器**，
+#      因此不進任何伺服器日誌；主控台讀到後立刻用 replaceState 清掉。
+#   2. 代碼是**另一種型別的 token**（`typ=otc`），效期 60 秒，
+#      而且被 token_verification_loader 擋在所有一般端點之外——
+#      就算它外流，也只能拿去 /api/auth/exchange，且 60 秒後失效。
+#   3. 交換行為本身進稽核，重用會被記下來。
+#
+# 誠實邊界：單次使用是**盡力而為**。判重的 jti 存在行程記憶體裡，Cloud Run 多實例時
+# 另一個實例看不到。要做到嚴格單次得共用狀態（GCS 寫入），代價是每次登入多一次寫入
+# 與延遲。以 60 秒窗口 + 不進日誌 + 型別限制來說，這個取捨是站得住的——
+# 但它是取捨，不是「已經解決」。
+OTC_TTL_SECONDS = 60
+_otc_used = {}          # jti -> 逾期時間（epoch 秒）
+
+
+def _otc_burn(jti, exp):
+    """記下已用過的 jti；順手清掉過期的，免得這個 dict 無限長大。"""
+    now = time.time()
+    for k, v in list(_otc_used.items()):
+        if v < now:
+            _otc_used.pop(k, None)
+    if jti in _otc_used:
+        return False
+    _otc_used[jti] = exp
+    return True
+
+
+@jwt.token_verification_loader
+def _reject_otc_on_normal_endpoints(jwt_header, jwt_data):
+    """一次性登入碼**不得**當成一般 access token 使用。
+
+    沒有這一段的話，otc 就是一個貨真價實的 access token——`@jwt_required` 會直接放行，
+    於是那 60 秒內它能打任何端點。加了型別檢查之後，它唯一能去的地方是
+    /api/auth/exchange（那支自己解碼，不走 jwt_required）。
+    """
+    return jwt_data.get('typ') != 'otc'
+
+
+@jwt.token_verification_failed_loader
+def _otc_rejected(jwt_header, jwt_data):
+    """驗證失敗的預設狀態碼是 **400**，那會讓客戶端把「憑證問題」誤判成「參數錯誤」——
+    然後去檢查請求主體，而真正的問題在 Authorization 標頭。改回 401 並說清楚。"""
+    return jsonify({'error': '這個憑證不能用於一般端點',
+                    'issues': ['一次性登入碼只能拿去 /api/auth/exchange 換取正式 token。']}), 401
 
 # 飛輪 HTTP 端點(/api/v1/annotation, /api/v1/consent/withdraw)
 try:
@@ -360,6 +416,80 @@ def login():
         'org': org, 'user': user, 'identity': ident,
         'display_name': rec.get('display_name'),
         # App 依此決定畫面呈現。**這只是輔助**——真正的閘門在每個端點的伺服器端檢查。
+        'perms': sorted([k for k in auth_users.PERMS if auth_users.can(rec['role'], k)]),
+    }), 200
+
+
+@app.route('/api/v1/auth/onetime', methods=['POST'])
+@jwt_required()
+def issue_onetime_code():
+    """發一個 60 秒、單次使用的登入碼，給 App 開啟主控台用。
+
+    要先有有效的 access token 才拿得到——這不是另一條認證途徑，
+    只是把「已經登入的身分」安全地遞給同一台裝置上的瀏覽器。
+    """
+    c = get_jwt() or {}
+    ident = get_jwt_identity() or 'unknown'
+    code = create_access_token(
+        identity=ident,
+        additional_claims={'role': c.get('role'), 'org': c.get('org'),
+                           'user': c.get('user'), 'typ': 'otc'},
+        expires_delta=timedelta(seconds=OTC_TTL_SECONDS))
+    try:
+        import api_flywheel as _fw
+        _fw.audit(ident, 'otc_issued', '-', f"效期 {OTC_TTL_SECONDS}s",
+                  c.get('role'), c.get('org'))
+    except Exception:
+        pass
+    return jsonify({'code': code, 'expires_in': OTC_TTL_SECONDS}), 200
+
+
+@app.route('/api/auth/exchange', methods=['POST'])
+def exchange_onetime_code():
+    """用一次性登入碼換一個正常的 access token。**刻意不掛 @jwt_required**——
+    掛了就會被上面的 token_verification_loader 擋掉（otc 不是合法的 access token）。
+    """
+    d = request.get_json(silent=True) or {}
+    code = d.get('code')
+    if not isinstance(code, str) or not code.strip():
+        return jsonify({'error': '缺少登入碼'}), 400
+    try:
+        data = decode_token(code.strip())
+    except Exception as e:
+        # 過期與偽造回同一句：分開講等於告訴攻擊者「這個簽章是對的，只是過期了」。
+        logger.warning('otc 解碼失敗: %s', e)
+        return jsonify({'error': '登入碼無效或已過期'}), 401
+    if data.get('typ') != 'otc':
+        return jsonify({'error': '登入碼無效或已過期'}), 401
+
+    ident = data.get('sub') or 'unknown'
+    role, org, user = data.get('role'), data.get('org'), data.get('user')
+    if not _otc_burn(data.get('jti'), data.get('exp', 0)):
+        # 重用要留痕：這可能是使用者按了兩次，也可能是代碼被攔截後重放。
+        try:
+            import api_flywheel as _fw
+            _fw.audit(ident, 'otc_reused', '-', '同一個登入碼被重複交換（已拒絕）', role, org)
+        except Exception:
+            pass
+        return jsonify({'error': '登入碼已使用過'}), 401
+
+    rec = auth_users.get_user(org, user) if (org and user) else None
+    # 發碼到交換之間帳號可能已被停用（管理者剛按下停用）。60 秒也是時間。
+    if rec is None or rec.get('disabled'):
+        return jsonify({'error': '帳號已停用或不存在'}), 401
+
+    token = create_access_token(identity=ident,
+                                additional_claims={'role': rec['role'], 'org': org, 'user': user})
+    try:
+        import api_flywheel as _fw
+        _fw.audit(ident, 'login_otc', '-', f"role={rec['role']}（一次性登入碼）", rec['role'], org)
+    except Exception:
+        pass
+    return jsonify({
+        'access_token': token, 'role': rec['role'],
+        'role_zh': auth_users.ROLES.get(rec['role'], rec['role']),
+        'org': org, 'user': user, 'identity': ident,
+        'display_name': rec.get('display_name'),
         'perms': sorted([k for k in auth_users.PERMS if auth_users.can(rec['role'], k)]),
     }), 200
 

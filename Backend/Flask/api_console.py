@@ -116,6 +116,7 @@ code{font-family:ui-monospace,monospace;font-size:12.5px;word-break:break-all}
 <nav>
   <div class="brand">WoundAI 主控台</div>
   <a data-tab="dash" class="hide" onclick="go('dash')">飛輪 Dashboard</a>
+  <a data-tab="recs"  class="hide" onclick="go('recs')">我的送件</a>
   <a data-tab="sys"   class="hide" onclick="go('sys')">系統狀態</a>
   <a data-tab="audit" class="hide" onclick="go('audit')">稽核軌跡</a>
   <a data-tab="users" class="hide" onclick="go('users')">帳號管理</a>
@@ -143,6 +144,25 @@ code{font-family:ui-monospace,monospace;font-size:12.5px;word-break:break-all}
   <p class="note">
   「臨床」那一欄才是 n=20 收案進度的分母。範例與模擬圖走同一條管線收進來，
   但不計入臨床樣本數——訓練時也要排除（範例是難例升級路由的驗收基準，拿去訓練等於考卷當講義）。
+  </p>
+</section>
+
+<section id="tab-recs">
+  <h1>我的送件</h1>
+  <p class="sub" id="recs_sub">你送出的每一筆訓練標註與它目前的狀態。</p>
+  <div class="row">
+    <select id="r_status"><option value="">全部狀態</option></select>
+    <span id="r_scope"></span>
+    <button onclick="loadRecs()">重新整理</button>
+  </div>
+  <div id="r_panel"></div>
+  <div class="wrap"><div id="recs"></div></div>
+  <p class="note">
+  「排除」不是刪除。佇列是 append-only 的稽核軌跡——排除會另寫一筆紀錄、把影像移進
+  <code>quarantine/</code>，原本的送件紀錄原封不動留著。<b>誰在什麼時候以什麼理由排除了哪一筆</b>，
+  本身就是稽核要看的內容。<br>
+  ⚠ 排除**不等於**病患撤回訓練同意。撤回同意是受試者行使權利，要走個案的同意管理；
+  用排除去記一次撤回（或反過來）會讓 IRB 報告上出現沒發生過的事。
   </p>
 </section>
 
@@ -237,7 +257,8 @@ async function api(path, opt){
    ⚠ 顯示／隱藏只是可讀性設計，不是存取控制。
    每個 API 端點都在伺服器端獨立檢查權限（fail-closed）；
    改前端 JS 打得出請求，但會拿到 403 並留下稽核紀錄。            */
-const TABS = {dash:"flywheel.stats", sys:"audit.read", audit:"audit.read", users:"user.manage"};
+const TABS = {dash:"flywheel.stats", recs:"flywheel.stats", sys:"audit.read",
+              audit:"audit.read", users:"user.manage"};
 const loaded = {};
 let cur = "login";
 
@@ -255,7 +276,7 @@ function go(name){
   if(location.hash.slice(1) !== name) history.replaceState(null,"","#"+name);
   // 延遲載入：進到那一頁才去要資料。第一版四支請求在登入當下全部發出，
   // 其中稽核最慢，於是「只想看收案數」也得等它讀完。
-  if(!loaded[name]){ loaded[name] = true; ({dash:loadDash, sys:loadSys,
+  if(!loaded[name]){ loaded[name] = true; ({dash:loadDash, recs:loadRecs, sys:loadSys,
     audit:()=>auditGo(0), users:loadUsers}[name]||(()=>{}))(); }
 }
 
@@ -344,6 +365,66 @@ async function loadDash(){
   $("detail").innerHTML = "<table><tr><th>項目</th><th>筆數</th><th>說明</th></tr>" +
     rows.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td style="color:var(--dim)">${r[2]}</td></tr>`).join("") +
     "</table><p class='note'>儲存後端：<code>" + esc(s.store||"—") + "</code></p>";
+}
+
+/* ───────── 我的送件 ───────── */
+let recsData = [], recsMeta = {};
+async function loadRecs(){
+  const q = new URLSearchParams();
+  if($("r_status").value) q.set("status", $("r_status").value);
+  if(window._recScopeAll) q.set("scope", "all");
+  let j; try{ j = await api("/api/v1/flywheel/records?" + q.toString()); }
+  catch(e){ $("recs").innerHTML = "<p class='bad'>讀取失敗："+esc(e.message)+"</p>"; return; }
+  recsData = j.records || []; recsMeta = j;
+  if($("r_status").options.length <= 1)
+    Object.entries(j.statuses||{}).forEach(([k,v]) => $("r_status").add(new Option(v, k)));
+  // 「看全部」只給後端說可以的人。前端自己判斷角色遲早會跟後端對不上，
+  // 而對不上的方向通常是前端比較寬鬆。
+  $("r_scope").innerHTML = j.may_see_all
+    ? `<label style="font-size:13px"><input type="checkbox" ${window._recScopeAll?"checked":""}
+         onchange="window._recScopeAll=this.checked;loadRecs()"> 看全部人的（非只有我）</label>`
+    : `<span style="font-size:12px;color:var(--dim)">只顯示 <code>${esc(j.actor)}</code> 送出的</span>`;
+  $("recs").innerHTML = "<table><tr><th>時間 (UTC)</th><th>代碼</th><th>來源</th>" +
+    "<th>面積</th><th>路由</th><th>狀態</th>" + (j.scope==="all"?"<th>送出者</th>":"") + "<th></th></tr>" +
+    recsData.map((r,i) => `<tr class="${r.status==="trainable"?"":"off"}">
+      <td class="nowrap">${esc((r.received_at||"").replace("T"," ").replace("Z",""))}</td>
+      <td class="nowrap"><code>${esc(r.code)}</code></td>
+      <td>${esc(r.source)}</td>
+      <td class="nowrap">${r.area_cm2==null?"—":esc(r.area_cm2)+" cm²"}</td>
+      <td style="color:var(--dim)">${esc(r.route||"—")}</td>
+      <td class="${r.status==="trainable"?"ok":(r.status==="superseded"?"":"bad")}">
+        ${esc(r.status_zh)}${r.retract_reason?`<br><span style="font-size:11px">${esc(r.retract_reason)}${r.retract_note?"："+esc(r.retract_note):""}</span>`:""}</td>
+      ${j.scope==="all"?`<td class="nowrap">${esc(r.actor)}</td>`:""}
+      <td class="nowrap">${r.can_retract
+        ? `<button onclick="askRetract(${i})">排除</button>` : ""}</td></tr>`).join("") + "</table>" +
+    (recsData.length ? "" : "<p class='note'>沒有符合條件的送件。</p>");
+}
+function askRetract(i){
+  const r = recsData[i];
+  const opts = Object.entries(recsMeta.reasons||{})
+    .map(([k,v]) => `<option value="${esc(k)}">${esc(v)}</option>`).join("");
+  $("r_panel").innerHTML = `<div class="banner">
+    要排除 <code>${esc(r.code)}</code>（${esc(r.received_at||"")}${
+      r.area_cm2==null?"":"・"+esc(r.area_cm2)+" cm²"}）<br>
+    <div class="row" style="margin:8px 0 0">
+      <select id="rr_reason">${opts}</select>
+      <input id="rr_note" placeholder="說明（reason=其他 時必填）" style="width:260px">
+      <button class="primary" onclick="doRetract('${esc(r.image_id)}')">確認排除</button>
+      <button onclick="$('r_panel').innerHTML=''">取消</button>
+    </div>
+    <span style="font-size:12px;color:var(--dim)">
+      排除後這張影像的所有標註都不進訓練集，影像移入 quarantine/。原紀錄保留。
+      按錯的話請找管理者還原。</span>
+  </div>`;
+}
+async function doRetract(imageId){
+  try{
+    const j = await api("/api/v1/retract", {body: JSON.stringify({
+      image_id: imageId, reason: $("rr_reason").value, note: $("rr_note").value.trim()})});
+    $("r_panel").innerHTML = `<div class="banner">✓ 已排除 <code>${esc(j.code)}</code>
+      （${esc(j.reason_zh)}）・影響 ${esc(j.affected)} 筆・影像隔離 ${j.quarantined?"是":"否"}</div>`;
+    loadRecs(); loaded.dash = false; loaded.audit = false;
+  }catch(e){ alert("排除失敗：" + e.message); }
 }
 
 /* ───────── 系統狀態 ───────── */
@@ -545,6 +626,40 @@ async function resetPw(u){
     loaded.audit = false;
   }catch(e){ alert("失敗：" + e.message); }
 }
+
+/* ───────── 一次性登入碼（App 按鈕帶進來的） ─────────
+   代碼放在 URL fragment，**fragment 不會送到伺服器**，所以不會出現在 Cloud Run 的
+   請求日誌裡。讀到之後立刻用 replaceState 清掉，瀏覽器歷史也不留。
+   代碼型別是 otc、效期 60 秒，且被後端擋在所有一般端點之外——
+   就算外流也只能拿去 /api/auth/exchange，且用過即失效。                          */
+async function tryOneTimeCode(){
+  const h = location.hash.slice(1);
+  if(!h.includes("c=")) return false;
+  const p = new URLSearchParams(h), code = p.get("c"), want = p.get("t");
+  // 先清網址再送出。順序刻意如此：萬一交換失敗而使用者重新整理，
+  // 一個已經失效的代碼不該還留在網址列誤導人。
+  history.replaceState(null, "", location.pathname + (want ? "#"+want : ""));
+  if(!code) return false;
+  $("msg").textContent = "以 App 帶來的一次性登入碼登入中…";
+  try{
+    const r = await fetch("/api/auth/exchange", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify({code})});
+    const j = await r.json();
+    if(!r.ok || !j.access_token){
+      $("msg").innerHTML = `⚠ 一次性登入碼無法使用：${esc(j.error||("HTTP "+r.status))}<br>` +
+        `<span style="color:var(--dim)">代碼只有 60 秒且只能用一次。請回 App 重新按一次，或在下方直接登入。</span>`;
+      return false;
+    }
+    tok = j.access_token; perms = j.perms || []; meRole = j.role || "";
+    $("msg").textContent = "";
+    $("who").innerHTML = `${esc(j.display_name||j.user||"")}<br>` +
+      `${esc(j.role_zh||meRole)}　<code>${esc(j.identity||"")}</code><br>` +
+      `<a onclick="logout()" style="cursor:pointer;text-decoration:underline">登出</a>`;
+    applyPerms();
+    return true;
+  }catch(e){ $("msg").textContent = "⚠ 連不到後端：" + e.message; return false; }
+}
+tryOneTimeCode();
 
 window.addEventListener("hashchange", () => { if(tok) go(location.hash.slice(1)); });
 </script></body></html>"""

@@ -5,6 +5,12 @@ plugins {
     id 'kotlin-parcelize'
 }
 
+// 版本號來自 ../version.properties（見該檔說明）。
+// 檔案不存在時退回 1 / 1.0——沒有這份檔的人（CI、外部協作者）仍然 build 得動。
+def versionProps = new Properties()
+def versionFile = rootProject.file("version.properties")
+if (versionFile.exists()) { versionFile.withInputStream { versionProps.load(it) } }
+
 android {
     namespace 'com.woundmeasurement.app'
     compileSdk 34
@@ -13,8 +19,8 @@ android {
         applicationId "com.woundmeasurement.app"
         minSdk 24
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        versionCode Integer.parseInt(versionProps.getProperty('versionCode', '1'))
+        versionName versionProps.getProperty('versionName', '1.0')
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -48,8 +54,19 @@ android {
         }
     }
 
+    buildFeatures { buildConfig true }
+
     buildTypes {
         release {
+            // 預設後端位址編進 APK。
+            //
+            // 這不是機密——網址本來就公開，而且沒有 token 進不去任何端點。
+            // 編進去解決的是一個實際問題：測試者裝完 App 的第一件事若是「手打一串
+            // 40 字元的網址」，就會有人打錯而看到「後端未連線」，然後把它回報成「App 壞了」。
+            //
+            // ⚠ 換部署位址時要一起改這裡並重新發版；設定頁仍可個別覆寫（存進 SharedPreferences）。
+            buildConfigField "String", "DEFAULT_BACKEND_URL",
+                '"https://woundai-backend-421209514056.asia-east1.run.app"'
             // ⚠ minifyEnabled 維持 false。
             // ONNX Runtime 與 OpenCV 大量走 JNI / 反射，R8 會把它們用得到的類別剝掉，
             // 症狀是**只有 release 版才閃退**，而且堆疊指向被混淆過的名字。
@@ -62,6 +79,9 @@ android {
             }
         }
         debug {
+            // debug 走模擬器 loopback：開發與 CI 都在模擬器上跑，
+            // 指向雲端會讓每次改後端都得先部署才測得到。
+            buildConfigField "String", "DEFAULT_BACKEND_URL", '"http://10.0.2.2:5000"'
             // 測試者拿到的若是 debug 版，adb 可以 run-as 讀 App 私有目錄、也可以附加除錯器。
             // PII 與影像仍是 Keystore 密文（金鑰不可匯出），但**執行中的記憶體內容擋不住**。
             // 所以：debug 版只給範例／模擬圖驗證用，真實個案一律用 release 版。

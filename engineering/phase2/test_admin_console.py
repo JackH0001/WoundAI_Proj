@@ -269,9 +269,17 @@ def main():
     check("11f 頁面原始碼不含任何帳號或密碼（資料一律靠 token 取）",
           pw2 not in html and "ns09" not in html)
     check("11g 前端 perms 來自後端回傳，不自行推導角色能力", "perms = j.perms" in html)
-    check("11h 頁籤權限對應表在前端也對得上後端",
-          'TABS = {dash:"flywheel.stats", sys:"audit.read", audit:"audit.read", users:"user.manage"}'
-          in html)
+    # 不比對整串字面值——那種測試每次加頁籤都要跟著改，而且改的人會直接複製新字串進來，
+    # 等於沒有驗到任何東西。改成把前端的對照表抽出來，逐一確認那個權限**真的存在於後端**。
+    # 打錯字（"audit.reads"）不會有任何錯誤訊息，只會讓那個頁籤對所有人永久隱藏。
+    import re as _re
+    m = _re.search(r"const TABS = \{(.*?)\};", html, _re.S)
+    tabs = dict(_re.findall(r"(\w+)\s*:\s*\"([\w.]+)\"", m.group(1))) if m else {}
+    unknown = {t: p for t, p in tabs.items() if p not in au.PERMS}
+    check("11h 每個頁籤宣告的權限都存在於後端權限矩陣（打錯字會讓頁籤永久隱藏且不報錯）",
+          bool(tabs) and not unknown, unknown or tabs)
+    check("11i 四個管理頁籤都在對照表裡",
+          {"dash", "sys", "audit", "users"} <= set(tabs), sorted(tabs))
 
     # ── 12 參數防呆 ───────────────────────────────────────────────
     bad = [

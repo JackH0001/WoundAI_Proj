@@ -37,10 +37,17 @@ object AppSettings {
     private const val K_PASS_ENC = "backend_pass_enc"
 
     /**
-     * 預設值刻意留模擬器位址：開發與 CI 都在模擬器上跑，改成空字串只會讓每個人第一次都卡住。
-     * 但**真機第一次啟動時設定頁會明確警告**這個位址在真機上不通（見 [isEmulatorLoopback]）。
+     * 預設後端位址由建置型別決定（`build.gradle` 的 `buildConfigField`）：
+     * release ＝ 雲端網址，debug ＝ 模擬器 loopback。
+     *
+     * 之所以編進 APK：測試者裝完 App 的第一件事若是手打一串 40 字元的網址，
+     * 就會有人打錯而看到「後端未連線」，然後把它回報成「App 壞了」。
+     * 網址不是機密——沒有 token 進不去任何端點。
+     *
+     * 設定頁仍可個別覆寫（存 SharedPreferences），且**已存過的值優先於預設值**：
+     * 升級 App 不會把使用者自己設的位址蓋掉。
      */
-    const val DEFAULT_URL = "http://10.0.2.2:5000"
+    val DEFAULT_URL: String = com.woundmeasurement.app.BuildConfig.DEFAULT_BACKEND_URL
 
     private fun prefs(ctx: Context) =
         ctx.applicationContext.getSharedPreferences(PREF, Context.MODE_PRIVATE)

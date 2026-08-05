@@ -111,6 +111,30 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
      * 特別把 clinical 與其他來源分開顯示——範例/模擬圖走同一條管線收進來,
      * 混在一起看會讓收案進度看起來比實際多。
      */
+    /**
+     * 取一個一次性登入碼，用來把「已登入的身分」交給同一台裝置上的瀏覽器。
+     *
+     * ⚠ **不可改成直接把 jwt 放進網址。** Cloud Run 會把完整請求 URL 寫進 Cloud Logging，
+     * 查詢字串裡的 token 就以明文躺在日誌裡，任何具 log viewer 權限的人都能複製它
+     * 冒用這位醫師的身分，而效期還有 24 小時。
+     *
+     * 一次性碼放在 URL **fragment**（`#c=...`）——fragment 不會送到伺服器，
+     * 因此不進任何伺服器日誌；效期 60 秒、用過即失效，且後端擋住它去打任何一般端點。
+     *
+     * 回 null 表示拿不到（後端太舊、網路失敗、token 過期）；呼叫端應退回「開網址但要手動登入」。
+     */
+    fun oneTimeCode(): String? {
+        return try {
+            val req = Request.Builder().url("$baseUrl/api/v1/auth/onetime")
+                .header("Authorization", "Bearer $jwt")
+                .post("{}".toRequestBody("application/json".toMediaType())).build()
+            http.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                JSONObject(resp.body?.string() ?: "").optString("code").takeIf { it.isNotBlank() }
+            }
+        } catch (e: Exception) { null }
+    }
+
     fun flywheelStats(): Pair<Boolean, String> {
         val req = Request.Builder().url("$baseUrl/api/v1/flywheel/stats")
             .header("Authorization", "Bearer $jwt").get().build()
