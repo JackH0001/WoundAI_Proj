@@ -3,7 +3,7 @@
 手機 UI 一律只顯示「**應用程式未安裝**」，看不出原因。真正的錯誤碼要用 adb 才拿得到：
 
 ```powershell
-adb install -r "C:\dev\WoundAI_Proj\Android\_dist\WoundAI-v1.0-b2-20260804.apk"
+adb install -r "C:\dev\WoundAI_Proj\Android\_dist\WoundAI-v<版本>-b<版號>-<日期>.apk"
 ```
 
 ---
@@ -106,12 +106,14 @@ $bt = (Get-ChildItem "$env:LOCALAPPDATA\Android\Sdk\build-tools" | Sort-Object N
 `Android/version.properties` 是唯一真實來源：
 
 ```properties
-versionCode=2
+versionCode=4
 versionName=1.0
 ```
 
+（`versionCode` 1、2 因下述的檔案損毀事故作廢，現行由 3 起算。）
+
 `build_release.ps1` **每次發布自動遞增 `versionCode`**（`-NoBump` 可跳過，
-用於上一次建置失敗要重建同一版時）。產出檔名是 `WoundAI-v1.0-b2-20260804.apk`，
+用於上一次建置失敗要重建同一版時）。產出檔名是 `WoundAI-v1.0-b4-20260805.apk` 這種形式，
 測試者看檔名就知道哪個新。
 
 ### version.properties 為什麼是純 ASCII
