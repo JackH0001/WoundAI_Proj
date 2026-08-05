@@ -1594,6 +1594,7 @@ def classify_wound():
 
         # Stage3 校正面積:優先 ArUco,否則 cm_per_pixel(手動)
         area_cm2 = None; calib = "none"; mm_per_px = None
+        marker_quad = None; marker_id = None; marker_mm = None
         if _ac is not None:
             det = _ac.detect_marker(img)
             if det is not None:
@@ -1603,6 +1604,17 @@ def classify_wound():
                 _c = np.array(det[0]).reshape(-1, 2)
                 _side = float(np.mean([np.linalg.norm(_c[_i] - _c[(_i + 1) % 4]) for _i in range(4)]))
                 if _side > 0: mm_per_px = _mm / _side
+                # ⚠ **把角點回傳給 App 目視複核。**
+                #
+                # ArUco 偵測本身沒有「認錯了」這個錯誤狀態——它要嘛回一個四邊形，要嘛回 None。
+                # 若它把反光、地磚接縫或別處的印刷圖案認成標記，mm_per_px 就是錯的，
+                # 而**每一筆面積都會安靜地錯**：服務照回 200、畫面照顯示一個合理的數字，
+                # 沒有任何跡象。這是本專案最危險的失敗形狀。
+                #
+                # 唯一實際可行的防線是讓人看一眼：把框畫在照片上，貼歪了、框到別的東西，
+                # 醫師三秒就看得出來。所以角點必須回傳。
+                marker_quad = [[int(round(x)), int(round(y))] for x, y in _c.tolist()]
+                marker_id = int(det[1]); marker_mm = _mm
         if area_cm2 is None:
             cpp = request.form.get('cm_per_pixel', type=float)
             if cpp:
@@ -1630,6 +1642,8 @@ def classify_wound():
                                'wound_polygon': wound_poly},
             'stage3_calibrate': {'method': calib, 'area_cm2': (round(area_cm2, 2) if area_cm2 is not None else None),
                                  'mm_per_px': (round(mm_per_px, 6) if mm_per_px is not None else None),
+                                 # 角點順序 TL,TR,BR,BL(影像座標,與 image_w/h 同一空間)。供 App 畫出校正框。
+                                 'marker_quad': marker_quad, 'marker_id': marker_id, 'marker_mm': marker_mm,
                                  'note': ('未校正(無 ArUco 且未提供 cm_per_pixel)' if area_cm2 is None else None)},
             'stage4_tissue': {'method': 'v2(WB+HSV)', 'tissue_frac': {k: round(t[k], 3) for k in ('necrosis','slough','granulation','epithelial','other')},
                               # 印刷單也可能做成多組織混色示範,故照常計算;但顏料≠組織,讀數不可作臨床解讀

@@ -25,6 +25,16 @@ data class ClassifyResult(
     val escalated: Boolean = false,
     val woundPolygon: List<List<Int>> = emptyList(),  // 傷口輪廓(供醫師修邊/飛輪標註)
     val mmPerPx: Double? = null,                      // ArUco 尺度(mm/影像px):修邊面積=像素數×(mm/px)²
+    /**
+     * ArUco 標記的四個角點（TL,TR,BR,BL，與 imageW/H 同一座標空間）。
+     *
+     * 存在的理由不是好看：**ArUco 偵測沒有「認錯了」這個錯誤狀態**——它要嘛回四邊形、
+     * 要嘛回 null。認錯目標（反光、其他方形圖案）時 mmPerPx 就是錯的，
+     * 而每一筆面積都會安靜地錯，服務照回 200。程式判斷不了，只能讓人看一眼。
+     */
+    val markerQuad: List<List<Int>>? = null,
+    val markerMm: Double? = null,
+    val calibMethod: String? = null,
     // 飛輪資料鏈:image_id=後端已存影像的內容雜湊;imageW/H=polygon 與修邊 GT 的座標空間。
     // 送標註時必須帶回,否則後端收到的是無影像、無尺寸的孤兒 GT(不可訓練)。
     val imageId: String? = null,
@@ -195,6 +205,14 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
                 escalated = !s2.isNull("escalated") && s2.getBoolean("escalated"),
                 woundPolygon = poly,
                 mmPerPx = if (s3.isNull("mm_per_px")) null else s3.getDouble("mm_per_px"),
+                markerQuad = if (s3.isNull("marker_quad")) null else runCatching {
+                    val qa = s3.getJSONArray("marker_quad")
+                    (0 until qa.length()).map { i ->
+                        val pt = qa.getJSONArray(i); listOf(pt.getInt(0), pt.getInt(1))
+                    }.takeIf { it.size == 4 }
+                }.getOrNull(),
+                markerMm = if (s3.isNull("marker_mm")) null else s3.getDouble("marker_mm"),
+                calibMethod = if (s3.isNull("method")) null else s3.getString("method"),
                 imageId = if (j.isNull("image_id")) null else j.getString("image_id"),
                 imageW = j.optInt("image_w", 0),
                 imageH = j.optInt("image_h", 0),

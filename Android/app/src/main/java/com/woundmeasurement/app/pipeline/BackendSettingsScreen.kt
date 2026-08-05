@@ -71,6 +71,14 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Text("後端連線設定", style = MaterialTheme.typography.titleLarge)
+        // App 版本。排錯的第一個問題永遠是「你裝的是哪一版」——
+        // 沒有這一行，答案只能靠測試者回去翻手機的應用程式資訊，而多數人不會翻。
+        Text("App ${com.woundmeasurement.app.BuildConfig.VERSION_NAME} " +
+             "(build ${com.woundmeasurement.app.BuildConfig.VERSION_CODE})" +
+             if (com.woundmeasurement.app.BuildConfig.DEBUG) " · DEBUG 版（不可用於真實個案）" else "",
+            style = MaterialTheme.typography.bodySmall,
+            color = if (com.woundmeasurement.app.BuildConfig.DEBUG) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onSurfaceVariant)
 
         OutlinedTextField(
             value = url, onValueChange = { url = it },

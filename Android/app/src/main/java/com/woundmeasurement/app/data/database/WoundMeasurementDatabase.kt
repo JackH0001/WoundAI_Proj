@@ -32,7 +32,7 @@ import com.woundmeasurement.app.data.converter.DateConverter
         WoundCaseEntity::class,
         ConsentEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 @TypeConverters(DateConverter::class)
@@ -151,6 +151,23 @@ abstract class WoundMeasurementDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v5：每筆量測存下組織比例。
+         *
+         * ⚠ 五個欄位都是 **nullable REAL，不給 DEFAULT 0**。
+         * 舊紀錄沒有這個資料，填 0 會讓時間軸畫出一根「肉芽 0%」的柱子，
+         * 而那會被讀成「當時完全沒有肉芽」——一個看起來完全合理的假數據。
+         * NULL 才說得出「這一筆沒有量」。
+         */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                for (c in listOf("tissueGranulation", "tissueSlough", "tissueNecrosis",
+                                 "tissueEpithelial", "tissueOther")) {
+                    db.execSQL("ALTER TABLE `measurements` ADD COLUMN `$c` REAL")
+                }
+            }
+        }
+
         fun getDatabase(context: Context): WoundMeasurementDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -158,7 +175,7 @@ abstract class WoundMeasurementDatabase : RoomDatabase() {
                     WoundMeasurementDatabase::class.java,
                     "wound_measurement_database"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     // 刻意不加 fallbackToDestructiveMigration:寧可在開發期因缺 migration 而崩潰,
                     // 也不要在醫護手機上默默刪光病歷。
                     .build()

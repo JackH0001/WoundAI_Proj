@@ -65,6 +65,9 @@ class MeasureViewModel(
     @Volatile var editRaster: EditRaster? = null
     // ArUco 尺度(mm/影像px,後端直傳):修邊面積=像素數×(mm/px)²,不依賴 AI 初始面積
     @Volatile var lastMmPerPx: Double? = null
+    /** ArUco 校正框角點與方法，供結果頁的參照圖目視複核（見 ClassifyResult.markerQuad）。 */
+    @Volatile var lastMarkerQuad: List<List<Int>>? = null
+    @Volatile var lastCalibMethod: String? = null
         private set
     // 飛輪資料鏈綁定:後端 classify 存下的影像雜湊 + polygon 座標空間尺寸 + 路由/模型(溯源)。
     // 缺這些,送出的標註就是無影像的孤兒 GT,永遠訓練不了(2026-07-28 稽核發現舊佇列 8/8 皆如此)。
@@ -102,7 +105,7 @@ class MeasureViewModel(
     private fun clearBackendBinding(alsoBitmap: Boolean = false) {
         lastPolygon = emptyList()
         lastCorrectionIou = null
-        lastMmPerPx = null
+        lastMmPerPx = null; lastMarkerQuad = null; lastCalibMethod = null
         lastImageId = null; lastImageW = 0; lastImageH = 0
         lastRoute = null; lastSegModel = null; lastPhantomHint = false; lastImageReused = false
         lastDoctorVerified = false   // 新影像＝尚未經醫師確認,不可沿用上一張的驗證狀態
@@ -206,6 +209,7 @@ class MeasureViewModel(
                 val cppWork = cmPerPixel?.let { it / scale }
                 var polyCap: List<List<Int>> = emptyList()
                 var mmCap: Double? = null
+                var quadCap: List<List<Int>>? = null; var calibCap: String? = null
                 var idCap: String? = null; var wCap = 0; var hCap = 0
                 var routeCap: String? = null; var modelCap: String? = null
                 var hintCap = false; var reusedCap = false
@@ -214,6 +218,8 @@ class MeasureViewModel(
                     val c = backend.classify(jpeg, cppWork, seg)
                     polyCap = c.woundPolygon
                     mmCap = c.mmPerPx
+                    quadCap = c.markerQuad
+                    calibCap = c.calibMethod
                     idCap = c.imageId; wCap = c.imageW; hCap = c.imageH
                     routeCap = c.route; modelCap = c.segModel; hintCap = c.phantomHint
                     reusedCap = c.imageReused
@@ -234,6 +240,7 @@ class MeasureViewModel(
                 lastCorrectionIou = null   // 新分析→重置修邊修正量
                 lastDoctorVerified = false // 新分析→醫師尚未確認
                 lastMmPerPx = mmCap
+                lastMarkerQuad = quadCap; lastCalibMethod = calibCap
                 lastImageId = idCap; lastImageW = wCap; lastImageH = hCap
                 lastRoute = routeCap; lastSegModel = modelCap; lastPhantomHint = hintCap
                 lastImageReused = reusedCap
@@ -425,7 +432,14 @@ class MeasureViewModel(
                             imageH = lastImageH.takeIf { it > 0 },
                             exudate = exudate,
                             correctionIou = lastCorrectionIou,
-                            doctorVerified = lastDoctorVerified
+                            doctorVerified = lastDoctorVerified,
+                            // v5：組織比例存在量測當下。原始影像會依 90 天政策清除，
+                            // 沒有現在存下來就永遠補不回來（見 MeasurementEntity 的說明）。
+                            tissueGranulation = r.tissueFrac["granulation"],
+                            tissueSlough = r.tissueFrac["slough"],
+                            tissueNecrosis = r.tissueFrac["necrosis"],
+                            tissueEpithelial = r.tissueFrac["epithelial"],
+                            tissueOther = r.tissueFrac["other"]
                         ))
                         Pair(nid, false)
                     }

@@ -2,7 +2,11 @@ package com.woundmeasurement.app.pipeline
 
 import android.graphics.Bitmap
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -32,15 +36,40 @@ import kotlin.math.sqrt
  */
 private enum class EditTool { B_PAINT, B_ERASE, PAN, TISSUE }
 
-private val T_NAMES = arrayOf("", "肉芽", "腐肉", "壞死", "上皮")
-private val T_COLORS = intArrayOf(
+// internal（非 private）：參照圖 AnalysisPreview 要用同一份調色盤。
+// 兩邊各定義一份的話，某天只改了其中一邊，畫面與修邊畫面的顏色就對不上了。
+internal val T_NAMES = arrayOf("", "肉芽", "腐肉", "壞死", "上皮", "其他")
+
+/**
+ * 組織圖層配色。索引＝本畫面的組織碼（1 肉芽 / 2 腐肉 / 3 壞死 / 4 上皮 / 5 其他）。
+ *
+ * ## 為什麼肉芽從紅改成綠
+ *
+ * 舊配色把肉芽畫成**半透明紅疊在紅色肉芽上**——那是資訊量為零的疊圖。
+ * 而且它的 α 只有 70/255（27%），是四類裡最低的，於是最需要看清楚的那一類最看不見。
+ * 綠是紅的互補色，疊在肉芽上對比最大，而且不會被誤認成組織本身的顏色。
+ *
+ * ## 為什麼四類的 α 要一致
+ *
+ * 舊值是 70 / 110 / 130 / 110，沒有理由地不一致。後果不只是美觀：
+ * **α 高的區域看起來「比較多」**，醫師在比較相鄰兩塊組織的範圍時會被透明度誤導，
+ * 而他正在做的判斷會直接變成訓練用的 GT。一致的 α 讓面積比較只反映面積。
+ *
+ * 選 T_ALPHA=115（45%）：低到看得見底下的組織紋理（醫師要靠紋理判斷），
+ * 高到在強光下的手機螢幕上仍分得出區塊。
+ */
+internal const val T_ALPHA = 115
+internal val T_COLORS = intArrayOf(
     0,
-    android.graphics.Color.argb(70, 220, 60, 60),
-    android.graphics.Color.argb(110, 235, 210, 70),
-    android.graphics.Color.argb(130, 40, 40, 40),
-    android.graphics.Color.argb(110, 240, 150, 170)
+    android.graphics.Color.argb(T_ALPHA, 29, 158, 117),    // 肉芽：綠（紅的互補色）
+    android.graphics.Color.argb(T_ALPHA, 239, 159, 39),    // 腐肉：琥珀
+    android.graphics.Color.argb(T_ALPHA, 60, 52, 137),     // 壞死：深紫（純黑會與陰影混淆）
+    android.graphics.Color.argb(T_ALPHA, 237, 147, 177),   // 上皮：粉
+    android.graphics.Color.argb(T_ALPHA, 180, 178, 169)    // 其他／未分類：灰
 )
 private val EDGE_COLOR = android.graphics.Color.argb(255, 0, 229, 255)
+/** 組織碼上限。加「其他」之後所有 coerce 都要跟著走——寫成常數才不會漏掉其中一處。 */
+internal const val T_MAX = 5
 private const val MAX_MASK_DIM = 2200   // 擴張上限(記憶體防護)
 
 /** 編輯狀態持久化:遮罩為唯一真相,跨回合原樣傳遞;cm2PerPx 首次鎖定(面積冪等)。 */
@@ -60,7 +89,7 @@ private class RasterState(
     var orig = ByteArray(mw * mh)
     var overlay: Bitmap = Bitmap.createBitmap(mw, mh, Bitmap.Config.ARGB_8888)
     var maskCount = 0
-    val tCounts = intArrayOf(0, 0, 0, 0, 0)
+    val tCounts = IntArray(T_MAX + 1)   // 索引 0 不用；1..T_MAX 對應組織碼
     var cm2PerPx: Double? = null
 
     fun colorAt(x: Int, y: Int): Int {
@@ -69,7 +98,7 @@ private class RasterState(
         val edge = x == 0 || y == 0 || x == mw - 1 || y == mh - 1 ||
                 mask[i - 1].toInt() == 0 || mask[i + 1].toInt() == 0 ||
                 mask[i - mw].toInt() == 0 || mask[i + mw].toInt() == 0
-        return if (edge) EDGE_COLOR else T_COLORS[tissue[i].toInt().coerceIn(1, 4)]
+        return if (edge) EDGE_COLOR else T_COLORS[tissue[i].toInt().coerceIn(1, T_MAX)]
     }
     fun syncAll() {
         val px = IntArray(mw * mh)
@@ -83,7 +112,7 @@ private class RasterState(
     }
     fun recount() {
         tCounts.fill(0); var c = 0
-        for (i in mask.indices) if (mask[i].toInt() != 0) { c++; tCounts[tissue[i].toInt().coerceIn(1, 4)]++ }
+        for (i in mask.indices) if (mask[i].toInt() != 0) { c++; tCounts[tissue[i].toInt().coerceIn(1, T_MAX)]++ }
         maskCount = c
     }
     /** 視需要向外擴張(維持 mScale;內容整格搬移,像素級無損)。回傳是否擴張。 */
@@ -223,6 +252,12 @@ fun WoundEditScreen(
     var curTissue by remember { mutableStateOf(2) }
     var brushScreen by remember { mutableStateOf(36f) }
     var cursor by remember { mutableStateOf<Offset?>(null) }
+    // 組織圖層開關。
+    //
+    // 醫師抱怨「遮罩顏色影響背景組織的分類判斷」，而任何配色都不可能同時滿足
+    // 「看得清楚分區」與「看得清楚底下的紋理」——那是同一塊像素的兩種用途。
+    // 與其在透明度上折衷到兩邊都不好，不如讓他一鍵切掉去看原圖。
+    var showTissue by remember { mutableStateOf(true) }
 
     class Snap(val m: ByteArray, val t: ByteArray, val mw: Int, val mh: Int, val rx0: Float, val ry0: Float)
     val undo = remember(st) { mutableStateListOf<Snap>() }
@@ -288,11 +323,11 @@ fun WoundEditScreen(
                 }
                 EditTool.B_ERASE -> if (st.mask[i].toInt() != 0) {
                     st.mask[i] = 0; st.maskCount--
-                    val tc = st.tissue[i].toInt(); if (tc in 1..4) st.tCounts[tc]--
+                    val tc = st.tissue[i].toInt(); if (tc in 1..T_MAX) st.tCounts[tc]--
                     st.tissue[i] = 0
                 }
                 EditTool.TISSUE -> if (st.mask[i].toInt() != 0 && st.tissue[i].toInt() != curTissue) {
-                    val tc = st.tissue[i].toInt(); if (tc in 1..4) st.tCounts[tc]--
+                    val tc = st.tissue[i].toInt(); if (tc in 1..T_MAX) st.tCounts[tc]--
                     st.tissue[i] = curTissue.toByte(); st.tCounts[curTissue]++
                 }
                 EditTool.PAN -> {}
@@ -313,7 +348,10 @@ fun WoundEditScreen(
         return mapOf(
             "granulation" to st.tCounts[1].toDouble() / tot, "slough" to st.tCounts[2].toDouble() / tot,
             "necrosis" to st.tCounts[3].toDouble() / tot, "epithelial" to st.tCounts[4].toDouble() / tot,
-            "other" to 0.0
+            // ⚠ 這裡原本寫死 0.0。分類器本來就會產生「其他」（TissueClassifierV2 的 code 5，
+            // 也就是不符合前四類的落點），寫死 0 等於在送出 GT 的最後一步把它抹掉——
+            // 於是訓練資料永遠學不到「這塊我也不知道是什麼」，而那正是最該讓醫師覆核的部分。
+            "other" to st.tCounts[5].toDouble() / tot
         )
     }
     @Suppress("UNUSED_EXPRESSION") version
@@ -335,29 +373,69 @@ fun WoundEditScreen(
         Box(Modifier.fillMaxWidth().weight(1f).clipToBounds().onSizeChanged { boxSize = it }) {
             Canvas(
                 Modifier.fillMaxSize().pointerInput(Unit) {
-                    var strokeSnapshot: Snap? = null
-                    var last: Offset? = null
-                    detectDragGestures(
-                        onDragStart = { off ->
-                            val kk = k(); val imgPt = off / kk + viewOffset
-                            cursor = off
-                            if (tool != EditTool.PAN) { strokeSnapshot = snap(); stamp(imgPt); last = imgPt }
-                        },
-                        onDrag = { change, delta ->
-                            change.consume()
-                            val kk = k(); cursor = change.position
-                            if (tool == EditTool.PAN) viewOffset -= delta / kk
-                            else { val cur = change.position / kk + viewOffset; last?.let { stampLine(it, cur) }; last = cur }
-                        },
-                        onDragEnd = {
-                            strokeSnapshot?.let {
-                                // 擴張過的舊快照尺寸不同，還原會錯位 → 丟棄
-                                if (it.mw == st.mw && it.mh == st.mh) pushUndo(it)
+                    // ⚠ 不能用 detectDragGestures + detectTransformGestures 兩個 pointerInput 疊起來：
+                    // 先註冊的那個會把事件吃掉，於是雙指縮放永遠不會觸發（或反過來，畫不了圖）。
+                    // 手勢必須在**同一個迴圈**裡依觸點數分流。
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        var strokeSnapshot: Snap? = null
+                        var last: Offset? = null
+                        var multi = false          // 一旦進入雙指模式，這一輪就不再回頭去畫
+                        cursor = down.position
+
+                        if (tool != EditTool.PAN) {
+                            strokeSnapshot = snap()
+                            val p0 = down.position / k() + viewOffset
+                            stamp(p0); last = p0
+                        }
+
+                        do {
+                            val ev = awaitPointerEvent()
+                            val pressed = ev.changes.count { it.pressed }
+
+                            if (pressed >= 2) {
+                                // ── 進入雙指：縮放 + 平移 ──
+                                if (!multi) {
+                                    multi = true
+                                    // 第一指落下時已經畫了一筆。使用者的意圖是縮放，不是畫圖——
+                                    // 用既有的快照把那一筆還原，否則每次縮放都會在傷口上留一個點，
+                                    // 而那個點會直接進入 GT。
+                                    strokeSnapshot?.let { if (it.mw == st.mw && it.mh == st.mh) restore(it) }
+                                    strokeSnapshot = null; last = null; cursor = null
+                                    version++
+                                }
+                                val zoom = ev.calculateZoom()
+                                val pan = ev.calculatePan()
+                                val centroid = ev.calculateCentroid(useCurrent = true)
+                                if (centroid != Offset.Unspecified) {
+                                    // 以雙指中心為錨點縮放：螢幕點 p 對應影像點 p/k + off，
+                                    // 要讓錨點下的影像位置不動 → off' = off + c/k - c/k'
+                                    val kOld = k()
+                                    val ci = centroid / kOld + viewOffset
+                                    if (zoom != 1f) viewScale = (viewScale * zoom).coerceIn(0.5f, 24f)
+                                    val kNew = k()
+                                    viewOffset = ci - centroid / kNew - pan / kNew
+                                }
+                                ev.changes.forEach { it.consume() }
+                            } else if (!multi && pressed == 1) {
+                                // ── 單指：維持原本行為（依工具決定塗抹或平移）──
+                                val ch = ev.changes.firstOrNull { it.pressed } ?: continue
+                                val delta = ch.position - ch.previousPosition
+                                cursor = ch.position
+                                if (tool == EditTool.PAN) viewOffset -= delta / k()
+                                else { val cur = ch.position / k() + viewOffset; last?.let { stampLine(it, cur) }; last = cur }
+                                ch.consume()
+                            } else {
+                                ev.changes.forEach { it.consume() }
                             }
-                            strokeSnapshot = null; last = null; cursor = null
-                        },
-                        onDragCancel = { strokeSnapshot = null; last = null; cursor = null }
-                    )
+                        } while (ev.changes.any { it.pressed })
+
+                        strokeSnapshot?.let {
+                            // 擴張過的舊快照尺寸不同，還原會錯位 → 丟棄
+                            if (it.mw == st.mw && it.mh == st.mh) pushUndo(it)
+                        }
+                        cursor = null      // last 是迴圈區域變數，這一輪結束即消失，不必再清
+                    }
                 }
             ) {
                 @Suppress("UNUSED_EXPRESSION") version
@@ -367,8 +445,9 @@ fun WoundEditScreen(
                 drawImage(img, srcOffset = IntOffset.Zero, srcSize = IntSize(bw, bh), dstOffset = dstOff, dstSize = dstSz)
                 val ovOff = IntOffset(((st.rx0 - viewOffset.x) * kk).roundToInt(), ((st.ry0 - viewOffset.y) * kk).roundToInt())
                 val ovW = (st.mw / st.mScale * kk).roundToInt(); val ovH = (st.mh / st.mScale * kk).roundToInt()
-                drawImage(st.overlay.asImageBitmap(), srcOffset = IntOffset.Zero, srcSize = IntSize(st.mw, st.mh),
-                    dstOffset = ovOff, dstSize = IntSize(ovW, ovH))
+                if (showTissue)
+                    drawImage(st.overlay.asImageBitmap(), srcOffset = IntOffset.Zero, srcSize = IntSize(st.mw, st.mh),
+                        dstOffset = ovOff, dstSize = IntSize(ovW, ovH))
                 drawRect(Color(0x44888888),
                     topLeft = Offset(ovOff.x.toFloat(), ovOff.y.toFloat()),
                     size = androidx.compose.ui.geometry.Size(ovW.toFloat(), ovH.toFloat()),
@@ -390,7 +469,11 @@ fun WoundEditScreen(
             FilterChip(tool == EditTool.B_ERASE, { tool = EditTool.B_ERASE }, { Text("邊界－") }, modifier = Modifier.weight(1f))
             FilterChip(tool == EditTool.PAN, { tool = EditTool.PAN }, { Text("移動") }, modifier = Modifier.weight(1f))
             FilterChip(tool == EditTool.TISSUE, { tool = EditTool.TISSUE }, { Text("組織🖌") }, modifier = Modifier.weight(1f))
+            FilterChip(showTissue, { showTissue = !showTissue },
+                { Text(if (showTissue) "圖層👁" else "圖層🚫") }, modifier = Modifier.weight(1f))
         }
+        if (!showTissue) Text("組織圖層已隱藏（僅影響顯示，遮罩與數值不變）",
+            fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (tool == EditTool.TISSUE) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 (1..4).forEach { c ->

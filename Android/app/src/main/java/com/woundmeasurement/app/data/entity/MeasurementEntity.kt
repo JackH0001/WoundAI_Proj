@@ -81,5 +81,22 @@ data class MeasurementEntity(
      * 刻意用獨立欄位而非從 [correctionIou] 是否為 null 反推：後者是「修正幅度」，
      * 語意不同且在從時間軸重新修邊時刻意不覆寫，拿來當驗證旗標會在某天悄悄錯掉。
      */
-    val doctorVerified: Boolean = false
+    val doctorVerified: Boolean = false,
+
+    // ── v5：組織比例（0..1，五類相加≈1） ─────────────────────────────
+    //
+    // 為什麼要存在**每一筆量測**上，而不是需要時再從雲端佇列重算：
+    //
+    //  1. 雲端佇列只有醫師**送出訓練標註**的那幾筆。護理師量測、醫師沒送訓練的、
+    //     以及撤回同意後被排除的，全都不在裡面——而時間軸要畫的是**這個病患的全部療程**。
+    //  2. 這是不可回溯的欄位。沒有在量測當下存下來，日後永遠補不回來
+    //     （原始影像會依 90 天政策清除，重算的前提就沒了）。
+    //
+    // ⚠ 可為 null，且 null ≠ 0。舊紀錄（v4 以前）沒有這個資料，
+    // 圖表要顯示「無資料」而不是畫一根 0% 的柱子——後者會被讀成「當時完全沒有肉芽」。
+    val tissueGranulation: Double? = null,
+    val tissueSlough: Double? = null,
+    val tissueNecrosis: Double? = null,
+    val tissueEpithelial: Double? = null,
+    val tissueOther: Double? = null
 )
