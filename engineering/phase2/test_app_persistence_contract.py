@@ -20,6 +20,16 @@ Compose UI 沒有便宜的自動化測試手段（要 instrumentation + 實機/�
 呼叫端漏傳參數。所以在這裡守。這不能取代實機驗證，但它擋得住回歸——
 而回歸正是這個 bug 最可能的來源（下次有人重構這段時很容易再寫成 `_`）。
 
+## ⚠ 這支測試綠燈**不代表編得起來**
+
+它只做文字比對，看不懂作用域。2026-08-06 實際發生過：本測試回報
+「AnalysisPreview.kt：TissueSeg.classify 有帶 wbGains → PASS」，
+而 Kotlin 編譯器回 `Unresolved reference: wbGains`——那個呼叫在一個
+**輔助函式**裡，而參數是加在 composable 上的，兩者不同作用域。
+
+編譯器是那一類錯誤的守門人，這支測試守的是另一類：**編得過、跑得動、
+但語意已經漂掉**的情況。兩者不能互相取代。改完 App 一定要 `build_release.ps1`。
+
 ## 守的四條線
 
 1. 所有 `WoundEditScreen(` 呼叫端都要傳 `resume =` 且不是 `null`

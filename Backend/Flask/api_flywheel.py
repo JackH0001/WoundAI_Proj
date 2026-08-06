@@ -295,22 +295,45 @@ def poly_sig(poly):
     return hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16]
 
 
-def sample_key(image_id, poly):
-    """樣本身分 = (影像, 遮罩)。同影像不同描邊 → 不同 key(視為修訂,見 find_duplicate)。"""
-    return f"{image_id or '-'}::{poly_sig(poly)}"
+def tissue_sig(mask_b64_or_bytes):
+    """組織遮罩內容雜湊。None／空 → None（代表這筆沒有組織遮罩）。"""
+    if not mask_b64_or_bytes:
+        return None
+    raw = (mask_b64_or_bytes.encode("utf-8")
+           if isinstance(mask_b64_or_bytes, str) else mask_b64_or_bytes)
+    return hashlib.sha1(raw).hexdigest()[:16]
 
 
-def find_duplicate(path, image_id, poly):
+def sample_key(image_id, poly, t_sig=None):
+    """樣本身分 = (影像, 傷口輪廓, **組織遮罩**)。
+
+    ⚠ 組織遮罩必須進這個鍵。2026-08-06 實測的後果：
+
+    醫師從時間軸重新修邊，只改組織分區、沒動傷口邊界 → poly_sig 完全相同
+    → 判定為「同影像同遮罩」→ 回 `duplicate_skipped` → **新的組織遮罩根本沒存**。
+    而畫面顯示「相同影像的相同遮罩已在佇列（去重），未重複新增」，
+    聽起來像正常的去重行為，醫師不會知道他剛才的標註被丟掉了。
+
+    傷口輪廓與組織分區是兩份獨立的 GT，任一份變了就是一筆新的標註。
+
+    舊紀錄沒有 tissue_sig（值為 None），所以「有組織遮罩的新標註」不會與
+    「沒有組織遮罩的舊標註」誤判為相同——那本來就是不同的東西。
+    """
+    return f"{image_id or '-'}::{poly_sig(poly)}::{t_sig or '-'}"
+
+
+def find_duplicate(path, image_id, poly, t_sig=None):
     """回 (完全重複 rec 或 None, 同影像既有 rec 清單)。
-    - 完全重複(同影像同遮罩)→ 略過,避免灌爆同一樣本。
-    - 同影像不同遮罩 → **不是重複,是修訂**:仍收下,但標 supersedes 讓匯出只取最新,
+    - 完全重複(同影像、同輪廓、同組織遮罩)→ 略過,避免灌爆同一樣本。
+    - 其中任一項不同 → **不是重複,是修訂**:仍收下,但標 supersedes 讓匯出只取最新,
       避免同一張圖出現兩份互相矛盾的 GT(舊實作就是這樣混進 WD-14864776/WD-17879162)。"""
-    key = sample_key(image_id, poly)
+    key = sample_key(image_id, poly, t_sig)
     exact, same_img = None, []
     for rec in read_jsonl(path):
         if rec.get("image_id") and image_id and rec.get("image_id") == image_id:
             same_img.append(rec)
-            if sample_key(rec.get("image_id"), rec.get("gt_polygon")) == key:
+            if sample_key(rec.get("image_id"), rec.get("gt_polygon"),
+                          rec.get("tissue_sig")) == key:
                 exact = rec
     return exact, same_img
 
@@ -704,19 +727,26 @@ try:
             audit(actor, "annotation_rejected", d.get("code", "?"), msg, role, org)
             return jsonify({"error": "標註不符上傳規範", "issues": [msg]}), 400
 
-        exact, same_img = find_duplicate(QUEUE, image_id, d.get("gt_polygon"))
+        # 組織遮罩也是身分的一部分——只改組織不改邊界時，沒有它就會被誤判為重複
+        # 而把醫師的標註丟掉（見 sample_key 的說明）。
+        t_sig = tissue_sig(d.get("tissue_mask_png"))
+        exact, same_img = find_duplicate(QUEUE, image_id, d.get("gt_polygon"), t_sig)
         # 已撤回的舊紀錄不算重複(否則重新取得同意後永遠補不回來)
         if exact is not None and exact.get("code") not in wd_codes:
             audit(actor, "annotation_duplicate", d.get("code", "?"),
-                  f"同影像同遮罩已在佇列({exact.get('code')})", role, org)
+                  f"同影像、同輪廓、同組織遮罩已在佇列({exact.get('code')})", role, org)
             return jsonify({"status": "duplicate_skipped", "code": d.get("code"),
-                            "note": "相同影像的相同遮罩已在再訓練佇列,已自動略過(避免重複樣本)"}), 200
+                            "note": "此筆與佇列中既有樣本的**影像、傷口輪廓、組織遮罩三者皆相同**，"
+                                    "已自動略過（避免重複樣本）。若您剛才有修改，請確認是否按下了「完成修邊」。"}), 200
 
         rec = {k: d.get(k) for k in REQUIRED}
         for k in PROVENANCE:
             if d.get(k) is not None: rec[k] = d.get(k)
         rec["source"] = str(d.get("source") or DEFAULT_SOURCE)   # 顯式落盤,免得日後靠預設值猜
         rec["poly_sig"] = poly_sig(d.get("gt_polygon"))
+        # 落盤，否則下一次的去重比對拿不到它，同樣的漏洞會再出現一次。
+        if t_sig:
+            rec["tissue_sig"] = t_sig
         rec["supersedes"] = [r.get("code") for r in same_img] or None
         rec["actor"] = actor
         rec["role"] = role

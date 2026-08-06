@@ -54,7 +54,11 @@ private const val PREVIEW_MAX = 900          // 預覽長邊上限（記憶體�
  * ⚠ 這是**色彩啟發式**，不是模型。它與後端 `stage4_tissue` 用的是同一套規則
  * （`TissueClassifierV2`），所以畫面與數字一致；但兩者都只是輔助，最終以醫師修邊為準。
  */
-private fun buildTissueOverlay(src: Bitmap, preview: Bitmap, polygon: List<List<Int>>): Bitmap? {
+private fun buildTissueOverlay(
+    src: Bitmap, preview: Bitmap, polygon: List<List<Int>>,
+    /** 後端色卡白平衡增益 [R,G,B]。null＝退回灰世界（與結果欄的數字會對不上）。 */
+    wbGains: DoubleArray? = null
+): Bitmap? {
     if (polygon.size < 3) return null
     return runCatching {
         var x0 = Int.MAX_VALUE; var y0 = Int.MAX_VALUE; var x1 = 0; var y1 = 0
@@ -106,8 +110,13 @@ fun AnalysisPreview(
     // 它只有幾十毫秒，但那是在**合成執行緒**上——結果頁第一次出現時會多卡一幀，
     // 而醫師拿到的印象會是「按完量測畫面頓一下」。overlay 晚一瞬間出現不影響判讀，
     // 卡頓卻會被記住。用 produceState 讓它自己補上來。
-    val tissue by produceState<Bitmap?>(initialValue = null, bitmap, polygon) {
-        value = withContext(Dispatchers.Default) { buildTissueOverlay(bitmap, preview, polygon) }
+    // ⚠ wbGains 必須列進 produceState 的 key。漏掉的話：先以無色卡的結果算過一次
+    // overlay 之後，即使後來拿到增益也不會重算——畫面停在灰世界版本，
+    // 而結果欄顯示的是色卡版本的數字。又是「兩個答案並列」。
+    val tissue by produceState<Bitmap?>(initialValue = null, bitmap, polygon, wbGains) {
+        value = withContext(Dispatchers.Default) {
+            buildTissueOverlay(bitmap, preview, polygon, wbGains)
+        }
     }
     val img = remember(preview) { preview.asImageBitmap() }
     val tImg = remember(tissue) { tissue?.asImageBitmap() }

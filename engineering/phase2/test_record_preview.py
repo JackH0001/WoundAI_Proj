@@ -186,6 +186,51 @@ def main():
     s2 = cli.get("/api/v1/flywheel/record/%s/preview.svg" % iid2, headers=H).data.decode()
     check("未修正的遮罩在圖上明講不進訓練集", "未經醫師修正" in s2 and "不會進入訓練集" in s2)
 
+    # ── 3b. 只改組織、不改邊界，必須被視為**新的標註**而非重複 ──────
+    #
+    # 2026-08-06 實測的 bug：去重鍵是 image_id::poly_sig(gt_polygon)，
+    # 組織遮罩不在鍵裡。醫師從時間軸重新修邊、只改組織分區沒動邊界時，
+    # poly_sig 完全相同 → 判定重複 → **新的組織遮罩根本沒存**，
+    # 而畫面顯示「相同影像的相同遮罩已在佇列（去重）」，聽起來像正常行為。
+    #
+    # 傷口輪廓與組織分區是兩份獨立的 GT，任一份變了就是一筆新的標註。
+    print("\n── 3b 只改組織不改邊界 ──")
+    b3 = dict(body, code="WD-TISSUEONLY",
+              tissue_mask_png=base64.b64encode(make_tissue_png(200, 150)).decode(),
+              tissue_edit_px=99999)
+    r3 = cli.post("/api/v1/annotation", headers=H, json=b3)
+    check("相同影像＋相同輪廓＋相同組織遮罩 → 判定重複",
+          (r3.get_json() or {}).get("status") == "duplicate_skipped",
+          (r3.get_json() or {}).get("status"))
+
+    # 換一張不同的組織遮罩（邊界完全不動）
+    import numpy as _np
+    from PIL import Image as _Im
+    import io as _io
+    _im = _Im.new("RGB", (200, 150), (0, 0, 0))
+    _px = _im.load()
+    for _y in range(150):
+        for _x in range(200):
+            if (_x - 100) ** 2 + (_y - 75) ** 2 < 50 ** 2:
+                _px[_x, _y] = ((2 if _x < 100 else 4), 0, 0)   # 換成腐肉／上皮
+    _buf = _io.BytesIO(); _im.save(_buf, "PNG")
+    b4 = dict(body, code="WD-TISSUENEW",
+              tissue_mask_png=base64.b64encode(_buf.getvalue()).decode(),
+              tissue_edit_px=54321)
+    r4 = cli.post("/api/v1/annotation", headers=H, json=b4)
+    j4 = r4.get_json() or {}
+    check("相同輪廓但**組織遮罩不同** → 收下（不是重複，是修訂）",
+          j4.get("status") != "duplicate_skipped", j4.get("status"))
+    recs4 = [x for x in fw.read_jsonl(fw.QUEUE) if x.get("code") == "WD-TISSUENEW"]
+    check("新的組織遮罩確實入列", len(recs4) == 1, "%d 筆" % len(recs4))
+    if recs4:
+        check("紀錄帶有 tissue_sig（下次比對才拿得到）", bool(recs4[0].get("tissue_sig")))
+        check("新遮罩的醫師修正像素數有落盤", recs4[0].get("tissue_edit_px") == 54321)
+    # 覆蓋後的遮罩檔要是新的那一份
+    _stored = open(os.path.join(tmp, "tissue_masks", iid + ".png"), "rb").read()
+    check("落盤的遮罩已更新為最新送出的那一份",
+          hashlib.sha1(_stored).hexdigest() == hashlib.sha1(_buf.getvalue()).hexdigest())
+
     # ── 4. 守門 ──
     r = cli.get("/api/v1/flywheel/record/..%2Fetc%2Fpasswd/preview.svg", headers=H)
     check("路徑穿越擋下", r.status_code in (400, 404), r.status_code)

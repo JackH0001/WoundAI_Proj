@@ -191,12 +191,23 @@ fun MeasurementReviewScreen(
                         runCatching { withContext(Dispatchers.IO) { store.save(it.first) } }.getOrNull()
                     }
                     val stamp = SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date())
+                    // ⚠ 組織比例要寫進修訂行。
+                    //
+                    // v5 起 tissue* 欄位在下面**確實會更新**（趨勢圖的柱狀圖讀的就是它們），
+                    // 但時間軸卡片顯示的是 notes 字串，而 notes 的開頭那行是第一次量測時寫的。
+                    // 舊版這裡還加了一句「上列組織比例為修邊前之值」——在欄位真的會更新之後，
+                    // 那句話變成**錯的**，而且卡片上會同時出現兩組互相矛盾的數字：
+                    // 文字說肉芽 61%、柱狀圖畫 56%，醫師不知道該信哪個。
+                    fun pct(k: String) = ((tis[k] ?: 0.0) * 100).toInt()
+                    val tisTxt = "組織 肉芽${pct("granulation")}% 腐肉${pct("slough")}% " +
+                        "壞死${pct("necrosis")}% 上皮${pct("epithelial")}% 其他${pct("other")}%"
                     val revision = "⟳ $stamp 醫師重新修邊:面積 " +
                         (oldArea?.let { "%.2f".format(it) } ?: "—") + "→" +
                         (finalArea?.let { "%.2f".format(it) } ?: "—") + " cm²" +
                         (if (subOld != null && subNew != null) "(PUSH面積子分 $subOld→$subNew)" else "") +
                         (iou?.let { "; 本次相對前版 IoU %.2f".format(it) } ?: "") +
-                        "。上列組織比例與 PUSH 總分為修邊前之值"
+                        "; " + tisTxt +
+                        "。**以本行為準**——最上方那行是首次量測的數值"
                     val updated = cur.copy(
                         gtPolygon = js,
                         estimatedArea = finalArea,
