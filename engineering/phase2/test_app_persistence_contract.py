@@ -140,6 +140,32 @@ def main():
             check("%s：寫 rasterPath 處同時有寫 tissueGranulation" % name(p),
                   "tissueGranulation" in seg)
 
+    # ── 4b. 白平衡增益必須貫穿整條鏈 ───────────────────────────────────
+    #
+    # 後端的組織比例是用**色卡白平衡**算的（見 app.py stage3b_colorcal）。
+    # 端上若有任何一處退回灰世界，畫面上就會出現兩個不同的答案：
+    # 結果欄說「肉芽 73%」而修邊底稿只把 21% 標成肉芽（實測數字）。
+    # 醫師是在修邊畫面上做判斷的，而那份 GT 會進訓練集——
+    # 所以不一致的代價不是「顯示怪怪的」，是訓練資料被污染。
+    for p, s in sorted(srcs.items()):
+        for m in re.finditer(r"TissueSeg\.classify\(([^)]*)\)", s):
+            n = len(m.group(1).split(","))
+            check("%s：TissueSeg.classify 有帶 wbGains" % name(p), n == 9,
+                  "參數 %d 個（應 9）" % n)
+    for p, s in sorted(srcs.items()):
+        for fn in ("WoundEditScreen(", "AnalysisPreview("):
+            if name(p).startswith(fn[:-1]):
+                continue                       # 定義處不算呼叫端
+            for m in re.finditer(re.escape(fn), s):
+                check("%s：%s 有傳 wbGains" % (name(p), fn[:-1]),
+                      "wbGains" in s[m.start():m.start() + 2600])
+    wec = next((s for q, s in srcs.items() if name(q) == "WoundEditScreen.kt"), "")
+    erc = next((s for q, s in srcs.items() if name(q) == "EditRasterCodec.kt"), "")
+    check("EditRaster 建構時帶上 wbGains", "wbGains = wbGains" in wec)
+    # 存了不讀等於沒存。從時間軸回頭修邊時就是靠這個欄位重建底稿。
+    check("EditRasterCodec 對 wb_gains 有存也有讀", erc.count("wb_gains") >= 2,
+          "出現 %d 次" % erc.count("wb_gains"))
+
     # ── 5. peek 期間不得作畫 ───────────────────────────────────────────
     #
     # 「看不見自己塗了什麼卻塗得下去」的那一筆會直接進 GT。

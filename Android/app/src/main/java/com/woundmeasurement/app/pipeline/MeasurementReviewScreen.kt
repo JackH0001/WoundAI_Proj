@@ -157,6 +157,10 @@ fun MeasurementReviewScreen(
             // v6：有柵格快照就原樣載回（組織分區保留、面積不漂移）；
             // 載不到才退回由 polygon 重建——那條路徑仍然可用，只是有損。
             resume = resumeRaster,
+            // 白平衡增益隨柵格一起存（見 EditRaster.wbGains）。這裡沒有後端回應可拿，
+            // 拿不到就退回灰世界——底稿會與當初量測時的分區不同，
+            // 而醫師會以為是自己上次標錯了，然後把對的改成錯的。
+            wbGains = resumeRaster?.wbGains,
             onCancel = { editing = false },
             // ⚠ 這五個參數**全都要用**。曾經寫成 `{ newPoly, iou, newArea, _, _ ->` ——
             // 後兩個（組織比例、修邊柵格）被直接丟棄，造成三重資料損失，而且沒有任何錯誤：

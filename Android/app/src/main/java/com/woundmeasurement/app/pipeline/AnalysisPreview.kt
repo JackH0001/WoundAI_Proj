@@ -65,7 +65,7 @@ private fun buildTissueOverlay(src: Bitmap, preview: Bitmap, polygon: List<List<
 
         val (gw, gh) = TissueSeg.grid(bw, bh)
         val inside = TissueSeg.rasterizePolygon(polygon, x0, y0, bw, bh, gw, gh)
-        val cls = TissueSeg.classify(src, x0, y0, x1, y1, gw, gh, inside) ?: return null
+        val cls = TissueSeg.classify(src, x0, y0, x1, y1, gw, gh, inside, wbGains) ?: return null
 
         val out = IntArray(gw * gh)
         for (i in out.indices) out[i] = if (cls[i].toInt() in 1..T_MAX) T_COLORS[cls[i].toInt()] else 0
@@ -89,6 +89,8 @@ fun AnalysisPreview(
     markerQuad: List<List<Int>>?,
     mmPerPx: Double?,
     calibMethod: String?,
+    /** 後端色卡白平衡增益 [R,G,B]；與結果欄、修邊底稿必須是同一組。 */
+    wbGains: DoubleArray? = null,
     modifier: Modifier = Modifier
 ) {
     var layers by remember { mutableStateOf(Layers()) }

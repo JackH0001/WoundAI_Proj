@@ -100,7 +100,15 @@ class EditRaster(
      * 寧可退回由多邊形重建，也不要把醫師的判斷搬到錯的位置。
      */
     val canvasW: Int = 0,
-    val canvasH: Int = 0
+    val canvasH: Int = 0,
+    /**
+     * 產生這份柵格時用的白平衡增益 [R,G,B]（來自後端色卡校正）。
+     *
+     * 跟著柵格一起存，是因為從時間軸回頭修邊時**沒有後端回應可拿**。
+     * 沒有它 seedAuto 會退回灰世界，底稿與當初量測時的分區對不上——
+     * 而醫師會以為是自己上次標錯了，然後把對的改成錯的。
+     */
+    val wbGains: DoubleArray? = null
 ) {
     val tissueEdited: Boolean get() = tissueEditedPx > 0
     val tissueEditRatio: Double get() = if (maskPx > 0) tissueEditedPx.toDouble() / maskPx else 0.0
@@ -113,7 +121,7 @@ class EditRaster(
  * 2200² 的柵格要 484 萬次 HSV 換算，而且結果是椒鹽狀雜點；
  * 512² 上算完再放大既快又平滑，代價只是分區邊界精細度——那本來就要靠醫師修。
  */
-private fun seedAuto(st: RasterState, src: Bitmap) {
+private fun seedAuto(st: RasterState, src: Bitmap, wbGains: DoubleArray? = null) {
     val x0 = st.rx0.roundToInt().coerceIn(0, src.width - 2)
     val y0 = st.ry0.roundToInt().coerceIn(0, src.height - 2)
     val x1 = (st.rx0 + st.mw / st.mScale).roundToInt().coerceIn(x0 + 2, src.width)
@@ -129,7 +137,7 @@ private fun seedAuto(st: RasterState, src: Bitmap) {
     // 遮罩太小（例如 AI 沒抓到）時網格上可能一格都不落——那就整片算，之後由筆刷決定範圍。
     if (inside.none { it.toInt() != 0 }) java.util.Arrays.fill(inside, 1.toByte())
 
-    val g = TissueSeg.classify(src, x0, y0, x1, y1, gw, gh, inside) ?: return
+    val g = TissueSeg.classify(src, x0, y0, x1, y1, gw, gh, inside, wbGains) ?: return
     for (y in 0 until st.mh) {
         val gy = (y * gh / st.mh).coerceIn(0, gh - 1)
         for (x in 0 until st.mw) {
@@ -252,6 +260,12 @@ fun WoundEditScreen(
     exudate: Int?,
     mmPerPx: Double? = null,      // ArUco 尺度直傳:面積=像素數×(mm/px)²(優先;不依賴 AI 初始面積)
     resume: EditRaster? = null,
+    /**
+     * 後端由校正貼紙算出的白平衡增益 [R,G,B]。**必須與結果欄用的是同一組**——
+     * 不同的話結果欄說「肉芽 73%」而這裡的底稿只把 21% 標成肉芽，
+     * 醫師會從一個錯的起點開始修，而那份 GT 會進訓練集。
+     */
+    wbGains: DoubleArray? = null,
     onCancel: () -> Unit,
     onDone: (edited: List<List<Int>>, correctionIou: Double?, newArea: Double?, tissue: Map<String, Double>, raster: EditRaster) -> Unit
 ) {
@@ -270,7 +284,7 @@ fun WoundEditScreen(
                 System.arraycopy(resume.mask, 0, mask, 0, mask.size)
                 System.arraycopy(resume.tissue, 0, tissue, 0, tissue.size)
                 System.arraycopy(resume.origMask, 0, orig, 0, orig.size)
-                seedAuto(this, bitmap)   // 續編時 auto 不隨 EditRaster 保存,重算即可(便宜且必然一致)
+                seedAuto(this, bitmap, wbGains)   // 續編時 auto 不隨 EditRaster 保存,重算即可(便宜且必然一致)
                 cm2PerPx = if (mmPerPx != null) (mmPerPx * mmPerPx / 100.0) / (resume.mScale * resume.mScale).toDouble()
                            else resume.cm2PerPx
                 recount(); syncAll()
@@ -292,7 +306,7 @@ fun WoundEditScreen(
                 scanlineFill(initialPolygon, mScale, mw, mh, mask, rx0, ry0)
                 // 逐像素分區作為修邊起點。auto 算不出來時（極小遮罩、影像異常）才退回
                 // 單一 defaultClass——那是降級，不是預設行為。
-                seedAuto(this, bitmap)
+                seedAuto(this, bitmap, wbGains)
                 var c = 0
                 for (i in mask.indices) if (mask[i].toInt() != 0) {
                     c++
@@ -413,7 +427,7 @@ fun WoundEditScreen(
         if (tool == EditTool.B_PAINT || tool == EditTool.B_ERASE || tool == EditTool.TISSUE) {
             if (st.expandIfNeeded(cx, cy, rM)) {           // 視窗擴張(內容無損);undo 尺寸失效→清空
                 undo.clear(); redo.clear()
-                seedAuto(st, bitmap)                       // 新擴出來的區域還沒有底稿
+                seedAuto(st, bitmap, wbGains)              // 新擴出來的區域還沒有底稿
                 cx = (imgPt.x - st.rx0) * st.mScale; cy = (imgPt.y - st.ry0) * st.mScale
             }
         }
@@ -688,7 +702,10 @@ fun WoundEditScreen(
                         val raster = EditRaster(st.mask.copyOf(), st.tissue.copyOf(), st.orig.copyOf(),
                             st.rx0, st.ry0, st.mw, st.mh, st.mScale, st.cm2PerPx,
                             tissueEditedPx = edited, maskPx = st.maskCount,
-                            canvasW = bw, canvasH = bh)
+                            canvasW = bw, canvasH = bh,
+                            // 帶著白平衡增益一起存。下次從時間軸回頭修邊時沒有後端回應，
+                            // 底稿要靠它才能重建成與這次相同的分區。
+                            wbGains = wbGains)
                         // ⚠ 沒動過邊界就**不要動那個數字**。
                         //
                         // 由多邊形重建柵格是有損的（RDP 簡化 + 重新掃描線填充 + ROI 外框改變），

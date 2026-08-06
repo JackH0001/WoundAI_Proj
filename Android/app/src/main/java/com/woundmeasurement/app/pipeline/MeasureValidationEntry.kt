@@ -173,6 +173,7 @@ fun MeasureValidationEntry(
             exudate = exudate,
             mmPerPx = vm.lastMmPerPx,  // ArUco 尺度直傳(面積=像素×(mm/px)²)
             resume = vm.editRaster,   // 同影像續編:原樣載回上次遮罩(零損耗)
+            wbGains = vm.lastWbGains, // 底稿要與結果欄的組織比例同一套白平衡
             onCancel = { editing = false },
             onDone = { poly, iou, newA, tis, raster ->
                 vm.editRaster = raster
@@ -352,6 +353,9 @@ fun MeasureValidationEntry(
                             markerQuad = vm.lastMarkerQuad,
                             mmPerPx = vm.lastMmPerPx,
                             calibMethod = vm.lastCalibMethod,
+                            // 與結果欄同一組增益。不傳的話參照圖會用灰世界，
+                            // 而數字用色卡——同一畫面上兩個答案。
+                            wbGains = vm.lastWbGains,
                             modifier = Modifier.fillMaxWidth()
                         )
                     }

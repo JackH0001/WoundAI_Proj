@@ -35,6 +35,19 @@ data class ClassifyResult(
     val markerQuad: List<List<Int>>? = null,
     val markerMm: Double? = null,
     val calibMethod: String? = null,
+    /**
+     * 後端由**校正貼紙中性色塊**算出的白平衡增益 [R,G,B]（含曝光係數）。
+     *
+     * ⚠ 端上一定要用這一組，不可自行算灰世界。後端的組織比例已經是用它算的，
+     * 端上若走另一套白平衡，結果欄與修邊畫面會顯示**兩個不同的答案**——
+     * 而醫師的修正是在修邊畫面上做的，那份 GT 會進訓練集。
+     *
+     * null＝這張沒有可用的色卡（貼紙沒入鏡／過曝／過暗）。此時退回灰世界，
+     * 而灰世界在以傷口為主體的近拍照上會把紅色壓掉約 22%（肉芽被低估）。
+     */
+    val wbGains: DoubleArray? = null,
+    /** 色準校正的診斷訊息。null＝校正成功且無警告。 */
+    val colorCalNote: String? = null,
     // 飛輪資料鏈:image_id=後端已存影像的內容雜湊;imageW/H=polygon 與修邊 GT 的座標空間。
     // 送標註時必須帶回,否則後端收到的是無影像、無尺寸的孤兒 GT(不可訓練)。
     val imageId: String? = null,
@@ -213,6 +226,19 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
                 }.getOrNull(),
                 markerMm = if (s3.isNull("marker_mm")) null else s3.getDouble("marker_mm"),
                 calibMethod = if (s3.isNull("method")) null else s3.getString("method"),
+                // 色準校正（stage3b）。舊版後端沒有這個鍵——用 optJSONObject 而非
+                // getJSONObject，否則 App 一連上舊後端就整個 classify 拋例外。
+                wbGains = j.optJSONObject("stage3b_colorcal")?.takeIf { it.optBoolean("ok") }
+                    ?.let { c ->
+                        val e = c.optDouble("exposure", 1.0)
+                        doubleArrayOf(c.optDouble("gain_r", 1.0) * e,
+                                      c.optDouble("gain_g", 1.0) * e,
+                                      c.optDouble("gain_b", 1.0) * e)
+                    },
+                colorCalNote = j.optJSONObject("stage3b_colorcal")?.let { c ->
+                    if (c.optBoolean("ok")) c.optString("reason", "").takeIf { it.isNotBlank() }
+                    else c.optString("reason", "色準校正未執行").takeIf { it.isNotBlank() }
+                },
                 imageId = if (j.isNull("image_id")) null else j.getString("image_id"),
                 imageW = j.optInt("image_w", 0),
                 imageH = j.optInt("image_h", 0),

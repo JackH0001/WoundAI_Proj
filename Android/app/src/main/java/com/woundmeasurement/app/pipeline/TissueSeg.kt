@@ -35,12 +35,23 @@ internal object TissueSeg {
     /**
      * 對 [src] 的矩形區域做逐像素分類，回傳 gw×gh 的**修邊畫面碼**（0＝區域外）。
      *
-     * @param inside gw*gh 的遮罩（非 0 才分類）。白平衡增益只用遮罩內的像素計算——
-     *   用整張圖算會被背景膚色拉偏，而膚色恰好落在肉芽的色相附近。
+     * @param inside gw*gh 的遮罩（非 0 才分類）。
+     * @param wbGains 後端由**校正貼紙中性色塊**算出的白平衡增益 [R,G,B]。
+     *
+     * ⚠ 給了 [wbGains] 就用它，沒給才退回灰世界。這個差別很大：
+     *
+     * 灰世界假設「場景平均為灰」，而以傷口為主體的近拍照嚴重違反這個假設。
+     * 後端實測（合成場景，真值肉芽 73%）：灰世界算出肉芽 21%、其他 70%，
+     * 紅色增益被壓到正確值的 ×0.78——被壓掉的肉芽像素掉出飽和度條件，落進「其他」。
+     * 用色卡增益則是肉芽 73%、其他 3%。
+     *
+     * 更重要的是**一致性**：後端 classify 已改用色卡增益，這裡若還用灰世界，
+     * 結果欄會顯示「肉芽 73%」而修邊畫面只把 21% 標成肉芽——醫師的修正會從
+     * 一個錯的起點開始，而那份 GT 會進訓練集。
      */
     fun classify(
         src: Bitmap, x0: Int, y0: Int, x1: Int, y1: Int,
-        gw: Int, gh: Int, inside: ByteArray
+        gw: Int, gh: Int, inside: ByteArray, wbGains: DoubleArray? = null
     ): ByteArray? = runCatching {
         val bw = x1 - x0; val bh = y1 - y0
         if (bw < 2 || bh < 2 || gw < 2 || gh < 2) return null
@@ -57,7 +68,9 @@ internal object TissueSeg {
             sr += (px[i] shr 16) and 0xFF; sg += (px[i] shr 8) and 0xFF; sb += px[i] and 0xFF; n++
         }
         if (n == 0) return null
-        val g = TissueClassifierV2.wbGains(sr / n, sg / n, sb / n)
+        // 色卡增益優先。退回灰世界時仍只用**遮罩內**的像素算——
+        // 用整張圖會被背景膚色拉偏，而膚色恰好落在肉芽的色相附近。
+        val g = wbGains ?: TissueClassifierV2.wbGains(sr / n, sg / n, sb / n)
 
         val raw = ByteArray(gw * gh)
         for (i in px.indices) if (inside[i].toInt() != 0) {

@@ -67,6 +67,14 @@ class MeasureViewModel(
     @Volatile var lastMmPerPx: Double? = null
     /** ArUco 校正框角點與方法，供結果頁的參照圖目視複核（見 ClassifyResult.markerQuad）。 */
     @Volatile var lastMarkerQuad: List<List<Int>>? = null
+    /**
+     * 後端由校正貼紙算出的白平衡增益 [R,G,B]。
+     *
+     * ⚠ 端上的組織分類（修邊底稿、參照圖）**必須用這一組**，不可自行算灰世界。
+     * 後端的 tissueFrac 已經是用它算的；兩邊不一致的話結果欄與修邊畫面會顯示
+     * 兩個不同的答案，而醫師是在修邊畫面上做判斷的。
+     */
+    @Volatile var lastWbGains: DoubleArray? = null
     @Volatile var lastCalibMethod: String? = null
         private set
     // 飛輪資料鏈綁定:後端 classify 存下的影像雜湊 + polygon 座標空間尺寸 + 路由/模型(溯源)。
@@ -105,7 +113,7 @@ class MeasureViewModel(
     private fun clearBackendBinding(alsoBitmap: Boolean = false) {
         lastPolygon = emptyList()
         lastCorrectionIou = null
-        lastMmPerPx = null; lastMarkerQuad = null; lastCalibMethod = null
+        lastMmPerPx = null; lastMarkerQuad = null; lastCalibMethod = null; lastWbGains = null
         lastImageId = null; lastImageW = 0; lastImageH = 0
         lastRoute = null; lastSegModel = null; lastPhantomHint = false; lastImageReused = false
         lastDoctorVerified = false   // 新影像＝尚未經醫師確認,不可沿用上一張的驗證狀態
@@ -210,6 +218,7 @@ class MeasureViewModel(
                 var polyCap: List<List<Int>> = emptyList()
                 var mmCap: Double? = null
                 var quadCap: List<List<Int>>? = null; var calibCap: String? = null
+                var wbCap: DoubleArray? = null
                 var idCap: String? = null; var wCap = 0; var hCap = 0
                 var routeCap: String? = null; var modelCap: String? = null
                 var hintCap = false; var reusedCap = false
@@ -220,6 +229,7 @@ class MeasureViewModel(
                     mmCap = c.mmPerPx
                     quadCap = c.markerQuad
                     calibCap = c.calibMethod
+                    wbCap = c.wbGains
                     idCap = c.imageId; wCap = c.imageW; hCap = c.imageH
                     routeCap = c.route; modelCap = c.segModel; hintCap = c.phantomHint
                     reusedCap = c.imageReused
@@ -240,7 +250,7 @@ class MeasureViewModel(
                 lastCorrectionIou = null   // 新分析→重置修邊修正量
                 lastDoctorVerified = false // 新分析→醫師尚未確認
                 lastMmPerPx = mmCap
-                lastMarkerQuad = quadCap; lastCalibMethod = calibCap
+                lastMarkerQuad = quadCap; lastCalibMethod = calibCap; lastWbGains = wbCap
                 lastImageId = idCap; lastImageW = wCap; lastImageH = hCap
                 lastRoute = routeCap; lastSegModel = modelCap; lastPhantomHint = hintCap
                 lastImageReused = reusedCap

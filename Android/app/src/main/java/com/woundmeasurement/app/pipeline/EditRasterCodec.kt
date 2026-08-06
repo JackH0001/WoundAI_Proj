@@ -74,6 +74,12 @@ object EditRasterCodec {
             // 畫布尺寸一起存：續編時若影像尺寸不同（例如換了後端縮圖策略），
             // 柵格座標就對不上——寧可放棄續編也不要用錯的座標畫在病人的傷口上。
             put("canvas_w", r.canvasW); put("canvas_h", r.canvasH)
+            // 白平衡增益一起存。從時間軸回頭修邊時沒有後端回應可拿，
+            // 沒有它 seedAuto 會退回灰世界——與當初量測時的分區對不上，
+            // 而醫師會以為是自己上次標錯了。
+            r.wbGains?.let { g ->
+                put("wb_gains", org.json.JSONArray().apply { g.forEach { put(it) } })
+            }
         }.toString()
         Pair(out.toByteArray(), meta)
     }.getOrNull()
@@ -109,7 +115,9 @@ object EditRasterCodec {
             if (j.isNull("cm2_per_px")) null else j.getDouble("cm2_per_px"),
             tissueEditedPx = j.optInt("tissue_edited_px", 0),
             maskPx = j.optInt("mask_px", 0),
-            canvasW = cw, canvasH = ch
+            canvasW = cw, canvasH = ch,
+            wbGains = j.optJSONArray("wb_gains")?.takeIf { it.length() == 3 }
+                ?.let { a -> DoubleArray(3) { a.getDouble(it) } }
         )
     }.getOrNull()
 }
