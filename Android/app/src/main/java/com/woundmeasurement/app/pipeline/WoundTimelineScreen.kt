@@ -313,12 +313,28 @@ private fun TissueTrendChart(
 
     Column(modifier) {
         Text("組織比例", style = MaterialTheme.typography.titleSmall)
+        // ⚠ 這裡曾經寫成 `if (!hasAny) { Text(...); return@Column }`，而那會讓 App 崩潰。
+        //
+        // `Column` 是 inline composable。Compose 編譯器在 lambda 前後插入
+        // startReplaceableGroup / endReplaceableGroup，而 `return@Column` 會**跳過**
+        // 結尾那一個 —— 群組堆疊就此不平衡，在 composition 結束時炸掉：
+        //
+        //   java.lang.IndexOutOfBoundsException: Index -1 out of bounds for length 0
+        //     at androidx.compose.runtime.Stack.pop(Stack.kt:26)
+        //     at ComposerImpl.exitGroup / end / endGroup / endRoot
+        //
+        // 錯誤訊息裡**沒有任何一行是我們的程式碼**，所以看堆疊完全找不到兇手。
+        //
+        // 2026-08-07 實際發生：DB v5 之前建立的個案（tissue_* 全為 null）→ hasAny=false
+        // → 走到 return → 進入時間軸即閃退。v5 之後的個案有組織資料，不走這條，
+        // 所以問題潛伏了很久才被踩到——早期建立的病患正是最少被打開的那些。
+        //
+        // 正確寫法是 if/else。composable lambda 裡永遠不要提早 return。
         if (!hasAny) {
             Text("這個個案還沒有組織比例資料（App 版本 build 5 之後的量測才會記錄）。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
-            return@Column
-        }
+        } else {
         Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.Bottom) {
             rows.forEachIndexed { i, m ->
@@ -352,5 +368,6 @@ private fun TissueTrendChart(
                 }
             }
         }
+        }   // else（見上方說明：不可用 return@Column）
     }
 }
