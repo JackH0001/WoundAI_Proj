@@ -96,6 +96,17 @@ fun MeasurementReviewScreen(
      * 面積會被**靜默**高估數倍並寫進癒合趨勢。寧可擋下並說清楚,也不要產生一個看起來正常的錯數字。
      */
     var spaceMismatch by remember { mutableStateOf<String?>(null) }
+    /**
+     * 上次修邊的柵格快照（v6）。**這是修掉兩個資料損失 bug 的關鍵。**
+     *
+     * 舊版這裡固定傳 `resume = null`，柵格由多邊形重建，後果是：
+     *   · 醫師畫的組織分區整批消失（多邊形不含組織資訊）
+     *   · 面積每進出一次漂移約 0.5%（RDP 簡化 + 重新柵格化是有損往返）
+     *
+     * 有快照就原樣載回：像素數不變 → 面積不變，組織分區也還在。
+     * 載不到（舊紀錄、畫布尺寸變了）才退回重建——那是降級，不是預設。
+     */
+    var resumeRaster by remember { mutableStateOf<EditRaster?>(null) }
 
     LaunchedEffect(cur.id) {
         loading = true
@@ -108,6 +119,12 @@ fun MeasurementReviewScreen(
             else -> null
         }
         bmp = b
+        resumeRaster = if (b == null) null else withContext(Dispatchers.IO) {
+            runCatching {
+                EditRasterCodec.decode(
+                    store.rawBytes(cur.rasterPath), cur.rasterMeta, b.width, b.height)
+            }.getOrNull()
+        }
         trainOk = readTrainConsent(repo, cur.caseId)
         // 憑證來自「設定」頁（Keystore 加密存本機），不再硬編碼 admin/woundai-admin。
         val u = AppSettings.backendUser(ctx)
@@ -126,12 +143,30 @@ fun MeasurementReviewScreen(
             bitmap = b,
             initialPolygon = poly,
             originalArea = cur.estimatedArea,
-            tissueFrac = emptyMap(),
+            // v5 起組織比例有存下來。傳 emptyMap 會讓 defaultClass 退回 1（肉芽），
+            // 而那是「AI 覺得最多的那一類」的猜測——有真值就不該用猜的。
+            tissueFrac = mapOf(
+                "granulation" to (cur.tissueGranulation ?: 0.0),
+                "slough" to (cur.tissueSlough ?: 0.0),
+                "necrosis" to (cur.tissueNecrosis ?: 0.0),
+                "epithelial" to (cur.tissueEpithelial ?: 0.0),
+                "other" to (cur.tissueOther ?: 0.0)
+            ),
             exudate = cur.exudate,
             mmPerPx = cur.mmPerPx,
-            resume = null,          // 從 DB 載回時沒有柵格快照,由 polygon 重建
+            // v6：有柵格快照就原樣載回（組織分區保留、面積不漂移）；
+            // 載不到才退回由 polygon 重建——那條路徑仍然可用，只是有損。
+            resume = resumeRaster,
             onCancel = { editing = false },
-            onDone = { newPoly, iou, newArea, _, _ ->
+            // ⚠ 這五個參數**全都要用**。曾經寫成 `{ newPoly, iou, newArea, _, _ ->` ——
+            // 後兩個（組織比例、修邊柵格）被直接丟棄，造成三重資料損失，而且沒有任何錯誤：
+            //   1. 柵格沒存 → 下次進來 decode 不到 → 退回由 polygon 重建 → 醫師的組織分區
+            //      整批消失，畫面回到顏色啟發式的猜測（而醫師會以為是自己沒存到）
+            //   2. tissue* 欄位沒更新 → 時間軸卡片與趨勢圖顯示的是**修邊前**的組織比例
+            //   3. 沒有柵格就送不出組織遮罩 → 補送標註只送得出傷口輪廓，
+            //      醫師花時間標的組織分區從來沒有進過訓練集
+            // 三個後果都是安靜的。修邊當下看起來完全正常。
+            onDone = { newPoly, iou, newArea, tis, raster ->
                 scope.launch {
                     val js = newPoly.joinToString(",", "[", "]") {
                         "[${it.getOrElse(0) { 0 }},${it.getOrElse(1) { 0 }}]"
@@ -144,6 +179,13 @@ fun MeasurementReviewScreen(
                     // 重算不了就**明講它是修邊前的值**,不要假裝它還成立。
                     val subOld = WoundPipeline.areaSubscore(oldArea)
                     val subNew = WoundPipeline.areaSubscore(finalArea)
+                    // 柵格落地。存檔失敗不可讓整筆更新一起失敗——輪廓與面積仍該存下來，
+                    // 但也**不可**假裝成功：rasterName 為 null 時下面會沿用舊值，
+                    // 而畫面訊息會明說組織分區這次沒存到。
+                    val rasterPair = raster?.let { runCatching { EditRasterCodec.encode(it) }.getOrNull() }
+                    val rasterName = rasterPair?.let {
+                        runCatching { withContext(Dispatchers.IO) { store.save(it.first) } }.getOrNull()
+                    }
                     val stamp = SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date())
                     val revision = "⟳ $stamp 醫師重新修邊:面積 " +
                         (oldArea?.let { "%.2f".format(it) } ?: "—") + "→" +
@@ -165,14 +207,35 @@ fun MeasurementReviewScreen(
                         // 本次相對前版的 IoU 改記在 notes,保留可追溯性但不污染指標。
                         notes = listOfNotNull(cur.notes?.takeIf { it.isNotBlank() }, revision).joinToString("\n"),
                         // 輪廓改了就不能再算「已送出」——要重新送才會讓雲端拿到新 GT
-                        annotationSubmitted = false
+                        annotationSubmitted = false,
+                        // v6：柵格與 meta 必須**成對**更新。只更新其中一個，
+                        // 座標就會對到錯的影像，而載回來時看起來只是「遮罩位置怪怪的」。
+                        rasterPath = rasterName ?: cur.rasterPath,
+                        rasterMeta = if (rasterName != null) rasterPair?.second else cur.rasterMeta,
+                        // v5：組織比例。原始影像會依 90 天政策清除，沒有現在存下來就永遠補不回來。
+                        tissueGranulation = tis["granulation"] ?: cur.tissueGranulation,
+                        tissueSlough = tis["slough"] ?: cur.tissueSlough,
+                        tissueNecrosis = tis["necrosis"] ?: cur.tissueNecrosis,
+                        tissueEpithelial = tis["epithelial"] ?: cur.tissueEpithelial,
+                        tissueOther = tis["other"] ?: cur.tissueOther
                     )
                     runCatching { withContext(Dispatchers.IO) { dao.updateMeasurement(updated) } }
                         .onSuccess {
+                            // 先寫 DB 再刪舊檔。反過來的話 update 失敗就留下指向不存在檔案的死路徑，
+                            // 而那個路徑會讓下次進來 decode 失敗——又退回顏色啟發式。
+                            if (rasterName != null && !cur.rasterPath.isNullOrEmpty()
+                                && cur.rasterPath != rasterName) {
+                                runCatching { withContext(Dispatchers.IO) { store.delete(cur.rasterPath!!) } }
+                            }
                             cur = updated
+                            // 記憶體中的快照也要換掉。不換的話**不離開這頁**再按一次「重新修邊」，
+                            // 載回的還是上一輪的柵格——剛畫的又不見了，而且只在這條路徑上發生。
+                            resumeRaster = raster ?: resumeRaster
                             msg = "✅ 已更新此筆紀錄的輪廓與面積\n" +
                                   "面積 " + (oldArea?.let { "%.2f".format(it) } ?: "—") + " → " +
                                   (finalArea?.let { "%.2f".format(it) } ?: "—") + " cm²。\n" +
+                                  (if (raster != null && rasterName == null)
+                                      "⚠️ 但組織分區**未能存檔**，下次進來會退回 AI 的猜測。\n" else "") +
                                   "輪廓已變更，此筆需**重新送出**才會讓雲端拿到新的 GT。"
                         }
                         .onFailure { msg = "⚠️ 更新失敗：${it.message}" }
@@ -265,6 +328,21 @@ fun MeasurementReviewScreen(
                     "· 樣本來源　　${cur.source ?: "clinical"}",
                     style = MaterialTheme.typography.bodySmall
                 )
+                // 組織遮罩到底有沒有跟著送,醫師要能在按下去之前看見。
+                // 只顯示「已送出」而不說送了什麼,等於要人相信一個看不見的結果。
+                val rr = resumeRaster
+                val edPx = rr?.tissueEditedPx ?: 0
+                Text(
+                    when {
+                        rr == null -> "· 組織遮罩　　✗ 不送（本筆沒有修邊柵格，請先「重新修邊」）"
+                        edPx <= 0 -> "· 組織遮罩　　△ 會送出，但標記為「未經醫師修正」\n" +
+                                     "　　　　　　　→ 不會進入組織分割訓練集（未修正的遮罩是 AI 自己的輸出）"
+                        else -> "· 組織遮罩　　✓ 含醫師修正 ${edPx} 像素，會進入組織分割訓練集"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (rr != null && edPx > 0) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.error
+                )
                 Text("✓ 姓名、病歷號等個資不在其中，且永不離開本機。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary)
@@ -295,6 +373,23 @@ fun MeasurementReviewScreen(
                                 mmPerPx = cur.mmPerPx, route = cur.route, segModel = null,
                                 correctionIou = cur.correctionIou, careNote = "resubmit from timeline",
                                 source = cur.source ?: "clinical", consentTrain = okNow,
+                                // 組織比例與分割 GT。這裡曾經**完全沒送**——醫師從時間軸修好的
+                                // 組織分區永遠進不了訓練集，而畫面照樣顯示「✅ 已補送」。
+                                // 失敗方向是安全的（沒送假 GT），但等於白做。
+                                tissueFrac = mapOf(
+                                    "granulation" to (cur.tissueGranulation ?: 0.0),
+                                    "slough" to (cur.tissueSlough ?: 0.0),
+                                    "necrosis" to (cur.tissueNecrosis ?: 0.0),
+                                    "epithelial" to (cur.tissueEpithelial ?: 0.0),
+                                    "other" to (cur.tissueOther ?: 0.0)
+                                ).takeIf { m -> m.values.any { it > 0.0 } },
+                                // 沒有柵格就整組不送。硬用輪廓補一張遮罩出來只會製造假 GT，
+                                // 而 tissue_edited 由 BackendClient 從柵格自己算——
+                                // 未經醫師修正的啟發式輸出後端會擋在訓練集外。
+                                tissueMaskPng = resumeRaster?.let {
+                                    TissueMaskCodec.encode(it.tissue, it.mask, it.mw, it.mh)
+                                },
+                                tissueRaster = resumeRaster,
                                 // 真值來自本機紀錄。v3 以前的舊紀錄一律 false（當時系統沒記錄
                                 // 醫師是否確認過，填 true 等於憑空捏造一個驗證事實）。
                                 doctorVerified = cur.doctorVerified

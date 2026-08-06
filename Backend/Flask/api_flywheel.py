@@ -16,7 +16,13 @@ app.py 註冊:from api_flywheel import flywheel_bp; app.register_blueprint(flywh
 佇列 jsonl 維持 append-only(稽核軌跡不竄改, IEC 62304),排除發生在消費端。
 
 驗證邏輯抽出為純函式(validate_annotation/effective_queue/...)供契約與單元測試。"""
-import os, json, re, time, hashlib, shutil
+import os, json, re, time, hashlib, shutil, base64, logging
+
+# ⚠ 這個模組原本沒有 logger，而 except 區塊裡卻呼叫了 logger.warning——
+# 於是**錯誤處理本身會拋 NameError**，把一個「遮罩存不進去」的小問題
+# 升級成整筆標註 500，連傷口分割的 GT 也一起丟掉。
+# 錯誤路徑的程式碼跟正常路徑一樣需要被執行過至少一次。
+logger = logging.getLogger(__name__)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # 測試/驗收腳本可用 WOUNDAI_FLYWHEEL_DIR 指到暫存目錄,避免把測試樣本寫進產線佇列
@@ -34,6 +40,9 @@ WITHDRAWN = os.path.join(FLYWHEEL_DIR, "withdrawn.jsonl")
 # 這與先前「拒絕理由要是『已撤回同意』而不是『查無影像』」是同一條原則：
 # 稽核紀錄的價值在於它說的是真正發生的事。
 RETRACTED = os.path.join(FLYWHEEL_DIR, "retracted.jsonl")
+# 組織分割 GT（每張影像一個 PNG，值＝組織碼 0..5）。與影像分開存：
+# 遮罩會被醫師修訂而覆蓋，影像不會；混在同一個前綴下，隔離／還原的邏輯會變複雜。
+TISSUE_DIR = os.path.join(FLYWHEEL_DIR, "tissue_masks")
 AUDIT = os.path.join(FLYWHEEL_DIR, "audit.jsonl")
 IMAGES_DIR = os.path.join(FLYWHEEL_DIR, "images")
 QUARANTINE_DIR = os.path.join(FLYWHEEL_DIR, "quarantine")
@@ -44,7 +53,38 @@ REQUIRED_CORE = ["code", "gt_polygon", "exudate", "doctor_verified", "deidentifi
 REQUIRED_IMAGE = ["image_id", "image_w", "image_h"]
 REQUIRED = REQUIRED_CORE + REQUIRED_IMAGE
 # 溯源欄位(非強制,但缺了無法做模型治理/回溯歸因)
-PROVENANCE = ["mm_per_px", "route", "seg_model", "app_version", "correction_iou", "care_note", "source"]
+# tissue_frac：**醫師修邊後**的五類組織比例（含 other）。
+#
+# 它不是分割 GT（那是 gt_polygon），而是未來訓練組織分類模型的種子。
+# 現在就開始收的理由：影像依保存政策會被清除，事後無法回溯重算；
+# 而「醫師看過並修正過的比例」是這條資料鏈上唯一有人背書的組織標籤。
+#
+# ⚠ 誠實邊界：這只是**比例**，不是逐像素的組織遮罩。要訓練組織分割還需要上傳
+#    遮罩本身（一張與影像同尺寸的分類圖），那是另一個資料量級，尚未實作。
+PROVENANCE = ["mm_per_px", "route", "seg_model", "app_version", "correction_iou", "care_note",
+              "source", "tissue_frac",
+              # 組織分割 GT 的溯源。tissue_edited 是**能不能拿去訓練的判準**：
+              # false 代表遮罩是 TissueSeg 色彩啟發式的原樣輸出，沒有人看過。
+              # 拿它訓練＝用模型自己的輸出訓練自己，指標漂亮而臨床表現不動。
+              "tissue_edited", "tissue_edit_px", "tissue_edit_ratio", "tissue_raster",
+              "tissue_mask_key", "quality",
+              # ── WoundAI3D 預留欄位（現在**不會有值**，但契約先定） ──────────
+              #
+              # 為什麼現在就埋：深度必須與 RGB **同一瞬間**擷取才有意義。
+              # 事後補不回來——不是「麻煩」，是物理上不可能（傷口已經變了）。
+              # 而定義幾個欄位的成本是零，日後改契約則要動 App、後端、匯出、訓練四處。
+              #
+              # ⚠ 但**埋欄位不等於資料會自己出現**。目前 App 沒有擷取深度，
+              # 所以 n=20 這批收案不會有深度資料。這裡只是讓未來不必改契約，
+              # 並讓現在的紀錄明確標記 depth_source=none 而不是含糊的「沒這個欄位」。
+              "depth_source",      # none | arcore_depth | lidar | stereo | photogrammetry
+              "depth_map_key",     # 深度圖物件鍵（16-bit PNG，單位 mm；0=無效值）
+              "depth_format",      # png16_mm | raw_f32_m
+              "depth_conf_key",    # 置信度圖（ARCore/LiDAR 都會給，低信心區不可用於量測）
+              "camera_intrinsics", # {fx, fy, cx, cy}（像素）——沒有它就無法反投影
+              "camera_pose",       # 4x4 row-major（多視角重建與體積計算需要）
+              "depth_scale",       # 深度值 → 公尺的乘數
+              "capture_device"]    # 機型／感測器，供日後分析跨裝置差異
 
 # 樣本來源。範例/驗證影像可以走同一條管線收進來,但**不得混入臨床樣本數**:
 #   clinical = 真實病人傷口(唯一可作臨床證據者)
@@ -407,21 +447,50 @@ def classify_queue(recs, images_dir=None, wd_codes=None, wd_imgs=None,
             st = "candidate"
         prelim.append(st)
         if st == "candidate":
-            # received_at 遞增(UTC) → 後到者為醫師最新修訂。
+            # ⚠ 鍵是 **(影像, 標註者)**，不是只有影像。
+            #
+            # 只用 image_id 的話，第二位醫師標同一張圖會把第一位的標成「被取代」——
+            # 但那兩筆不是修訂關係，是**兩個人的獨立判斷**。而那正是 inter-rater
+            # 一致性分析唯一的資料來源，也是判斷「Dice 0.70 到底算好還算壞」的基準
+            #（模型不可能比兩個人彼此同意的程度更準）。
+            #
+            # 分開之後：同一人後送的仍取代自己先前那筆（那才是修訂），
+            # 不同人的則各自保留。
+            ra = r.get("received_at") or ""
+            k = (iid, r.get("actor"))
+            cur = best.get(k)
             # 用 `or ""` 而非 get 預設值:顯式 null 會變字串 "None",而 "None" > "2026-..."
             #（字典序）會讓沒有時間戳的那筆永遠勝出。
-            ra = r.get("received_at") or ""
-            cur = best.get(iid)
             if cur is None or ra >= cur[0]:
-                best[iid] = (ra, i)
-    winners = {i for _, i in best.values()}
-    return [(r, ("trainable" if i in winners else "superseded") if st == "candidate" else st)
-            for i, (r, st) in enumerate(zip(recs, prelim))]
+                best[k] = (ra, i)
+
+    # 每張影像挑一位**主標註者**進訓練集：同一張圖出現兩份 GT 會讓它在損失裡佔兩倍權重，
+    # 而那張圖並不比別張重要。挑「最早送出的那位」而不是最新——
+    # 取最新的話，每多一位醫師標註，訓練集就換一批樣本，前後兩次訓練的結果無從比較。
+    primary = {}
+    for (iid, actor), (ra, i) in best.items():
+        cur = primary.get(iid)
+        if cur is None or ra < cur[0]:
+            primary[iid] = (ra, i)
+    winners = {i for _, i in primary.values()}
+    parallel = {i for _, i in best.values()} - winners
+
+    def _final(i, st):
+        if st != "candidate":
+            return st
+        if i in winners:
+            return "trainable"
+        return "parallel_rater" if i in parallel else "superseded"
+
+    return [(r, _final(i, st)) for i, (r, st) in enumerate(zip(recs, prelim))]
 
 
 RECORD_STATUS = {
     "trainable":       "可訓練",
-    "superseded":      "被較新的修訂版取代",
+    "superseded":      "被同一人較新的修訂版取代",
+    # 不是被取代，是另一位標註者對同一張影像的獨立判斷。
+    # 不計入訓練（避免同一張圖佔兩倍權重），但**是一致性分析的資料**。
+    "parallel_rater":  "其他標註者的平行標註（供一致性分析）",
     "withdrawn":       "已撤回訓練同意",
     "retracted":       "已標記排除（誤送等）",
     "consent_invalid": "三同意未齊",
@@ -450,6 +519,99 @@ def poly_area_cm2(poly, mm_per_px):
         return None
 
 
+# ── 單筆送件的向量預覽 ────────────────────────────────────────────────
+#
+# 用途是**複核**：這筆標註合不合理、該不該排除。那個判斷不需要看到病患皮膚，
+# 所以這裡刻意只輸出幾何與類別，一個原始影像像素都不含。
+
+# 與 App 修邊畫面同一套組織碼與配色（WoundEditScreen.T_COLORS）。
+# ⚠ 兩邊不一致的話，複核者看到的顏色與醫師當初畫的不是同一件事，
+# 而那種錯誤沒有任何提示——他會據此排除一筆其實正確的紀錄。
+TISSUE_NAMES = {1: "肉芽", 2: "腐肉", 3: "壞死", 4: "上皮", 5: "其他"}
+TISSUE_HEX = {1: "#1d9e75", 2: "#e6b422", 3: "#4a3f3a", 4: "#b9c4eb", 5: "#9aa0a6"}
+
+
+def _tissue_cells(png_bytes, grid=64):
+    """組織遮罩 PNG → [(gx, gy, cls)]，降到約 grid 格寬。
+
+    為什麼降採樣：逐像素輸出 SVG 是幾 MB 而且瀏覽器會卡，而複核只需要看出
+    「哪一區是什麼」。每格取**眾數**而非中心點取樣——後者在細碎區域會隨機
+    挑到某一類，讓小面積的壞死區在預覽上時有時無。
+    """
+    from PIL import Image
+    import io
+    im = Image.open(io.BytesIO(png_bytes))
+    # 值在 R 通道（與 App 的 TissueMaskCodec 一致）。灰階圖則直接用。
+    if im.mode in ("RGB", "RGBA"):
+        im = im.split()[0]
+    else:
+        im = im.convert("L")
+    W, H = im.size
+    if W <= 0 or H <= 0:
+        return [], 0, 0
+    step = max(1, max(W, H) // max(8, grid))
+    gw, gh = (W + step - 1) // step, (H + step - 1) // step
+    px = im.load()
+    out = []
+    for gy in range(gh):
+        for gx in range(gw):
+            counts = {}
+            for y in range(gy * step, min(H, (gy + 1) * step), max(1, step // 4)):
+                for x in range(gx * step, min(W, (gx + 1) * step), max(1, step // 4)):
+                    v = px[x, y]
+                    if 1 <= v <= 5:
+                        counts[v] = counts.get(v, 0) + 1
+            if counts:
+                out.append((gx, gy, max(counts, key=counts.get)))
+    return out, gw, gh
+
+
+def _render_preview_svg(w, h, poly, cells, gw, gh, rec, tissue_note):
+    """輸出 SVG。座標空間＝影像空間，viewBox 讓瀏覽器自己縮放。"""
+    def esc(s):
+        return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+    pad = 48                                    # 底部留給文字
+    parts = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" '
+             'width="100%%" font-family="sans-serif">' % (w, h + pad)]
+    # 中性背景。**不是**傷口照片——這一點要在圖上寫明，否則複核者可能以為
+    # 影像載入失敗，或更糟：以為傷口真的長這樣。
+    parts.append('<rect width="%d" height="%d" fill="#f5f5f5"/>' % (w, h))
+
+    if cells and gw and gh:
+        cw = w / float(gw); ch = h / float(gh)
+        for gx, gy, c in cells:
+            parts.append('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="%s"/>'
+                         % (gx * cw, gy * ch, cw + 0.5, ch + 0.5, TISSUE_HEX.get(c, "#9aa0a6")))
+
+    pts = " ".join("%.1f,%.1f" % (float(p[0]), float(p[1]))
+                   for p in poly if len(p) >= 2)
+    # 雙線描邊：深色在下、亮色在上，任何背景色上都看得見。
+    parts.append('<polygon points="%s" fill="none" stroke="#000" stroke-width="%.1f" '
+                 'stroke-opacity="0.55"/>' % (pts, max(2.0, w / 300.0)))
+    parts.append('<polygon points="%s" fill="none" stroke="#00e5ff" stroke-width="%.1f"/>'
+                 % (pts, max(1.0, w / 600.0)))
+
+    fs = max(11.0, w / 55.0)
+    frac = rec.get("tissue_frac") or {}
+    key_zh = {"granulation": "肉芽", "slough": "腐肉", "necrosis": "壞死",
+              "epithelial": "上皮", "other": "其他"}
+    fr = "・".join("%s%.0f%%" % (key_zh.get(k, k), 100.0 * float(v))
+                   for k, v in frac.items() if isinstance(v, (int, float)) and v > 0)
+    lines = [
+        "%s ・ %d 點 @ %d×%d ・ 深度 %s"
+        % (rec.get("code") or "-", len(poly), w, h, rec.get("depth_source") or "none"),
+        tissue_note + (("　" + fr) if fr else ""),
+        "此圖為標註示意，不含任何原始影像像素",
+    ]
+    for i, t in enumerate(lines):
+        parts.append('<text x="4" y="%.1f" font-size="%.1f" fill="%s">%s</text>'
+                     % (h + fs * (i + 1.15), fs,
+                        "#c62828" if t.startswith("⚠") else "#444", esc(t)))
+    parts.append("</svg>")
+    return "".join(parts)
+
+
 def quarantine_image(image_id, images_dir=None, quarantine_dir=None):
     """撤回同意 → 影像移出 images/,不再進任何資料集。保留於 quarantine/ 供稽核,
     實體銷毀另走資料刪除程序(需留紀錄)。回 True 表示有搬動。"""
@@ -461,7 +623,7 @@ def quarantine_image(image_id, images_dir=None, quarantine_dir=None):
 
 # ---- Flask Blueprint(import flask 失敗時不影響純函式測試) ----
 try:
-    from flask import Blueprint, request, jsonify
+    from flask import Blueprint, request, jsonify, Response
     from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
     flywheel_bp = Blueprint("flywheel", __name__)
 
@@ -556,12 +718,50 @@ try:
         rec["actor"] = actor
         rec["role"] = role
         rec["org"] = org        # 現在只有一個值也要寫:事後補欄位=舊紀錄全是 null
+        # 組織遮罩落盤。**失敗不阻擋標註**——遮罩缺席只是少一個組織訓練樣本，
+        # 讓整筆標註失敗會連傷口分割的 GT 一起丟掉，那是更大的損失。
+        if d.get("tissue_mask_png"):
+            try:
+                raw = base64.b64decode(d["tissue_mask_png"], validate=True)
+                if len(raw) > 4 * 1024 * 1024:
+                    raise ValueError("遮罩超過 4MB（1024² 的 5 類 PNG 應在 40KB 量級，這幾乎必然是送錯東西）")
+                if raw[:8] != b"\x89PNG\r\n\x1a\n":
+                    raise ValueError("不是 PNG。JPEG 會把類別邊界糊掉，解碼端只能猜，一律拒收")
+                key = _key(os.path.join(TISSUE_DIR, image_id + ".png"))
+                _store().put_blob(key, raw)
+                rec["tissue_mask_key"] = "tissue_masks/%s.png" % image_id
+                audit(actor, "tissue_mask_stored", rec["code"],
+                      "%d bytes；醫師修正 %s px（%.1f%%）"
+                      % (len(raw), d.get("tissue_edit_px", 0),
+                         100.0 * float(d.get("tissue_edit_ratio") or 0.0)), role, org)
+            except Exception as e:
+                logger.warning("組織遮罩落盤失敗(%s): %s", image_id, e)
+                audit(actor, "tissue_mask_rejected", rec["code"], str(e), role, org)
+
         rec["received_at"] = utc_now()
         append_jsonl(QUEUE, rec)
         note = None
         if same_img:
-            note = f"同影像已有 {len(same_img)} 筆舊標註,本筆視為醫師修訂版,匯出時只取最新"
-            audit(actor, "annotation_revised", rec["code"], note, role, org)
+            # ⚠ 措辭要正確，而且**兩件事可能同時成立**：
+            # 一筆新標註可以既是「相對他人的平行標註」又是「相對自己的修訂版」。
+            # 只說其中一件，稽核軌跡就記載了一個不完整的事實——
+            # 而 inter-rater 分析正是靠這裡分辨誰標了什麼、哪一筆取代了哪一筆。
+            others = sorted({x.get("actor") for x in same_img
+                             if x.get("actor") and x.get("actor") != actor})
+            mine = [x for x in same_img if x.get("actor") == actor]
+            parts = []
+            if others:
+                parts.append(f"同影像已有 {len(others)} 位其他標註者（{', '.join(others)}）；"
+                             f"本筆為**平行標註**，不覆蓋他人。")
+            if mine:
+                parts.append(f"並**取代你自己先前的 {len(mine)} 筆修訂版**。")
+            if others:
+                parts.append("訓練集每張圖只取主標註者，其餘供 inter-rater 一致性分析。")
+            else:
+                parts.append("匯出時只取最新。")
+            note = "".join(parts)
+            audit(actor, "annotation_parallel" if others else "annotation_revised",
+                  rec["code"], note, role, org)
         audit(actor, "annotation_enqueued", rec["code"], "ok", role, org)
         return jsonify({"status": "enqueued", "code": rec["code"], "queue": "retrain",
                         "image_id": image_id, "note": note}), 200
@@ -712,12 +912,238 @@ try:
                                (_can(role, "user.manage") or r.get("actor") == actor),
                 "retract_reason": meta.get("reason_zh"), "retract_note": meta.get("note"),
                 "retracted_by": meta.get("actor"),
+                # ── 複核者要判斷「這筆對不對、該不該排除」所需的欄位 ──
+                #
+                # 只給代碼與面積是不夠的：一筆 74 cm² 的紀錄看起來很正常，
+                # 但它可能完全沒有組織標註、或組織遮罩是 AI 自己的輸出。
+                # 那兩件事決定它進不進得了組織分割訓練集，而清單上原本看不出來。
+                "tissue_mask": bool(r.get("tissue_mask_key")),
+                "tissue_edited": bool(r.get("tissue_edited")),
+                "tissue_edit_px": r.get("tissue_edit_px"),
+                "tissue_frac": r.get("tissue_frac"),
+                # 深度：現在一律 none。**明確顯示 none 比欄位缺席重要**——
+                # 日後回頭看「這批為什麼沒有 3D」時，要分得出「沒拍」與「拍了沒存」。
+                "depth_source": r.get("depth_source") or "none",
+                "capture_device": r.get("capture_device"),
+                # 影像品質旗標。對焦不足／過曝／標記太小都會讓面積不可信，
+                # 而那是排除的正當理由之一（且比事後看面積異常更早發現）。
+                "quality": r.get("quality"),
+                # 有沒有東西可畫。前端據此決定要不要給「看標註」按鈕，
+                # 而不是點下去才發現 404。
+                "has_preview": bool(r.get("gt_polygon")),
             })
         out.reverse()       # 新到舊
         return jsonify({
             "records": out, "scope": "all" if all_scope else "mine",
             "may_see_all": may_see_all, "actor": actor,
             "reasons": RETRACT_REASONS, "statuses": RECORD_STATUS,
+        }), 200
+
+
+    @flywheel_bp.route("/api/v1/flywheel/record/<image_id>/preview.svg", methods=["GET"])
+    @jwt_required()
+    def get_record_preview(image_id):
+        """單筆送件的**向量預覽**：GT 輪廓 ＋ 組織分區，畫在中性背景上。
+
+        ## 為什麼不是影像縮圖
+
+        複核者要回答的問題是「這筆標註對不對、該不該排除」，而那個問題
+        **不需要看到病患的皮膚**：輪廓的形狀是否合理（不是一個點、不是整個畫面）、
+        組織分區有沒有、比例分布是否荒謬——這些從幾何與類別就看得出來。
+
+        主控台目前刻意不顯示任何影像（`get_records` 的說明裡寫明「沒有影像」）。
+        為了複核便利把傷口照片放進瀏覽器，代價是快取、截圖、旁人目視，
+        而那條界線一旦破了就補不回來。用向量圖能達成同樣的複核目的，
+        又完全不含任何一個病患像素。
+
+        ## 權限
+
+        比照 `records`：只看得到自己送的，除非有 `audit.read`（工程師／管理者）。
+        **範圍在伺服器端判定**——前端不顯示不等於看不到。
+        """
+        actor, role, org = _who()
+        if not _can(role, "flywheel.stats"):
+            return jsonify({"error": "權限不足"}), 403
+        if not ID_RE.match(str(image_id or "")):
+            # 路徑穿越守門。image_id 會被拼進物件鍵，沒有這一行就能拿去讀別的東西。
+            return jsonify({"error": "image_id 格式不合法"}), 400
+
+        rec = None
+        for r in read_jsonl(QUEUE):
+            if r.get("image_id") == image_id:
+                # 同影像可能有多筆（修訂／平行標註）。取最新的那筆，
+                # 因為複核者最可能是在看剛剛送出的東西。
+                if rec is None or (r.get("received_at") or "") >= (rec.get("received_at") or ""):
+                    rec = r
+        if rec is None:
+            return jsonify({"error": "查無此筆"}), 404
+        if not _can(role, "audit.read") and rec.get("actor") != actor:
+            # 措辭用「查無」而非「無權限」：後者會洩漏「這個 image_id 存在」，
+            # 而 image_id 本身就是可枚舉的。
+            return jsonify({"error": "查無此筆"}), 404
+
+        w = int(rec.get("image_w") or 0); h = int(rec.get("image_h") or 0)
+        poly = rec.get("gt_polygon") or []
+        if w <= 0 or h <= 0 or len(poly) < 3:
+            return jsonify({"error": "此筆沒有可繪製的輪廓"}), 404
+
+        # ── 組織分區：把遮罩降到粗網格再輸出方塊 ──
+        #
+        # 逐像素輸出 SVG 會是幾 MB 的檔案而且瀏覽器會卡。降到 ~64 格寬就夠看出
+        # 「哪裡是肉芽、哪裡是壞死」——這是複核用途，不是量測用途。
+        cells, gw, gh = [], 0, 0
+        tissue_note = "此筆沒有組織遮罩"
+        if rec.get("tissue_mask_key"):
+            try:
+                raw = _store().get_blob(_key(os.path.join(TISSUE_DIR, image_id + ".png")))
+                cells, gw, gh = _tissue_cells(raw, 64)
+                tissue_note = ("組織遮罩（醫師已修正 %s px）" % rec.get("tissue_edit_px")
+                               if rec.get("tissue_edited")
+                               else "⚠ 組織遮罩未經醫師修正 — 不會進入訓練集")
+            except Exception as e:
+                logger.warning("預覽讀取組織遮罩失敗(%s): %s", image_id, e)
+                tissue_note = "組織遮罩讀取失敗：%s" % e
+
+        svg = _render_preview_svg(w, h, poly, cells, gw, gh, rec, tissue_note)
+        audit(actor, "record_preview", rec.get("code") or "-",
+              "image_id=%s" % image_id, role, org)
+        # content_type 而非 mimetype：Flask 會對後者再附一次 charset。
+        return Response(svg, content_type="image/svg+xml; charset=utf-8")
+
+
+    @flywheel_bp.route("/api/v1/dataset/manifest", methods=["GET"])
+    @jwt_required()
+    def get_dataset_manifest():
+        """訓練資料集清單（**控制面**）。`audit.read` 權限（工程師／管理者）。
+
+        ## 為什麼大量位元組不走這裡
+
+        這支只回 manifest（哪些 image_id 合格 + 溯源），幾百 KB。
+        影像與遮罩由本地端拿著 manifest 直接對 GCS 抓（見 `pull_dataset.ps1`）。
+
+        理由不是潔癖：
+          - Cloud Run 的回應有 32MB 上限、有請求逾時，而資料集是 GB 量級
+          - 串流大檔要付 CPU-秒與出口流量，而 GCS 本來就有 IAM、可續傳、可增量同步
+          - 分開之後，**規則仍然在這裡執行**（同意、撤回、誤送排除、修正判準），
+            而且每次匯出都留在稽核軌跡上——那才是控制面該做的事
+
+        ## `require_edited` 預設為真
+
+        `tissue_edited=false` 的遮罩是 `TissueSeg` 色彩啟發式的原樣輸出，沒有人看過。
+        拿它訓練＝**用模型自己的輸出訓練自己**：驗證指標會漂亮，臨床表現不動。
+        要看到那些筆數請明確傳 `require_edited=0`，而回應一定會標出來。
+        """
+        actor, role, org = _who()
+        if not _can(role, "audit.read"):
+            return jsonify({"error": "權限不足", "issues": ["僅工程師／管理者可匯出資料集。"]}), 403
+
+        kind = request.args.get("kind", "tissue")          # tissue | wound | interrater
+        want_edited = request.args.get("require_edited", "1") not in ("0", "false", "no")
+        sources = [x for x in (request.args.get("source") or "clinical").split(",") if x]
+
+        def _f(name, default):
+            try:
+                return float(request.args.get(name, default))
+            except (TypeError, ValueError):
+                return default
+        # 門檻預設值取自 docs/tissue_segmentation_plan.md §4.3；可由呼叫端覆寫，
+        # 因為臨床顯示與訓練集本來就該用不同的嚴格度。
+        min_focus = _f("min_focus", 80.0)
+        max_clipped = _f("max_clipped", 0.05)
+        max_skew = _f("max_skew", 0.25)
+        min_marker = _f("min_marker_frac", 0.04)
+        min_roi = _f("min_roi_px", 256)
+
+        # ── kind=interrater：被兩位以上標註者標過的影像 ──────────────
+        #
+        # 不需要特地做「20 張研究」：**任何被 2 人以上標過的影像都是免費的一致性資料**。
+        # 而 inter-rater Dice 是模型表現的**天花板**——模型不可能比兩個人彼此同意的
+        # 程度更準。沒有它，Dice 0.70 到底是好是壞無從判斷。
+        if kind == "interrater":
+            keep = set(sources) if sources else None
+            tagged = classify_queue(read_jsonl(QUEUE))
+            by_img = {}
+            for r, st in tagged:
+                # trainable 是主標註者、parallel_rater 是其他人——兩者都要，
+                # 它們合起來才是「同一張圖的多份獨立判斷」。
+                if st not in ("trainable", "parallel_rater"):
+                    continue
+                if keep is not None and rec_source(r) not in keep:
+                    continue
+                if not r.get("tissue_mask_key") or not r.get("tissue_edited"):
+                    continue          # 沒有經人修正的遮罩，比較的是演算法跟自己
+                by_img.setdefault(r["image_id"], []).append({
+                    "actor": r.get("actor"), "role": r.get("role"), "code": r.get("code"),
+                    "tissue_mask_key": r.get("tissue_mask_key"),
+                    "tissue_raster": r.get("tissue_raster"),
+                    "tissue_frac": r.get("tissue_frac"),
+                    "received_at": r.get("received_at"), "status": st,
+                })
+            multi = {k: v for k, v in by_img.items() if len({x["actor"] for x in v}) >= 2}
+            pairs = sum(len({x["actor"] for x in v}) * (len({x["actor"] for x in v}) - 1) // 2
+                        for v in multi.values())
+            audit(actor, "dataset_manifest", "-",
+                  "kind=interrater 多標註者影像 %d 張／可比較配對 %d" % (len(multi), pairs), role, org)
+            return jsonify({
+                "kind": "interrater", "count": len(multi), "pairs": pairs,
+                "items": [{"image_id": k, "image_key": "images/%s.jpg" % k, "raters": v}
+                          for k, v in sorted(multi.items())],
+                "single_rater_images": len(by_img) - len(multi),
+                "store": _store().describe(),
+                "note": ("用 analyze_interrater.py 計算逐類 Dice。"
+                         "這個數字是模型表現的天花板——模型不可能比兩位醫師彼此同意的程度更準。"),
+            }), 200
+
+        recs, _ = effective_queue(source=set(sources) if sources else None)
+        items, excluded = [], {}
+        def drop(why):
+            excluded[why] = excluded.get(why, 0) + 1
+
+        for r in recs:
+            q = r.get("quality") or {}
+            if kind == "tissue":
+                if not r.get("tissue_mask_key"):
+                    drop("no_tissue_mask"); continue
+                if want_edited and not r.get("tissue_edited"):
+                    drop("tissue_not_edited"); continue
+            # 品質門檻。缺指標（舊紀錄）**不擋**——那些影像本身沒問題，
+            # 只是收集時還沒有這個欄位；擋掉會把早期樣本整批丟掉。
+            if q.get("focus_lapvar") is not None and q["focus_lapvar"] < min_focus:
+                drop("blurry"); continue
+            if q.get("clipped_frac") is not None and q["clipped_frac"] > max_clipped:
+                drop("clipped"); continue
+            if q.get("marker_skew") is not None and q["marker_skew"] > max_skew:
+                drop("perspective_skew"); continue
+            if q.get("marker_frac") is not None and q["marker_frac"] < min_marker:
+                drop("marker_too_small"); continue
+            if q.get("roi_short_px") is not None and q["roi_short_px"] < min_roi:
+                drop("roi_too_small"); continue
+            items.append({
+                "image_id": r.get("image_id"), "code": r.get("code"),
+                "image_key": "images/%s.jpg" % r.get("image_id"),
+                "tissue_mask_key": r.get("tissue_mask_key"),
+                "tissue_raster": r.get("tissue_raster"), "tissue_frac": r.get("tissue_frac"),
+                "tissue_edited": bool(r.get("tissue_edited")),
+                "tissue_edit_ratio": r.get("tissue_edit_ratio"),
+                "image_w": r.get("image_w"), "image_h": r.get("image_h"),
+                "mm_per_px": r.get("mm_per_px"), "route": r.get("route"),
+                "source": rec_source(r), "quality": q,
+                # actor 留著是為了算 inter-rater 一致性與避免資料洩漏
+                #（同一位標註者的樣本不該橫跨訓練/驗證切分）
+                "actor": r.get("actor"), "received_at": r.get("received_at"),
+            })
+
+        audit(actor, "dataset_manifest", "-",
+              "kind=%s source=%s 合格 %d 筆／排除 %s"
+              % (kind, ",".join(sources) or "*", len(items), excluded or "無"), role, org)
+        return jsonify({
+            "kind": kind, "count": len(items), "items": items,
+            "excluded": excluded, "require_edited": want_edited,
+            "thresholds": {"min_focus": min_focus, "max_clipped": max_clipped,
+                           "max_skew": max_skew, "min_marker_frac": min_marker,
+                           "min_roi_px": min_roi},
+            "store": _store().describe(),
+            "note": "影像與遮罩請用 pull_dataset.ps1 直接對 GCS 抓；此端點只回清單。",
         }), 200
 
     @flywheel_bp.route("/api/v1/consent/withdraw", methods=["POST"])

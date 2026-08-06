@@ -94,3 +94,11 @@ Backend/Flask/flywheel/users.jsonl
 _screenshots/
 screenshots/
 Screenshots/
+
+# 多行中文 commit 訊息的暫存檔。
+#
+# PowerShell 的 `git commit -m "..."` 對中文多行訊息會出事：`$` 會被展開、
+# 反引號被當跳脫字元、`\"` 不是合法跳脫。2026-08-05 就因此吃過一次 parse error。
+# 固定作法是把訊息寫進這個檔再 `git commit -F COMMIT_MSG.txt`。
+# 它是過程產物，不該進版控（訊息本身已經在 git log 裡了）。
+/COMMIT_MSG.txt

@@ -41,7 +41,9 @@ fun SamplePickerScreen(
      */
     measureEnabled: Boolean = true,
     /** measureEnabled=false 時顯示的原因。 */
-    disabledReason: String? = null
+    disabledReason: String? = null,
+    /** 辨識參照圖，透傳給 MeasureScreen（顯示於量測數值與滲液輸入之間）。 */
+    preview: @Composable () -> Unit = {}
 ) {
     val ctx = LocalContext.current
     // 模式:false=端上、true=後端。有後端時預設走後端(端上 ONNX 原生庫在模擬器可能不相容)
@@ -128,6 +130,6 @@ fun SamplePickerScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant)
         Divider()
         MeasureScreen(vm = vm, onReview = onReview, onSaveToTimeline = onSaveToTimeline,
-            exudate = exudate, onExudate = onExudate)
+            exudate = exudate, onExudate = onExudate, preview = preview)
     }
 }

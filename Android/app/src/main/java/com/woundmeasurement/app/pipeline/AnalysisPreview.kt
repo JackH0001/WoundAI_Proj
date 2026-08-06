@@ -44,13 +44,12 @@ import kotlin.math.roundToInt
 private data class Layers(val outline: Boolean = true, val tissue: Boolean = true, val marker: Boolean = true)
 
 private const val PREVIEW_MAX = 900          // 預覽長邊上限（記憶體與繪製成本）
-private const val TISSUE_MAX = 384           // 組織分類的取樣解析度上限
 
 /**
  * 在傷口多邊形內做逐像素組織分類，回傳一張與 [preview] 同尺寸的半透明 ARGB 疊圖。
  *
- * 刻意在**低解析度**上分類再放大：HSV 逐像素規則在全解析度照片上會產生椒鹽狀雜點，
- * 而且成本與像素數成正比。降取樣本身就是一種平滑，再加 3×3 多數決把孤立點吃掉。
+ * 分類本身在 [TissueSeg]——**與修邊畫面共用同一份實作**。兩邊各寫一份的話，
+ * 某天只改了其中一邊，醫師就會看到「結果頁說腐肉、修邊頁說肉芽」而無從判斷該信哪個。
  *
  * ⚠ 這是**色彩啟發式**，不是模型。它與後端 `stage4_tissue` 用的是同一套規則
  * （`TissueClassifierV2`），所以畫面與數字一致；但兩者都只是輔助，最終以醫師修邊為準。
@@ -58,91 +57,25 @@ private const val TISSUE_MAX = 384           // 組織分類的取樣解析度�
 private fun buildTissueOverlay(src: Bitmap, preview: Bitmap, polygon: List<List<Int>>): Bitmap? {
     if (polygon.size < 3) return null
     return runCatching {
-        val sw = src.width; val sh = src.height
         var x0 = Int.MAX_VALUE; var y0 = Int.MAX_VALUE; var x1 = 0; var y1 = 0
-        polygon.forEach { p ->
-            x0 = min(x0, p[0]); y0 = min(y0, p[1]); x1 = max(x1, p[0]); y1 = max(y1, p[1])
-        }
-        x0 = x0.coerceIn(0, sw - 1); y0 = y0.coerceIn(0, sh - 1)
-        x1 = x1.coerceIn(x0 + 1, sw); y1 = y1.coerceIn(y0 + 1, sh)
+        polygon.forEach { p -> x0 = min(x0, p[0]); y0 = min(y0, p[1]); x1 = max(x1, p[0]); y1 = max(y1, p[1]) }
+        x0 = x0.coerceIn(0, src.width - 2); y0 = y0.coerceIn(0, src.height - 2)
+        x1 = x1.coerceIn(x0 + 2, src.width); y1 = y1.coerceIn(y0 + 2, src.height)
         val bw = x1 - x0; val bh = y1 - y0
-        if (bw < 4 || bh < 4) return null
 
-        val s = min(1f, TISSUE_MAX.toFloat() / max(bw, bh))
-        val tw = max(2, (bw * s).roundToInt()); val th = max(2, (bh * s).roundToInt())
+        val (gw, gh) = TissueSeg.grid(bw, bh)
+        val inside = TissueSeg.rasterizePolygon(polygon, x0, y0, bw, bh, gw, gh)
+        val cls = TissueSeg.classify(src, x0, y0, x1, y1, gw, gh, inside) ?: return null
 
-        // 取樣傷口 bbox
-        val roi = Bitmap.createBitmap(src, x0, y0, bw, bh)
-        val small = Bitmap.createScaledBitmap(roi, tw, th, true)
-        if (roi !== small) roi.recycle()
-        val px = IntArray(tw * th)
-        small.getPixels(px, 0, tw, 0, 0, tw, th)
-        small.recycle()
-
-        // 多邊形柵格化（縮放到取樣座標）
-        val inside = ByteArray(tw * th)
-        val poly = polygon.map { floatArrayOf((it[0] - x0) * s, (it[1] - y0) * s) }
-        for (y in 0 until th) {
-            val yc = y + 0.5f
-            var j = poly.size - 1
-            val xs = ArrayList<Float>(8)
-            for (i in poly.indices) {
-                val a = poly[i]; val b = poly[j]
-                if ((a[1] > yc) != (b[1] > yc)) xs.add(a[0] + (yc - a[1]) / (b[1] - a[1]) * (b[0] - a[0]))
-                j = i
-            }
-            xs.sort()
-            var k = 0
-            while (k + 1 < xs.size) {
-                val xa = max(0, xs[k].roundToInt()); val xb = min(tw - 1, xs[k + 1].roundToInt())
-                for (x in xa..xb) inside[y * tw + x] = 1
-                k += 2
-            }
-        }
-
-        // 灰世界白平衡（只用遮罩內的像素算增益——背景膚色會把整體均值拉偏）
-        var sr = 0.0; var sg = 0.0; var sb = 0.0; var n = 0
-        for (i in px.indices) if (inside[i].toInt() != 0) {
-            sr += (px[i] shr 16) and 0xFF; sg += (px[i] shr 8) and 0xFF; sb += px[i] and 0xFF; n++
-        }
-        if (n == 0) return null
-        val g = TissueClassifierV2.wbGains(sr / n, sg / n, sb / n)
-
-        val cls = ByteArray(tw * th)
-        for (i in px.indices) if (inside[i].toInt() != 0) {
-            val r = TissueClassifierV2.applyGain((px[i] shr 16) and 0xFF, g[0])
-            val gg = TissueClassifierV2.applyGain((px[i] shr 8) and 0xFF, g[1])
-            val b = TissueClassifierV2.applyGain(px[i] and 0xFF, g[2])
-            cls[i] = TissueClassifierV2.classifyPixel(r, gg, b).toByte()
-        }
-
-        // 3×3 多數決：吃掉孤立雜點。少了這一步，畫面會是一片椒鹽而不是可讀的分區。
-        val sm = cls.copyOf()
-        val cnt = IntArray(6)
-        for (y in 1 until th - 1) for (x in 1 until tw - 1) {
-            val i = y * tw + x
-            if (inside[i].toInt() == 0) continue
-            java.util.Arrays.fill(cnt, 0)
-            for (dy in -1..1) for (dx in -1..1) {
-                val c = cls[(y + dy) * tw + (x + dx)].toInt()
-                if (c in 1..5) cnt[c]++
-            }
-            var best = cls[i].toInt(); var bn = -1
-            for (c in 1..5) if (cnt[c] > bn) { bn = cnt[c]; best = c }
-            sm[i] = best.toByte()
-        }
-
-        // 上色並放大到 preview 尺寸
-        val out = IntArray(tw * th)
-        for (i in out.indices) out[i] = if (inside[i].toInt() == 0) 0 else T_COLORS[sm[i].toInt().coerceIn(1, 5)]
-        val tint = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888)
-        tint.setPixels(out, 0, tw, 0, 0, tw, th)
+        val out = IntArray(gw * gh)
+        for (i in out.indices) out[i] = if (cls[i].toInt() in 1..T_MAX) T_COLORS[cls[i].toInt()] else 0
+        val tint = Bitmap.createBitmap(gw, gh, Bitmap.Config.ARGB_8888)
+        tint.setPixels(out, 0, gw, 0, 0, gw, gh)
 
         val full = Bitmap.createBitmap(preview.width, preview.height, Bitmap.Config.ARGB_8888)
         val c = android.graphics.Canvas(full)
         val k = preview.width.toFloat() / src.width
-        c.drawBitmap(tint, null,
-            android.graphics.RectF(x0 * k, y0 * k, x1 * k, y1 * k),
+        c.drawBitmap(tint, null, android.graphics.RectF(x0 * k, y0 * k, x1 * k, y1 * k),
             android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
         tint.recycle()
         full

@@ -110,7 +110,8 @@ class MigrationTest {
                 WoundMeasurementDatabase.MIGRATION_1_2,
                 WoundMeasurementDatabase.MIGRATION_2_3,
                 WoundMeasurementDatabase.MIGRATION_3_4,
-                WoundMeasurementDatabase.MIGRATION_4_5
+                WoundMeasurementDatabase.MIGRATION_4_5,
+                WoundMeasurementDatabase.MIGRATION_5_6
             )
             // 刻意**不加** fallbackToDestructiveMigration：這個測試存在的意義就是抓住
             // 「缺 Migration 導致資料被清空」。加了它，測試會靜默通過而資料早就沒了。
@@ -153,6 +154,10 @@ class MigrationTest {
             // 而且沒有任何跡象顯示它其實是「沒量」。這是本次 migration 唯一容易做錯的地方。
             assertEquals(null, sorted[0].tissueGranulation)
             assertEquals(null, sorted[0].tissueOther)
+            // v6：舊紀錄沒有柵格快照。續編時會退回由多邊形重建（有損但可用），
+            // 而 null 正是「沒有快照」的正確表示——空字串會讓載入端去找一個不存在的檔。
+            assertEquals(null, sorted[0].rasterPath)
+            assertEquals(null, sorted[0].rasterMeta)
         } finally {
             room.close()
         }

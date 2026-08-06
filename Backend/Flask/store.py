@@ -232,8 +232,11 @@ class GcsStore(Store):
 
     def put_blob(self, key: str, data: bytes) -> None:
         bucket, _ = self._target(key)
-        bucket.blob(self._k(key)).upload_from_file(
-            io.BytesIO(data), content_type="image/jpeg")
+        # content_type 依副檔名決定。寫死 image/jpeg 的話，組織遮罩 PNG 在 GCS 上
+        # 會被標成 JPEG——`gcloud storage cp` 下載沒問題，但瀏覽器預覽與任何依
+        # metadata 分派的工具都會解錯，而檔案本身是好的，症狀會很難歸因。
+        ct = "image/png" if self._k(key).lower().endswith(".png") else "image/jpeg"
+        bucket.blob(self._k(key)).upload_from_file(io.BytesIO(data), content_type=ct)
 
     def get_blob(self, key: str):
         bucket, _ = self._target(key)

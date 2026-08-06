@@ -385,19 +385,72 @@ async function loadRecs(){
          onchange="window._recScopeAll=this.checked;loadRecs()"> 看全部人的（非只有我）</label>`
     : `<span style="font-size:12px;color:var(--dim)">只顯示 <code>${esc(j.actor)}</code> 送出的</span>`;
   $("recs").innerHTML = "<table><tr><th>時間 (UTC)</th><th>代碼</th><th>來源</th>" +
-    "<th>面積</th><th>路由</th><th>狀態</th>" + (j.scope==="all"?"<th>送出者</th>":"") + "<th></th></tr>" +
+    "<th>面積</th><th>組織</th><th>深度</th><th>品質</th><th>狀態</th>" +
+    (j.scope==="all"?"<th>送出者</th>":"") + "<th></th></tr>" +
     recsData.map((r,i) => `<tr class="${r.status==="trainable"?"":"off"}">
       <td class="nowrap">${esc((r.received_at||"").replace("T"," ").replace("Z",""))}</td>
-      <td class="nowrap"><code>${esc(r.code)}</code></td>
-      <td>${esc(r.source)}</td>
+      <td class="nowrap"><code>${esc(r.code)}</code>${r.has_preview
+        ? `<br><a href="#" onclick="showPreview('${esc(r.image_id)}');return false"
+             style="font-size:11px">看標註</a>` : ""}</td>
+      <td>${esc(r.source)}<br><span style="font-size:11px;color:var(--dim)">${esc(r.route||"")}</span></td>
       <td class="nowrap">${r.area_cm2==null?"—":esc(r.area_cm2)+" cm²"}</td>
-      <td style="color:var(--dim)">${esc(r.route||"—")}</td>
+      <td class="nowrap">${tissueCell(r)}</td>
+      <td class="nowrap">${depthCell(r)}</td>
+      <td class="nowrap">${qualityCell(r)}</td>
       <td class="${r.status==="trainable"?"ok":(r.status==="superseded"?"":"bad")}">
         ${esc(r.status_zh)}${r.retract_reason?`<br><span style="font-size:11px">${esc(r.retract_reason)}${r.retract_note?"："+esc(r.retract_note):""}</span>`:""}</td>
       ${j.scope==="all"?`<td class="nowrap">${esc(r.actor)}</td>`:""}
       <td class="nowrap">${r.can_retract
         ? `<button onclick="askRetract(${i})">排除</button>` : ""}</td></tr>`).join("") + "</table>" +
     (recsData.length ? "" : "<p class='note'>沒有符合條件的送件。</p>");
+}
+// ⚠ 三個欄位刻意分開顯示「沒有」與「有但不可用」。
+// 合成一個「可訓練 ✓／✗」會把兩種完全不同的處置混成一格：
+// 「沒有遮罩」要請醫師去補標，「未經修正」則是醫師標了但沒改過 AI 的輸出——
+// 後者要問的是「他是不是按錯了完成」，而那從一個 ✗ 看不出來。
+function tissueCell(r){
+  if(!r.tissue_mask) return `<span class="bad">✗ 無</span>`;
+  if(!r.tissue_edited) return `<span class="bad" title="未經醫師修正的遮罩是 AI 自己的輸出，拿去訓練等於自我確認">△ 未修正</span>`;
+  const px = r.tissue_edit_px ? ` ${Number(r.tissue_edit_px).toLocaleString()}px` : "";
+  return `<span class="ok">✓${esc(px)}</span>`;
+}
+function depthCell(r){
+  const d = r.depth_source || "none";
+  // none 是目前的正常值（App 尚未擷取深度）。**不要標紅**——
+  // 把預期中的狀態畫成錯誤，久了所有紅字都會被忽略，包括真正的錯誤。
+  if(d === "none") return `<span style="color:var(--dim)" title="${esc(r.capture_device||"")}">—</span>`;
+  return `<span class="ok" title="${esc(r.capture_device||"")}">${esc(d)}</span>`;
+}
+function qualityCell(r){
+  const q = r.quality; if(!q) return `<span style="color:var(--dim)">—</span>`;
+  const bad = [];
+  if(q.focus_lapvar != null && q.focus_lapvar < 60) bad.push("失焦");
+  if(q.clipped_frac != null && q.clipped_frac > 0.05) bad.push("過曝");
+  if(q.roi_short_px != null && q.roi_short_px < 256) bad.push("ROI 太小");
+  if(q.marker_frac != null && q.marker_frac < 0.002) bad.push("標記太小");
+  if(q.marker_skew != null && q.marker_skew > 0.25) bad.push("斜拍");
+  return bad.length ? `<span class="bad" title="面積可信度受影響">⚠ ${esc(bad.join("・"))}</span>`
+                    : `<span class="ok">✓</span>`;
+}
+// 預覽是**向量圖，不含任何原始影像像素**（見後端 get_record_preview）。
+// ⚠ 不能用 <img src="...">：那個請求不會帶 Authorization 標頭，會拿到 401
+//（與 auditCsv 同一個坑）。改成 fetch 取回 SVG 文字再內嵌。
+// 回應是我們自己後端產生的 SVG，內容只有 rect/polygon/text，沒有腳本。
+async function showPreview(iid){
+  const box = $("r_panel");
+  box.innerHTML = `<div class="banner">載入標註示意圖…</div>`;
+  try{
+    const res = await fetch("/api/v1/flywheel/record/" + encodeURIComponent(iid) + "/preview.svg",
+                            {headers:{Authorization:"Bearer "+tok}});
+    if(!res.ok) throw new Error("HTTP " + res.status);
+    const svg = await res.text();
+    box.innerHTML = `<div class="banner">
+      <div style="max-width:420px">${svg}</div>
+      <p class="note">此圖由輪廓與組織遮罩繪製，<b>不含任何原始影像像素</b>——
+      用來確認標註形狀與分區是否合理，不能用來判讀傷口本身。</p>
+      <button onclick="$('r_panel').innerHTML=''">關閉</button></div>`;
+  }catch(e){ box.innerHTML = `<div class="banner"><p class="bad">預覽失敗：${esc(e.message)}</p>
+    <button onclick="$('r_panel').innerHTML=''">關閉</button></div>`; }
 }
 function askRetract(i){
   const r = recsData[i];

@@ -32,7 +32,7 @@ import com.woundmeasurement.app.data.converter.DateConverter
         WoundCaseEntity::class,
         ConsentEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 @TypeConverters(DateConverter::class)
@@ -152,6 +152,19 @@ abstract class WoundMeasurementDatabase : RoomDatabase() {
         }
 
         /**
+         * v6：修邊柵格的本機快照（路徑 + 仿射參數）。
+         *
+         * 兩欄都可為 null：舊紀錄沒有柵格，續編時仍退回由多邊形重建（有損但可用）。
+         * **必須成對存在**才能還原——只有路徑沒有 meta 就不知道座標怎麼對回影像。
+         */
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `measurements` ADD COLUMN `rasterPath` TEXT")
+                db.execSQL("ALTER TABLE `measurements` ADD COLUMN `rasterMeta` TEXT")
+            }
+        }
+
+        /**
          * v5：每筆量測存下組織比例。
          *
          * ⚠ 五個欄位都是 **nullable REAL，不給 DEFAULT 0**。
@@ -175,7 +188,7 @@ abstract class WoundMeasurementDatabase : RoomDatabase() {
                     WoundMeasurementDatabase::class.java,
                     "wound_measurement_database"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     // 刻意不加 fallbackToDestructiveMigration:寧可在開發期因缺 migration 而崩潰,
                     // 也不要在醫護手機上默默刪光病歷。
                     .build()

@@ -1620,6 +1620,36 @@ def classify_wound():
             if cpp:
                 area_cm2 = float(mask.sum()) * (cpp ** 2); calib = "manual_cm_per_pixel"
                 mm_per_px = cpp * 10.0
+        # 影像品質指標。
+        #
+        # 模糊、過曝、角度過斜的影像會產生垃圾組織 GT，而**垃圾 GT 比沒有 GT 更糟**：
+        # 它會把錯誤教給模型，且從指標上看不出來。所以在 classify 當下就算好落盤，
+        # 匯出訓練集時可以依門檻篩。
+        #
+        # ⚠ 只標記、不自動丟棄。自動丟會讓「為什麼這張沒進訓練集」變成黑箱；
+        # 標記讓門檻可以事後調整，而且每次調整都留得下紀錄。
+        quality = {}
+        try:
+            _ys, _xs = np.nonzero(mask)
+            if _ys.size > 0:
+                _y0, _y1 = int(_ys.min()), int(_ys.max()) + 1
+                _x0, _x1 = int(_xs.min()), int(_xs.max()) + 1
+                _roi = img[_y0:_y1, _x0:_x1]
+                _g = cv2.cvtColor(_roi, cv2.COLOR_RGB2GRAY)
+                quality["focus_lapvar"] = round(float(cv2.Laplacian(_g, cv2.CV_64F).var()), 1)
+                quality["clipped_frac"] = round(float(((_g <= 2) | (_g >= 253)).mean()), 4)
+                quality["roi_short_px"] = int(min(_y1 - _y0, _x1 - _x0))
+            if marker_quad:
+                _q = np.array(marker_quad, dtype=float)
+                _sides = [float(np.linalg.norm(_q[i] - _q[(i + 1) % 4])) for i in range(4)]
+                quality["marker_side_px"] = round(float(np.mean(_sides)), 1)
+                quality["marker_frac"] = round(float(np.mean(_sides)) / max(W, H), 4)
+                # 正方形標記在正射投影下四邊等長；差異愈大代表拍攝角度愈斜，
+                # 而斜視角會讓 mm/px 在畫面不同位置不一致（比例法假設平面正對）。
+                quality["marker_skew"] = round((max(_sides) - min(_sides)) / max(1e-6, np.mean(_sides)), 4)
+        except Exception as _qe:
+            logger.warning("品質指標計算失敗: %s", _qe)
+
         # Stage4 組織 v2 + Stage5 PUSH
         t = tissue_proxy_v2(img, mask)
         push = push_score(area_cm2, t)
@@ -1650,6 +1680,9 @@ def classify_wound():
                               'note': ('印刷模擬圖:組織比例由顏料色彩推得,僅供色彩分型演算法比對,不可作臨床解讀'
                                        if phantom else None)},
             'stage5_severity': {k: push[k] for k in ('tool','area_subscore','tissue_subscore','exudate_subscore','total_partial_img','total_full','range_full')},
+            # 品質指標供 App 顯示與訓練集篩選。門檻不寫在後端——
+            # 不同用途（臨床顯示 vs 訓練集）該用不同門檻，硬編一組會讓其中一邊將就。
+            'quality': quality,
             'phantom_mode': phantom,
             'phantom_pass': phantom_pass,   # strict / gray_world_wb(偏色時已自動白平衡重試)
             # true = AI 沒抓到但色彩分割抓得到 → 幾乎確定是把印刷模擬圖誤選成臨床/範例

@@ -236,6 +236,10 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
         code: String, gtPolygon: List<List<Int>>, exudate: Int?,
         imageId: String?, imageW: Int, imageH: Int,
         mmPerPx: Double? = null, route: String? = null, segModel: String? = null,
+        tissueFrac: Map<String, Double>? = null,
+        /** 組織分割 GT（base64 PNG，值＝組織碼）與其柵格→影像座標的仿射參數。 */
+        tissueMaskPng: String? = null,
+        tissueRaster: EditRaster? = null,
         correctionIou: Double? = null, careNote: String? = null,
         source: String? = null,  // clinical(預設)/sample/phantom/external;範例集不可灌進臨床樣本數
         /**
@@ -278,6 +282,32 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
         if (correctionIou != null) obj.put("correction_iou", correctionIou)
         if (careNote != null) obj.put("care_note", careNote)
         if (source != null) obj.put("source", source)
+        // WoundAI3D 預留：現在一律 none，但**明確標記**比欄位缺席好——
+        // 日後分析時「沒拍深度」與「拍了但沒存」要分得出來。
+        // capture_device 現在就有值，且它是日後查「某機型面積系統性偏高」的唯一依據。
+        obj.put("depth_source", "none")
+        obj.put("capture_device", "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
+        // 醫師修邊後的組織比例（含「其他」）。不是分割 GT，是未來訓練組織分類的種子——
+        // 影像會依保存政策清除，事後無法回溯重算，所以現在就收。
+        if (tissueFrac != null && tissueFrac.isNotEmpty()) {
+            obj.put("tissue_frac", JSONObject().also { t ->
+                tissueFrac.forEach { (k2, v) -> t.put(k2, v) }
+            })
+        }
+        // 組織分割 GT。**tissue_edited 一定要跟著送**——後端靠它決定這張遮罩
+        // 能不能進訓練集。少了它，未經醫師修正的啟發式輸出會安靜地混進去，
+        // 而模型就在學習複製它自己已經會做的事（見 EditRaster.tissueEditedPx）。
+        if (tissueMaskPng != null && tissueRaster != null) {
+            obj.put("tissue_mask_png", tissueMaskPng)
+            obj.put("tissue_raster", JSONObject().apply {
+                put("rx0", tissueRaster.rx0.toDouble()); put("ry0", tissueRaster.ry0.toDouble())
+                put("mw", tissueRaster.mw); put("mh", tissueRaster.mh)
+                put("m_scale", tissueRaster.mScale.toDouble())
+            })
+            obj.put("tissue_edited", tissueRaster.tissueEdited)
+            obj.put("tissue_edit_px", tissueRaster.tissueEditedPx)
+            obj.put("tissue_edit_ratio", tissueRaster.tissueEditRatio)
+        }
         val req = Request.Builder().url("$baseUrl/api/v1/annotation")
             .header("Authorization", "Bearer $jwt")
             .post(obj.toString().toRequestBody("application/json".toMediaType())).build()

@@ -98,5 +98,20 @@ data class MeasurementEntity(
     val tissueSlough: Double? = null,
     val tissueNecrosis: Double? = null,
     val tissueEpithelial: Double? = null,
-    val tissueOther: Double? = null
+    val tissueOther: Double? = null,
+
+    // ── v6：修邊柵格的本機快照 ───────────────────────────────────────
+    //
+    // 在此之前離開量測畫面後**只有多邊形被保存**，從時間軸回頭修邊時柵格由多邊形重建。
+    // 兩個後果都是實質的資料損失（見 EditRasterCodec 的說明）：
+    //
+    //   1. 醫師畫的**組織分區整批消失** —— 多邊形不含組織資訊，重建後退回色彩啟發式，
+    //      而畫面看起來完全正常，於是他會再做一次，然後再消失一次
+    //   2. **面積每進出一次漂移約 0.5%** —— 遮罩→輪廓→RDP→多邊形→掃描線填充是有損往返，
+    //      醫師什麼都沒改卻看到數字變了
+    //
+    // 存的是加密後的無損 PNG（R=組織碼 G=遮罩 B=原始遮罩），檔名寫在這裡。
+    val rasterPath: String? = null,
+    /** 仿射參數與畫布尺寸（JSON）。與 rasterPath 必須成對，缺一就無法還原座標。 */
+    val rasterMeta: String? = null
 )

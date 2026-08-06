@@ -296,6 +296,15 @@ class MeasureViewModel(
                         imageId = lastImageId, imageW = lastImageW, imageH = lastImageH,
                         mmPerPx = lastMmPerPx, route = lastRoute, segModel = lastSegModel,
                         correctionIou = lastCorrectionIou, careNote = careNote, source = source,
+                        // 醫師修邊後的組織比例（含「其他」）。用 state 裡的值而不是 lastXxx——
+                        // 修邊完成時 applyEditedPolygon 已把它寫回 result，那才是醫師確認過的版本。
+                        tissueFrac = _state.value.result?.tissueFrac,
+                        // 組織分割 GT。editRaster 為 null（醫師沒進修邊）時整組不送——
+                        // 沒有柵格就沒有遮罩，硬用 AI 輪廓補一張出來只會製造假 GT。
+                        tissueMaskPng = editRaster?.let {
+                            TissueMaskCodec.encode(it.tissue, it.mask, it.mw, it.mh)
+                        },
+                        tissueRaster = editRaster,
                         consentTrain = consentTrain, doctorVerified = lastDoctorVerified
                     )
                 }
@@ -370,6 +379,11 @@ class MeasureViewModel(
                 }
                 val (id, updatedRow) = withContext(Dispatchers.IO) {
                     val imgName = if (imageStore != null) lastBitmap?.let { imageStore.save(it) } else null
+                    // v6：把修邊柵格一起存下來。沒有它，從時間軸回頭修邊時醫師畫的組織分區
+                    // 會整批消失、面積也會每進出一次漂移 0.5%（見 EditRasterCodec 的說明）。
+                    val rasterPair = editRaster?.let { EditRasterCodec.encode(it) }
+                    val rasterName = if (imageStore != null && rasterPair != null)
+                        imageStore.save(rasterPair.first) else null
                     val existId = lastSavedId
                     val exist = existId?.let { dao.getMeasurementById(it) }
                     if (exist != null) {
@@ -402,11 +416,27 @@ class MeasureViewModel(
                             // 而重算面積是拿 2048 空間的 mmPerPx 去乘 4000 空間的像素數 → 高估 (4000/2048)²≈3.8 倍,
                             // 且這個錯誤會**靜默**寫進 estimatedArea 汙染癒合趨勢。
                             // 多存一份幾百 KB 的密文,換掉整類「圖與輪廓不同空間」的錯誤,這筆帳很划算。
-                            imagePath = imgName ?: exist.imagePath
+                            imagePath = imgName ?: exist.imagePath,
+                            // 柵格與 meta 必須成對更新。只更新其中一個，座標就會對到錯的影像。
+                            rasterPath = rasterName ?: exist.rasterPath,
+                            rasterMeta = if (rasterName != null) rasterPair?.second else exist.rasterMeta,
+                            // v5 組織比例。**update 分支曾經整組漏掉**——insert 有、update 沒有，
+                            // 於是「修邊後再存一次」會把新的組織比例丟掉，時間軸卡片與趨勢圖
+                            // 顯示的是第一次量測的值。這種漏欄位不會報錯，也不會有任何徵兆。
+                            tissueGranulation = r.tissueFrac["granulation"] ?: exist.tissueGranulation,
+                            tissueSlough = r.tissueFrac["slough"] ?: exist.tissueSlough,
+                            tissueNecrosis = r.tissueFrac["necrosis"] ?: exist.tissueNecrosis,
+                            tissueEpithelial = r.tissueFrac["epithelial"] ?: exist.tissueEpithelial,
+                            tissueOther = r.tissueFrac["other"] ?: exist.tissueOther
                         ))
                         // 先寫 DB 再刪舊檔:順序反過來的話,update 失敗就會留下指向不存在檔案的死路徑。
                         if (imgName != null && exist.imagePath.isNotEmpty() && exist.imagePath != imgName) {
                             imageStore?.delete(exist.imagePath)
+                        }
+                        // 同上：先寫 DB 再刪舊檔。反過來的話 update 失敗就留下死路徑。
+                        if (rasterName != null && !exist.rasterPath.isNullOrEmpty()
+                            && exist.rasterPath != rasterName) {
+                            imageStore?.delete(exist.rasterPath)
                         }
                         Pair(exist.id, true)
                     } else {
@@ -421,6 +451,8 @@ class MeasureViewModel(
                             quality = "backend",
                             processingTime = 0L,
                             imagePath = imgName ?: "",
+                            rasterPath = rasterName,
+                            rasterMeta = rasterPair?.second,
                             dataPath = "",
                             notes = notes,
                             // 綁定個案與雲端影像:本機病歷與飛輪樣本靠 wdCode/imageId 對得起來

@@ -63,6 +63,15 @@ class LocalImageStore(context: Context) {
         null
     }
 
+    /**
+     * 取出解密後的原始位元組（不解碼成 Bitmap）。
+     *
+     * 修邊柵格用得到：它是一張把三份 8-bit 資料塞在 RGB 通道的無損 PNG，
+     * 走 `loadFull` 也可以，但那會多一次 Bitmap 配置與回收；
+     * 而且柵格的「像素」不是影像，經過任何 Bitmap 的色彩處理都可能被改動。
+     */
+    fun rawBytes(name: String?): ByteArray? = readDecrypted(name)
+
     private fun readDecrypted(name: String?): ByteArray? {
         if (name.isNullOrBlank()) return null
         val f = File(dir, name)

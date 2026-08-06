@@ -114,6 +114,13 @@ fun WoundTimelineScreen(
                     modifier = Modifier.fillMaxWidth().height(170.dp)
                 )
             }
+            if (!unassignedOnly && asc.isNotEmpty()) {
+                TissueTrendChart(
+                    rows = asc,
+                    labels = asc.map { fmtShort.format(it.timestamp) },
+                    modifier = Modifier.fillMaxWidth().height(150.dp)
+                )
+            }
             Divider()
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
                 // 依「新→舊」顯示,但變化%要跟時間上的前一次比,所以用 asc 的索引來查前值
@@ -267,6 +274,83 @@ private fun AreaTrendChart(areas: List<Double>, labels: List<String>, modifier: 
                 Spacer(Modifier.weight(1f))
             }
             Text(labels.last(), fontSize = 10.sp)
+        }
+    }
+}
+
+
+/**
+ * 組織比例趨勢（100% 堆疊柱狀圖）。
+ *
+ * ## 為什麼要與面積分開看
+ *
+ * 面積縮小不等於在癒合。一個被壞死組織覆蓋的傷口清創後**面積會變大**，
+ * 那是好轉；而一個面積不變但肉芽轉為腐肉的傷口正在惡化。只看面積曲線，
+ * 這兩種情況都會被讀反。組織比例是判讀癒合方向的另一半資訊。
+ *
+ * ## ⚠ 無資料 ≠ 0%
+ *
+ * v5 之前的紀錄沒有組織欄位（`MIGRATION_4_5` 刻意不給 DEFAULT 0）。
+ * 那些柱子畫成灰色斜線的「無資料」，**不是**畫成一根 0% 的柱子——
+ * 後者會被讀成「當時完全沒有肉芽」，是一個看起來完全合理的假數據。
+ */
+@Composable
+private fun TissueTrendChart(
+    rows: List<MeasurementEntity>,
+    labels: List<String>,
+    modifier: Modifier
+) {
+    // 五類的順序刻意由「好」到「壞」：上皮 → 肉芽 → 其他 → 腐肉 → 壞死。
+    // 堆疊圖的閱讀方式是看色帶的消長，順序若隨意排，趨勢就看不出方向。
+    val order = listOf(
+        4 to "上皮", 1 to "肉芽", 5 to "其他", 2 to "腐肉", 3 to "壞死"
+    )
+    fun frac(m: MeasurementEntity, code: Int): Double? = when (code) {
+        1 -> m.tissueGranulation; 2 -> m.tissueSlough; 3 -> m.tissueNecrosis
+        4 -> m.tissueEpithelial; 5 -> m.tissueOther; else -> null
+    }
+    val hasAny = rows.any { m -> order.any { frac(m, it.first) != null } }
+
+    Column(modifier) {
+        Text("組織比例", style = MaterialTheme.typography.titleSmall)
+        if (!hasAny) {
+            Text("這個個案還沒有組織比例資料（App 版本 build 5 之後的量測才會記錄）。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            return@Column
+        }
+        Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.Bottom) {
+            rows.forEachIndexed { i, m ->
+                val vals = order.map { (code, _) -> frac(m, code) }
+                val sum = vals.filterNotNull().sum()
+                Column(Modifier.weight(1f).fillMaxHeight(), horizontalAlignment = Alignment.CenterHorizontally) {
+                    if (sum <= 0.0) {
+                        // 無資料：灰底 + 說明，不畫成 0%
+                        Box(Modifier.weight(1f).fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surfaceVariant))
+                        Text("無資料", fontSize = 9.sp, maxLines = 1,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        order.forEachIndexed { k, (code, _) ->
+                            val v = (vals[k] ?: 0.0) / sum
+                            if (v > 0.0) Box(
+                                Modifier.weight(v.toFloat()).fillMaxWidth()
+                                    .background(Color(T_COLORS[code] or -0x1000000))
+                            )
+                        }
+                        Text(labels.getOrElse(i) { "" }, fontSize = 9.sp, maxLines = 1)
+                    }
+                }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 4.dp)) {
+            order.forEach { (code, name) ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(9.dp).background(Color(T_COLORS[code] or -0x1000000)))
+                    Text(" $name", fontSize = 10.sp)
+                }
+            }
         }
     }
 }

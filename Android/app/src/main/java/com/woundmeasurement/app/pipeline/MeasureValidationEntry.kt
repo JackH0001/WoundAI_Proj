@@ -246,23 +246,6 @@ fun MeasureValidationEntry(
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
 
-            // 辨識參照圖：原圖 ＋ 傷口輪廓 ＋ 組織分區 ＋ **ArUco 校正框**。
-            //
-            // 放在結果數字**正下方**是刻意的：面積是這一頁最容易被直接採信的數字，
-            // 而它完全依賴 ArUco 認對了貼紙。認錯目標時系統不會有任何警告
-            // （偵測器沒有「認錯了」這個狀態，只有「找到／沒找到」），
-            // 所以複核的機會必須就在數字旁邊，而不是藏在另一個畫面裡。
-            if (st.result != null) vm.lastBitmap?.let { bmp ->
-                AnalysisPreview(
-                    bitmap = bmp,
-                    polygon = vm.lastPolygon,
-                    markerQuad = vm.lastMarkerQuad,
-                    mmPerPx = vm.lastMmPerPx,
-                    calibMethod = vm.lastCalibMethod,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-
             // 醫師修邊確認狀態。**取消不算確認** —— 先前按取消後畫面仍留著 AI 的原始輪廓，
             // 而「存入時間軸」與「送訓練標註」照樣可按，等於把沒人看過的 AI 輸出
             // 當成人工 GT。存檔仍允許（那是一筆合法的 AI 初步量測紀錄），
@@ -355,6 +338,23 @@ fun MeasureValidationEntry(
                     // 載入完成前不要指控「未取得同意」——擋住是對的,但訊息是假的
                     !consentLoaded -> "同意狀態載入中…"
                     else -> "⚠ 此病患尚未取得①照護同意（或已撤回），不得進行量測。請至個案管理簽署。"
+                },
+                // 辨識參照圖：原圖 ＋ 傷口輪廓 ＋ 組織分區 ＋ ArUco 校正框。
+                //
+                // 位置在**量測數值之下、滲液輸入之上**（見 MeasureScreen 的 preview 插槽說明）：
+                // 面積與 PUSH 完全依賴 ArUco 認對了貼紙、分割抓對了範圍，而兩者出錯時
+                // 系統都不會有任何警告。複核的機會要緊接在數字後面。
+                preview = {
+                    vm.lastBitmap?.let { bmp ->
+                        AnalysisPreview(
+                            bitmap = bmp,
+                            polygon = vm.lastPolygon,
+                            markerQuad = vm.lastMarkerQuad,
+                            mmPerPx = vm.lastMmPerPx,
+                            calibMethod = vm.lastCalibMethod,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
                 }
             )
             // 飛輪送出:滲液已填 + 上一步(修邊確認或存檔)完成後才自動顯示

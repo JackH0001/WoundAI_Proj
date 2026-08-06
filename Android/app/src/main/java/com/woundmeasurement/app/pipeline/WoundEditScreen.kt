@@ -7,6 +7,8 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -76,8 +78,66 @@ private const val MAX_MASK_DIM = 2200   // 擴張上限(記憶體防護)
 class EditRaster(
     val mask: ByteArray, val tissue: ByteArray, val origMask: ByteArray,
     val rx0: Float, val ry0: Float, val mw: Int, val mh: Int,
-    val mScale: Float, val cm2PerPx: Double?
-)
+    val mScale: Float, val cm2PerPx: Double?,
+    /**
+     * 醫師實際重畫的組織像素數（tissue 與分類器建議 auto 不同的部分）。
+     *
+     * ⚠ **這個欄位決定這張遮罩能不能拿去訓練。**
+     *
+     * 醫師若完全沒動組織筆刷，遮罩就是 `TissueSeg` 色彩啟發式的原樣輸出。
+     * 拿它當 GT 訓練＝**用模型自己的輸出訓練自己**：驗證指標會很漂亮，
+     * 因為模型只是在學會複製它已經會做的事，而臨床表現不會有任何改善。
+     *
+     * 沒有這個計數的話，訓練集會安靜地被未經人看過的啟發式輸出填滿，
+     * 而且從資料本身完全看不出來——又是那個「沒有錯誤、沒有警告、結果是錯的」形狀。
+     */
+    val tissueEditedPx: Int = 0,
+    /** 遮罩內像素總數，用來算修改比例。 */
+    val maskPx: Int = 0,
+    /**
+     * 產生這份柵格時的畫布尺寸。續編前必須比對——
+     * 柵格座標是相對於當時那張畫布算的，尺寸不同就整份作廢，
+     * 寧可退回由多邊形重建，也不要把醫師的判斷搬到錯的位置。
+     */
+    val canvasW: Int = 0,
+    val canvasH: Int = 0
+) {
+    val tissueEdited: Boolean get() = tissueEditedPx > 0
+    val tissueEditRatio: Double get() = if (maskPx > 0) tissueEditedPx.toDouble() / maskPx else 0.0
+}
+
+/**
+ * 用 [TissueSeg] 重算整個柵格的分類底稿（[RasterState.auto]）。
+ *
+ * 在**取樣網格**上分類再最近鄰放大，不在柵格解析度上逐像素跑：
+ * 2200² 的柵格要 484 萬次 HSV 換算，而且結果是椒鹽狀雜點；
+ * 512² 上算完再放大既快又平滑，代價只是分區邊界精細度——那本來就要靠醫師修。
+ */
+private fun seedAuto(st: RasterState, src: Bitmap) {
+    val x0 = st.rx0.roundToInt().coerceIn(0, src.width - 2)
+    val y0 = st.ry0.roundToInt().coerceIn(0, src.height - 2)
+    val x1 = (st.rx0 + st.mw / st.mScale).roundToInt().coerceIn(x0 + 2, src.width)
+    val y1 = (st.ry0 + st.mh / st.mScale).roundToInt().coerceIn(y0 + 2, src.height)
+    val (gw, gh) = TissueSeg.grid(x1 - x0, y1 - y0)
+    // 只在遮罩內分類。遮罩外的像素是皮膚與背景，分類它們既浪費又會把白平衡增益拉偏。
+    val inside = ByteArray(gw * gh)
+    for (gy in 0 until gh) for (gx in 0 until gw) {
+        val mx = (gx * st.mw / gw).coerceIn(0, st.mw - 1)
+        val my = (gy * st.mh / gh).coerceIn(0, st.mh - 1)
+        if (st.mask[my * st.mw + mx].toInt() != 0) inside[gy * gw + gx] = 1
+    }
+    // 遮罩太小（例如 AI 沒抓到）時網格上可能一格都不落——那就整片算，之後由筆刷決定範圍。
+    if (inside.none { it.toInt() != 0 }) java.util.Arrays.fill(inside, 1.toByte())
+
+    val g = TissueSeg.classify(src, x0, y0, x1, y1, gw, gh, inside) ?: return
+    for (y in 0 until st.mh) {
+        val gy = (y * gh / st.mh).coerceIn(0, gh - 1)
+        for (x in 0 until st.mw) {
+            val gx = (x * gw / st.mw).coerceIn(0, gw - 1)
+            st.auto[y * st.mw + x] = g[gy * gw + gx]
+        }
+    }
+}
 
 /** 可擴張柵格(非 Compose 狀態;變更後由呼叫端 version++ 觸發重繪)。 */
 private class RasterState(
@@ -87,8 +147,28 @@ private class RasterState(
     var mask = ByteArray(mw * mh)
     var tissue = ByteArray(mw * mh)
     var orig = ByteArray(mw * mh)
+    /**
+     * 分類器對每個像素的建議（修邊畫面碼；0＝尚未算過）。
+     *
+     * 這不是遮罩，是「AI 覺得這裡是什麼」的底稿。用途有二：
+     *  1. 進入修邊時把 tissue 初始化成逐像素分區，而不是整片同一色
+     *  2. 用「邊界＋」把新區域畫進遮罩時，新像素自動帶上分類，而不是繼承某個預設類別
+     *
+     * ⚠ 舊版把整片遮罩填成 `defaultClass`（比例最高的那一類），於是醫師按下「完成修邊」
+     * 送出的組織 GT 是「整個傷口都是肉芽」——把後端算對的 54/38/6 覆蓋成 100/0/0。
+     * 畫面看起來正常（一片合理的顏色），資料卻是錯的。
+     */
+    var auto = ByteArray(mw * mh)
     var overlay: Bitmap = Bitmap.createBitmap(mw, mh, Bitmap.Config.ARGB_8888)
     var maskCount = 0
+    /**
+     * 組織填色是否顯示。**邊界不受此影響。**
+     *
+     * ⚠ 舊版把開關做在「整張 overlay 要不要畫」，而 overlay 同時承載邊界色與組織色——
+     * 於是關掉圖層時**連遮罩邊界一起消失**，醫師用「邊界＋／－」等於在畫看不見的東西。
+     * 他關圖層的用意是看清底下的組織紋理，不是放棄邊界回饋。
+     */
+    var showTissue = true
     val tCounts = IntArray(T_MAX + 1)   // 索引 0 不用；1..T_MAX 對應組織碼
     var cm2PerPx: Double? = null
 
@@ -98,7 +178,9 @@ private class RasterState(
         val edge = x == 0 || y == 0 || x == mw - 1 || y == mh - 1 ||
                 mask[i - 1].toInt() == 0 || mask[i + 1].toInt() == 0 ||
                 mask[i - mw].toInt() == 0 || mask[i + mw].toInt() == 0
-        return if (edge) EDGE_COLOR else T_COLORS[tissue[i].toInt().coerceIn(1, T_MAX)]
+        if (edge) return EDGE_COLOR
+        // 隱藏組織時內部畫成透明，邊界仍在——這是「看得見自己在畫什麼」的最低要求。
+        return if (showTissue) T_COLORS[tissue[i].toInt().coerceIn(1, T_MAX)] else 0
     }
     fun syncAll() {
         val px = IntArray(mw * mh)
@@ -140,7 +222,7 @@ private class RasterState(
             for (y in 0 until mh) System.arraycopy(src, y * mw, d, (y + gT) * nw + gL, mw)
             return d
         }
-        mask = move(mask); tissue = move(tissue); orig = move(orig)
+        mask = move(mask); tissue = move(tissue); orig = move(orig); auto = move(auto)
         rx0 -= gL / mScale; ry0 -= gT / mScale
         mw = nw; mh = nh
         // ⚠ 舊 overlay 必須明確回收再配新的。ARGB_8888 在 2200² 是 19.4 MB;
@@ -188,6 +270,7 @@ fun WoundEditScreen(
                 System.arraycopy(resume.mask, 0, mask, 0, mask.size)
                 System.arraycopy(resume.tissue, 0, tissue, 0, tissue.size)
                 System.arraycopy(resume.origMask, 0, orig, 0, orig.size)
+                seedAuto(this, bitmap)   // 續編時 auto 不隨 EditRaster 保存,重算即可(便宜且必然一致)
                 cm2PerPx = if (mmPerPx != null) (mmPerPx * mmPerPx / 100.0) / (resume.mScale * resume.mScale).toDouble()
                            else resume.cm2PerPx
                 recount(); syncAll()
@@ -207,9 +290,16 @@ fun WoundEditScreen(
             val sc = min(1f, 1024f / max(rw, rh))
             RasterState(x0.toFloat(), y0.toFloat(), max(8, (rw * sc).roundToInt()), max(8, (rh * sc).roundToInt()), sc, bw, bh).apply {
                 scanlineFill(initialPolygon, mScale, mw, mh, mask, rx0, ry0)
+                // 逐像素分區作為修邊起點。auto 算不出來時（極小遮罩、影像異常）才退回
+                // 單一 defaultClass——那是降級，不是預設行為。
+                seedAuto(this, bitmap)
                 var c = 0
-                for (i in mask.indices) if (mask[i].toInt() != 0) { c++; tissue[i] = defaultClass.toByte() }
-                maskCount = c; tCounts[defaultClass] = c
+                for (i in mask.indices) if (mask[i].toInt() != 0) {
+                    c++
+                    tissue[i] = if (auto[i].toInt() in 1..T_MAX) auto[i] else defaultClass.toByte()
+                }
+                maskCount = c
+                recount()
                 System.arraycopy(mask, 0, orig, 0, mask.size)
                 // 係數優先序:ArUco 尺度直傳(精確,=(mm/px)²/100/mScale²) > AI面積/像素數(後備)
                 cm2PerPx = if (mmPerPx != null) (mmPerPx * mmPerPx / 100.0) / (mScale * mScale).toDouble()
@@ -258,6 +348,23 @@ fun WoundEditScreen(
     // 「看得清楚分區」與「看得清楚底下的紋理」——那是同一塊像素的兩種用途。
     // 與其在透明度上折衷到兩邊都不好，不如讓他一鍵切掉去看原圖。
     var showTissue by remember { mutableStateOf(true) }
+    /**
+     * 「按住看原圖」的按壓狀態。宣告在這裡而不是按鈕旁邊，因為畫布的手勢迴圈
+     * （在版面上方）也要讀它——peek 期間**第二根手指不得作畫**。
+     * 手指壓在按鈕上已經擋掉大部分誤觸，但擋不掉另一手；而「看不見卻塗得下去」
+     * 的那一筆會直接進 GT，沒有錯誤也沒有警告。
+     */
+    val peekSrc = remember { MutableInteractionSource() }
+    val peeking by peekSrc.collectIsPressedAsState()
+    // 柵格換新（換影像／續編載回）時把圖層旗標同步過去。
+    // 宣告位置必須在 showTissue 之後——Kotlin 不允許向前引用區域變數。
+    LaunchedEffect(st) { if (st.showTissue != showTissue) { st.showTissue = showTissue; st.syncAll(); version++ } }
+    // peek 開關。只在狀態真的翻轉時 syncAll——每次重組都重畫整張覆蓋圖會明顯卡頓。
+    LaunchedEffect(peeking) {
+        showTissue = !peeking
+        st.showTissue = showTissue
+        st.syncAll(); version++
+    }
 
     class Snap(val m: ByteArray, val t: ByteArray, val mw: Int, val mh: Int, val rx0: Float, val ry0: Float)
     val undo = remember(st) { mutableStateListOf<Snap>() }
@@ -306,6 +413,7 @@ fun WoundEditScreen(
         if (tool == EditTool.B_PAINT || tool == EditTool.B_ERASE || tool == EditTool.TISSUE) {
             if (st.expandIfNeeded(cx, cy, rM)) {           // 視窗擴張(內容無損);undo 尺寸失效→清空
                 undo.clear(); redo.clear()
+                seedAuto(st, bitmap)                       // 新擴出來的區域還沒有底稿
                 cx = (imgPt.x - st.rx0) * st.mScale; cy = (imgPt.y - st.ry0) * st.mScale
             }
         }
@@ -319,7 +427,11 @@ fun WoundEditScreen(
             when (tool) {
                 EditTool.B_PAINT -> if (st.mask[i].toInt() == 0) {
                     st.mask[i] = 1; st.maskCount++
-                    st.tissue[i] = defaultClass.toByte(); st.tCounts[defaultClass]++
+                    // 新畫進遮罩的像素帶上分類器的建議，而不是繼承某個預設類別——
+                    // 否則醫師每往外補一筆，GT 裡就多一塊「其實沒人判斷過」的組織。
+                    val a = st.auto[i].toInt()
+                    val nc = if (a in 1..T_MAX) a else defaultClass
+                    st.tissue[i] = nc.toByte(); st.tCounts[nc]++
                 }
                 EditTool.B_ERASE -> if (st.mask[i].toInt() != 0) {
                     st.mask[i] = 0; st.maskCount--
@@ -364,8 +476,27 @@ fun WoundEditScreen(
              "  [尺度:${if (mmPerPx != null) "ArUco✓" else "AI後備⚠"}]",
             style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
         Text("組織  肉芽${(lf["granulation"]!! * 100).toInt()}% · 腐肉${(lf["slough"]!! * 100).toInt()}% · " +
-             "壞死${(lf["necrosis"]!! * 100).toInt()}% · 上皮${(lf["epithelial"]!! * 100).toInt()}%  (框會隨筆刷自動擴張)",
+             "壞死${(lf["necrosis"]!! * 100).toInt()}% · 上皮${(lf["epithelial"]!! * 100).toInt()}% · " +
+             "其他${(lf["other"]!! * 100).toInt()}%  (框會隨筆刷自動擴張)",
             fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // 「其他」偏高時要說出來。它代表的是**分類器不知道那是什麼**（肌腱、異物、血水、
+        // 遮蔽物、或只是反光），而那正是最需要醫師看一眼的部分——不是可以忽略的殘差。
+        // 這些像素若被硬歸到四類之一，訓練資料就會學到錯的東西；標成「其他」則是誠實的標籤。
+        if ((lf["other"] ?: 0.0) > 0.10) Text(
+            "ℹ 有 ${((lf["other"]!!) * 100).toInt()}% 判不出類別（肌腱／異物／血水／遮蔽物／反光）。" +
+            "請用「組織🖌 → 其他」確認範圍，或改標成正確的組織——這一塊會照原樣進訓練集。",
+            fontSize = 12.sp, color = MaterialTheme.colorScheme.tertiary)
+        // 這條提示不是催促，是說明後果：不動筆刷不是錯，只是這一筆不會成為組織訓練樣本。
+        // 醫師有權說「AI 分得對，我沒意見」——但那時的遮罩是啟發式輸出，不是人的判斷，
+        // 拿去訓練會變成模型自我確認。所以要讓他知道這個選擇的意義。
+        run {
+            var ed = 0
+            for (i in st.mask.indices) if (st.mask[i].toInt() != 0 && st.tissue[i] != st.auto[i]) ed++
+            if (st.maskCount > 0 && ed == 0) Text(
+                "ℹ 尚未修正任何組織分區。面積與邊界照常送出；但組織遮罩會標記為「未經醫師修正」，" +
+                "**不會進入組織分割訓練集**——未修正的遮罩是 AI 自己的輸出，拿去訓練等於自我確認。",
+                fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         if (st.maskCount == 0)
             Text("⚠ AI 未偵測到傷口:請用「邊界＋」從零塗抹;ArUco 尺度仍有效,面積照常精確計算",
                 fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
@@ -383,7 +514,13 @@ fun WoundEditScreen(
                         var multi = false          // 一旦進入雙指模式，這一輪就不再回頭去畫
                         cursor = down.position
 
-                        if (tool != EditTool.PAN) {
+                        // peek（按住看原圖）期間一律不作畫，只允許平移縮放。
+                        // 使用者的手指在按鈕上，但**另一手仍可能碰到畫布**——
+                        // 而此刻組織圖層是關的，他看不見自己塗了什麼。
+                        // 那一筆會直接進 GT，沒有錯誤、沒有警告。
+                        val canPaint = tool != EditTool.PAN && !peeking
+
+                        if (canPaint) {
                             strokeSnapshot = snap()
                             val p0 = down.position / k() + viewOffset
                             stamp(p0); last = p0
@@ -422,7 +559,7 @@ fun WoundEditScreen(
                                 val ch = ev.changes.firstOrNull { it.pressed } ?: continue
                                 val delta = ch.position - ch.previousPosition
                                 cursor = ch.position
-                                if (tool == EditTool.PAN) viewOffset -= delta / k()
+                                if (!canPaint) viewOffset -= delta / k()   // 含 peek：只平移，不作畫
                                 else { val cur = ch.position / k() + viewOffset; last?.let { stampLine(it, cur) }; last = cur }
                                 ch.consume()
                             } else {
@@ -445,9 +582,8 @@ fun WoundEditScreen(
                 drawImage(img, srcOffset = IntOffset.Zero, srcSize = IntSize(bw, bh), dstOffset = dstOff, dstSize = dstSz)
                 val ovOff = IntOffset(((st.rx0 - viewOffset.x) * kk).roundToInt(), ((st.ry0 - viewOffset.y) * kk).roundToInt())
                 val ovW = (st.mw / st.mScale * kk).roundToInt(); val ovH = (st.mh / st.mScale * kk).roundToInt()
-                if (showTissue)
-                    drawImage(st.overlay.asImageBitmap(), srcOffset = IntOffset.Zero, srcSize = IntSize(st.mw, st.mh),
-                        dstOffset = ovOff, dstSize = IntSize(ovW, ovH))
+                drawImage(st.overlay.asImageBitmap(), srcOffset = IntOffset.Zero, srcSize = IntSize(st.mw, st.mh),
+                    dstOffset = ovOff, dstSize = IntSize(ovW, ovH))
                 drawRect(Color(0x44888888),
                     topLeft = Offset(ovOff.x.toFloat(), ovOff.y.toFloat()),
                     size = androidx.compose.ui.geometry.Size(ovW.toFloat(), ovH.toFloat()),
@@ -468,16 +604,39 @@ fun WoundEditScreen(
             FilterChip(tool == EditTool.B_PAINT, { tool = EditTool.B_PAINT }, { Text("邊界＋") }, modifier = Modifier.weight(1f))
             FilterChip(tool == EditTool.B_ERASE, { tool = EditTool.B_ERASE }, { Text("邊界－") }, modifier = Modifier.weight(1f))
             FilterChip(tool == EditTool.PAN, { tool = EditTool.PAN }, { Text("移動") }, modifier = Modifier.weight(1f))
-            FilterChip(tool == EditTool.TISSUE, { tool = EditTool.TISSUE }, { Text("組織🖌") }, modifier = Modifier.weight(1f))
-            FilterChip(showTissue, { showTissue = !showTissue },
-                { Text(if (showTissue) "圖層👁" else "圖層🚫") }, modifier = Modifier.weight(1f))
+            FilterChip(tool == EditTool.TISSUE, { tool = EditTool.TISSUE },
+                { Text("組織🖌") }, modifier = Modifier.weight(1f))
+            // ── 圖層：**按住才隱藏，放開就回來** ──
+            //
+            // 舊版是切換式，有三個實測回報的問題：
+            //  1. 關掉圖層時強制切到「移動」→ 下面那排組織分類按鈕整列消失
+            //     → Column 重新排版 → 畫布拿到更多高度 → **影像跳一下變大**。
+            //     再切回組織又跳回去。醫師以為是遮罩在動，其實是版面在動。
+            //  2. 關著的時候筆刷仍然可用（切到移動只是降低機率，不是杜絕）——
+            //     看不見自己塗了什麼卻照樣能塗，那一筆會直接進 GT。
+            //  3. 要看一眼原圖得按兩次，而且中間狀態是可以誤操作的。
+            //
+            // 改成 peek 之後三個問題同時消失：工具完全不變（不重排版、不跳動），
+            // 手指壓在這顆鈕上的期間本來就碰不到畫布，放開立刻回到組織圖層。
+            // （peekSrc / peeking 宣告在畫布手勢迴圈之前，見上方。）
+            FilterChip(
+                selected = !peeking,
+                onClick = {},           // 行為在按壓狀態上，不在點擊上
+                label = { Text(if (peeking) "原圖🚫" else "按住看原圖") },
+                interactionSource = peekSrc,
+                modifier = Modifier.weight(1f)
+            )
         }
-        if (!showTissue) Text("組織圖層已隱藏（僅影響顯示，遮罩與數值不變）",
-            fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // ⚠ 這一列的顯示條件**只看工具，不看 peek**。
+        // 若寫成 `tool == TISSUE && !peeking`，peek 期間整列會消失並讓畫布長高，
+        // 那正是要修掉的跳動。空間必須恆定。
         if (tool == EditTool.TISSUE) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                (1..4).forEach { c ->
-                    FilterChip(curTissue == c, { curTissue = c }, { Text(T_NAMES[c]) }, modifier = Modifier.weight(1f))
+                // 1..T_MAX：包含「其他」。沒有這個筆刷的話，醫師看得到判不出來的區塊，
+                // 卻只能把它硬塞進四類之一——那等於強迫他為訓練集捏造一個標籤。
+                (1..T_MAX).forEach { c ->
+                    FilterChip(curTissue == c, { curTissue = c }, { Text(T_NAMES[c]) },
+                        enabled = !peeking, modifier = Modifier.weight(1f))
                 }
             }
         }
@@ -521,9 +680,24 @@ fun WoundEditScreen(
                             if (a || b) uni++; if (a && b) inter++
                         }
                         val iou = if (uni == 0) 1.0 else inter.toDouble() / uni
+                        // 醫師實際重畫了多少組織像素。auto 是分類器的建議，tissue 是最終結果——
+                        // 兩者相同代表這一格他沒有表示意見。見 EditRaster.tissueEditedPx 的說明。
+                        var edited = 0
+                        for (i in st.mask.indices) if (st.mask[i].toInt() != 0 &&
+                            st.tissue[i] != st.auto[i]) edited++
                         val raster = EditRaster(st.mask.copyOf(), st.tissue.copyOf(), st.orig.copyOf(),
-                            st.rx0, st.ry0, st.mw, st.mh, st.mScale, st.cm2PerPx)
-                        onDone(poly, iou, liveArea, liveFrac(), raster)
+                            st.rx0, st.ry0, st.mw, st.mh, st.mScale, st.cm2PerPx,
+                            tissueEditedPx = edited, maskPx = st.maskCount,
+                            canvasW = bw, canvasH = bh)
+                        // ⚠ 沒動過邊界就**不要動那個數字**。
+                        //
+                        // 由多邊形重建柵格是有損的（RDP 簡化 + 重新掃描線填充 + ROI 外框改變），
+                        // 每進出一次面積就漂移約 0.5%。醫師什麼都沒改卻看到面積變了，
+                        // 那個數字就失去意義——而一個會自己緩慢變動的臨床數值
+                        // 比明顯的錯誤更難察覺。
+                        val areaOut = if (iou >= 0.9999 && originalArea != null) originalArea
+                                      else liveArea
+                        onDone(poly, iou, areaOut, liveFrac(), raster)
                     }
                 } catch (_: Exception) { onCancel() }
             }, Modifier.weight(1f), enabled = st.maskCount > 0) { Text("完成修邊") }

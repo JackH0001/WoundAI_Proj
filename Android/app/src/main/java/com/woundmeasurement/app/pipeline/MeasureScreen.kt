@@ -19,7 +19,18 @@ fun MeasureScreen(
     onReview: () -> Unit,
     onSaveToTimeline: () -> Unit,
     exudate: Int? = null,
-    onExudate: ((Int) -> Unit)? = null   // 提供時:滲液顯示於結果卡下方,且未輸入前鎖定修邊/存檔(防呆)
+    onExudate: ((Int) -> Unit)? = null,  // 提供時:滲液顯示於結果卡下方,且未輸入前鎖定修邊/存檔(防呆)
+    /**
+     * 辨識參照圖插槽，顯示在**量測數值之下、滲液輸入之上**。
+     *
+     * 位置是刻意的：面積與 PUSH 是這一頁最容易被直接採信的數字，而它們完全依賴
+     * ArUco 認對了貼紙、分割抓對了範圍。複核的機會要緊接在數字後面；
+     * 放在更下面（滲液、存檔之後）的話，人已經在做下一件事了，不會回頭看。
+     *
+     * 用插槽而不是直接把 AnalysisPreview 寫進來：MeasureScreen 不需要知道
+     * bitmap / 校正框 / 組織分區這些東西，那是呼叫端的事。
+     */
+    preview: @Composable () -> Unit = {}
 ) {
     val st by vm.state.collectAsState()
     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -49,6 +60,8 @@ fun MeasureScreen(
                         Text("路由：${r.route} · 信心 ${"%.0f".format(r.confidence * 100)}%")
                     }
                 }
+                preview()
+
                 // 滲液量(醫師輸入)——緊接量測結果;未輸入前修邊/存檔鎖定(防呆)
                 val needExudate = onExudate != null && exudate == null
                 if (onExudate != null) {
