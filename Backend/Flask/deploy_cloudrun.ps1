@@ -118,6 +118,27 @@ if (-not $VerifyOnly) {
     }
     Write-Host "  ✓ flywheel/ 與 *.db 已排除"
 
+    # ── 部署身分：把「這一版是哪一版」帶進容器 ───────────────────────────
+    #
+    # 沒有這個的話，主控台只能顯示 Cloud Run 的 revision 序號，而序號回答不了
+    # 「跑的是不是我剛推的那份程式碼」。這個專案已經被「看起來成功的部署」
+    # 咬過兩次，兩次都是因為部署動作與執行中的程式碼之間沒有可比對的標識。
+    $GitCommit = (& git rev-parse --short HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $GitCommit) {
+        $GitCommit = "unknown"
+        Warn "取不到 git commit（不在 repo 內？）——主控台會顯示「未帶入」"
+    } else {
+        # 有未提交的變更時要標出來：部署的是工作目錄，不是那個 commit。
+        # 不標的話主控台會顯示一個**看似精確而實際不對**的 SHA。
+        & git diff --quiet HEAD 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            $GitCommit = "$GitCommit-dirty"
+            Warn "工作目錄有未提交的變更——部署的內容與 $GitCommit 不完全相同"
+        }
+    }
+    $DeployedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    Write-Host "  ✓ 部署身分 $GitCommit @ $DeployedAt"
+
     Say "確認專案與帳單"
     Invoke-GCloud config set project $ProjectId | Out-Null
     # 帳單沒綁的話 Cloud Run 會以權限錯誤失敗，而訊息完全不會提到「帳單」——
@@ -260,6 +281,10 @@ if (-not $VerifyOnly) {
         "phase1\clinical_rules.py",
         "phase2\aruco_calibrate.py",
         "phase2\verify_area_sheet.py",
+        # 色準校正。漏了它 classify 不會壞——它被包在 try/except 裡——
+        # 而是**安靜退回 gray-world 白平衡**，紅色被壓抑 ×0.78，肉芽被低估。
+        # 這正是本專案最典型的失敗形狀：一切回 200，數字看起來合理。
+        "phase2\color_calib.py",
         "phase0\preprocessing.json"
     )
     if (Test-Path $vendor) { Remove-Item $vendor -Recurse -Force }
@@ -294,7 +319,7 @@ if (-not $VerifyOnly) {
         --concurrency 4 `
         --min-instances 0 `
         --max-instances 3 `
-        --set-env-vars "WOUNDAI_STORE=gcs,WOUNDAI_GCS_BUCKET=$Bucket,WOUNDAI_GCS_PREFIX=flywheel,WOUNDAI_AUDIT_BUCKET=$AuditBucket" `
+        --set-env-vars "WOUNDAI_STORE=gcs,WOUNDAI_GCS_BUCKET=$Bucket,WOUNDAI_GCS_PREFIX=flywheel,WOUNDAI_AUDIT_BUCKET=$AuditBucket,GIT_COMMIT=$GitCommit,DEPLOYED_AT=$DeployedAt" `
         --set-secrets "ADMIN_PASSWORD=woundai-admin-password:latest,JWT_SECRET_KEY=woundai-jwt-secret:latest"
     Assert-GCloudOk "Cloud Run 部署"
 
@@ -378,7 +403,9 @@ if (-not $r.Reached) {
 # 上線後它就是一個**任何人都能列出所有帳號**的公開端點。
 # 部署當下用「不帶 token」打一次，是唯一能在事故前抓到它的時機。
 Say "管理端點存取控制"
-foreach ($ep in @("/api/v1/users", "/api/v1/audit")) {
+foreach ($ep in @("/api/v1/users", "/api/v1/audit",
+                  "/api/v1/flywheel/records",
+                  "/api/v1/flywheel/record/0123456789abcdef/preview.svg")) {
     $r = Get-HttpResult -Uri "$url$ep"
     if (-not $r.Reached) {
         Warn "⚠ $ep 連不上，**未經驗證**：$($r.Content)"
@@ -399,6 +426,38 @@ if (-not $c.Reached) {
     Warn "⚠ /console 可開，但沒有管理分區 —— 這版映像是舊的主控台。"
 } else {
     Warn "⚠ /console → HTTP $($c.Code)"
+}
+
+# ── 部署身分：雲端跑的到底是不是本機這一版 ──────────────────────────────
+#
+# 這是整份驗證裡最直接回答「部署有沒有生效」的一條。
+# 先前兩次事故（漏裝 onnxruntime、URL 探測靜默失效）都不是功能報錯，
+# 而是「部署完了，但跑的不是預期的東西」——那從功能表現上看不出來。
+Say "部署身分"
+$hb = Get-HttpResult -Uri "$url/api/health"
+if (-not $hb.Reached) {
+    Warn "⚠ /api/health 連不上，部署身分**未經驗證**：$($hb.Content)"
+} else {
+    try { $hj = $hb.Content | ConvertFrom-Json } catch { $hj = $null }
+    $b = $hj.build
+    if (-not $b) {
+        Warn "⚠ /api/health 沒有 build 區塊 —— 這版映像是舊的（請重建，不是只更新環境變數）。"
+    } else {
+        Write-Host "  雲端 revision   $($b.revision)"
+        Write-Host "  雲端 git commit $($b.git_commit)"
+        Write-Host "  部署時間        $($b.deployed_at)"
+        $local = (& git rev-parse --short HEAD 2>$null)
+        if ($LASTEXITCODE -ne 0 -or -not $local) {
+            Warn "  ⚠ 取不到本機 commit，無法比對"
+        } elseif (-not $b.git_commit -or $b.git_commit -eq "unknown") {
+            Warn "  ⚠ 雲端沒有 commit 標識 —— 這版是用舊腳本部署的，無法確認版本"
+        } elseif ($b.git_commit -eq $local -or $b.git_commit -eq "$local-dirty") {
+            Write-Host "  ✓ 與本機 $local 一致"
+        } else {
+            Warn "  ❌ 雲端是 $($b.git_commit)，本機是 $local —— **部署沒生效，或推錯了分支**。"
+            Warn "     功能測試多半仍會通過，因為舊版也能跑。請重新部署後再驗一次。"
+        }
+    }
 }
 
 if ($altUrl) {

@@ -507,12 +507,22 @@ def health_check():
     所以：模型沒載到就回 `status: degraded`，並明說影響。監控與主控台都看得到。
     """
     model_ready = wound_segmentation_model is not None
+    # 色準校正模組。缺了 classify **不會壞**（呼叫端有 try/except），
+    # 而是安靜退回 gray-world 白平衡：紅色被壓抑 ×0.78、肉芽被低估，
+    # 服務照回 200、數字看起來合理。這正是本專案定義的「危險失敗」，
+    # 與漏裝 onnxruntime 同一類，所以同樣要讓它在健康檢查裡現形。
+    try:
+        _load_classify_mods()          # 確保 vendor/ 已進 sys.path
+        import color_calib as _cc_probe          # noqa: F401
+        colorcal_ready = True
+    except Exception:
+        colorcal_ready = False
     # classify 端點還需要 engineering 的組織分類與 PUSH 模組。它們在容器裡是
     # 部署時複製的 vendor/ 副本——漏了複製的話，**只有 classify 會 503**，
     # 而健康檢查依舊全綠（實際發生過：登入 200、stats 200、classify 503）。
     # 健康檢查要涵蓋「主要功能真的能用」，不只是「行程還活著」。
     classify_ready = _load_classify_mods() is not None
-    degraded = (not model_ready) or (not classify_ready)
+    degraded = (not model_ready) or (not classify_ready) or (not colorcal_ready)
     status = {
         'status': 'degraded' if degraded else 'healthy',
         'timestamp': datetime.now().isoformat(),
@@ -522,10 +532,29 @@ def health_check():
             'tensorflow': TENSORFLOW_AVAILABLE,
             'segmentation_model': model_ready,
             'classify_modules': classify_ready,
+            'color_calibration': colorcal_ready,
             'database': True
         },
         'store': None,
-        'version': '1.0.0'
+        'version': '1.0.0',
+        # ── 「跑的是不是我推的那份程式碼」──────────────────────────────
+        #
+        # 原本這裡只有寫死的 '1.0.0'，回答不了任何問題。而這個專案已經被
+        # 「看起來成功的部署」咬過兩次（漏裝 onnxruntime 靜默降級、
+        # gcloud 的 status.urls[] 欄位不存在導致 URL 探測靜默失效），
+        # 兩次都是因為沒有東西能把「部署的動作」與「實際在跑的東西」對起來。
+        #
+        # K_REVISION / K_SERVICE 由 Cloud Run 自動注入，不必自己維護。
+        # GIT_COMMIT 由部署腳本帶進來——沒有它就只知道「換了一版」，
+        # 不知道是哪一版，而那在回推問題時等於沒有。
+        'build': {
+            'service': os.environ.get('K_SERVICE'),
+            'revision': os.environ.get('K_REVISION'),
+            'git_commit': os.environ.get('GIT_COMMIT'),
+            'deployed_at': os.environ.get('DEPLOYED_AT'),
+            # 本地跑時上面全是 None，這個旗標讓主控台不會把本機誤標成雲端。
+            'on_cloud_run': bool(os.environ.get('K_REVISION')),
+        },
     }
     if degraded:
         reasons = []
@@ -539,6 +568,12 @@ def health_check():
                 'classify 所需的 engineering 模組載不進來（wound_classifier / clinical_rules '
                 '/ aruco_calibrate），/api/v1/classify 會回 503。'
                 '容器內請確認部署時已把它們複製到 vendor/。')
+        if not colorcal_ready:
+            reasons.append(
+                'color_calib 載不進來，組織分類的白平衡會退回 gray-world。'
+                '實測紅色增益被壓到正確值的 ×0.78（傷口佔畫面越大越嚴重），'
+                '肉芽會被低估並落入「其他」。classify 仍回 200，**數字看起來合理**。'
+                '部署時請確認 vendor/color_calib.py 存在。')
         status['degraded_reason'] = ' ｜ '.join(reasons)
     # 儲存後端也一併回報：WOUNDAI_STORE 沒設成 gcs 時，Cloud Run 的資料會隨實例回收消失，
     # 而那同樣是「一切看起來正常，直到某天統計歸零」。
@@ -1615,6 +1650,31 @@ def classify_wound():
                 # 醫師三秒就看得出來。所以角點必須回傳。
                 marker_quad = [[int(round(x)), int(round(y))] for x, y in _c.tolist()]
                 marker_id = int(det[1]); marker_mm = _mm
+        # ── 色準校正：用貼紙的中性色塊做白平衡與曝光正規化 ───────────────
+        #
+        # ⚠ 這裡修掉的是一個**現行路徑的缺陷**，不只是新增功能。
+        #
+        # wound_classifier.tissue_classmap_v2 的白平衡有兩條路：有量到的灰塊就用
+        # patch_wb（正確），否則退回 gray_world_wb。而這裡一直沒有傳灰塊值，
+        # 所以每一張臨床影像的組織分類都是在 **gray-world** 之後做的。
+        #
+        # gray-world 假設「場景平均為灰」。一張以傷口為主體的近拍照嚴重違反這個假設：
+        # 實測它把紅色增益壓到正確值的 ×0.78（傷口佔畫面越大越嚴重，最差 ×0.74），
+        # 而紅色正是肉芽的判準——被壓掉的肉芽像素會掉出飽和度條件，落進「其他」。
+        #
+        # 更根本的問題是 gray-world 的增益取自**場景統計**：同一個傷口換個取景
+        # 就是另一組增益（實測跨構圖離散 2.6%，色卡則是 0.0%）。那讓跨次追蹤
+        # 與跨裝置比較都失去共同基準，而那正是這個平台的核心用途。
+        colorcal = None
+        if marker_quad is not None:
+            try:
+                from color_calib import calibrate as _color_calibrate
+                # img 是 RGB（見上方 cvtColor），務必指明——弄反的話增益會反向套用，
+                # 而輸出仍是一張「看起來有被處理過」的影像。
+                colorcal = _color_calibrate(img, marker_quad,
+                                            marker_mm=marker_mm or 12.0, order="rgb")
+            except Exception as _e:
+                logger.warning("色準校正略過：%s", _e)
         if area_cm2 is None:
             cpp = request.form.get('cm_per_pixel', type=float)
             if cpp:
@@ -1651,7 +1711,15 @@ def classify_wound():
             logger.warning("品質指標計算失敗: %s", _qe)
 
         # Stage4 組織 v2 + Stage5 PUSH
-        t = tissue_proxy_v2(img, mask)
+        #
+        # ⚠ 有色卡就把量到的灰塊值傳進去，讓 tissue_classmap_v2 走 patch_wb 那條路。
+        # 沒傳的話它會退回 gray_world_wb——見上方色準校正段落的說明。
+        #
+        # 傳 grey_reference() 而不是自己先套用增益再傳一張校正過的圖：
+        # 後者會讓 wound_classifier 在已校正的影像上**再做一次** gray-world，
+        # 兩層白平衡疊起來的結果沒有人推得出來，而且它不會報錯。
+        _gp = colorcal.grey_reference() if (colorcal is not None and colorcal.ok) else None
+        t = tissue_proxy_v2(img, mask, gray_patch_rgb=_gp)
         push = push_score(area_cm2, t)
         # 傷口輪廓多邊形(最大連通、approxPolyDP 精簡)→ 供 App 醫師修邊/飛輪標註
         wound_poly = []
@@ -1675,10 +1743,21 @@ def classify_wound():
                                  # 角點順序 TL,TR,BR,BL(影像座標,與 image_w/h 同一空間)。供 App 畫出校正框。
                                  'marker_quad': marker_quad, 'marker_id': marker_id, 'marker_mm': marker_mm,
                                  'note': ('未校正(無 ArUco 且未提供 cm_per_pixel)' if area_cm2 is None else None)},
-            'stage4_tissue': {'method': 'v2(WB+HSV)', 'tissue_frac': {k: round(t[k], 3) for k in ('necrosis','slough','granulation','epithelial','other')},
-                              # 印刷單也可能做成多組織混色示範,故照常計算;但顏料≠組織,讀數不可作臨床解讀
-                              'note': ('印刷模擬圖:組織比例由顏料色彩推得,僅供色彩分型演算法比對,不可作臨床解讀'
-                                       if phantom else None)},
+            'stage4_tissue': {
+                # method 要說清楚走了哪一條白平衡。兩條路的結果差很多，
+                # 而事後從 tissue_frac 完全看不出來當初用的是哪一條。
+                'method': ('v2(色卡WB+HSV)' if _gp is not None else 'v2(gray-world WB+HSV)'),
+                'tissue_frac': {k: round(t[k], 3) for k in ('necrosis','slough','granulation','epithelial','other')},
+                # 印刷單也可能做成多組織混色示範,故照常計算;但顏料≠組織,讀數不可作臨床解讀
+                'note': ('印刷模擬圖:組織比例由顏料色彩推得,僅供色彩分型演算法比對,不可作臨床解讀'
+                         if phantom else
+                         (None if _gp is not None else
+                          '無色卡參考,白平衡退回 gray-world:紅色會被系統性壓抑(實測 ×0.78),'
+                          '肉芽可能被低估。請確認校正貼紙完整入鏡。'))},
+            # 色準校正的參數與診斷。**一定要落盤**：影像會依保存政策清除，
+            # 事後想知道「那批資料當時的光源是什麼」就只剩這幾個數字。
+            'stage3b_colorcal': (colorcal.as_dict() if colorcal is not None else
+                                 {'ok': False, 'reason': '無 ArUco,無法定位色卡'}),
             'stage5_severity': {k: push[k] for k in ('tool','area_subscore','tissue_subscore','exudate_subscore','total_partial_img','total_full','range_full')},
             # 品質指標供 App 顯示與訓練集篩選。門檻不寫在後端——
             # 不同用途（臨床顯示 vs 訓練集）該用不同門檻，硬編一組會讓其中一邊將就。

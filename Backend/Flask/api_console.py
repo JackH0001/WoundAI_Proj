@@ -502,6 +502,9 @@ async function loadSys(){
           <td style="color:var(--dim)">缺了無法產生遮罩</td></tr>
       <tr><td>classify 模組</td><td>${ok(sv.classify_modules)}</td>
           <td style="color:var(--dim)">缺了 /api/v1/classify 直接 503</td></tr>
+      <tr><td>色準校正</td><td>${ok(sv.color_calibration)}</td>
+          <td style="color:var(--dim)">缺了白平衡退回 gray-world：紅色被壓抑 ×0.78、肉芽低估，
+          但仍回 200 且數字看起來合理</td></tr>
       <tr><td>儲存後端</td><td colspan="2" class="${isGcs?'':'bad'}">
           <code>${esc(h.store||"—")}</code>
           ${isGcs ? "" : "<br><span style='font-size:12px'>不是 GCS：Cloud Run 的容器檔案系統是暫時的，"+
@@ -510,7 +513,34 @@ async function loadSys(){
           <td style="color:var(--dim)">未接上時稽核寫在主桶，刪得掉——雜湊鏈擋不住整份重寫</td></tr>
     </table>
     <p class="note">⚠ 若「整體」是 degraded 仍能量測，但<b>面積數值不可作臨床用途</b>。
-    這正是把降級狀態拉到檯面上的理由——先前它只寫在日誌裡，前端照樣顯示一個看起來正常的數字。</p>`;
+    這正是把降級狀態拉到檯面上的理由——先前它只寫在日誌裡，前端照樣顯示一個看起來正常的數字。</p>`
+    + buildBox(h.build);
+}
+// 部署身分。回答的是「**現在跑的是不是我推的那一版**」——
+// 這個專案已經被「看起來成功的部署」咬過兩次（漏裝 onnxruntime 靜默降級、
+// gcloud 的 status.urls[] 欄位不存在讓 URL 探測靜默失效），兩次都是因為
+// 沒有東西能把「部署這個動作」與「實際在跑的東西」對起來。
+function buildBox(b){
+  b = b || {};
+  if(!b.on_cloud_run) return `<p class="note">本機執行（沒有 Cloud Run revision）。</p>`;
+  const sha = b.git_commit || "";
+  const noSha = !sha;
+  return `<h2 style="margin-top:18px">部署身分</h2>
+    <table>
+      <tr><th>項目</th><th>值</th><th></th></tr>
+      <tr><td>服務</td><td><code>${esc(b.service||"—")}</code></td><td></td></tr>
+      <tr><td>Revision</td><td><code>${esc(b.revision||"—")}</code></td>
+          <td style="color:var(--dim)">Cloud Run 自動注入；每次部署遞增</td></tr>
+      <tr><td>Git commit</td>
+          <td class="${noSha?'bad':'ok'}"><code>${esc(sha||"未帶入")}</code></td>
+          <td style="color:var(--dim)">${noSha
+            ? "部署時沒帶 GIT_COMMIT：只知道換了一版，不知道是哪一版"
+            : "與本機 <code>git rev-parse --short HEAD</code> 比對即可確認"}</td></tr>
+      <tr><td>部署時間</td><td>${esc(b.deployed_at||"—")}</td><td></td></tr>
+    </table>
+    <p class="note">要確認雲端跑的就是你本機的版本，在專案目錄執行
+    <code>git rev-parse --short HEAD</code> 並與上面的 Git commit 比對。
+    不一致代表**部署沒生效或推錯分支**——而那件事從功能表現上通常看不出來。</p>`;
 }
 
 /* ───────── 稽核軌跡 ───────── */
