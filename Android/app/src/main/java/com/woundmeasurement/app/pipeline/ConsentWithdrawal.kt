@@ -35,6 +35,9 @@ object ConsentWithdrawal {
         val allOk: Boolean get() = pending.isEmpty()
     }
 
+    /** 同步方向。撤回與重新取得必須分開兩個佇列，兩者的正確結果剛好相反。 */
+    private enum class Dir { WITHDRAW, RESTORE }
+
     /**
      * 對後端撤回一批代碼。失敗的會記進待重試佇列。
      *
@@ -42,6 +45,22 @@ object ConsentWithdrawal {
      * 那一刻拋例外只會讓畫面顯示一個技術訊息，而該做的事一件都沒做。
      */
     suspend fun pushToBackend(ctx: Context, codes: Collection<String>): Result =
+        sync(ctx, codes, Dir.WITHDRAW)
+
+    /**
+     * 重新取得同意 → 解除雲端的撤回封鎖。
+     *
+     * ⚠ 沒有這一步，撤回就是**死局**：病患改變主意重新簽署後，App 顯示「訓練同意✓」，
+     * 而雲端仍以「已撤回訓練同意」擋下每一次送出——錯誤訊息還會把內部端點路徑
+     * `/api/v1/consent/restore` 直接印給醫師看，而他沒有辦法自己呼叫它。
+     *
+     * 2026-08-07 實測到這個狀態：test001 撤回後重新簽署，重新修邊都成功，
+     * 但補送標註一律被擋，畫面上完全看不出該怎麼辦。
+     */
+    suspend fun restoreOnBackend(ctx: Context, codes: Collection<String>): Result =
+        sync(ctx, codes, Dir.RESTORE)
+
+    private suspend fun sync(ctx: Context, codes: Collection<String>, dir: Dir): Result =
         withContext(Dispatchers.IO) {
             val list = codes.filter { it.isNotBlank() }.distinct()
             if (list.isEmpty()) return@withContext Result(emptyList(), emptyList())
@@ -49,15 +68,22 @@ object ConsentWithdrawal {
             val url = AppSettings.backendUrl(ctx)
             val user = AppSettings.backendUser(ctx)
             val pass = AppSettings.backendPassword(ctx)
+            fun remember(cs: List<String>) =
+                if (dir == Dir.WITHDRAW) AppSettings.addPendingWithdrawals(ctx, cs)
+                else AppSettings.addPendingRestores(ctx, cs)
+            fun forget(c: String) =
+                if (dir == Dir.WITHDRAW) AppSettings.clearPendingWithdrawal(ctx, c)
+                else AppSettings.clearPendingRestore(ctx, c)
+
             if (user.isBlank() || pass.isBlank()) {
-                AppSettings.addPendingWithdrawals(ctx, list)
+                remember(list)
                 return@withContext Result(emptyList(), list)
             }
 
             val backend = BackendClient(url)
             val loggedIn = runCatching { backend.login(user, pass) }.getOrDefault(false)
             if (!loggedIn) {
-                AppSettings.addPendingWithdrawals(ctx, list)
+                remember(list)
                 return@withContext Result(emptyList(), list)
             }
 
@@ -66,15 +92,12 @@ object ConsentWithdrawal {
             for (c in list) {
                 // 逐筆處理而非整批：一個代碼失敗不該讓其他的也留在佇列裡，
                 // 而重試時只重試真正沒完成的那些。
-                val ok = runCatching { backend.withdrawConsent(c) }.getOrDefault(false)
-                if (ok) {
-                    done.add(c)
-                    AppSettings.clearPendingWithdrawal(ctx, c)
-                } else {
-                    fail.add(c)
-                }
+                val ok = runCatching {
+                    if (dir == Dir.WITHDRAW) backend.withdrawConsent(c) else backend.restoreConsent(c)
+                }.getOrDefault(false)
+                if (ok) { done.add(c); forget(c) } else fail.add(c)
             }
-            if (fail.isNotEmpty()) AppSettings.addPendingWithdrawals(ctx, fail)
+            if (fail.isNotEmpty()) remember(fail)
             Result(done, fail)
         }
 
@@ -85,17 +108,31 @@ object ConsentWithdrawal {
      * 這兩處都是「使用者剛好有網路而且在等畫面」的時刻，補做不會被感知到。
      */
     suspend fun retryPending(ctx: Context): Result {
-        val pending = AppSettings.pendingWithdrawals(ctx)
-        if (pending.isEmpty()) return Result(emptyList(), emptyList())
-        return pushToBackend(ctx, pending)
+        // 兩個方向都要補做。只補撤回的話，重新簽署的病患會永遠卡在「雲端說已撤回」。
+        val wd = AppSettings.pendingWithdrawals(ctx)
+        val rs = AppSettings.pendingRestores(ctx)
+        if (wd.isEmpty() && rs.isEmpty()) return Result(emptyList(), emptyList())
+        val a = if (wd.isEmpty()) Result(emptyList(), emptyList()) else sync(ctx, wd, Dir.WITHDRAW)
+        val b = if (rs.isEmpty()) Result(emptyList(), emptyList()) else sync(ctx, rs, Dir.RESTORE)
+        return Result(a.done + b.done, a.pending + b.pending)
     }
 
     /** 給畫面用的提示。沒有待辦時回 null。 */
     fun pendingBanner(ctx: Context): String? {
-        val p = AppSettings.pendingWithdrawals(ctx)
-        if (p.isEmpty()) return null
-        return "⚠ 有 ${p.size} 筆撤回尚未同步到雲端：${p.sorted().joinToString("、")}\n" +
-               "這些代碼的資料目前**仍在雲端訓練佇列中**。請確認網路與後端帳密後重試；" +
-               "若持續失敗，請由管理者到主控台手動撤回。"
+        val wd = AppSettings.pendingWithdrawals(ctx)
+        val rs = AppSettings.pendingRestores(ctx)
+        if (wd.isEmpty() && rs.isEmpty()) return null
+        // 兩種待辦的後果完全不同，訊息必須分開講：
+        //   撤回沒同步 → 病患已撤回但資料還會進訓練集（違反同意書承諾）
+        //   重簽沒同步 → 病患已同意但送不出去（醫師會以為系統壞了）
+        val parts = ArrayList<String>()
+        if (wd.isNotEmpty()) parts.add(
+            "⚠ 有 ${wd.size} 筆撤回尚未同步到雲端：${wd.sorted().joinToString("、")}\n" +
+            "這些代碼的資料目前仍在雲端訓練佇列中。")
+        if (rs.isNotEmpty()) parts.add(
+            "⚠ 有 ${rs.size} 筆重新簽署尚未同步到雲端：${rs.sorted().joinToString("、")}\n" +
+            "這些代碼在雲端仍被標記為已撤回，補送訓練標註會被擋下。")
+        parts.add("請確認網路與後端帳密後重試；若持續失敗，請由管理者到主控台處理。")
+        return parts.joinToString("\n")
     }
 }

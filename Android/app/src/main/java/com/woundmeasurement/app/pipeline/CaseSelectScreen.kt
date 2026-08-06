@@ -103,7 +103,28 @@ fun CaseSelectScreen(
                         repo.signConsent(selected!!.id, care, train, png)
                         reloadPatient(selected!!)
                         signing = false
-                        msg = "✅ 同意書已簽署（照護${if (care) "✓" else "✗"}・訓練${if (train) "✓" else "✗"}）"
+                        val base = "✅ 同意書已簽署（照護${if (care) "✓" else "✗"}・訓練${if (train) "✓" else "✗"}）"
+                        // ⚠ 勾了②訓練同意就必須對雲端**解除撤回封鎖**。
+                        //
+                        // 沒有這一步的話：App 顯示「訓練同意✓」、重新修邊都成功，
+                        // 而每一次補送標註都被擋下並印出
+                        //   「被守門擋下：代碼 WD-xxxx 已撤回訓練同意。
+                        //     重新取得同意請先呼叫 /api/v1/consent/restore」
+                        // ——那不是給臨床人員看的東西，而且他也沒有辦法自己呼叫它。
+                        // 2026-08-07 實測到這個死局（test001）。
+                        msg = if (!train) base else {
+                            val codes = cases.mapNotNull { it.wdCode }
+                            if (codes.isEmpty()) base else {
+                                val r = ConsentWithdrawal.restoreOnBackend(ctx, codes)
+                                if (r.allOk)
+                                    "$base\n雲端已解除撤回封鎖：${r.done.joinToString("、")}"
+                                else
+                                    "$base\n⚠ 但雲端尚未解除封鎖：${r.pending.joinToString("、")}\n" +
+                                    "這些代碼在雲端仍被標記為已撤回，**補送訓練標註會被擋下**。" +
+                                    "已記錄待重試，下次連上後端時會自動再試。"
+                            }
+                        }
+                        pendingWd = ConsentWithdrawal.pendingBanner(ctx)
                     } catch (e: Exception) { msg = "⚠ 簽署失敗:${e.message}"; signing = false }
                 }
             }

@@ -26,6 +26,7 @@ import sys
 import json
 import base64
 import hashlib
+import re
 import shutil
 import tempfile
 import importlib
@@ -168,6 +169,34 @@ def main():
     check("預覽不含 base64 內嵌影像", "data:image" not in svg)
     check("預覽不含原圖位元組", jpg[:64] not in r.data)
     check("預覽不含腳本", "<script" not in svg.lower() and "onload" not in svg.lower())
+
+    # ── 2b. 組織遮罩必須畫在**它真正的位置**，不是拉滿整張影像 ──────
+    #
+    # 2026-08-07 實測回報：「雲端的組織標註邊緣超過傷口邊界，正常嗎？會不會污染訓練？」
+    # 遮罩本身完全正確——錯的是這張複核圖：它把 mw×mh 的 ROI 柵格直接拉滿 w×h，
+    # 於是組織色塊大幅溢出傷口輪廓。
+    #
+    # **一張畫錯的複核圖比沒有複核圖危險**：它會讓人排除掉正確的紀錄。
+    print("\n── 2b 組織遮罩的定位 ──")
+    tr = body["tissue_raster"]
+    rx, ry = tr["rx0"], tr["ry0"]
+    rw = tr["mw"] / tr["sx"] if "sx" in tr else None
+    # 本測試的 body 用的是 m_scale 的舊鍵名，統一改成後端實際讀的那個
+    check("測試資料含 tissue_raster 定位資訊", all(k in tr for k in ("rx0", "ry0", "mw", "mh")))
+    xs = [float(m) for m in re.findall(r'<rect x="([\d.]+)" y="[\d.]+" width="[\d.]+" height="[\d.]+" fill="#', svg)]
+    ys = [float(m) for m in re.findall(r'<rect x="[\d.]+" y="([\d.]+)" width="[\d.]+" height="[\d.]+" fill="#', svg)]
+    check("有畫出組織色塊", len(xs) > 10, "%d 塊" % len(xs))
+    if xs:
+        # 色塊必須落在 tissue_raster 宣告的矩形內（容一點邊界誤差）
+        x1 = rx + tr["mw"] / float(tr.get("m_scale") or 1.0)
+        y1 = ry + tr["mh"] / float(tr.get("m_scale") or 1.0)
+        check("組織色塊全部落在 tissue_raster 宣告的範圍內",
+              min(xs) >= rx - 2 and max(xs) <= x1 + 2 and min(ys) >= ry - 2 and max(ys) <= y1 + 2,
+              "色塊 x∈[%.0f,%.0f] y∈[%.0f,%.0f]；柵格 x∈[%.0f,%.0f] y∈[%.0f,%.0f]"
+              % (min(xs), max(xs), min(ys), max(ys), rx, x1, ry, y1))
+        # 這一條才是真正抓到 bug 的：拉滿整張影像的話，色塊會從 0 開始
+        check("組織色塊沒有從影像原點開始（＝沒有被拉滿整張圖）", min(xs) > 1.0,
+              "最小 x = %.1f（rx0 = %.1f）" % (min(xs), rx))
 
     # ── 3. 未修正的遮罩要**在圖上**講清楚 ──
     jpg2 = make_jpeg(800, 600)

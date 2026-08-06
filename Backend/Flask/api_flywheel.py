@@ -592,8 +592,36 @@ def _tissue_cells(png_bytes, grid=64):
     return out, gw, gh
 
 
-def _render_preview_svg(w, h, poly, cells, gw, gh, rec, tissue_note):
-    """輸出 SVG。座標空間＝影像空間，viewBox 讓瀏覽器自己縮放。"""
+def _raster_rect(rec, w, h):
+    """組織遮罩在**影像座標**中佔的矩形 (x0, y0, rw, rh)。取不到回 None。
+
+    ⚠ 遮罩不是整張影像。它是修邊畫面的柵格，只覆蓋 ROI 那一塊，
+    而 `tissue_raster` 的 rx0/ry0/mw/mh/m_scale 就是為了把它擺回正確位置。
+
+    2026-08-07 實際踩到：預覽圖把 mw×mh 的柵格直接拉滿整張 w×h 影像，
+    於是組織色塊看起來**大幅溢出傷口輪廓**。醫師據此回報「標註超出邊界，
+    會不會污染訓練？」——而遮罩本身完全正確，錯的是這張複核圖。
+
+    一張畫錯的複核圖比沒有複核圖危險：它會讓人排除掉正確的紀錄。
+    """
+    tr = rec.get("tissue_raster") or {}
+    try:
+        mw = int(tr["mw"]); mh = int(tr["mh"])
+        ms = float(tr.get("m_scale") or 1.0)
+        x0 = float(tr.get("rx0") or 0.0); y0 = float(tr.get("ry0") or 0.0)
+        if mw <= 0 or mh <= 0 or ms <= 0:
+            return None
+        return x0, y0, mw / ms, mh / ms
+    except Exception:
+        return None
+
+
+def _render_preview_svg(w, h, poly, cells, gw, gh, rec, tissue_note, rect=None):
+    """輸出 SVG。座標空間＝影像空間，viewBox 讓瀏覽器自己縮放。
+
+    `rect` 是組織遮罩在影像座標中的位置（見 `_raster_rect`）。**None 就不畫組織**——
+    畫在錯的位置比不畫更糟，見上方說明。
+    """
     def esc(s):
         return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
@@ -604,11 +632,19 @@ def _render_preview_svg(w, h, poly, cells, gw, gh, rec, tissue_note):
     # 影像載入失敗，或更糟：以為傷口真的長這樣。
     parts.append('<rect width="%d" height="%d" fill="#f5f5f5"/>' % (w, h))
 
-    if cells and gw and gh:
-        cw = w / float(gw); ch = h / float(gh)
+    if cells and gw and gh and rect:
+        rx, ry, rw, rh = rect
+        cw = rw / float(gw); ch = rh / float(gh)
         for gx, gy, c in cells:
             parts.append('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="%s"/>'
-                         % (gx * cw, gy * ch, cw + 0.5, ch + 0.5, TISSUE_HEX.get(c, "#9aa0a6")))
+                         % (rx + gx * cw, ry + gy * ch, cw + 0.5, ch + 0.5,
+                            TISSUE_HEX.get(c, "#9aa0a6")))
+        # 把柵格範圍畫出來，讓複核者看得出「組織遮罩只覆蓋這一塊」。
+        # 沒有這個框的話，遮罩邊緣看起來就像是醫師刻意畫到那裡為止。
+        parts.append('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="none" '
+                     'stroke="#9aa0a6" stroke-width="%.1f" stroke-dasharray="%.0f %.0f"/>'
+                     % (rx, ry, rw, rh, max(1.0, w / 700.0),
+                        max(4.0, w / 100.0), max(4.0, w / 100.0)))
 
     pts = " ".join("%.1f,%.1f" % (float(p[0]), float(p[1]))
                    for p in poly if len(p) >= 2)
@@ -1078,19 +1114,27 @@ try:
         # 逐像素輸出 SVG 會是幾 MB 的檔案而且瀏覽器會卡。降到 ~64 格寬就夠看出
         # 「哪裡是肉芽、哪裡是壞死」——這是複核用途，不是量測用途。
         cells, gw, gh = [], 0, 0
+        rect = _raster_rect(rec, w, h)
         tissue_note = "此筆沒有組織遮罩"
         if rec.get("tissue_mask_key"):
             try:
                 raw = _store().get_blob(_key(os.path.join(TISSUE_DIR, image_id + ".png")))
                 cells, gw, gh = _tissue_cells(raw, 64)
-                tissue_note = ("組織遮罩（醫師已修正 %s px）" % rec.get("tissue_edit_px")
-                               if rec.get("tissue_edited")
-                               else "⚠ 組織遮罩未經醫師修正 — 不會進入訓練集")
+                if rect is None:
+                    # 缺 tissue_raster（舊紀錄）→ 不知道遮罩該擺哪。**寧可不畫**：
+                    # 猜一個位置畫出來，複核者會拿一張錯位的圖去判斷該不該排除。
+                    cells = []
+                    tissue_note = ("有組織遮罩，但缺 tissue_raster 定位資訊（舊版紀錄），"
+                                   "無法標示位置，故不繪製")
+                else:
+                    tissue_note = ("組織遮罩（醫師已修正 %s px）" % rec.get("tissue_edit_px")
+                                   if rec.get("tissue_edited")
+                                   else "⚠ 組織遮罩未經醫師修正 — 不會進入訓練集")
             except Exception as e:
                 logger.warning("預覽讀取組織遮罩失敗(%s): %s", image_id, e)
                 tissue_note = "組織遮罩讀取失敗：%s" % e
 
-        svg = _render_preview_svg(w, h, poly, cells, gw, gh, rec, tissue_note)
+        svg = _render_preview_svg(w, h, poly, cells, gw, gh, rec, tissue_note, rect)
         audit(actor, "record_preview", rec.get("code") or "-",
               "image_id=%s" % image_id, role, org)
         # content_type 而非 mimetype：Flask 會對後者再附一次 charset。

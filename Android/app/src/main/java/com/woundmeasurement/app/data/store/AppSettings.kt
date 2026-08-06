@@ -69,6 +69,33 @@ object AppSettings {
     }
 
     /**
+     * 尚未成功送到後端的「重新取得同意」代碼。
+     *
+     * 與撤回**完全對稱**，理由也一樣：病患重新簽署是立即生效的，
+     * 不能因為手機沒網路就拒絕；但雲端沒解除封鎖的話，那份同意等於沒有效力——
+     * 醫師會在送出時看到「已撤回訓練同意」而完全不知道該怎麼辦。
+     *
+     * 撤回與重新取得必須分開兩個佇列。合成一個的話，
+     * 「先撤回、後重簽」與「先重簽、後撤回」會得到同樣的待辦清單，
+     * 而那兩者的正確結果剛好相反。
+     */
+    private const val K_PENDING_RESTORE = "pending_restores"
+
+    fun pendingRestores(ctx: Context): Set<String> =
+        prefs(ctx).getStringSet(K_PENDING_RESTORE, emptySet()) ?: emptySet()
+
+    fun addPendingRestores(ctx: Context, codes: Collection<String>) {
+        if (codes.isEmpty()) return
+        val next = pendingRestores(ctx).toMutableSet().apply { addAll(codes) }
+        prefs(ctx).edit().putStringSet(K_PENDING_RESTORE, next).apply()
+    }
+
+    fun clearPendingRestore(ctx: Context, code: String) {
+        val next = pendingRestores(ctx).toMutableSet().apply { remove(code) }
+        prefs(ctx).edit().putStringSet(K_PENDING_RESTORE, next).apply()
+    }
+
+    /**
      * 預設後端位址由建置型別決定（`build.gradle` 的 `buildConfigField`）：
      * release ＝ 雲端網址，debug ＝ 模擬器 loopback。
      *

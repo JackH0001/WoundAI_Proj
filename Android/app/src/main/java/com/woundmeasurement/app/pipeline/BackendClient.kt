@@ -363,6 +363,24 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
     }
 
     /** 撤回同意 → 後端下架、排除訓練、稽核。 */
+    /**
+     * 重新取得同意（re-consent）→ 解除雲端的撤回封鎖。
+     *
+     * ⚠ 沒有這一支，撤回就是**死局**：病患改變主意重新簽署後，App 端顯示
+     * 「訓練同意✓」，而雲端仍以「已撤回訓練同意」擋下每一次送出——
+     * 錯誤訊息還會直接把內部端點路徑印給醫師看：
+     *   「被守門擋下：代碼 WD-xxxx 已撤回訓練同意。重新取得同意請先呼叫
+     *     /api/v1/consent/restore」
+     * 那不是給臨床人員看的東西，而且他也沒有辦法自己呼叫它。
+     */
+    fun restoreConsent(code: String): Boolean {
+        val body = JSONObject(mapOf("code" to code)).toString()
+            .toRequestBody("application/json".toMediaType())
+        val req = Request.Builder().url("$baseUrl/api/v1/consent/restore")
+            .header("Authorization", "Bearer $jwt").post(body).build()
+        http.newCall(req).execute().use { return it.isSuccessful }
+    }
+
     fun withdrawConsent(code: String): Boolean {
         val body = JSONObject(mapOf("code" to code)).toString()
             .toRequestBody("application/json".toMediaType())
