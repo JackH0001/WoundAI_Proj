@@ -43,6 +43,9 @@ RETRACTED = os.path.join(FLYWHEEL_DIR, "retracted.jsonl")
 # 組織分割 GT（每張影像一個 PNG，值＝組織碼 0..5）。與影像分開存：
 # 遮罩會被醫師修訂而覆蓋，影像不會；混在同一個前綴下，隔離／還原的邏輯會變複雜。
 TISSUE_DIR = os.path.join(FLYWHEEL_DIR, "tissue_masks")
+# 深度圖與置信度圖（WoundAI3D）。同樣與影像分開：深度是另一個感測器的產物，
+# 保存期限、撤回隔離、匯出規則都可能與 RGB 不同，混在一起之後再分很痛。
+DEPTH_DIR = os.path.join(FLYWHEEL_DIR, "depth_maps")
 AUDIT = os.path.join(FLYWHEEL_DIR, "audit.jsonl")
 IMAGES_DIR = os.path.join(FLYWHEEL_DIR, "images")
 QUARANTINE_DIR = os.path.join(FLYWHEEL_DIR, "quarantine")
@@ -737,6 +740,59 @@ try:
             except Exception as e:
                 logger.warning("組織遮罩落盤失敗(%s): %s", image_id, e)
                 audit(actor, "tissue_mask_rejected", rec["code"], str(e), role, org)
+
+        # ── 深度圖落盤（WoundAI3D）──────────────────────────────────────
+        #
+        # 同樣**不阻擋標註**：沒有深度只是少一個 3D 樣本，讓整筆失敗會連 2D 的
+        # 傷口 GT 一起丟掉。但拒收的理由一定要寫進稽核——深度資料事後補不回來，
+        # 「為什麼這批沒有深度」是日後唯一查得到的線索。
+        if d.get("depth_map_png"):
+            try:
+                raw = base64.b64decode(d["depth_map_png"], validate=True)
+                if len(raw) > 16 * 1024 * 1024:
+                    raise ValueError("深度圖超過 16MB")
+                if raw[:8] != b"\x89PNG\r\n\x1a\n":
+                    raise ValueError("不是 PNG")
+                # ⚠ 位元深度必須是 16。8-bit 會把深度壓進 0–255 mm，
+                # 而臨床攝距是 200–600 mm——整張圖飽和成同一個值，
+                # 反投影出一個平面，表面積看起來完全正常。這是最惡性的一種錯。
+                # PNG IHDR：位元組 24 是 bit depth，25 是 colour type（0＝灰階）。
+                bit_depth, colour_type = raw[24], raw[25]
+                if bit_depth != 16 or colour_type != 0:
+                    raise ValueError(
+                        "深度圖必須是 16-bit 灰階 PNG（實際 bit_depth=%d colour_type=%d）。"
+                        "8-bit 只表示得了 0–255 mm，臨床攝距會整片飽和而**不會有任何錯誤**"
+                        % (bit_depth, colour_type))
+                # 內參缺席 → 深度圖無法反投影，等於一堆沒有單位的數字。
+                # 這裡**必須擋**：存下來只會製造「有資料但不能用」的假庫存。
+                ci = d.get("camera_intrinsics") or {}
+                miss = [k for k in ("fx", "fy", "cx", "cy")
+                        if not isinstance(ci.get(k), (int, float))]
+                if miss:
+                    raise ValueError("camera_intrinsics 缺 %s。沒有內參就無法反投影，"
+                                     "深度圖存下來也用不了，而那些值事後查不到" % "、".join(miss))
+                key = _key(os.path.join(DEPTH_DIR, image_id + ".png"))
+                _store().put_blob(key, raw)
+                rec["depth_map_key"] = "depth_maps/%s.png" % image_id
+                rec["depth_format"] = d.get("depth_format") or "png16_mm"
+                if d.get("depth_conf_png"):
+                    craw = base64.b64decode(d["depth_conf_png"], validate=True)
+                    if craw[:8] != b"\x89PNG\r\n\x1a\n":
+                        raise ValueError("置信度圖不是 PNG")
+                    _store().put_blob(_key(os.path.join(DEPTH_DIR, image_id + "_conf.png")), craw)
+                    rec["depth_conf_key"] = "depth_maps/%s_conf.png" % image_id
+                audit(actor, "depth_map_stored", rec["code"],
+                      "%d bytes；source=%s format=%s 置信度=%s"
+                      % (len(raw), rec.get("depth_source"), rec["depth_format"],
+                         "有" if rec.get("depth_conf_key") else "無"), role, org)
+            except Exception as e:
+                logger.warning("深度圖落盤失敗(%s): %s", image_id, e)
+                audit(actor, "depth_map_rejected", rec["code"], str(e), role, org)
+                # 深度被拒 → depth_source 不可停留在 arcore_depth/lidar，
+                # 否則紀錄會聲稱「有深度」而實際上沒有檔案，比沒有更糟。
+                rec["depth_source"] = "rejected"
+                rec.pop("depth_map_key", None)
+                rec.pop("depth_conf_key", None)
 
         rec["received_at"] = utc_now()
         append_jsonl(QUEUE, rec)
