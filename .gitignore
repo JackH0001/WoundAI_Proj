@@ -56,7 +56,24 @@ engineering/phase2/*.jsonl
 # runtime/IDE artifacts (cleanup 2026-07-07)
 Android/.gradle/
 **/.idea/
-Backend/Flask/*.db
+# ⚠ 資料庫與日誌一律排除，**不限目錄**。
+#
+# 2026-08-06：`wound_analysis.db`、`wound_analysis.db-journal`、`logs/wound_analysis.log`
+# 被提交進這個公開 repo。這次三個都是 0 bytes（沒有資料外洩），但原因值得記下來：
+#
+# 舊規則寫成 `Backend/Flask/*.db`，只擋得住「從 Backend/Flask 啟動」的那一種情況。
+# 而 app.py 是在**當前工作目錄**建 SQLite 與 logs/ 的——從 repo 根目錄跑一次測試
+# （或任何人從別的目錄跑一次 app.py），檔案就落在規則涵蓋不到的地方，
+# 而 `git add -A` 不會問你任何問題。
+#
+# 這個 repo 裡沒有任何一個 .db/.log 是該進版控的，所以規則就寫成無條件排除。
+# 真的有例外時再用 `git add -f`——那時至少是一個有意識的決定。
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.log
+logs/
 Backend/Flask/logs/
 # 飛輪執行期資料:醫師標註佇列、稽核軌跡、**病人傷口原始影像**、匯出的訓練集。
 # 2026-07-28:原本只擋 *.jsonl,但 classify 現在會把上傳影像存進 flywheel/images/,
