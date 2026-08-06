@@ -37,6 +37,38 @@ object AppSettings {
     private const val K_PASS_ENC = "backend_pass_enc"
 
     /**
+     * 尚未成功送到後端的「撤回訓練同意」代碼。
+     *
+     * ## 為什麼需要這個佇列
+     *
+     * 病患撤回同意是**立即生效的權利**，不能因為手機當下沒網路就拒絕他。
+     * 所以本機撤回一定要先成功。但雲端那一邊沒撤回的話，他的資料照樣會進訓練集——
+     * 那正是同意書承諾不會發生的事。
+     *
+     * 兩者的解法是：本機立刻生效、雲端撤回失敗就記在這裡，之後每次連上就重試，
+     * 而且**在撤回成功之前一直顯示出來**。
+     *
+     * ⚠ 只存 `WD-` 代碼，不含任何個資——代碼本身就是去識別後的識別子。
+     * 這是唯一可以放進 SharedPreferences 的原因。
+     */
+    private const val K_PENDING_WD = "pending_withdrawals"
+
+    fun pendingWithdrawals(ctx: Context): Set<String> =
+        prefs(ctx).getStringSet(K_PENDING_WD, emptySet()) ?: emptySet()
+
+    fun addPendingWithdrawals(ctx: Context, codes: Collection<String>) {
+        if (codes.isEmpty()) return
+        // getStringSet 回的可能是內部共用實例，直接改它的行為未定義——一定要複製一份。
+        val next = pendingWithdrawals(ctx).toMutableSet().apply { addAll(codes) }
+        prefs(ctx).edit().putStringSet(K_PENDING_WD, next).apply()
+    }
+
+    fun clearPendingWithdrawal(ctx: Context, code: String) {
+        val next = pendingWithdrawals(ctx).toMutableSet().apply { remove(code) }
+        prefs(ctx).edit().putStringSet(K_PENDING_WD, next).apply()
+    }
+
+    /**
      * 預設後端位址由建置型別決定（`build.gradle` 的 `buildConfigField`）：
      * release ＝ 雲端網址，debug ＝ 模擬器 loopback。
      *

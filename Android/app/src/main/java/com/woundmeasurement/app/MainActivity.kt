@@ -32,6 +32,7 @@ import com.woundmeasurement.app.pipeline.BackendSettingsScreen
 import com.woundmeasurement.app.pipeline.CaseSelectScreen
 import com.woundmeasurement.app.data.entity.MeasurementEntity
 import com.woundmeasurement.app.data.store.LocalImageStore
+import com.woundmeasurement.app.pipeline.ManualScreen
 import com.woundmeasurement.app.pipeline.MeasureValidationEntry
 import com.woundmeasurement.app.pipeline.MeasurementReviewScreen
 import com.woundmeasurement.app.pipeline.RecentActivityScreen
@@ -183,6 +184,7 @@ fun WoundMeasurementApp() {
             onOpenRecord = { m -> reviewRecord = m; backTo = "quickHistory"; currentScreen = "review" }
         )
         "settings" -> BackendSettingsScreen(onBack = { currentScreen = "main" })
+        "manual" -> ManualScreen(onBack = { currentScreen = "main" })
         else -> Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -199,6 +201,13 @@ fun WoundMeasurementApp() {
             MainButton("最近就診") { currentScreen = "recent" }
             MainButton("快速量測（範例／模擬圖・不綁個案）") { currentScreen = "quick" }
             MainButton("設定（後端連線・帳號・佇列健康度）") { currentScreen = "settings" }
+            // 說明書放在最後、樣式較輕：它是查閱用的，不該與四個操作入口爭視覺重量。
+            // 但一定要在首頁——需要看手冊的時刻通常是操作卡住的當下，
+            // 那時使用者不會想「這應該藏在設定裡的某個地方」。
+            OutlinedButton(
+                onClick = { currentScreen = "manual" },
+                modifier = Modifier.fillMaxWidth().height(52.dp).padding(bottom = 12.dp)
+            ) { Text("使用說明書（依角色分頁・可離線查閱）", fontSize = 16.sp) }
             Text(
                 "臨床量測請由「個案」進入：紀錄才會歸戶到正確的傷口，代碼也才穩定（回診沿用同一組）。",
                 fontSize = 13.sp,

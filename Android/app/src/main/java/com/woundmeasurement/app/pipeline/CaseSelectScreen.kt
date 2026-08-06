@@ -52,6 +52,9 @@ fun CaseSelectScreen(
      */
     var selectedCaseId by remember { mutableStateOf<Long?>(null) }
 
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    /** 尚未同步到雲端的撤回。沒有完成的撤回必須**一直看得見**，不能只閃一次訊息。 */
+    var pendingWd by remember { mutableStateOf<String?>(null) }
     // 新增病患欄位
     var newName by remember { mutableStateOf("") }
     var newMrn by remember { mutableStateOf("") }
@@ -72,6 +75,10 @@ fun CaseSelectScreen(
     LaunchedEffect(Unit) {
         // Keystore 失效/DB 損毀會從這裡拋,不攔會炸掉整個 App 且畫面無線索
         try { patients = repo.listPatients() } catch (e: Exception) { msg = "⚠ 讀取病患失敗:${e.message}" }
+        // 補做上次沒送成功的撤回。這裡是「使用者剛好有網路而且在等畫面」的時刻，
+        // 補做不會被感知到；而沒有完成的撤回代表病患的資料還留在雲端訓練佇列裡。
+        runCatching { ConsentWithdrawal.retryPending(ctx) }
+        pendingWd = ConsentWithdrawal.pendingBanner(ctx)
     }
 
     // 返回鍵逐層退出:簽名 → 傷口選取 → 病患選取 → 才真的離開。
@@ -111,6 +118,25 @@ fun CaseSelectScreen(
         Text("個案管理", style = MaterialTheme.typography.titleLarge)
         msg?.let { Text(it, color = MaterialTheme.colorScheme.primary,
             style = MaterialTheme.typography.bodyMedium) }
+        // 未完成的撤回：**常駐顯示直到真的完成**。
+        // 一次性的訊息會被下一則蓋掉或被滑走，而這件事沒做完就等於同意書的承諾沒兌現。
+        pendingWd?.let {
+            Surface(color = MaterialTheme.colorScheme.errorContainer,
+                shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(10.dp)) {
+                    Text(it, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer)
+                    TextButton(onClick = {
+                        scope.launch {
+                            val r = ConsentWithdrawal.retryPending(ctx)
+                            pendingWd = ConsentWithdrawal.pendingBanner(ctx)
+                            msg = if (r.allOk) "✅ 待重試的撤回已全部同步到雲端"
+                                  else "⚠ 仍有 ${r.pending.size} 筆未完成，請確認網路與後端帳密"
+                        }
+                    }) { Text("立即重試") }
+                }
+            }
+        }
 
         // ---------- 病患 ----------
         Text("病患", style = MaterialTheme.typography.titleSmall)
@@ -195,10 +221,26 @@ fun CaseSelectScreen(
                 onClick = {
                     scope.launch {
                         try {
+                        // 1) 本機立即生效。病患的撤回是**立即生效的權利**，
+                        //    不能因為手機當下沒網路就拒絕他。
                         val codes = repo.withdrawTraining(p.id, "病患要求")
                         reloadPatient(p)
-                        msg = "已撤回訓練同意。⚠ 尚須對後端撤回這些代碼:${codes.joinToString()}" +
-                              "(本機留痕只是一半,雲端沒排除的話資料照樣會進訓練集)"
+                        // 2) 雲端撤回。以前這裡只印一行「尚須對後端撤回」就結束了——
+                        //    而 BackendClient.withdrawConsent() 根本沒有呼叫端。
+                        //    結果是同意書寫著「撤回後不再納入後續訓練」，
+                        //    而系統實際上做不到那件事。
+                        msg = "已撤回訓練同意（本機）。正在同步到雲端…"
+                        val r = ConsentWithdrawal.pushToBackend(ctx, codes)
+                        msg = if (r.allOk)
+                            "✅ 已撤回訓練同意，雲端也已排除：${r.done.joinToString("、")}\n" +
+                            "這些代碼的影像已移入隔離區，不再進入任何訓練集。"
+                        else
+                            // 3) 失敗**不可以**顯示成功。誠實地說「本機已撤回、雲端尚未完成」，
+                            //    至少有人會去處理；顯示「已撤回」則沒有人會再看它一眼。
+                            "⚠ 本機已撤回，但雲端尚未完成：${r.pending.joinToString("、")}\n" +
+                            "這些代碼的資料**目前仍在雲端訓練佇列中**。已記錄待重試，" +
+                            "下次連上後端時會自動再試；也可請管理者到主控台手動撤回。"
+                        pendingWd = ConsentWithdrawal.pendingBanner(ctx)
                         } catch (e: Exception) { msg = "⚠ 撤回失敗:${e.message}" }
                     }
                 },

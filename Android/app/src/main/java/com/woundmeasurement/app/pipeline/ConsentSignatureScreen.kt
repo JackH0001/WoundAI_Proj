@@ -20,6 +20,7 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import java.io.ByteArrayOutputStream
 
@@ -62,16 +63,25 @@ fun ConsentSignatureScreen(
                 Text("① 照護同意（必填）", style = MaterialTheme.typography.titleSmall)
                 Text("同意以手機拍攝傷口影像，作為本人傷口照護之量測與紀錄用途。",
                     style = MaterialTheme.typography.bodySmall)
+                ConsentDetail("詳細說明", CARE_DETAIL)
             }
         }
         Row(verticalAlignment = androidx.compose.ui.Alignment.Top) {
             Checkbox(checked = train, onCheckedChange = { train = it })
             Column(Modifier.padding(top = 12.dp)) {
-                Text("② 研究/訓練同意（選填，可隨時撤回）", style = MaterialTheme.typography.titleSmall)
-                Text("同意將去識別化後的影像與醫師標註，用於本系統之演算法改良。" +
-                     "影像不含姓名、病歷號等可識別資訊。**不同意亦不影響照護權益**，" +
-                     "日後可隨時撤回，撤回後不再納入後續訓練。",
+                Text("② 研究／訓練同意（選填，可隨時撤回）",
+                    style = MaterialTheme.typography.titleSmall)
+                // ⚠ 這裡曾經寫成 `**不同意亦不影響照護權益**`。
+                // Compose 的 Text **不解析 Markdown**，病患看到的是帶著星號的字串——
+                // 一份法律文件上出現排版符號，會讓人合理懷疑其他部分是不是也沒人看過。
+                // 要強調就用字體與顏色，不要用星號。
+                Text("同意將去識別化後的影像與醫師標註，用於本系統之演算法改良。",
                     style = MaterialTheme.typography.bodySmall)
+                Text("不同意不影響您的照護權益。",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary)
+                ConsentDetail("詳細說明（請務必閱讀）", TRAIN_DETAIL)
             }
         }
 
@@ -131,6 +141,71 @@ fun ConsentSignatureScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
+
+/**
+ * 可展開的詳細說明。
+ *
+ * ## 為什麼是可展開，而不是全部攤開
+ *
+ * 完整揭露有六段，全部攤開的話簽名框會被推到第三頁——而實務上**沒有人會捲到那裡**。
+ * 結果是「揭露得很完整」與「沒有人讀過」同時成立，那不是知情同意。
+ *
+ * 摺疊起來至少讓兩件事都可能：想快的人看得到摘要，想細看的人點得開。
+ * 預設收合、但②訓練同意那一段的標題明寫「請務必閱讀」。
+ */
+@Composable
+private fun ConsentDetail(title: String, body: String) {
+    var open by remember { mutableStateOf(false) }
+    TextButton(onClick = { open = !open }, contentPadding = PaddingValues(0.dp)) {
+        Text((if (open) "▾ " else "▸ ") + title, style = MaterialTheme.typography.labelLarge)
+    }
+    if (open) {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            shape = MaterialTheme.shapes.small,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(body, style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(10.dp))
+        }
+    }
+}
+
+private const val CARE_DETAIL =
+    "・拍什麼：您的傷口照片，以及一張放在傷口旁的方形校正貼紙（用來換算實際尺寸）。\n" +
+    "・存在哪：這支手機內，加密保存。姓名與病歷號一併加密，不會傳到網路上。\n" +
+    "・誰看得到：您的照護團隊（醫師、護理師、助理）。\n" +
+    "・用途：計算傷口面積、組織比例與癒合趨勢，供臨床照護判斷參考。\n" +
+    "・這是輔助工具：所有數值都需要醫師確認，不會取代醫師的診斷。\n" +
+    "・不同意的話：無法使用本系統進行量測，您的傷口照護不受影響，會以原本的方式進行。"
+
+/**
+ * ⚠ 這段文字是對病患的承諾，改動前請確認系統真的做得到。
+ *
+ * 特別是「已訓練的模型無法反悔」那一條：撤回可以讓資料退出未來的訓練，
+ * 但**已經學進模型參數裡的東西拿不回來**。這是機器學習的性質，不是實作偷懶。
+ * 不寫的話病患會以為撤回等於完全抹除，而那不是事實——
+ * 一份說了做不到的事的同意書，比沒有同意書更糟。
+ */
+private const val TRAIN_DETAIL =
+    "・會離開手機的是什麼：傷口照片、醫師畫的傷口範圍與組織標記、面積與滲液量、" +
+    "一組隨機代碼（例如 WD-1A2B3C4D）、手機型號。\n" +
+    "・不會離開手機的是什麼：您的姓名、病歷號、簽名。這三項永遠只存在這支手機。\n" +
+    "・存在哪裡：台灣境內的雲端主機。傳輸與儲存皆加密。\n" +
+    "・誰看得到：本系統的研究與工程人員。他們看得到傷口照片，但看不到您是誰——" +
+    "他們手上只有那組隨機代碼。\n" +
+    "・保留多久：影像自最後一次量測起保留約 90 天後清除；由影像算出的數值（面積、" +
+    "組織比例）會留在本機病歷中，作為您的照護紀錄。\n" +
+    "・用途限於：改進本系統辨識傷口與組織的準確度。不會用於商業廣告，不會轉售，" +
+    "不會用於與傷口照護無關的目的。\n" +
+    "\n" +
+    "・您可以隨時撤回：告訴任何一位照護人員即可，不需要理由，也不影響您的照護。\n" +
+    "・撤回之後會發生什麼：您的影像會立即從資料庫中隔離，不再用於任何後續的訓練。\n" +
+    "・⚠ 但有一件事要誠實告訴您：如果在您撤回之前，系統已經用您的資料訓練過某個版本的" +
+    "模型，那個已完成的模型無法「忘記」學過的東西。撤回能停止未來的使用，" +
+    "但無法回溯移除已經完成的訓練。這是這類技術的性質，我們認為您有權在同意前知道。\n" +
+    "\n" +
+    "・有疑問想問誰：請洽您的主治醫師或本研究的聯絡窗口。"
 
 /** 把筆畫轉成 PNG bytes（存本機同意紀錄；不隨標註上傳）。 */
 private fun renderSignature(strokes: List<List<Offset>>, w: Int, h: Int): ByteArray? {
