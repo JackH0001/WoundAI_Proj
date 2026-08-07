@@ -184,10 +184,14 @@ def main():
     if wes:
         check("有 peek（按住看原圖）狀態", "collectIsPressedAsState" in wes)
         check("peek 期間停用作畫", re.search(r"canPaint\s*=.*!peeking", wes) is not None)
-        # 組織分類列若隨 peek 消失，版面會重排 → 畫布高度改變 → 影像跳動。
-        row = re.search(r"if \(tool == EditTool\.TISSUE\) \{", wes)
-        check("組織分類列的顯示條件只看工具、不看 peek", row is not None and
-              "tool == EditTool.TISSUE && !peeking" not in wes)
+        # 組織分類列**完全不可以有顯示條件**——不論是 peek 還是工具。
+        #
+        # 它一出現／消失，畫布的 weight(1f) 高度就變，base() 跟著變，
+        # 整張影像的縮放與位置一起跳。這個 bug 咬過兩次：
+        # 先是 peek 強制切到「移動」讓它消失，修掉之後單純切工具仍然會。
+        # 版面必須恆定，可用性用 enabled 控制。（詳見 test_compose_safety.py）
+        check("組織分類列不隨 peek 消失", "tool == EditTool.TISSUE && !peeking" not in wes)
+        check("組織分類列不隨工具消失", "if (tool == EditTool.TISSUE) {" not in wes)
 
     print("\n%d 項檢查，%d 項失敗" % (TOTAL[0], len(FAILED)))
     if FAILED:

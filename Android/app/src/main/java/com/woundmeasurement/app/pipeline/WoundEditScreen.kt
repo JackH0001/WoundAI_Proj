@@ -427,7 +427,15 @@ fun WoundEditScreen(
         if (tool == EditTool.B_PAINT || tool == EditTool.B_ERASE || tool == EditTool.TISSUE) {
             if (st.expandIfNeeded(cx, cy, rM)) {           // 視窗擴張(內容無損);undo 尺寸失效→清空
                 undo.clear(); redo.clear()
-                seedAuto(st, bitmap, wbGains)              // 新擴出來的區域還沒有底稿
+                // ⚠ seedAuto **只有 B_PAINT 需要**。
+                //
+                // `auto` 的唯一用途是「新畫進遮罩的像素要帶什麼分類」，而只有 B_PAINT
+                // 會產生新的遮罩像素。對「邊界－」與「組織🖌」它完全用不到——
+                // 而它在 2200² 上是近千萬次寫入，跑在**筆畫進行中的主執行緒**上。
+                //
+                // 這正是「擴張時畫面卡一下、手指繼續移動、恢復後邊界突然過標」的來源：
+                // 不是畫面移動了，是使用者在看不到回饋的那幾百毫秒裡把手指帶過頭了。
+                if (tool == EditTool.B_PAINT) seedAuto(st, bitmap, wbGains)
                 cx = (imgPt.x - st.rx0) * st.mScale; cy = (imgPt.y - st.ry0) * st.mScale
             }
         }
@@ -462,9 +470,24 @@ fun WoundEditScreen(
         st.refresh(x0 - 1, y0 - 1, x1 + 1, y1 + 1)
         version++
     }
+    /**
+     * 兩點之間補間塗抹。
+     *
+     * ⚠ **段落過長時只點終點，不補間。**
+     *
+     * 一段遠超過筆刷直徑的位移，幾乎不可能是使用者真的想畫的那一筆——
+     * 它代表中間掉了影格（最常見的原因是遮罩擴張時的重算）。把那段距離
+     * 補畫成一條線，就是醫師回報的「邊界突然過標，還要再修回來」。
+     *
+     * 在標註工具裡，**少畫是可以補的，多畫要靠 undo**。不確定時寧可少畫。
+     */
     fun stampLine(a: Offset, b: Offset) {
         val d = b - a; val len = sqrt(d.x * d.x + d.y * d.y)
-        val stepPx = max(1f, (brushScreen / k()) * 0.5f)
+        val brushImg = brushScreen / k()
+        // brushImg 是**半徑**，所以 ×6 等於筆刷直徑的 3 倍。
+        // 正常拖曳每個事件的位移遠小於此；掉影格造成的跳躍通常是它的數倍。
+        if (len > brushImg * 6f) { stamp(b); return }
+        val stepPx = max(1f, brushImg * 0.5f)
         val n = max(1, (len / stepPx).toInt())
         for (i in 0..n) stamp(a + d * (i.toFloat() / n))
     }
@@ -644,14 +667,35 @@ fun WoundEditScreen(
         // ⚠ 這一列的顯示條件**只看工具，不看 peek**。
         // 若寫成 `tool == TISSUE && !peeking`，peek 期間整列會消失並讓畫布長高，
         // 那正是要修掉的跳動。空間必須恆定。
-        if (tool == EditTool.TISSUE) {
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                // 1..T_MAX：包含「其他」。沒有這個筆刷的話，醫師看得到判不出來的區塊，
-                // 卻只能把它硬塞進四類之一——那等於強迫他為訓練集捏造一個標籤。
-                (1..T_MAX).forEach { c ->
-                    FilterChip(curTissue == c, { curTissue = c }, { Text(T_NAMES[c]) },
-                        enabled = !peeking, modifier = Modifier.weight(1f))
-                }
+        // ⚠ 這一列**永遠顯示**，即使目前不是組織筆刷。
+        //
+        // 原本寫成 `if (tool == EditTool.TISSUE)`，於是切到「組織🖌」時整列憑空出現，
+        // 畫布的 weight(1f) 高度隨之變小 → base() 變小 → k() 變小 → **整張影像縮放改變**。
+        // 醫師的感受是「切個工具圖就跳一下」，而他正在對照的位置也跟著跑掉。
+        //
+        // 版面高度必須恆定。非組織筆刷時停用即可，不要讓它消失。
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            // 1..T_MAX：包含「其他」。沒有這個筆刷的話，醫師看得到判不出來的區塊，
+            // 卻只能把它硬塞進四類之一——那等於強迫他為訓練集捏造一個標籤。
+            (1..T_MAX).forEach { c ->
+                // 按鈕直接呈現**該類在畫面上實際的疊色**（同一組 T_COLORS、同一個 alpha）。
+                // 靠文字記「肉芽是綠的」多一層轉換；讓按鈕自己是那個顏色，
+                // 醫師掃一眼就知道等一下塗下去會變成什麼樣子。
+                val tint = Color(T_COLORS[c])
+                FilterChip(
+                    selected = curTissue == c,
+                    onClick = { curTissue = c },
+                    label = { Text(T_NAMES[c], maxLines = 1) },
+                    enabled = !peeking && tool == EditTool.TISSUE,
+                    colors = FilterChipDefaults.filterChipColors(
+                        containerColor = tint,
+                        // 選中時加深：半透明色塊彼此的差異在小按鈕上不夠明顯，
+                        // 光靠邊框看不出選了哪一個。
+                        selectedContainerColor = Color(T_COLORS[c] or -0x1000000).copy(alpha = 0.85f),
+                        disabledContainerColor = tint.copy(alpha = tint.alpha * 0.4f)
+                    ),
+                    modifier = Modifier.weight(1f)
+                )
             }
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {

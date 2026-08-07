@@ -1,0 +1,856 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		3D4B7A2A2B1234567890123 /* WoundMeasurementApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A292B1234567890123 /* WoundMeasurementApp.swift */; };
+		3D4B7A2C2B1234567890123 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A2B2B1234567890123 /* ContentView.swift */; };
+		3D4B7A2E2B1234567890123 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3D4B7A2D2B1234567890123 /* Assets.xcassets */; };
+		3D4B7A312B1234567890123 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3D4B7A302B1234567890123 /* Preview Assets.xcassets */; };
+		3D4B7A382B1234567890123 /* CaptureModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A372B1234567890123 /* CaptureModule.swift */; };
+		3D4B7A3A2B1234567890123 /* PreProcessingModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A392B1234567890123 /* PreProcessingModule.swift */; };
+		3D4B7A3C2B1234567890123 /* QAFilterModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A3B2B1234567890123 /* QAFilterModule.swift */; };
+		3D4B7A3E2B1234567890123 /* ImageJCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A3D2B1234567890123 /* ImageJCore.swift */; };
+		3D4B7A402B1234567890123 /* ClassificationModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A3F2B1234567890123 /* ClassificationModule.swift */; };
+		3D4B7A422B1234567890123 /* WoundRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A412B1234567890123 /* WoundRecord.swift */; };
+		3D4B7A442B1234567890123 /* WoundMeasurementModel.xcdatamodeld in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A432B1234567890123 /* WoundMeasurementModel.xcdatamodeld */; };
+		3D4B7A4A2B1234567890123 /* MedicalComplianceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A492B1234567890123 /* MedicalComplianceManager.swift */; };
+		3D4B7A4C2B1234567890123 /* DataManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A4B2B1234567890123 /* DataManager.swift */; };
+		3D4B7A4E2B1234567890123 /* SharedTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A4D2B1234567890123 /* SharedTypes.swift */; };
+		3D4B7A502B1234567890123 /* ErrorHandlingModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A4F2B1234567890123 /* ErrorHandlingModule.swift */; };
+		3D4B7A512B1234567890123 /* WoundAnnotationModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A482B1234567890123 /* WoundAnnotationModel.swift */; };
+		3D4B7A522B1234567890123 /* AppStateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A472B1234567890999 /* AppStateManager.swift */; };
+		3D4B7A562B1234567890123 /* LiDARCalibrationModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A532B1234567890123 /* LiDARCalibrationModule.swift */; };
+		3D4B7A572B1234567890123 /* RealTimeAnalysisModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A542B1234567890123 /* RealTimeAnalysisModule.swift */; };
+		3D4B7A582B1234567890123 /* RulerCalibrationModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A552B1234567890123 /* RulerCalibrationModule.swift */; };
+		3D4B7A5B2B1234567890123 /* WoundTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A5A2B1234567890123 /* WoundTypes.swift */; };
+		3D4B7A5C2B1234567890123 /* CalibrationStickerModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A5D2B1234567890123 /* CalibrationStickerModule.swift */; };
+		3D4B7A5E2B1234567890123 /* SquareCalibrationModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A5F2B1234567890123 /* SquareCalibrationModule.swift */; };
+		3D4B7A602B1234567890123 /* ColorCalibrationValidationModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A612B1234567890123 /* ColorCalibrationValidationModule.swift */; };
+		3D4B7A622B1234567890123 /* VisualizationModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A632B1234567890123 /* VisualizationModule.swift */; };
+		3D4B7A642B1234567890123 /* SmartROIModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A652B1234567890123 /* SmartROIModule.swift */; };
+		3D4B7A682B1234567890AAA /* ARSessionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D4B7A662B1234567890AAA /* ARSessionManager.swift */; };
+		A1MODIMG_BUILD /* ImageTypeDetectionModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1MODIMG /* ImageTypeDetectionModule.swift */; };
+		A1OCVMM /* OpenCVCircleDetector.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1OCVREFMM /* OpenCVCircleDetector.mm */; };
+		A1SERV001_BUILD /* BatchProcessingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1SERV001 /* BatchProcessingService.swift */; };
+		A1SERV002_BUILD /* PDFReportGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1SERV002 /* PDFReportGenerator.swift */; };
+		A1SERV003_BUILD /* EnhancedPerformanceMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1SERV003 /* EnhancedPerformanceMonitor.swift */; };
+		A1VIEW001 /* AnnotationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FILE001 /* AnnotationView.swift */; };
+		A1VIEW002 /* AnalysisHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FILE002 /* AnalysisHistoryView.swift */; };
+		A1VIEW003 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FILE003 /* SettingsView.swift */; };
+		A1VIEW004 /* WoundVisualizationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FILE004 /* WoundVisualizationView.swift */; };
+		A1VIEW005 /* Depth3DVisualizationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FILE005 /* Depth3DVisualizationView.swift */; };
+		A1VIEW006_BUILD /* ARCameraPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1VIEW006 /* ARCameraPreviewView.swift */; };
+		A1VIEW007_BUILD /* BatchProcessingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1VIEW007 /* BatchProcessingView.swift */; };
+		A1VIEW008_BUILD /* BatchResultsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1VIEW008 /* BatchResultsView.swift */; };
+		A1VIEW009_BUILD /* PhotoMeasurementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1VIEW009 /* PhotoMeasurementView.swift */; };
+		A1VIEW010_BUILD /* BatchConfigurationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1VIEW010 /* BatchConfigurationView.swift */; };
+		A1VIEW011_BUILD /* BatchReportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1VIEW011 /* BatchReportView.swift */; };
+		A1XCLINK /* opencv2.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1XCREF /* opencv2.xcframework */; };
+		A1XEMBED /* opencv2.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = A1XCREF /* opencv2.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		B1MOD001_BUILD /* MultiAlgorithmDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD001_REF /* MultiAlgorithmDetector.swift */; };
+		B1MOD002_BUILD /* AdvancedMLClassificationModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD002_REF /* AdvancedMLClassificationModule.swift */; };
+		B1MOD003_BUILD /* SegmentationEngineCoreML.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD003_REF /* SegmentationEngineCoreML.swift */; };
+		B1MOD004_BUILD /* UWMLightweightSegmentationModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD004_REF /* UWMLightweightSegmentationModule.swift */; };
+		B1MOD005_BUILD /* SimplifiedAdvancedMLModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD005_REF /* SimplifiedAdvancedMLModule.swift */; };
+		B1MOD006_BUILD /* CloudLocalAlgorithmAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD006_REF /* CloudLocalAlgorithmAnalyzer.swift */; };
+		B1MOD007_BUILD /* CloudResultComparator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD007_REF /* CloudResultComparator.swift */; };
+		B1MOD008_BUILD /* AlgorithmComparisonTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD008_REF /* AlgorithmComparisonTool.swift */; };
+		B1MOD009_BUILD /* ImageJHeadlessProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD009_REF /* ImageJHeadlessProcessor.swift */; };
+		B1MOD010_BUILD /* LiveCameraAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD010_REF /* LiveCameraAnalyzer.swift */; };
+		B1MOD011_BUILD /* LocalCloudIntegrationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD011_REF /* LocalCloudIntegrationController.swift */; };
+		B1MOD012_BUILD /* LocalSyncSimulationEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD012_REF /* LocalSyncSimulationEngine.swift */; };
+		B1MOD013_BUILD /* MedicalGradeValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD013_REF /* MedicalGradeValidator.swift */; };
+		B1MOD014_BUILD /* MobileComputeSimulator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD014_REF /* MobileComputeSimulator.swift */; };
+		B1MOD015_BUILD /* MobileImageProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD015_REF /* MobileImageProcessor.swift */; };
+		B1MOD016_BUILD /* MobileOptimizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD016_REF /* MobileOptimizer.swift */; };
+		B1MOD017_BUILD /* MultiScaleImageProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD017_REF /* MultiScaleImageProcessor.swift */; };
+		B1MOD018_BUILD /* QualityValidationModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD018_REF /* QualityValidationModule.swift */; };
+		B1MOD019_BUILD /* RealDataAnalysisController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD019_REF /* RealDataAnalysisController.swift */; };
+		B1MOD020_BUILD /* RealDataComparator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD020_REF /* RealDataComparator.swift */; };
+		B1MOD021_BUILD /* StickerDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD021_REF /* StickerDetector.swift */; };
+		B1MOD022_BUILD /* Wound3DVisualizationModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MOD022_REF /* Wound3DVisualizationModule.swift */; };
+		B1ENH001_BUILD /* ARDepthVolumeCalculator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1ENH001_REF /* ARDepthVolumeCalculator.swift */; };
+		B1ENH002_BUILD /* AdaptiveParametersController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1ENH002_REF /* AdaptiveParametersController.swift */; };
+		B1ENH003_BUILD /* AdaptiveSegmentationModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1ENH003_REF /* AdaptiveSegmentationModule.swift */; };
+		B1ENH004_BUILD /* CalibrationStickerDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1ENH004_REF /* CalibrationStickerDetector.swift */; };
+		B1ENH005_BUILD /* MedicalGradeValidationSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1ENH005_REF /* MedicalGradeValidationSystem.swift */; };
+		B1ENH006_BUILD /* MultiScaleSegmentationEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1ENH006_REF /* MultiScaleSegmentationEngine.swift */; };
+		B1MDL001_BUILD /* ViewSupportTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1MDL001_REF /* ViewSupportTypes.swift */; };
+		B1MDL002_BUILD /* UNet256.mlmodel in Resources */ = {isa = PBXBuildFile; fileRef = B1MDL002_REF /* UNet256.mlmodel */; };
+		B1SRV001_BUILD /* CloudAPIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1SRV001_REF /* CloudAPIService.swift */; };
+		B1SRV002_BUILD /* WoundAnalysisAPIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1SRV002_REF /* WoundAnalysisAPIService.swift */; };
+		B1SRV003_BUILD /* PerformanceMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1SRV003_REF /* PerformanceMonitor.swift */; };
+		B1SRV004_BUILD /* MockDataService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1SRV004_REF /* MockDataService.swift */; };
+		B1VW001_BUILD /* CalibrationSelectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1VW001_REF /* CalibrationSelectionView.swift */; };
+		B1VW002_BUILD /* CalibrationStickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1VW002_REF /* CalibrationStickerView.swift */; };
+		B1VW003_BUILD /* CloudAuthenticationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1VW003_REF /* CloudAuthenticationView.swift */; };
+		B1VW004_BUILD /* CloudUploadView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1VW004_REF /* CloudUploadView.swift */; };
+		B1VW005_BUILD /* EnhancedAnnotationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1VW005_REF /* EnhancedAnnotationView.swift */; };
+		B1VW006_BUILD /* EnhancedMeasurementBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1VW006_REF /* EnhancedMeasurementBanner.swift */; };
+		B1VW007_BUILD /* LiveCameraMeasurementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1VW007_REF /* LiveCameraMeasurementView.swift */; };
+		B1VW008_BUILD /* LocalCloudIntegrationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1VW008_REF /* LocalCloudIntegrationView.swift */; };
+		B1VW009_BUILD /* PerformanceDashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1VW009_REF /* PerformanceDashboardView.swift */; };
+		B1VW010_BUILD /* StandardStickerCalibrationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1VW010_REF /* StandardStickerCalibrationView.swift */; };
+		B1VW011_BUILD /* Wound3DVisualizationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1VW011_REF /* Wound3DVisualizationView.swift */; };
+		B1OCV001_BUILD /* OpenCVSwiftBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1OCV001_REF /* OpenCVSwiftBridge.swift */; };
+		B1ANL001_BUILD /* ExecuteAnalysisReport.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1ANL001_REF /* ExecuteAnalysisReport.swift */; };
+		B1ANL002_BUILD /* ExecuteRealDataAnalysis.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1ANL002_REF /* ExecuteRealDataAnalysis.swift */; };
+		B1UTL001_BUILD /* AreaCalibrationHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1UTL001_REF /* AreaCalibrationHelper.swift */; };
+		B1UTL002_BUILD /* SimulatedAnalysisExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1UTL002_REF /* SimulatedAnalysisExecutor.swift */; };
+		B1TST001_BUILD /* MeasurementEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1TST001_REF /* MeasurementEngineTests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		A1EMBED /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				A1XEMBED /* opencv2.xcframework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		3D4B7A262B1234567890123 /* WoundMeasurementApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WoundMeasurementApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		3D4B7A292B1234567890123 /* WoundMeasurementApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WoundMeasurementApp.swift; sourceTree = "<group>"; };
+		3D4B7A2B2B1234567890123 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		3D4B7A2D2B1234567890123 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		3D4B7A302B1234567890123 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
+		3D4B7A372B1234567890123 /* CaptureModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureModule.swift; sourceTree = "<group>"; };
+		3D4B7A392B1234567890123 /* PreProcessingModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreProcessingModule.swift; sourceTree = "<group>"; };
+		3D4B7A3B2B1234567890123 /* QAFilterModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QAFilterModule.swift; sourceTree = "<group>"; };
+		3D4B7A3D2B1234567890123 /* ImageJCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageJCore.swift; sourceTree = "<group>"; };
+		3D4B7A3F2B1234567890123 /* ClassificationModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassificationModule.swift; sourceTree = "<group>"; };
+		3D4B7A412B1234567890123 /* WoundRecord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WoundRecord.swift; sourceTree = "<group>"; };
+		3D4B7A452B1234567890123 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		3D4B7A472B1234567890999 /* AppStateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStateManager.swift; sourceTree = "<group>"; };
+		3D4B7A482B1234567890123 /* WoundAnnotationModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WoundAnnotationModel.swift; sourceTree = "<group>"; };
+		3D4B7A492B1234567890123 /* MedicalComplianceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MedicalComplianceManager.swift; sourceTree = "<group>"; };
+		3D4B7A4B2B1234567890123 /* DataManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataManager.swift; sourceTree = "<group>"; };
+		3D4B7A4D2B1234567890123 /* SharedTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedTypes.swift; sourceTree = "<group>"; };
+		3D4B7A4F2B1234567890123 /* ErrorHandlingModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorHandlingModule.swift; sourceTree = "<group>"; };
+		3D4B7A532B1234567890123 /* LiDARCalibrationModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiDARCalibrationModule.swift; sourceTree = "<group>"; };
+		3D4B7A542B1234567890123 /* RealTimeAnalysisModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealTimeAnalysisModule.swift; sourceTree = "<group>"; };
+		3D4B7A552B1234567890123 /* RulerCalibrationModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RulerCalibrationModule.swift; sourceTree = "<group>"; };
+		3D4B7A5A2B1234567890123 /* WoundTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WoundTypes.swift; sourceTree = "<group>"; };
+		3D4B7A5D2B1234567890123 /* CalibrationStickerModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalibrationStickerModule.swift; sourceTree = "<group>"; };
+		3D4B7A5F2B1234567890123 /* SquareCalibrationModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquareCalibrationModule.swift; sourceTree = "<group>"; };
+		3D4B7A612B1234567890123 /* ColorCalibrationValidationModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ColorCalibrationValidationModule.swift; sourceTree = "<group>"; };
+		3D4B7A632B1234567890123 /* VisualizationModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualizationModule.swift; sourceTree = "<group>"; };
+		3D4B7A652B1234567890123 /* SmartROIModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartROIModule.swift; sourceTree = "<group>"; };
+		3D4B7A662B1234567890AAA /* ARSessionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARSessionManager.swift; sourceTree = "<group>"; };
+		A1CDMODELVER /* WoundMeasurementModel.xcdatamodel */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodel; path = WoundMeasurementModel.xcdatamodel; sourceTree = "<group>"; };
+		A1FILE001 /* AnnotationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnnotationView.swift; sourceTree = "<group>"; };
+		A1FILE002 /* AnalysisHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisHistoryView.swift; sourceTree = "<group>"; };
+		A1FILE003 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		A1FILE004 /* WoundVisualizationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WoundVisualizationView.swift; sourceTree = "<group>"; };
+		A1FILE005 /* Depth3DVisualizationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Depth3DVisualizationView.swift; sourceTree = "<group>"; };
+		A1MODIMG /* ImageTypeDetectionModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageTypeDetectionModule.swift; sourceTree = "<group>"; };
+		A1OCVREFH /* OpenCVCircleDetector.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = OpenCVCircleDetector.h; sourceTree = "<group>"; };
+		A1OCVREFMM /* OpenCVCircleDetector.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = OpenCVCircleDetector.mm; sourceTree = "<group>"; };
+		A1SERV001 /* BatchProcessingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchProcessingService.swift; sourceTree = "<group>"; };
+		A1SERV002 /* PDFReportGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFReportGenerator.swift; sourceTree = "<group>"; };
+		A1SERV003 /* EnhancedPerformanceMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnhancedPerformanceMonitor.swift; sourceTree = "<group>"; };
+		A1VIEW006 /* ARCameraPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARCameraPreviewView.swift; sourceTree = "<group>"; };
+		A1VIEW007 /* BatchProcessingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchProcessingView.swift; sourceTree = "<group>"; };
+		A1VIEW008 /* BatchResultsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchResultsView.swift; sourceTree = "<group>"; };
+		A1VIEW009 /* PhotoMeasurementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoMeasurementView.swift; sourceTree = "<group>"; };
+		A1VIEW010 /* BatchConfigurationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchConfigurationView.swift; sourceTree = "<group>"; };
+		A1VIEW011 /* BatchReportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchReportView.swift; sourceTree = "<group>"; };
+		A1XCREF /* opencv2.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = opencv2.xcframework; sourceTree = "<group>"; };
+		B1MOD001_REF /* MultiAlgorithmDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultiAlgorithmDetector.swift; sourceTree = "<group>"; };
+		B1MOD002_REF /* AdvancedMLClassificationModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdvancedMLClassificationModule.swift; sourceTree = "<group>"; };
+		B1MOD003_REF /* SegmentationEngineCoreML.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SegmentationEngineCoreML.swift; sourceTree = "<group>"; };
+		B1MOD004_REF /* UWMLightweightSegmentationModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UWMLightweightSegmentationModule.swift; sourceTree = "<group>"; };
+		B1MOD005_REF /* SimplifiedAdvancedMLModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimplifiedAdvancedMLModule.swift; sourceTree = "<group>"; };
+		B1MOD006_REF /* CloudLocalAlgorithmAnalyzer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudLocalAlgorithmAnalyzer.swift; sourceTree = "<group>"; };
+		B1MOD007_REF /* CloudResultComparator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudResultComparator.swift; sourceTree = "<group>"; };
+		B1MOD008_REF /* AlgorithmComparisonTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlgorithmComparisonTool.swift; sourceTree = "<group>"; };
+		B1MOD009_REF /* ImageJHeadlessProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageJHeadlessProcessor.swift; sourceTree = "<group>"; };
+		B1MOD010_REF /* LiveCameraAnalyzer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCameraAnalyzer.swift; sourceTree = "<group>"; };
+		B1MOD011_REF /* LocalCloudIntegrationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalCloudIntegrationController.swift; sourceTree = "<group>"; };
+		B1MOD012_REF /* LocalSyncSimulationEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalSyncSimulationEngine.swift; sourceTree = "<group>"; };
+		B1MOD013_REF /* MedicalGradeValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MedicalGradeValidator.swift; sourceTree = "<group>"; };
+		B1MOD014_REF /* MobileComputeSimulator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileComputeSimulator.swift; sourceTree = "<group>"; };
+		B1MOD015_REF /* MobileImageProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileImageProcessor.swift; sourceTree = "<group>"; };
+		B1MOD016_REF /* MobileOptimizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileOptimizer.swift; sourceTree = "<group>"; };
+		B1MOD017_REF /* MultiScaleImageProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultiScaleImageProcessor.swift; sourceTree = "<group>"; };
+		B1MOD018_REF /* QualityValidationModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QualityValidationModule.swift; sourceTree = "<group>"; };
+		B1MOD019_REF /* RealDataAnalysisController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealDataAnalysisController.swift; sourceTree = "<group>"; };
+		B1MOD020_REF /* RealDataComparator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealDataComparator.swift; sourceTree = "<group>"; };
+		B1MOD021_REF /* StickerDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StickerDetector.swift; sourceTree = "<group>"; };
+		B1MOD022_REF /* Wound3DVisualizationModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wound3DVisualizationModule.swift; sourceTree = "<group>"; };
+		B1ENH001_REF /* ARDepthVolumeCalculator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARDepthVolumeCalculator.swift; sourceTree = "<group>"; };
+		B1ENH002_REF /* AdaptiveParametersController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdaptiveParametersController.swift; sourceTree = "<group>"; };
+		B1ENH003_REF /* AdaptiveSegmentationModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdaptiveSegmentationModule.swift; sourceTree = "<group>"; };
+		B1ENH004_REF /* CalibrationStickerDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalibrationStickerDetector.swift; sourceTree = "<group>"; };
+		B1ENH005_REF /* MedicalGradeValidationSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MedicalGradeValidationSystem.swift; sourceTree = "<group>"; };
+		B1ENH006_REF /* MultiScaleSegmentationEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultiScaleSegmentationEngine.swift; sourceTree = "<group>"; };
+		B1MDL001_REF /* ViewSupportTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewSupportTypes.swift; sourceTree = "<group>"; };
+		B1MDL002_REF /* UNet256.mlmodel */ = {isa = PBXFileReference; lastKnownFileType = file.mlmodel; path = UNet256.mlmodel; sourceTree = "<group>"; };
+		B1SRV001_REF /* CloudAPIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudAPIService.swift; sourceTree = "<group>"; };
+		B1SRV002_REF /* WoundAnalysisAPIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WoundAnalysisAPIService.swift; sourceTree = "<group>"; };
+		B1SRV003_REF /* PerformanceMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceMonitor.swift; sourceTree = "<group>"; };
+		B1SRV004_REF /* MockDataService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockDataService.swift; sourceTree = "<group>"; };
+		B1VW001_REF /* CalibrationSelectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalibrationSelectionView.swift; sourceTree = "<group>"; };
+		B1VW002_REF /* CalibrationStickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalibrationStickerView.swift; sourceTree = "<group>"; };
+		B1VW003_REF /* CloudAuthenticationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudAuthenticationView.swift; sourceTree = "<group>"; };
+		B1VW004_REF /* CloudUploadView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudUploadView.swift; sourceTree = "<group>"; };
+		B1VW005_REF /* EnhancedAnnotationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnhancedAnnotationView.swift; sourceTree = "<group>"; };
+		B1VW006_REF /* EnhancedMeasurementBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnhancedMeasurementBanner.swift; sourceTree = "<group>"; };
+		B1VW007_REF /* LiveCameraMeasurementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCameraMeasurementView.swift; sourceTree = "<group>"; };
+		B1VW008_REF /* LocalCloudIntegrationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalCloudIntegrationView.swift; sourceTree = "<group>"; };
+		B1VW009_REF /* PerformanceDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceDashboardView.swift; sourceTree = "<group>"; };
+		B1VW010_REF /* StandardStickerCalibrationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StandardStickerCalibrationView.swift; sourceTree = "<group>"; };
+		B1VW011_REF /* Wound3DVisualizationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wound3DVisualizationView.swift; sourceTree = "<group>"; };
+		B1OCV001_REF /* OpenCVSwiftBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenCVSwiftBridge.swift; sourceTree = "<group>"; };
+		B1ANL001_REF /* ExecuteAnalysisReport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecuteAnalysisReport.swift; sourceTree = "<group>"; };
+		B1ANL002_REF /* ExecuteRealDataAnalysis.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecuteRealDataAnalysis.swift; sourceTree = "<group>"; };
+		B1UTL001_REF /* AreaCalibrationHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AreaCalibrationHelper.swift; sourceTree = "<group>"; };
+		B1UTL002_REF /* SimulatedAnalysisExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatedAnalysisExecutor.swift; sourceTree = "<group>"; };
+		B1TST001_REF /* MeasurementEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeasurementEngineTests.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		3D4B7A232B1234567890123 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1XCLINK /* opencv2.xcframework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		3D4B7A1D2B1234567890123 = {
+			isa = PBXGroup;
+			children = (
+				3D4B7A282B1234567890123 /* WoundMeasurementApp */,
+				3D4B7A272B1234567890123 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		3D4B7A272B1234567890123 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				3D4B7A262B1234567890123 /* WoundMeasurementApp.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		3D4B7A282B1234567890123 /* WoundMeasurementApp */ = {
+			isa = PBXGroup;
+			children = (
+				3D4B7A292B1234567890123 /* WoundMeasurementApp.swift */,
+				3D4B7A2B2B1234567890123 /* ContentView.swift */,
+				A1VIEWGRP /* Views */,
+				3D4B7A462B1234567890123 /* Modules */,
+				A1SERVGRP /* Services */,
+				A1OCVGRP /* OpenCV */,
+				3D4B7A472B1234567890123 /* Models */,
+				3D4B7A2D2B1234567890123 /* Assets.xcassets */,
+				3D4B7A452B1234567890123 /* Info.plist */,
+				3D4B7A2F2B1234567890123 /* Preview Content */,
+				A1XCREF /* opencv2.xcframework */,
+				B1ANLGRP /* Analysis */,
+				B1UTLGRP /* Utils */,
+				B1TSTGRP /* Tests */,
+			);
+			path = WoundMeasurementApp;
+			sourceTree = "<group>";
+		};
+		3D4B7A2F2B1234567890123 /* Preview Content */ = {
+			isa = PBXGroup;
+			children = (
+				3D4B7A302B1234567890123 /* Preview Assets.xcassets */,
+			);
+			path = "Preview Content";
+			sourceTree = "<group>";
+		};
+		3D4B7A462B1234567890123 /* Modules */ = {
+			isa = PBXGroup;
+			children = (
+				3D4B7A372B1234567890123 /* CaptureModule.swift */,
+				3D4B7A392B1234567890123 /* PreProcessingModule.swift */,
+				3D4B7A3B2B1234567890123 /* QAFilterModule.swift */,
+				3D4B7A3D2B1234567890123 /* ImageJCore.swift */,
+				3D4B7A3F2B1234567890123 /* ClassificationModule.swift */,
+				3D4B7A4F2B1234567890123 /* ErrorHandlingModule.swift */,
+				3D4B7A532B1234567890123 /* LiDARCalibrationModule.swift */,
+				3D4B7A542B1234567890123 /* RealTimeAnalysisModule.swift */,
+				3D4B7A552B1234567890123 /* RulerCalibrationModule.swift */,
+				3D4B7A5D2B1234567890123 /* CalibrationStickerModule.swift */,
+				3D4B7A5F2B1234567890123 /* SquareCalibrationModule.swift */,
+				3D4B7A612B1234567890123 /* ColorCalibrationValidationModule.swift */,
+				3D4B7A632B1234567890123 /* VisualizationModule.swift */,
+				3D4B7A652B1234567890123 /* SmartROIModule.swift */,
+				3D4B7A662B1234567890AAA /* ARSessionManager.swift */,
+				A1MODIMG /* ImageTypeDetectionModule.swift */,
+				B1MOD001_REF /* MultiAlgorithmDetector.swift */,
+				B1MOD002_REF /* AdvancedMLClassificationModule.swift */,
+				B1MOD003_REF /* SegmentationEngineCoreML.swift */,
+				B1MOD004_REF /* UWMLightweightSegmentationModule.swift */,
+				B1MOD005_REF /* SimplifiedAdvancedMLModule.swift */,
+				B1MOD006_REF /* CloudLocalAlgorithmAnalyzer.swift */,
+				B1MOD007_REF /* CloudResultComparator.swift */,
+				B1MOD008_REF /* AlgorithmComparisonTool.swift */,
+				B1MOD009_REF /* ImageJHeadlessProcessor.swift */,
+				B1MOD010_REF /* LiveCameraAnalyzer.swift */,
+				B1MOD011_REF /* LocalCloudIntegrationController.swift */,
+				B1MOD012_REF /* LocalSyncSimulationEngine.swift */,
+				B1MOD013_REF /* MedicalGradeValidator.swift */,
+				B1MOD014_REF /* MobileComputeSimulator.swift */,
+				B1MOD015_REF /* MobileImageProcessor.swift */,
+				B1MOD016_REF /* MobileOptimizer.swift */,
+				B1MOD017_REF /* MultiScaleImageProcessor.swift */,
+				B1MOD018_REF /* QualityValidationModule.swift */,
+				B1MOD019_REF /* RealDataAnalysisController.swift */,
+				B1MOD020_REF /* RealDataComparator.swift */,
+				B1MOD021_REF /* StickerDetector.swift */,
+				B1MOD022_REF /* Wound3DVisualizationModule.swift */,
+				B1ENHGRP /* Enhanced */,
+			);
+			path = Modules;
+			sourceTree = "<group>";
+		};
+		3D4B7A472B1234567890123 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				3D4B7A412B1234567890123 /* WoundRecord.swift */,
+				3D4B7A432B1234567890123 /* WoundMeasurementModel.xcdatamodeld */,
+				3D4B7A492B1234567890123 /* MedicalComplianceManager.swift */,
+				3D4B7A4B2B1234567890123 /* DataManager.swift */,
+				3D4B7A4D2B1234567890123 /* SharedTypes.swift */,
+				3D4B7A482B1234567890123 /* WoundAnnotationModel.swift */,
+				3D4B7A472B1234567890999 /* AppStateManager.swift */,
+				3D4B7A5A2B1234567890123 /* WoundTypes.swift */,
+				B1MDL001_REF /* ViewSupportTypes.swift */,
+				B1MDL002_REF /* UNet256.mlmodel */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		B1ENHGRP /* Enhanced */ = {
+			isa = PBXGroup;
+			children = (
+				B1ENH001_REF /* ARDepthVolumeCalculator.swift */,
+				B1ENH002_REF /* AdaptiveParametersController.swift */,
+				B1ENH003_REF /* AdaptiveSegmentationModule.swift */,
+				B1ENH004_REF /* CalibrationStickerDetector.swift */,
+				B1ENH005_REF /* MedicalGradeValidationSystem.swift */,
+				B1ENH006_REF /* MultiScaleSegmentationEngine.swift */,
+			);
+			path = Enhanced;
+			sourceTree = "<group>";
+		};
+		B1ANLGRP /* Analysis */ = {
+			isa = PBXGroup;
+			children = (
+				B1ANL001_REF /* ExecuteAnalysisReport.swift */,
+				B1ANL002_REF /* ExecuteRealDataAnalysis.swift */,
+			);
+			path = Analysis;
+			sourceTree = "<group>";
+		};
+		B1UTLGRP /* Utils */ = {
+			isa = PBXGroup;
+			children = (
+				B1UTL001_REF /* AreaCalibrationHelper.swift */,
+				B1UTL002_REF /* SimulatedAnalysisExecutor.swift */,
+			);
+			path = Utils;
+			sourceTree = "<group>";
+		};
+		B1TSTGRP /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				B1TST001_REF /* MeasurementEngineTests.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		A1OCVGRP /* OpenCV */ = {
+			isa = PBXGroup;
+			children = (
+				A1OCVREFH /* OpenCVCircleDetector.h */,
+				A1OCVREFMM /* OpenCVCircleDetector.mm */,
+				B1OCV001_REF /* OpenCVSwiftBridge.swift */,
+			);
+			path = OpenCV;
+			sourceTree = "<group>";
+		};
+		A1SERVGRP /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				A1SERV001 /* BatchProcessingService.swift */,
+				A1SERV002 /* PDFReportGenerator.swift */,
+				A1SERV003 /* EnhancedPerformanceMonitor.swift */,
+				B1SRV001_REF /* CloudAPIService.swift */,
+				B1SRV002_REF /* WoundAnalysisAPIService.swift */,
+				B1SRV003_REF /* PerformanceMonitor.swift */,
+				B1SRV004_REF /* MockDataService.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		A1VIEWGRP /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				A1FILE001 /* AnnotationView.swift */,
+				A1FILE002 /* AnalysisHistoryView.swift */,
+				A1FILE003 /* SettingsView.swift */,
+				A1FILE004 /* WoundVisualizationView.swift */,
+				A1FILE005 /* Depth3DVisualizationView.swift */,
+				A1VIEW006 /* ARCameraPreviewView.swift */,
+				A1VIEW007 /* BatchProcessingView.swift */,
+				A1VIEW008 /* BatchResultsView.swift */,
+				A1VIEW009 /* PhotoMeasurementView.swift */,
+				A1VIEW010 /* BatchConfigurationView.swift */,
+				A1VIEW011 /* BatchReportView.swift */,
+				B1VW001_REF /* CalibrationSelectionView.swift */,
+				B1VW002_REF /* CalibrationStickerView.swift */,
+				B1VW003_REF /* CloudAuthenticationView.swift */,
+				B1VW004_REF /* CloudUploadView.swift */,
+				B1VW005_REF /* EnhancedAnnotationView.swift */,
+				B1VW006_REF /* EnhancedMeasurementBanner.swift */,
+				B1VW007_REF /* LiveCameraMeasurementView.swift */,
+				B1VW008_REF /* LocalCloudIntegrationView.swift */,
+				B1VW009_REF /* PerformanceDashboardView.swift */,
+				B1VW010_REF /* StandardStickerCalibrationView.swift */,
+				B1VW011_REF /* Wound3DVisualizationView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		3D4B7A252B1234567890123 /* WoundMeasurementApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 3D4B7A342B1234567890123 /* Build configuration list for PBXNativeTarget "WoundMeasurementApp" */;
+			buildPhases = (
+				3D4B7A222B1234567890123 /* Sources */,
+				3D4B7A232B1234567890123 /* Frameworks */,
+				3D4B7A242B1234567890123 /* Resources */,
+				A1EMBED /* Embed Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = WoundMeasurementApp;
+			productName = WoundMeasurementApp;
+			productReference = 3D4B7A262B1234567890123 /* WoundMeasurementApp.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		3D4B7A1E2B1234567890123 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					3D4B7A252B1234567890123 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
+			};
+			buildConfigurationList = 3D4B7A212B1234567890123 /* Build configuration list for PBXProject "WoundMeasurementApp" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 3D4B7A1D2B1234567890123;
+			packageReferences = (
+			);
+			productRefGroup = 3D4B7A272B1234567890123 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				3D4B7A252B1234567890123 /* WoundMeasurementApp */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		3D4B7A242B1234567890123 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3D4B7A312B1234567890123 /* Preview Assets.xcassets in Resources */,
+				3D4B7A2E2B1234567890123 /* Assets.xcassets in Resources */,
+				B1MDL002_BUILD /* UNet256.mlmodel in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		3D4B7A222B1234567890123 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3D4B7A442B1234567890123 /* WoundMeasurementModel.xcdatamodeld in Sources */,
+				3D4B7A2C2B1234567890123 /* ContentView.swift in Sources */,
+				A1VIEW001 /* AnnotationView.swift in Sources */,
+				3D4B7A382B1234567890123 /* CaptureModule.swift in Sources */,
+				3D4B7A3A2B1234567890123 /* PreProcessingModule.swift in Sources */,
+				3D4B7A3C2B1234567890123 /* QAFilterModule.swift in Sources */,
+				3D4B7A3E2B1234567890123 /* ImageJCore.swift in Sources */,
+				3D4B7A402B1234567890123 /* ClassificationModule.swift in Sources */,
+				3D4B7A422B1234567890123 /* WoundRecord.swift in Sources */,
+				3D4B7A4A2B1234567890123 /* MedicalComplianceManager.swift in Sources */,
+				3D4B7A4C2B1234567890123 /* DataManager.swift in Sources */,
+				3D4B7A4E2B1234567890123 /* SharedTypes.swift in Sources */,
+				3D4B7A502B1234567890123 /* ErrorHandlingModule.swift in Sources */,
+				3D4B7A512B1234567890123 /* WoundAnnotationModel.swift in Sources */,
+				3D4B7A522B1234567890123 /* AppStateManager.swift in Sources */,
+				3D4B7A562B1234567890123 /* LiDARCalibrationModule.swift in Sources */,
+				3D4B7A572B1234567890123 /* RealTimeAnalysisModule.swift in Sources */,
+				3D4B7A582B1234567890123 /* RulerCalibrationModule.swift in Sources */,
+				3D4B7A5B2B1234567890123 /* WoundTypes.swift in Sources */,
+				A1OCVMM /* OpenCVCircleDetector.mm in Sources */,
+				3D4B7A5C2B1234567890123 /* CalibrationStickerModule.swift in Sources */,
+				3D4B7A5E2B1234567890123 /* SquareCalibrationModule.swift in Sources */,
+				3D4B7A602B1234567890123 /* ColorCalibrationValidationModule.swift in Sources */,
+				3D4B7A622B1234567890123 /* VisualizationModule.swift in Sources */,
+				3D4B7A642B1234567890123 /* SmartROIModule.swift in Sources */,
+				A1VIEW002 /* AnalysisHistoryView.swift in Sources */,
+				A1VIEW003 /* SettingsView.swift in Sources */,
+				A1VIEW004 /* WoundVisualizationView.swift in Sources */,
+				A1VIEW005 /* Depth3DVisualizationView.swift in Sources */,
+				3D4B7A2A2B1234567890123 /* WoundMeasurementApp.swift in Sources */,
+				3D4B7A682B1234567890AAA /* ARSessionManager.swift in Sources */,
+				A1MODIMG_BUILD /* ImageTypeDetectionModule.swift in Sources */,
+				A1VIEW006_BUILD /* ARCameraPreviewView.swift in Sources */,
+				A1VIEW007_BUILD /* BatchProcessingView.swift in Sources */,
+				A1VIEW008_BUILD /* BatchResultsView.swift in Sources */,
+				A1VIEW009_BUILD /* PhotoMeasurementView.swift in Sources */,
+				A1VIEW010_BUILD /* BatchConfigurationView.swift in Sources */,
+				A1VIEW011_BUILD /* BatchReportView.swift in Sources */,
+				A1SERV001_BUILD /* BatchProcessingService.swift in Sources */,
+				A1SERV002_BUILD /* PDFReportGenerator.swift in Sources */,
+				A1SERV003_BUILD /* EnhancedPerformanceMonitor.swift in Sources */,
+				B1MOD001_BUILD /* MultiAlgorithmDetector.swift in Sources */,
+				B1MOD002_BUILD /* AdvancedMLClassificationModule.swift in Sources */,
+				B1MOD003_BUILD /* SegmentationEngineCoreML.swift in Sources */,
+				B1MOD004_BUILD /* UWMLightweightSegmentationModule.swift in Sources */,
+				B1MOD005_BUILD /* SimplifiedAdvancedMLModule.swift in Sources */,
+				B1MOD006_BUILD /* CloudLocalAlgorithmAnalyzer.swift in Sources */,
+				B1MOD007_BUILD /* CloudResultComparator.swift in Sources */,
+				B1MOD008_BUILD /* AlgorithmComparisonTool.swift in Sources */,
+				B1MOD009_BUILD /* ImageJHeadlessProcessor.swift in Sources */,
+				B1MOD010_BUILD /* LiveCameraAnalyzer.swift in Sources */,
+				B1MOD011_BUILD /* LocalCloudIntegrationController.swift in Sources */,
+				B1MOD012_BUILD /* LocalSyncSimulationEngine.swift in Sources */,
+				B1MOD013_BUILD /* MedicalGradeValidator.swift in Sources */,
+				B1MOD014_BUILD /* MobileComputeSimulator.swift in Sources */,
+				B1MOD015_BUILD /* MobileImageProcessor.swift in Sources */,
+				B1MOD016_BUILD /* MobileOptimizer.swift in Sources */,
+				B1MOD017_BUILD /* MultiScaleImageProcessor.swift in Sources */,
+				B1MOD018_BUILD /* QualityValidationModule.swift in Sources */,
+				B1MOD019_BUILD /* RealDataAnalysisController.swift in Sources */,
+				B1MOD020_BUILD /* RealDataComparator.swift in Sources */,
+				B1MOD021_BUILD /* StickerDetector.swift in Sources */,
+				B1MOD022_BUILD /* Wound3DVisualizationModule.swift in Sources */,
+				B1ENH001_BUILD /* ARDepthVolumeCalculator.swift in Sources */,
+				B1ENH002_BUILD /* AdaptiveParametersController.swift in Sources */,
+				B1ENH003_BUILD /* AdaptiveSegmentationModule.swift in Sources */,
+				B1ENH004_BUILD /* CalibrationStickerDetector.swift in Sources */,
+				B1ENH005_BUILD /* MedicalGradeValidationSystem.swift in Sources */,
+				B1ENH006_BUILD /* MultiScaleSegmentationEngine.swift in Sources */,
+				B1MDL001_BUILD /* ViewSupportTypes.swift in Sources */,
+				B1SRV001_BUILD /* CloudAPIService.swift in Sources */,
+				B1SRV002_BUILD /* WoundAnalysisAPIService.swift in Sources */,
+				B1SRV003_BUILD /* PerformanceMonitor.swift in Sources */,
+				B1SRV004_BUILD /* MockDataService.swift in Sources */,
+				B1VW001_BUILD /* CalibrationSelectionView.swift in Sources */,
+				B1VW002_BUILD /* CalibrationStickerView.swift in Sources */,
+				B1VW003_BUILD /* CloudAuthenticationView.swift in Sources */,
+				B1VW004_BUILD /* CloudUploadView.swift in Sources */,
+				B1VW005_BUILD /* EnhancedAnnotationView.swift in Sources */,
+				B1VW006_BUILD /* EnhancedMeasurementBanner.swift in Sources */,
+				B1VW007_BUILD /* LiveCameraMeasurementView.swift in Sources */,
+				B1VW008_BUILD /* LocalCloudIntegrationView.swift in Sources */,
+				B1VW009_BUILD /* PerformanceDashboardView.swift in Sources */,
+				B1VW010_BUILD /* StandardStickerCalibrationView.swift in Sources */,
+				B1VW011_BUILD /* Wound3DVisualizationView.swift in Sources */,
+				B1OCV001_BUILD /* OpenCVSwiftBridge.swift in Sources */,
+				B1ANL001_BUILD /* ExecuteAnalysisReport.swift in Sources */,
+				B1ANL002_BUILD /* ExecuteRealDataAnalysis.swift in Sources */,
+				B1UTL001_BUILD /* AreaCalibrationHelper.swift in Sources */,
+				B1UTL002_BUILD /* SimulatedAnalysisExecutor.swift in Sources */,
+				B1TST001_BUILD /* MeasurementEngineTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		3D4B7A322B1234567890123 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		3D4B7A332B1234567890123 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		3D4B7A352B1234567890123 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"WoundMeasurementApp/Preview Content\"";
+				DEVELOPMENT_TEAM = LY2F24ZM68;
+				ENABLE_PREVIEWS = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64",
+					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-i386_x86_64-simulator",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64/opencv2.framework/Headers",
+					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-i386_x86_64-simulator/opencv2.framework/Headers",
+				);
+				INFOPLIST_FILE = WoundMeasurementApp/Info.plist;
+				INFOPLIST_KEY_NSCameraUsageDescription = "需要使用相機來拍攝傷口影像";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lstdc++",
+				);
+				OTHER_SWIFT_FLAGS = "$(inherited) -D OPENCV_STATIC";
+				PRODUCT_BUNDLE_IDENTIFIER = com.woundmeasurement.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "WoundMeasurementApp/WoundMeasurementApp-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		3D4B7A362B1234567890123 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"WoundMeasurementApp/Preview Content\"";
+				DEVELOPMENT_TEAM = LY2F24ZM68;
+				ENABLE_PREVIEWS = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64",
+					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-i386_x86_64-simulator",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-arm64/opencv2.framework/Headers",
+					"$(SRCROOT)/WoundMeasurementApp/opencv2.xcframework/ios-i386_x86_64-simulator/opencv2.framework/Headers",
+				);
+				INFOPLIST_FILE = WoundMeasurementApp/Info.plist;
+				INFOPLIST_KEY_NSCameraUsageDescription = "需要使用相機來拍攝傷口影像";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lstdc++",
+				);
+				OTHER_SWIFT_FLAGS = "$(inherited) -D OPENCV_STATIC";
+				PRODUCT_BUNDLE_IDENTIFIER = com.woundmeasurement.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "WoundMeasurementApp/WoundMeasurementApp-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		3D4B7A212B1234567890123 /* Build configuration list for PBXProject "WoundMeasurementApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3D4B7A322B1234567890123 /* Debug */,
+				3D4B7A332B1234567890123 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		3D4B7A342B1234567890123 /* Build configuration list for PBXNativeTarget "WoundMeasurementApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3D4B7A352B1234567890123 /* Debug */,
+				3D4B7A362B1234567890123 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCVersionGroup section */
+		3D4B7A432B1234567890123 /* WoundMeasurementModel.xcdatamodeld */ = {
+			isa = XCVersionGroup;
+			children = (
+				A1CDMODELVER /* WoundMeasurementModel.xcdatamodel */,
+			);
+			currentVersion = A1CDMODELVER /* WoundMeasurementModel.xcdatamodel */;
+			path = WoundMeasurementModel.xcdatamodeld;
+			sourceTree = "<group>";
+			versionGroupType = wrapper.xcdatamodel;
+		};
+/* End XCVersionGroup section */
+	};
+	rootObject = 3D4B7A1E2B1234567890123 /* Project object */;
+}

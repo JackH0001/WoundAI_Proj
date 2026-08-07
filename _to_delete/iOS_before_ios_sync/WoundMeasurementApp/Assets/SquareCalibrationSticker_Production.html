@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>方形RGBY校正貼紙 - 生產用印刷檔案</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20mm;
+            font-family: Arial, sans-serif;
+            background: white;
+        }
+        
+        .production-sheet {
+            width: 210mm;
+            height: 297mm;
+            position: relative;
+            background: white;
+        }
+        
+        .sticker {
+            width: 20mm;
+            height: 20mm;
+            position: relative;
+            background: white;
+            border: 0.1mm solid #cccccc;
+            margin: 5mm;
+            display: inline-block;
+            page-break-inside: avoid;
+        }
+        
+        .color-dot {
+            position: absolute;
+            width: 3mm;
+            height: 3mm;
+            border-radius: 50%;
+        }
+        
+        .corner-dot {
+            position: absolute;
+            width: 1.5mm;
+            height: 1.5mm;
+            border-radius: 50%;
+            background: #000000;
+        }
+        
+        /* RGBY色彩點 */
+        .red-dot { background: #FF0000; top: 1.5mm; left: 8.5mm; }
+        .yellow-dot { background: #FFFF00; top: 8.5mm; right: 1.5mm; }
+        .green-dot { background: #00FF00; bottom: 1.5mm; left: 8.5mm; }
+        .blue-dot { background: #0000FF; top: 8.5mm; left: 1.5mm; }
+        
+        /* 四角凸點 */
+        .top-left { top: 1.25mm; left: 1.25mm; }
+        .top-right { top: 1.25mm; right: 1.25mm; }
+        .bottom-left { bottom: 1.25mm; left: 1.25mm; }
+        .bottom-right { bottom: 1.25mm; right: 1.25mm; }
+        
+        .specs {
+            margin: 20mm 0;
+            font-size: 10pt;
+            line-height: 1.4;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(8, 25mm);
+            grid-gap: 5mm;
+            margin-top: 20mm;
+        }
+        
+        @media print {
+            body { margin: 0; padding: 10mm; }
+            .specs { font-size: 8pt; }
+        }
+        
+        .dimension-line {
+            position: absolute;
+            border-top: 0.5px solid #666;
+        }
+        
+        .dimension-text {
+            position: absolute;
+            font-size: 6pt;
+            color: #666;
+            background: white;
+            padding: 0.5mm;
+        }
+    </style>
+</head>
+<body>
+    <div class="production-sheet">
+        <h1 style="text-align: center; margin-bottom: 10mm; font-size: 14pt;">
+            方形RGBY校正貼紙生產檔案 v2.0
+        </h1>
+        
+        <div class="specs">
+            <h2>📋 生產規格</h2>
+            <ul>
+                <li><strong>尺寸</strong>: 20mm × 20mm 正方形 (±0.1mm)</li>
+                <li><strong>材質</strong>: 啞光白色醫療級不織布貼紙</li>
+                <li><strong>印刷</strong>: 600 DPI 高精度數位印刷</li>
+                <li><strong>色彩</strong>: sRGB色彩空間，ΔE < 2.0</li>
+                <li><strong>凸點</strong>: 高度0.15mm ± 0.02mm，黑色霧面</li>
+            </ul>
+            
+            <h2>🎨 色彩規格</h2>
+            <table border="1" cellpadding="3" style="border-collapse: collapse;">
+                <tr>
+                    <th>顏色</th>
+                    <th>位置</th>
+                    <th>sRGB值</th>
+                    <th>Pantone參考</th>
+                    <th>ΔE容差</th>
+                </tr>
+                <tr style="background: #ffeeee;">
+                    <td>紅色</td>
+                    <td>上方中央</td>
+                    <td>#FF0000</td>
+                    <td>186 C</td>
+                    <td>< 2.0</td>
+                </tr>
+                <tr style="background: #ffffee;">
+                    <td>黃色</td>
+                    <td>右方中央</td>
+                    <td>#FFFF00</td>
+                    <td>Process Yellow C</td>
+                    <td>< 2.0</td>
+                </tr>
+                <tr style="background: #eeffee;">
+                    <td>綠色</td>
+                    <td>下方中央</td>
+                    <td>#00FF00</td>
+                    <td>354 C</td>
+                    <td>< 2.0</td>
+                </tr>
+                <tr style="background: #eeeeff;">
+                    <td>藍色</td>
+                    <td>左方中央</td>
+                    <td>#0000FF</td>
+                    <td>300 C</td>
+                    <td>< 2.0</td>
+                </tr>
+            </table>
+        </div>
+        
+        <!-- 單一貼紙範例（帶尺寸標註） -->
+        <div style="margin: 20mm 0; text-align: center;">
+            <h2>📐 單一貼紙規格圖</h2>
+            <div style="position: relative; display: inline-block; margin: 20mm;">
+                <div class="sticker" style="border: 1px solid #000;">
+                    <!-- RGBY色彩點 -->
+                    <div class="color-dot red-dot" title="紅色 #FF0000"></div>
+                    <div class="color-dot yellow-dot" title="黃色 #FFFF00"></div>
+                    <div class="color-dot green-dot" title="綠色 #00FF00"></div>
+                    <div class="color-dot blue-dot" title="藍色 #0000FF"></div>
+                    
+                    <!-- 四角凸點 -->
+                    <div class="corner-dot top-left" title="左上凸點"></div>
+                    <div class="corner-dot top-right" title="右上凸點"></div>
+                    <div class="corner-dot bottom-left" title="左下凸點"></div>
+                    <div class="corner-dot bottom-right" title="右下凸點"></div>
+                </div>
+                
+                <!-- 尺寸標註 -->
+                <div class="dimension-text" style="top: -5mm; left: 0;">20mm</div>
+                <div class="dimension-text" style="left: -8mm; top: 8mm; writing-mode: vertical-lr;">20mm</div>
+                <div class="dimension-text" style="top: 22mm; left: 6mm;">3mm⌀</div>
+                <div class="dimension-text" style="top: -8mm; right: -12mm;">1.5mm⌀</div>
+            </div>
+        </div>
+        
+        <!-- 批量生產版面 (8×10 = 80片) -->
+        <div style="page-break-before: always;">
+            <h2 style="text-align: center; margin-bottom: 10mm;">
+                生產版面 - 80片貼紙 (8×10排列)
+            </h2>
+            
+            <div class="grid">
+                <!-- 生成80個貼紙 -->
+                <script>
+                document.addEventListener('DOMContentLoaded', function() {
+                    const grid = document.querySelector('.grid');
+                    for(let i = 0; i < 80; i++) {
+                        const sticker = document.createElement('div');
+                        sticker.className = 'sticker';
+                        sticker.innerHTML = `
+                            <div class="color-dot red-dot"></div>
+                            <div class="color-dot yellow-dot"></div>
+                            <div class="color-dot green-dot"></div>
+                            <div class="color-dot blue-dot"></div>
+                            <div class="corner-dot top-left"></div>
+                            <div class="corner-dot top-right"></div>
+                            <div class="corner-dot bottom-left"></div>
+                            <div class="corner-dot bottom-right"></div>
+                        `;
+                        grid.appendChild(sticker);
+                    }
+                });
+                </script>
+            </div>
+        </div>
+        
+        <!-- 品質檢測規格 -->
+        <div style="page-break-before: always; margin-top: 20mm;">
+            <h2>🔍 品質檢測標準</h2>
+            
+            <h3>1. 色彩檢測</h3>
+            <ul>
+                <li>使用分光測色計測量每個色彩點</li>
+                <li>與標準色卡比較，ΔE值必須 &lt; 2.0</li>
+                <li>光照條件：D65標準光源，2°觀察角</li>
+                <li>取樣率：每批次至少檢測10%</li>
+            </ul>
+            
+            <h3>2. 幾何檢測</h3>
+            <ul>
+                <li>外框尺寸：20mm×20mm ± 0.1mm</li>
+                <li>色彩點直徑：3mm ± 0.1mm</li>
+                <li>凸點直徑：1.5mm ± 0.05mm</li>
+                <li>凸點高度：0.15mm ± 0.02mm</li>
+                <li>位置精度：±0.05mm</li>
+            </ul>
+            
+            <h3>3. 材質檢測</h3>
+            <ul>
+                <li>黏著力：N/25mm ≥ 2.0N</li>
+                <li>耐溫：-10°C ~ 60°C無變形</li>
+                <li>抗UV：連續照射100小時無褪色</li>
+                <li>表面粗糙度：Ra ≤ 0.5μm</li>
+            </ul>
+            
+            <h3>4. 功能測試</h3>
+            <ul>
+                <li>AI檢測成功率 &gt; 95%</li>
+                <li>多角度識別測試（0°-45°）</li>
+                <li>不同光照條件測試</li>
+                <li>測量精度驗證（±2%以內）</li>
+            </ul>
+        </div>
+        
+        <div style="margin-top: 20mm; border-top: 1px solid #ccc; padding-top: 10mm; font-size: 8pt; color: #666;">
+            <p><strong>文件資訊</strong></p>
+            <p>版本: v2.0 | 建立日期: 2024年1月 | 用途: 傷口測量AI系統</p>
+            <p>技術支援: tech-support@woundai.com | 品質問題: quality@woundai.com</p>
+            <p><strong>重要</strong>: 本規格書受智慧財產權保護，未經授權不得複製或商業使用</p>
+        </div>
+    </div>
+</body>
+</html>

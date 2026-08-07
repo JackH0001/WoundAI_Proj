@@ -2,12 +2,27 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>NSCameraUsageDescription</key>
-	<string>需要使用相機來拍攝傷口影像進行測量分析</string>
-	<key>NSPhotoLibraryUsageDescription</key>
-	<string>需要存取相簿來儲存和讀取傷口影像</string>
 	<key>CFBundleDisplayName</key>
-	<string>傷口測量</string>
+	<string>WoundAI</string>
+
+	<key>NSCameraUsageDescription</key>
+	<string>拍攝傷口影像以進行面積量測與組織判讀。影像加密儲存於本機。</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>讀取既有的傷口影像進行量測分析。</string>
+	<!-- 舊版缺這一項，而只要呼叫一次寫入相簿就會直接閃退（不是回錯誤，是 crash）。 -->
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>將範例與模擬圖的量測結果存回相簿供驗證比對。</string>
+
+	<!--
+	  App Transport Security
+
+	  ⚠ localhost 例外只在開發時需要（Debug 組態的預設後端是 http://localhost:5000）。
+	    Release 走 Cloud Run 的 HTTPS，不需要任何例外。
+
+	    這裡保留 localhost/127.0.0.1 例外是刻意的：它們指向裝置自己，不構成中間人風險，
+	    而上架審查對 loopback 例外一向接受。真正不能留的是 NSAllowsArbitraryLoads=true
+	    ——那會讓**任何**網域都能走明文，包含後端位址被改成 http:// 的情況。
+	-->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
@@ -16,19 +31,29 @@
 		<dict>
 			<key>localhost</key>
 			<dict>
-				<key>NSTemporaryExceptionAllowsInsecureHTTPLoads</key>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
 				<true/>
 			</dict>
 			<key>127.0.0.1</key>
 			<dict>
-				<key>NSTemporaryExceptionAllowsInsecureHTTPLoads</key>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
 				<true/>
 			</dict>
 		</dict>
 	</dict>
+
 	<key>UIStatusBarHidden</key>
 	<false/>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<false/>
+
+	<!--
+	  ITSAppUsesNonExemptEncryption=false
+
+	  App 只用 HTTPS 與作業系統提供的 CryptoKit/Keychain 做本機資料保護，屬於豁免類別。
+	  少了這一鍵，每一次上傳 TestFlight 都會停下來問一次，而每次都要等人回答。
+	-->
+	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 </dict>
 </plist>

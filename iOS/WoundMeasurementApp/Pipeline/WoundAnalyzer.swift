@@ -41,15 +41,29 @@ public final class WoundAnalyzer {
                     cloudEscalate: ((CGImage) async -> [Bool])? = nil) async -> MeasureResult {
         var mask = await student.segment(image)
         let dis = (wsm != nil) ? iou(mask, await wsm!.segment(image)) : 1.0
-        if dis < 0.50, let esc = cloudEscalate { mask = await esc(image) }
+        if dis < Self.escalateIou, let esc = cloudEscalate { mask = await esc(image) }
         let woundPx = mask.filter { $0 }.count
         let markerPxArea = markerCorners.map { quadPxArea($0) }
         // 組織 v2:遮罩內像素 → 灰世界白平衡 → 互斥分類 → 比例(可由 override 帶入)
         let frac = tissueFracOverride ?? computeTissueFrac(image, mask)
-        let cap = CaptureContainer(rgb: Data(), timestamp: ISO8601DateFormatter().string(from: Date()))
-        return WoundPipeline.analyze(cap: cap, woundPx: woundPx, markerPxArea: markerPxArea,
-                                     tissueFrac: frac, disagreementIou: dis, exudate: exudate)
+
+        // 直接組出結果，不再包一層 `CaptureContainer`——那個型別只是被傳進去又沒被用到，
+        // 而每一個「傳了但沒用」的參數都會讓下一個讀這段的人以為它有作用。
+        let area = markerPxArea.flatMap {
+            WoundPipeline.areaCm2ByRatio(woundPx: woundPx, markerPxArea: $0)
+        }
+        let route = dis < Self.escalateIou ? "cloud" : "ondevice"
+        return MeasureResult(
+            areaCm2: area,
+            tissueFrac: frac,
+            push: WoundPipeline.push(cm2: area, frac: frac, exudate: exudate),
+            route: route,
+            confidence: route == "cloud" ? 0.95 : (1.0 - dis)
+        )
     }
+
+    /// 雙軌上雲門檻（分歧度 IoU）。與後端 `dual_track_router` 及 Android 端一致。
+    static let escalateIou = 0.50
 
     /// 取出 image 縮放至 side×side 的 RGBA 緩衝。
     private func rgba(_ image: CGImage, _ side: Int) -> [UInt8] {

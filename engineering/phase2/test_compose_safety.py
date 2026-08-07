@@ -115,6 +115,34 @@ def main():
 
     # ── 3. 本次崩潰的具體防線 ─────────────────────────────────────
     wt = files.get("WoundTimelineScreen.kt", "")
+    wt_edit = files.get("WoundEditScreen.kt", "")
+
+    # ── 2b. 工具切換不得改變畫布高度 ───────────────────────────────
+    #
+    # `base()` 由 `boxSize` 決定，而 `boxSize` 是畫布 Box 在 weight(1f) 下分到的高度。
+    # 任何「隨工具出現／消失」的一整列控制項都會改變那個高度 →
+    # base() 變 → k() 變 → **整張影像縮放與位置一起跳**。
+    #
+    # 這個 bug 咬過兩次：先是 peek 強制切到「移動」讓組織分類列消失，
+    # 修掉之後，單純從「邊界＋」切到「組織🖌」仍然會讓那一列憑空出現。
+    # 醫師的感受都是「切個工具圖就跳一下」，而他正在對照的位置也跟著跑掉。
+    #
+    # 正確做法是版面恆定、以 enabled 控制可用性。
+    _cond_row = "if (tool == EditTool.TISSUE) {" in wt_edit
+    check("組織分類列不隨工具出現或消失", not _cond_row,
+          "找到 `if (tool == EditTool.TISSUE) {` —— 那一列會改變畫布高度" if _cond_row else "")
+    check("組織分類列改以 enabled 控制", "tool == EditTool.TISSUE" in wt_edit
+          and "enabled = !peeking && tool == EditTool.TISSUE" in wt_edit)
+
+    # ── 2c. 補間塗抹要有跳躍上限 ──────────────────────────────────
+    #
+    # 遮罩擴張會在主執行緒上做近千萬次寫入，UI 凍住期間手指繼續移動；
+    # 恢復後把那段距離補畫成一條線，就是「邊界突然過標」。
+    # 標註工具裡少畫可以補、多畫要 undo——不確定時寧可少畫。
+    check("stampLine 有跳躍長度上限", "if (len > brushImg" in wt_edit)
+    check("擴張時只有 B_PAINT 才重算 auto（其餘工具用不到）",
+          "if (tool == EditTool.B_PAINT) seedAuto" in wt_edit)
+
     check("WoundTimelineScreen 的組織圖改用 if/else",
           "if (!hasAny) {" in wt and "} else {" in wt and "return@Column" not in wt)
 

@@ -1,0 +1,100 @@
+## XcodeGen 專案定義 — WoundAI iOS release
+##
+## 用法（macOS）：
+##   brew install xcodegen
+##   cd iOS && xcodegen generate
+##   open WoundMeasurementApp.xcodeproj
+##
+## ## 為什麼改用產生式專案
+##
+## 舊的 `WoundMeasurementApp.xcodeproj` 是手工維護的。2026-06 寫的 `Pipeline/` 那 8 個檔案
+## **一個都沒有被加進去**——它們躺在磁碟上三個月，編譯器從來沒看過，而 git diff 看起來
+## 一切正常。這不是誰疏忽，是手工 pbxproj 的必然：新增檔案要記得同時改四個區段
+## （PBXBuildFile / PBXFileReference / PBXGroup / PBXSourcesBuildPhase），漏一個就是靜默失效。
+##
+## 用目錄萬用字元取代逐檔登記之後，這一整類錯誤消失：放進資料夾就在 build 裡。
+##
+## ## 為什麼不編舊的 Modules/ Views/ Services/
+##
+## 靜態稽核（`tools/swift_audit.py`）在原本 89 檔的 target 內找出 **58 個頂層符號重複宣告**
+## （例如 `CloudAPIService` 同時宣告在 `Services/CloudAPIService.swift` 與
+## `Views/AnnotationView.swift`；`ImagePicker` 宣告了四次）。在同一個 Swift module 裡，
+## 這些是硬性的 `invalid redeclaration` 錯誤——**那份專案從來沒有編譯成功過**。
+## 再加上 build 設定引用了 repo 裡不存在的 `opencv2.xcframework` 與 `UNet256.mlmodel`。
+##
+## 那批程式碼多數是上一代 ImageJ 架構與模擬資料（檔名含 Mock/Simulat/Demo 的就有 5 個，
+## 另有 21 個內含亂數模擬邏輯），已被後端管線取代。要它們回到 build 裡，得先逐一解決
+## 58 組命名衝突——那是獨立的清理工作，不該擋住 release。
+##
+## Android 端做過同一個決定：16 個壞掉的檔案改名 `.kt.disabled` 隔離，核心才編得起來。
+## 這裡是同一招，只是規模較大。清單見 `docs/ios_legacy_quarantine.md`。
+
+name: WoundMeasurementApp
+
+options:
+  bundleIdPrefix: com.woundmeasurement
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: false
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: LY2F24ZM68
+    MARKETING_VERSION: "1.0"
+    # 與 Android `version.properties` 的 versionCode 對齊。每次發布必須遞增——
+    # 兩邊的版號要能互相對照，排錯時第一個問題永遠是「你裝的是哪一版」。
+    CURRENT_PROJECT_VERSION: "19"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    SWIFT_STRICT_CONCURRENCY: minimal
+
+targets:
+
+  WoundMeasurementApp:
+    type: application
+    platform: iOS
+    sources:
+      # 只收新架構。**不要**加 Modules/ Views/ Services/ Analysis/ Utils/ Models/，
+      # 理由見檔頭。
+      - path: WoundMeasurementApp/Generated
+      - path: WoundMeasurementApp/Core
+      - path: WoundMeasurementApp/Pipeline
+      - path: WoundMeasurementApp/UI
+      - path: WoundMeasurementApp/Assets.xcassets
+        type: folder.assetcatalog
+        buildPhase: resources
+      - path: WoundMeasurementApp/Info.plist
+        buildPhase: none
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.woundmeasurement.app
+        INFOPLIST_FILE: WoundMeasurementApp/Info.plist
+        # ⚠ 不可同時開 GENERATE_INFOPLIST_FILE 與 INFOPLIST_FILE：舊專案兩者都設，
+        #   而 build setting 裡的 NSCameraUsageDescription 與 Info.plist 裡的字串不一致，
+        #   實際上架時哪一份生效要看合併結果。這裡只留 Info.plist 一個來源。
+        GENERATE_INFOPLIST_FILE: NO
+        # opencv2.xcframework 不在 repo 裡，端上 ArUco 因此不可用（與 Android 相同：
+        # ArucoDetector 是 stub，ArUco 一律在後端做）。要啟用端上 ArUco 時，把
+        # framework 放進 WoundMeasurementApp/ 並在此加回連結設定與 OpenCV/ 來源目錄。
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited)"
+      configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) DEBUG"
+
+  WoundMeasurementAppTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: WoundAITests
+    dependencies:
+      - target: WoundMeasurementApp
+    settings:
+      base:
+        # 舊專案**沒有測試 target**，於是 WoundMeasurementAppTests/ 底下約 2,900 行測試
+        # 從來沒有被執行過，而 Tests/MeasurementEngineTests.swift 反而被誤編進 App target
+        # （XCTest 檔進 App target，正式 build 會失敗或需連結 XCTest.framework）。
+        # 這裡把兩者都擺正。
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/WoundMeasurementApp.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/WoundMeasurementApp"
+        BUNDLE_LOADER: "$(TEST_HOST)"
