@@ -172,7 +172,9 @@ enum EditRasterCodec {
             // ——寧可放棄續編也不要用錯的座標畫在病人的傷口上。
             "canvas_w": r.canvasW, "canvas_h": r.canvasH
         ]
-        meta["cm2_per_px"] = r.cm2PerPx ?? NSNull()
+        // `as Any?` 不可省：`??` 要把兩邊併成同一個型別，而 `Double` 與 `NSNull` 併不起來。
+        // 同檔案風格見 BackendClient.swift:551。
+        meta["cm2_per_px"] = r.cm2PerPx as Any? ?? NSNull()
         if let g = r.wbGains { meta["wb_gains"] = g }
 
         guard let mjson = try? JSONSerialization.data(withJSONObject: meta),

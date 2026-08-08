@@ -172,6 +172,10 @@ final class ClassifyContractTests: XCTestCase {
     }
 
     /// 提示訊息必須涵蓋每一種「服務回 200 但數字可能是錯的」的情形。
+    ///
+    /// `MeasureViewModel` 標了 `@MainActor`，而全域 actor 標在**型別**上時連 static 成員
+    /// 都會被隔離（SE-0316）。同步的測試方法不在 main actor 上，所以這裡要補標。
+    @MainActor
     func testAdvisoriesCoverSilentFailureModes() {
         let r = parse("""
         {

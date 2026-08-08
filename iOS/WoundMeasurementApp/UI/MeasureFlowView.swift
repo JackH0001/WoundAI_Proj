@@ -268,21 +268,38 @@ struct ResultCard: View {
         return "\(Int((v * 100).rounded()))%"
     }
 
+    // 下面三行原本直接寫成 `Text("…" + "…" + "…")`。字串 `+` 的多載很多，
+    // 混著字串插值一路串五段會讓型別檢查器組合爆炸——症狀是
+    // 「unable to type-check this expression in reasonable time」，
+    // 而且錯誤指的是整個 body，看不出是哪一行。先在 String 層組好，Text 只吃一個引數。
+    private var pushLine: String {
+        let v = result.pushPartial.map(String.init) ?? "—"
+        return "PUSH：\(v)（面積＋組織；滲液須醫師輸入才算得出總分）"
+    }
+
+    private var tissueLine: String {
+        var s = "組織　肉芽 \(pct(result.tissueFrac["granulation"]))"
+        s += "・腐肉 \(pct(result.tissueFrac["slough"]))"
+        s += "・壞死 \(pct(result.tissueFrac["necrosis"]))"
+        s += "・上皮 \(pct(result.tissueFrac["epithelial"]))"
+        s += "・其他 \(pct(result.tissueFrac["other"]))"
+        return s
+    }
+
+    private var routeLine: String {
+        let tail = result.escalated ? "　（難例已上雲集成）" : ""
+        return "路由 \(result.route)　信心 \(pct(result.confidence))\(tail)"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(result.areaCm2.map { String(format: "面積：%.2f cm²", $0) } ?? "面積：未校正（無貼紙）")
                 .font(.headline)
-            Text("PUSH：" + (result.pushPartial.map(String.init) ?? "—")
-                 + "（面積＋組織；滲液須醫師輸入才算得出總分）")
+            Text(pushLine)
                 .font(.subheadline)
-            Text("組織　肉芽 \(pct(result.tissueFrac["granulation"]))"
-                 + "・腐肉 \(pct(result.tissueFrac["slough"]))"
-                 + "・壞死 \(pct(result.tissueFrac["necrosis"]))"
-                 + "・上皮 \(pct(result.tissueFrac["epithelial"]))"
-                 + "・其他 \(pct(result.tissueFrac["other"]))")
+            Text(tissueLine)
                 .font(.footnote)
-            Text("路由 \(result.route)　信心 \(pct(result.confidence))"
-                 + (result.escalated ? "　（難例已上雲集成）" : ""))
+            Text(routeLine)
                 .font(.caption).foregroundStyle(.secondary)
             Text("輔助用途、非診斷，需醫師確認。")
                 .font(.caption2).foregroundStyle(.secondary)

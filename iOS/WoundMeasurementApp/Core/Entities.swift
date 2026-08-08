@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /**
  個案化醫療紀錄的三層資料模型（對等 Android Room v6）。

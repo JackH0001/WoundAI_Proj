@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -25,7 +26,7 @@ final class LocalImageStore {
 
     /// - Returns: 檔名（存進 `Measurement.imagePath`），失敗回 nil。
     func save(jpeg: Data) -> String? {
-        guard let enc = try? PhiCrypto.encryptBytes(jpeg), let enc = enc else { return nil }
+        guard let enc = try? PhiCrypto.encryptBytes(jpeg) else { return nil }
         let name = "img_\(UUID().uuidString).enc"
         do {
             try enc.write(to: url(name), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
@@ -74,7 +75,7 @@ final class LocalImageStore {
     }
 
     func saveRaw(_ bytes: Data) -> String? {
-        guard let enc = try? PhiCrypto.encryptBytes(bytes), let enc = enc else { return nil }
+        guard let enc = try? PhiCrypto.encryptBytes(bytes) else { return nil }
         let name = "ras_\(UUID().uuidString).enc"
         do {
             try enc.write(to: url(name), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])

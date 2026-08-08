@@ -112,6 +112,14 @@ _screenshots/
 screenshots/
 Screenshots/
 
+# XcodeGen 產出的專案檔。單一事實來源是 `iOS/project.yml`——把產物一起版控，
+# 就會出現「有人改了 pbxproj 但沒改 project.yml，下一次 generate 靜默蓋掉」的情形，
+# 而那正是這個 repo 改用 XcodeGen 要解決的問題（舊的手工 pbxproj 漏收了 Pipeline/ 的 8 個檔案）。
+iOS/*.xcodeproj/
+**/xcuserdata/
+**/*.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+iOS/DerivedData/
+
 # 多行中文 commit 訊息的暫存檔。
 #
 # PowerShell 的 `git commit -m "..."` 對中文多行訊息會出事：`$` 會被展開、

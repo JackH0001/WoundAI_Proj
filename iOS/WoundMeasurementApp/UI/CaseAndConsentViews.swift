@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit   // UIGraphicsImageRenderer / UIColor / UIBezierPath（簽名柵格化）
 
 /**
  個案管理三段式：病患 → 知情同意 → 傷口個案（對等 Android `CaseSelectScreen`）。
@@ -115,7 +116,7 @@ struct CaseSelectView: View {
                 patients = await app.repo.listPatients()
                 // 進入這一頁時補做未完成的雲端同步——使用者剛好有網路而且在等畫面。
                 _ = await ConsentSync.retryPending()
-                app.refreshBanner()
+                await app.refreshBanner()
             }
         }
     }
@@ -325,7 +326,7 @@ struct TimelineView: View {
                 }
             }
             .task {
-                if let c = app.chosenCase { rows = await app.repo.measurements(caseId: c.id) }
+                if let c = await app.chosenCase { rows = await app.repo.measurements(caseId: c.id) }
             }
         }
     }

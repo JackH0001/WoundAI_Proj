@@ -58,7 +58,9 @@ struct RootView: View {
             //  1. 補做未完成的同意同步（撤回／重新取得）
             //  2. 預熱 Cloud Run（冷啟動實測 >10s，醫師第一次按下去時最有感）
             _ = await ConsentSync.retryPending()
-            app.refreshBanner()
+            // `.task` 的閉包是 @Sendable，不繼承外層的 @MainActor 隔離，
+            // 所以呼叫 AppState（@MainActor）的成員一律要 await。
+            await app.refreshBanner()
             let backend = BackendClient(baseUrl: AppSettings.backendURL())
             _ = try? await backend.health()
         }

@@ -13,10 +13,13 @@ public protocol WoundSegmenter {
     func segment(_ image: CGImage) async -> [Bool]
 }
 
-public final class WoundAnalyzer {
+// 不宣告 public：`run` 回傳的 `MeasureResult` 與其內含的 `PushScore` 都是 internal，
+// public 成員的簽章不能露出 internal 型別（Swift 存取層級規則）。此型別只在 App target
+// 內使用，沒有跨模組需求。
+final class WoundAnalyzer {
     private let student: WoundSegmenter
     private let wsm: WoundSegmenter?
-    public init(student: WoundSegmenter, wsm: WoundSegmenter? = nil) { self.student = student; self.wsm = wsm }
+    init(student: WoundSegmenter, wsm: WoundSegmenter? = nil) { self.student = student; self.wsm = wsm }
 
     /// IoU(分歧度)
     private func iou(_ a: [Bool], _ b: [Bool]) -> Double {
@@ -34,11 +37,11 @@ public final class WoundAnalyzer {
     }
 
     /// 端到端分析；cloudEscalate：難例上雲回 A∪U 二值遮罩。
-    public func run(image: CGImage,
-                    markerCorners: [CGFloat]?,
-                    exudate: Int?,
-                    tissueFracOverride: [String: Double]? = nil,
-                    cloudEscalate: ((CGImage) async -> [Bool])? = nil) async -> MeasureResult {
+    func run(image: CGImage,
+             markerCorners: [CGFloat]?,
+             exudate: Int?,
+             tissueFracOverride: [String: Double]? = nil,
+             cloudEscalate: ((CGImage) async -> [Bool])? = nil) async -> MeasureResult {
         var mask = await student.segment(image)
         let dis = (wsm != nil) ? iou(mask, await wsm!.segment(image)) : 1.0
         if dis < Self.escalateIou, let esc = cloudEscalate { mask = await esc(image) }
