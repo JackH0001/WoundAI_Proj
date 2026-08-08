@@ -38,6 +38,15 @@ class MeasureViewModel(
     // 後端 classify 回傳的傷口輪廓(供醫師修邊/飛輪標註送出);修邊 UI 可覆寫此值
     @Volatile var lastPolygon: List<List<Int>> = emptyList()
         private set
+    /**
+     * **所有**傷口輪廓（由大到小）。同一肢體多處傷口是臨床常態。
+     *
+     * ⚠ [lastPolygon] 只是它的第一個元素，保留給只吃單一輪廓的舊路徑。
+     * 送訓練標註與畫參照圖都要用這一個——只用 lastPolygon 的話，
+     * 第二個傷口會被標成背景，而那是在**教模型「那不是傷口」**。
+     */
+    @Volatile var lastPolygons: List<List<List<Int>>> = emptyList()
+        private set
     // 最近分析的原圖(供修邊畫布顯示)
     @Volatile var lastBitmap: Bitmap? = null
         private set
@@ -111,7 +120,7 @@ class MeasureViewModel(
      * 端上路徑(analyze)沒有後端影像綁定,故 imageId 一律為 null,送標註時會被守門擋下。
      */
     private fun clearBackendBinding(alsoBitmap: Boolean = false) {
-        lastPolygon = emptyList()
+        lastPolygon = emptyList(); lastPolygons = emptyList()
         lastCorrectionIou = null
         lastMmPerPx = null; lastMarkerQuad = null; lastCalibMethod = null; lastWbGains = null
         lastImageId = null; lastImageW = 0; lastImageH = 0
@@ -247,6 +256,9 @@ class MeasureViewModel(
                 }
                 bindImage(identity = bitmap, canvas = work)   // 編輯/顯示用縮圖(polygon 座標即此圖座標)
                 lastPolygon = polyCap
+                // 後端目前只回一個輪廓（wound_polygon 取最大連通元件）。
+                // 醫師修邊後才會有多輪廓——那時 applyEditedPolygon 會覆蓋這裡。
+                lastPolygons = if (polyCap.size >= 3) listOf(polyCap) else emptyList()
                 lastCorrectionIou = null   // 新分析→重置修邊修正量
                 lastDoctorVerified = false // 新分析→醫師尚未確認
                 lastMmPerPx = mmCap
@@ -303,6 +315,11 @@ class MeasureViewModel(
                 val (ok, msg) = withContext(Dispatchers.IO) {
                     backend.submitAnnotation(
                         code, poly, exudate,
+                        // 多處傷口：只送 poly 的話第二個傷口會被標成背景。
+                        allPolygons = lastPolygons,
+                        // 面積以**遮罩像素**為真值，不讓後端由多邊形反算——
+                        // RDP 簡化 + 多輪廓合計，兩邊各算一次必然對不上。
+                        areaCm2 = _state.value.result?.areaCm2,
                         imageId = lastImageId, imageW = lastImageW, imageH = lastImageH,
                         mmPerPx = lastMmPerPx, route = lastRoute, segModel = lastSegModel,
                         correctionIou = lastCorrectionIou, careNote = careNote, source = source,
@@ -338,9 +355,13 @@ class MeasureViewModel(
      */
     fun applyEditedPolygon(
         edited: List<List<Int>>, correctionIou: Double?, newArea: Double?, exudate: Int?,
-        tissue: Map<String, Double>? = null
+        tissue: Map<String, Double>? = null,
+        /** 所有輪廓。null＝呼叫端還沒支援多傷口，退回單一輪廓。 */
+        allPolygons: List<List<List<Int>>>? = null
     ) {
         lastPolygon = edited
+        lastPolygons = allPolygons?.takeIf { it.isNotEmpty() }
+            ?: (if (edited.size >= 3) listOf(edited) else emptyList())
         lastCorrectionIou = correctionIou
         // 只有走到這裡（按下「完成修邊」）才算醫師確認過。取消不會呼叫本函式。
         lastDoctorVerified = true
@@ -384,9 +405,10 @@ class MeasureViewModel(
                 fun pct(k: String) = ((r.tissueFrac[k] ?: 0.0) * 100).toInt()
                 val notes = "PUSH ${r.push.partial ?: "-"}; 肉芽${pct("granulation")}% 腐肉${pct("slough")}% 壞死${pct("necrosis")}%; 滲液${exudate ?: "-"}; route ${r.route}" +
                         (lastCorrectionIou?.let { "; 修邊IoU %.2f".format(it) } ?: "")
-                val polyJson = lastPolygon.takeIf { it.isNotEmpty() }?.let { pts ->
-                    pts.joinToString(",", "[", "]") { "[${it.getOrElse(0){0}},${it.getOrElse(1){0}}]" }
-                }
+                // 多處傷口要存**全部**輪廓。單一輪廓仍寫成舊格式，DB 裡既有紀錄照樣讀得懂。
+                val polyJson = polygonsToJson(lastPolygons.ifEmpty {
+                    if (lastPolygon.size >= 3) listOf(lastPolygon) else emptyList()
+                })
                 val (id, updatedRow) = withContext(Dispatchers.IO) {
                     val imgName = if (imageStore != null) lastBitmap?.let { imageStore.save(it) } else null
                     // v6：把修邊柵格一起存下來。沒有它，從時間軸回頭修邊時醫師畫的組織分區

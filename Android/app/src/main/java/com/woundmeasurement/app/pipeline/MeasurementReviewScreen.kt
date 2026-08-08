@@ -170,11 +170,15 @@ fun MeasurementReviewScreen(
             //   3. 沒有柵格就送不出組織遮罩 → 補送標註只送得出傷口輪廓，
             //      醫師花時間標的組織分區從來沒有進過訓練集
             // 三個後果都是安靜的。修邊當下看起來完全正常。
-            onDone = { newPoly, iou, newArea, tis, raster ->
+            onDone = { newPoly, allPolys, iou, newArea, tis, raster ->
                 scope.launch {
-                    val js = newPoly.joinToString(",", "[", "]") {
-                        "[${it.getOrElse(0) { 0 }},${it.getOrElse(1) { 0 }}]"
-                    }
+                    // ⚠ 多處傷口時要存**全部**輪廓。只存 newPoly 的話，
+                    // 第二個傷口在下次載回與補送標註時都會消失。
+                    // 格式與 MeasureViewModel.polyJson 一致：單一輪廓存成點陣列（相容舊紀錄），
+                    // 多輪廓存成「輪廓的陣列」，由 parsePolygons 兩種都吃。
+                    val js = polygonsToJson(allPolys.ifEmpty {
+                        if (newPoly.size >= 3) listOf(newPoly) else emptyList()
+                    })
                     val oldArea = cur.estimatedArea
                     val finalArea = newArea ?: oldArea
                     // 面積變了,notes 裡的 PUSH 與組織%就不能原封不動留著——否則時間軸卡片會出現

@@ -260,6 +260,20 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
      */
     fun submitAnnotation(
         code: String, gtPolygon: List<List<Int>>, exudate: Int?,
+        /**
+         * **所有**傷口輪廓。同一肢體多處傷口是臨床常態。
+         *
+         * ⚠ 空的話只送 [gtPolygon]（最大的那一個），而其餘傷口在訓練集裡會被
+         * 標成背景——那是在教模型「那不是傷口」，比少收一筆資料糟得多。
+         */
+        allPolygons: List<List<List<Int>>> = emptyList(),
+        /**
+         * 面積（cm²）。來自**遮罩像素數 × 鎖定係數**，是唯一真值。
+         *
+         * 不給的話後端會由多邊形反算，而那個數字與 App 顯示的必然不同：
+         * RDP 簡化有損、多輪廓還要合計。兩個都合理、都沒有警告的數字最難查。
+         */
+        areaCm2: Double? = null,
         imageId: String?, imageW: Int, imageH: Int,
         mmPerPx: Double? = null, route: String? = null, segModel: String? = null,
         tissueFrac: Map<String, Double>? = null,
@@ -302,6 +316,18 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
             .put("image_id", imageId)
             .put("image_w", imageW)
             .put("image_h", imageH)
+        // 多輪廓。gt_polygon 保留最大的那一個供舊後端使用——新舊後端都收得下。
+        val polysOut = allPolygons.filter { it.size >= 3 }
+        if (polysOut.size > 1) {
+            val arr = JSONArray()
+            polysOut.forEach { p ->
+                val pa = JSONArray()
+                p.forEach { pt -> pa.put(JSONArray().put(pt.getOrElse(0) { 0 }).put(pt.getOrElse(1) { 0 })) }
+                arr.put(pa)
+            }
+            obj.put("gt_polygons", arr)
+        }
+        if (areaCm2 != null) obj.put("area_cm2", areaCm2)
         if (mmPerPx != null) obj.put("mm_per_px", mmPerPx)
         if (route != null) obj.put("route", route)
         if (segModel != null) obj.put("seg_model", segModel)

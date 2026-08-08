@@ -267,7 +267,18 @@ fun WoundEditScreen(
      */
     wbGains: DoubleArray? = null,
     onCancel: () -> Unit,
-    onDone: (edited: List<List<Int>>, correctionIou: Double?, newArea: Double?, tissue: Map<String, Double>, raster: EditRaster) -> Unit
+    /**
+     * @param edited 最大連通元件的輪廓。**相容用**——舊呼叫端只吃一個。
+     * @param all    **所有**連通元件的輪廓，由大到小。多處傷口時這才是完整的 GT；
+     *               只用 [edited] 的話第二個傷口會被標成背景，等於教模型「那不是傷口」。
+     * @param newArea 面積來自**遮罩像素數**，涵蓋所有元件——與 [all] 一致，與 [edited] 不一致。
+     */
+    onDone: (
+        edited: List<List<Int>>,
+        all: List<List<List<Int>>>,
+        correctionIou: Double?, newArea: Double?,
+        tissue: Map<String, Double>, raster: EditRaster
+    ) -> Unit
 ) {
     val img = remember(bitmap) { bitmap.asImageBitmap() }
     val bw = bitmap.width; val bh = bitmap.height
@@ -726,12 +737,18 @@ fun WoundEditScreen(
             OutlinedButton(onCancel, Modifier.weight(1f)) { Text("取消") }
             Button({
                 try {
-                    val boundary = traceLargestBoundary(st.mask, st.mw, st.mh)
-                    if (boundary.size >= 3) {
-                        val simplified = rdp(boundary, 1.5)
-                        val poly = simplified.map {
-                            listOf((it[0] / st.mScale + st.rx0).roundToInt(), (it[1] / st.mScale + st.ry0).roundToInt())
-                        }
+                    // 追**所有**連通元件。同一肢體多處傷口是臨床常態，
+                    // 只取最大的那一個等於把第二個傷口標成背景（見 traceAllBoundaries）。
+                    val boundaries = traceAllBoundaries(st.mask, st.mw, st.mh)
+                    if (boundaries.isNotEmpty()) {
+                        val polys = boundaries.map { b ->
+                            rdp(b, 1.5).map {
+                                listOf((it[0] / st.mScale + st.rx0).roundToInt(),
+                                       (it[1] / st.mScale + st.ry0).roundToInt())
+                            }
+                        }.filter { it.size >= 3 }
+                        // 相容用：下游若只吃單一輪廓，拿到的是最大的那個（已排序）。
+                        val poly = polys.firstOrNull() ?: emptyList()
                         var inter = 0; var uni = 0
                         for (i in st.mask.indices) {
                             val a = st.orig[i].toInt() != 0; val b = st.mask[i].toInt() != 0
@@ -758,7 +775,7 @@ fun WoundEditScreen(
                         // 比明顯的錯誤更難察覺。
                         val areaOut = if (iou >= 0.9999 && originalArea != null) originalArea
                                       else liveArea
-                        onDone(poly, iou, areaOut, liveFrac(), raster)
+                        onDone(poly, polys, iou, areaOut, liveFrac(), raster)
                     }
                 } catch (_: Exception) { onCancel() }
             }, Modifier.weight(1f), enabled = st.maskCount > 0) { Text("完成修邊") }
@@ -793,10 +810,32 @@ private fun scanlineFill(poly: List<List<Int>>, s: Float, mw: Int, mh: Int, out:
     }
 }
 
-/** 最大連通元件外邊界(Moore-neighbor)。 */
-private fun traceLargestBoundary(mask: ByteArray, mw: Int, mh: Int): List<FloatArray> {
+/**
+ * **所有**連通元件的外邊界(Moore-neighbor)，由大到小排序。
+ *
+ * ## 為什麼不能只取最大的那一個
+ *
+ * 舊版是 `traceLargestBoundary`——函式名就寫著它會丟掉其他元件。
+ * 臨床上同一肢體多處傷口是常態（小腿同時有兩處潰瘍），而醫師在修邊畫面
+ * 明明把兩個都標了。
+ *
+ * 2026-08-07 實測的後果：
+ *  · 參照圖只畫得出一個傷口，醫師以為「畫面沒更新」
+ *  · **送進訓練集的 GT 是錯的**——第二個傷口被標成背景，
+ *    等於在教模型「那不是傷口」。比少收一筆資料糟得多。
+ *  · 面積（涵蓋兩個）與輪廓（只有一個）不一致，而兩個數字都沒有警告
+ *
+ * ## 雜點過濾
+ *
+ * 小於 [minPx] 的元件不回傳。筆刷邊緣的抗鋸齒與擴張時的殘留會產生幾像素的
+ * 孤立點，把它們當成獨立傷口送出去只會製造垃圾標註。
+ */
+private fun traceAllBoundaries(
+    mask: ByteArray, mw: Int, mh: Int, minPx: Int = 64
+): List<List<FloatArray>> {
     val label = IntArray(mw * mh)
-    var bestLbl = 0; var bestCnt = 0; var lbl = 0
+    val counts = ArrayList<Int>()          // index = lbl-1
+    var lbl = 0
     val stack = IntArray(mw * mh)
     for (start in mask.indices) {
         if (mask[start].toInt() != 0 && label[start] == 0) {
@@ -809,10 +848,17 @@ private fun traceLargestBoundary(mask: ByteArray, mw: Int, mh: Int): List<FloatA
                 if (py > 0 && mask[p - mw].toInt() != 0 && label[p - mw] == 0) { label[p - mw] = lbl; stack[top++] = p - mw }
                 if (py < mh - 1 && mask[p + mw].toInt() != 0 && label[p + mw] == 0) { label[p + mw] = lbl; stack[top++] = p + mw }
             }
-            if (cnt > bestCnt) { bestCnt = cnt; bestLbl = lbl }
+            counts.add(cnt)
         }
     }
-    if (bestLbl == 0) return emptyList()
+    if (lbl == 0) return emptyList()
+    // 由大到小：下游若只能取一個（舊格式相容），拿到的仍是主要傷口。
+    val order = (1..lbl).filter { counts[it - 1] >= minPx }.sortedByDescending { counts[it - 1] }
+    return order.mapNotNull { target -> traceOne(label, mw, mh, target).takeIf { it.size >= 3 } }
+}
+
+/** 單一標籤的外邊界。 */
+private fun traceOne(label: IntArray, mw: Int, mh: Int, bestLbl: Int): List<FloatArray> {
     fun on(x: Int, y: Int) = x in 0 until mw && y in 0 until mh && label[y * mw + x] == bestLbl
     var sx = -1; var sy = -1
     outer@ for (y in 0 until mh) for (x in 0 until mw) if (on(x, y)) { sx = x; sy = y; break@outer }

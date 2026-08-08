@@ -175,9 +175,11 @@ fun MeasureValidationEntry(
             resume = vm.editRaster,   // 同影像續編:原樣載回上次遮罩(零損耗)
             wbGains = vm.lastWbGains, // 底稿要與結果欄的組織比例同一套白平衡
             onCancel = { editing = false },
-            onDone = { poly, iou, newA, tis, raster ->
+            onDone = { poly, allPolys, iou, newA, tis, raster ->
                 vm.editRaster = raster
-                vm.applyEditedPolygon(poly, iou, newA, exudate, tis); editing = false
+                // allPolys 一定要傳。只傳 poly 的話多處傷口只會送出最大的那一個，
+                // 其餘被標成背景——而畫面上醫師明明兩個都標了。
+                vm.applyEditedPolygon(poly, iou, newA, exudate, tis, allPolys); editing = false
             }
         )
     } else {
@@ -350,6 +352,8 @@ fun MeasureValidationEntry(
                         AnalysisPreview(
                             bitmap = bmp,
                             polygon = vm.lastPolygon,
+                            // 多處傷口時要把全部傳進去，否則第二個傷口的輪廓與組織都畫不出來。
+                            polygons = vm.lastPolygons,
                             markerQuad = vm.lastMarkerQuad,
                             mmPerPx = vm.lastMmPerPx,
                             calibMethod = vm.lastCalibMethod,

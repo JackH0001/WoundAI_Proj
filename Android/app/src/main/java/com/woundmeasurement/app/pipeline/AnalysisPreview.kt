@@ -55,20 +55,28 @@ private const val PREVIEW_MAX = 900          // 預覽長邊上限（記憶體�
  * （`TissueClassifierV2`），所以畫面與數字一致；但兩者都只是輔助，最終以醫師修邊為準。
  */
 private fun buildTissueOverlay(
-    src: Bitmap, preview: Bitmap, polygon: List<List<Int>>,
+    src: Bitmap, preview: Bitmap, polygons: List<List<List<Int>>>,
     /** 後端色卡白平衡增益 [R,G,B]。null＝退回灰世界（與結果欄的數字會對不上）。 */
     wbGains: DoubleArray? = null
 ): Bitmap? {
-    if (polygon.size < 3) return null
+    val polys = polygons.filter { it.size >= 3 }
+    if (polys.isEmpty()) return null
     return runCatching {
+        // 外框涵蓋**所有**輪廓。只框最大的那一個，第二個傷口的組織就不會被分類。
         var x0 = Int.MAX_VALUE; var y0 = Int.MAX_VALUE; var x1 = 0; var y1 = 0
-        polygon.forEach { p -> x0 = min(x0, p[0]); y0 = min(y0, p[1]); x1 = max(x1, p[0]); y1 = max(y1, p[1]) }
+        polys.forEach { poly -> poly.forEach { p ->
+            x0 = min(x0, p[0]); y0 = min(y0, p[1]); x1 = max(x1, p[0]); y1 = max(y1, p[1]) } }
         x0 = x0.coerceIn(0, src.width - 2); y0 = y0.coerceIn(0, src.height - 2)
         x1 = x1.coerceIn(x0 + 2, src.width); y1 = y1.coerceIn(y0 + 2, src.height)
         val bw = x1 - x0; val bh = y1 - y0
 
         val (gw, gh) = TissueSeg.grid(bw, bh)
-        val inside = TissueSeg.rasterizePolygon(polygon, x0, y0, bw, bh, gw, gh)
+        // 每個輪廓各柵格化一次再疊起來——多處傷口之間的皮膚不該被分類。
+        val inside = ByteArray(gw * gh)
+        polys.forEach { poly ->
+            val m = TissueSeg.rasterizePolygon(poly, x0, y0, bw, bh, gw, gh)
+            for (i in inside.indices) if (m[i].toInt() != 0) inside[i] = 1
+        }
         val cls = TissueSeg.classify(src, x0, y0, x1, y1, gw, gh, inside, wbGains) ?: return null
 
         val out = IntArray(gw * gh)
@@ -89,7 +97,10 @@ private fun buildTissueOverlay(
 @Composable
 fun AnalysisPreview(
     bitmap: Bitmap,
+    /** 最大輪廓（相容用）。實際繪製以 [polygons] 為準。 */
     polygon: List<List<Int>>,
+    /** 所有輪廓。空的話退回只畫 [polygon]——多處傷口時第二個就看不到了。 */
+    polygons: List<List<List<Int>>> = emptyList(),
     markerQuad: List<List<Int>>?,
     mmPerPx: Double?,
     calibMethod: String?,
@@ -113,9 +124,15 @@ fun AnalysisPreview(
     // ⚠ wbGains 必須列進 produceState 的 key。漏掉的話：先以無色卡的結果算過一次
     // overlay 之後，即使後來拿到增益也不會重算——畫面停在灰世界版本，
     // 而結果欄顯示的是色卡版本的數字。又是「兩個答案並列」。
-    val tissue by produceState<Bitmap?>(initialValue = null, bitmap, polygon, wbGains) {
+    // 實際要畫的輪廓集合。polygons 為空時退回單一輪廓（舊呼叫端／舊紀錄）。
+    val drawPolys = remember(polygon, polygons) {
+        polygons.filter { it.size >= 3 }.ifEmpty {
+            if (polygon.size >= 3) listOf(polygon) else emptyList()
+        }
+    }
+    val tissue by produceState<Bitmap?>(initialValue = null, bitmap, drawPolys, wbGains) {
         value = withContext(Dispatchers.Default) {
-            buildTissueOverlay(bitmap, preview, polygon, wbGains)
+            buildTissueOverlay(bitmap, preview, drawPolys, wbGains)
         }
     }
     val img = remember(preview) { preview.asImageBitmap() }
@@ -134,10 +151,12 @@ fun AnalysisPreview(
                     drawImage(tImg, dstOffset = IntOffset.Zero,
                         dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()))
 
-                if (layers.outline && polygon.size >= 3) {
+                // 畫**每一個**輪廓。只畫最大的那一個，醫師會以為第二個傷口沒被記錄——
+                // 而那正是 2026-08-07 回報的「參照圖沒更新」。
+                if (layers.outline) drawPolys.forEach { poly ->
                     val path = Path().apply {
-                        moveTo(polygon[0][0] * k, polygon[0][1] * k)
-                        for (i in 1 until polygon.size) lineTo(polygon[i][0] * k, polygon[i][1] * k)
+                        moveTo(poly[0][0] * k, poly[0][1] * k)
+                        for (i in 1 until poly.size) lineTo(poly[i][0] * k, poly[i][1] * k)
                         close()
                     }
                     // 先描一圈深色再描亮色：亮青在淺色皮膚上會消失，雙描邊在任何背景都看得見。

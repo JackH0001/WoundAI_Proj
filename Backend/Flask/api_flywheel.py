@@ -71,6 +71,13 @@ PROVENANCE = ["mm_per_px", "route", "seg_model", "app_version", "correction_iou"
               # 拿它訓練＝用模型自己的輸出訓練自己，指標漂亮而臨床表現不動。
               "tissue_edited", "tissue_edit_px", "tissue_edit_ratio", "tissue_raster",
               "tissue_mask_key", "quality",
+              # 多處傷口：gt_polygon 只有最大的那一個（相容用），gt_polygons 才是完整的。
+              # 只用 gt_polygon 訓練時，其餘傷口會被當成背景——那是在教模型「那不是傷口」。
+              "gt_polygons",
+              # 面積真值來自 App 的**遮罩像素數**，不由多邊形反算。
+              # 兩邊各算一次必然對不上（RDP 有損、多輪廓要合計），
+              # 而兩個都合理、都沒有警告的數字最難查。
+              "area_cm2",
               # ── WoundAI3D 預留欄位（現在**不會有值**，但契約先定） ──────────
               #
               # 為什麼現在就埋：深度必須與 RGB **同一瞬間**擷取才有意義。
@@ -138,6 +145,14 @@ def validate_annotation(d: dict, require_image: bool = True):
             issues.append("exudate 非整數")
 
     poly = d.get("gt_polygon") or []
+    # 多處傷口：gt_polygons 是完整的，gt_polygon 只是其中最大的那一個（相容用）。
+    # 兩者都要驗——只驗 gt_polygon 的話，第二個傷口的座標錯了也收得進來。
+    polys = d.get("gt_polygons")
+    if polys is not None and (not isinstance(polys, list) or not polys):
+        issues.append("gt_polygons 必須是非空的輪廓清單")
+        polys = None
+    all_polys = polys if polys else ([poly] if poly else [])
+
     if len(poly) < 3:
         issues.append("gt_polygon 少於 3 點(無法構成面)")
     elif require_image:
@@ -146,9 +161,14 @@ def validate_annotation(d: dict, require_image: bool = True):
             if w <= 0 or h <= 0:
                 issues.append("image_w/image_h 非正整數")
             else:
-                oob = [p for p in poly if not (0 <= float(p[0]) <= w and 0 <= float(p[1]) <= h)]
-                if oob:
-                    issues.append(f"gt_polygon 有 {len(oob)} 點超出影像範圍 {w}x{h}(座標空間不符)")
+                for ci, one in enumerate(all_polys):
+                    if not isinstance(one, list) or len(one) < 3:
+                        issues.append(f"第 {ci + 1} 個輪廓少於 3 點")
+                        continue
+                    oob = [p for p in one if not (0 <= float(p[0]) <= w and 0 <= float(p[1]) <= h)]
+                    if oob:
+                        issues.append(f"第 {ci + 1} 個輪廓有 {len(oob)} 點超出影像範圍 "
+                                      f"{w}x{h}(座標空間不符)")
         except (TypeError, ValueError, IndexError):
             issues.append("gt_polygon 或 image_w/h 格式錯誤")
     return (len(issues) == 0, issues)
@@ -527,22 +547,50 @@ RECORD_STATUS = {
 }
 
 
-def poly_area_cm2(poly, mm_per_px):
+def _shoelace(pts):
+    a = 0.0
+    for i in range(len(pts)):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % len(pts)]
+        a += x1 * y2 - x2 * y1
+    return abs(a) / 2.0
+
+
+def poly_area_cm2(poly, mm_per_px, polys=None):
     """多邊形面積（cm²）。算不出來回 None——**不要回 0**：
-    0 看起來像「量到了但很小」，None 才看得出是「沒有這個數字」。"""
+    0 看起來像「量到了但很小」，None 才看得出是「沒有這個數字」。
+
+    ⚠ 有 `polys`（多處傷口）時**要把所有輪廓加總**。只算 `poly`（最大的那一個）
+    會讓主控台顯示的面積比 App 少一整個傷口，而兩個數字都沒有警告。
+    """
     try:
-        pts = [(float(x), float(y)) for x, y in (poly or [])]
-        if len(pts) < 3 or not mm_per_px:
+        src = polys if polys else ([poly] if poly else [])
+        if not src or not mm_per_px:
             return None
-        a = 0.0
-        for i in range(len(pts)):
-            x1, y1 = pts[i]
-            x2, y2 = pts[(i + 1) % len(pts)]
-            a += x1 * y2 - x2 * y1
-        px2 = abs(a) / 2.0
-        return round(px2 * (float(mm_per_px) ** 2) / 100.0, 2)
+        tot = 0.0
+        for one in src:
+            pts = [(float(x), float(y)) for x, y in (one or [])]
+            if len(pts) >= 3:
+                tot += _shoelace(pts)
+        if tot <= 0:
+            return None
+        return round(tot * (float(mm_per_px) ** 2) / 100.0, 2)
     except Exception:
         return None
+
+
+def record_area_cm2(rec):
+    """一筆紀錄的面積真值。
+
+    **優先用 App 送來的 `area_cm2`**（來自遮罩像素數 × 鎖定係數），
+    沒有才由多邊形反算。兩者不會相同：RDP 簡化是有損的、多輪廓還要合計，
+    而遮罩才是醫師實際畫的東西。
+    """
+    a = rec.get("area_cm2")
+    if isinstance(a, (int, float)) and a > 0:
+        return round(float(a), 2)
+    return poly_area_cm2(rec.get("gt_polygon"), rec.get("mm_per_px"),
+                         rec.get("gt_polygons"))
 
 
 # ── 單筆送件的向量預覽 ────────────────────────────────────────────────
@@ -646,13 +694,19 @@ def _render_preview_svg(w, h, poly, cells, gw, gh, rec, tissue_note, rect=None):
                      % (rx, ry, rw, rh, max(1.0, w / 700.0),
                         max(4.0, w / 100.0), max(4.0, w / 100.0)))
 
-    pts = " ".join("%.1f,%.1f" % (float(p[0]), float(p[1]))
-                   for p in poly if len(p) >= 2)
-    # 雙線描邊：深色在下、亮色在上，任何背景色上都看得見。
-    parts.append('<polygon points="%s" fill="none" stroke="#000" stroke-width="%.1f" '
-                 'stroke-opacity="0.55"/>' % (pts, max(2.0, w / 300.0)))
-    parts.append('<polygon points="%s" fill="none" stroke="#00e5ff" stroke-width="%.1f"/>'
-                 % (pts, max(1.0, w / 600.0)))
+    # 畫**每一個**輪廓。只畫最大的那一個，複核者會以為第二個傷口沒被記錄——
+    # 而那正是 2026-08-07 回報「參照圖沒更新」的同一個根因。
+    all_polys = rec.get("gt_polygons") or ([poly] if poly else [])
+    for one in all_polys:
+        if not one or len(one) < 3:
+            continue
+        pts = " ".join("%.1f,%.1f" % (float(p[0]), float(p[1]))
+                       for p in one if len(p) >= 2)
+        # 雙線描邊：深色在下、亮色在上，任何背景色上都看得見。
+        parts.append('<polygon points="%s" fill="none" stroke="#000" stroke-width="%.1f" '
+                     'stroke-opacity="0.55"/>' % (pts, max(2.0, w / 300.0)))
+        parts.append('<polygon points="%s" fill="none" stroke="#00e5ff" stroke-width="%.1f"/>'
+                     % (pts, max(1.0, w / 600.0)))
 
     fs = max(11.0, w / 55.0)
     frac = rec.get("tissue_frac") or {}
@@ -661,8 +715,10 @@ def _render_preview_svg(w, h, poly, cells, gw, gh, rec, tissue_note, rect=None):
     fr = "・".join("%s%.0f%%" % (key_zh.get(k, k), 100.0 * float(v))
                    for k, v in frac.items() if isinstance(v, (int, float)) and v > 0)
     lines = [
-        "%s ・ %d 點 @ %d×%d ・ 深度 %s"
-        % (rec.get("code") or "-", len(poly), w, h, rec.get("depth_source") or "none"),
+        "%s ・ %s ・ %d×%d ・ 深度 %s"
+        % (rec.get("code") or "-",
+           ("%d 個傷口輪廓" % len(all_polys)) if len(all_polys) > 1 else ("%d 點" % len(poly)),
+           w, h, rec.get("depth_source") or "none"),
         tissue_note + (("　" + fr) if fr else ""),
         "此圖為標註示意，不含任何原始影像像素",
     ]
@@ -1026,7 +1082,9 @@ try:
                 "route": r.get("route"), "status": st,
                 "status_zh": RECORD_STATUS.get(st, st),
                 "doctor_verified": bool(r.get("doctor_verified")),
-                "area_cm2": poly_area_cm2(r.get("gt_polygon"), r.get("mm_per_px")),
+                "area_cm2": record_area_cm2(r),
+                # 多處傷口：讓複核者一眼看得出這一筆有幾個輪廓。
+                "polygon_count": len(r.get("gt_polygons") or ([r["gt_polygon"]] if r.get("gt_polygon") else [])),
                 "actor": r.get("actor"), "role": r.get("role"),
                 # 只有自己送的（或管理者）才需要知道能不能排除；直接算好，
                 # 免得前端自己推導一套規則然後跟後端對不上。

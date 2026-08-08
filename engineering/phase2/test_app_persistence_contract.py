@@ -112,13 +112,15 @@ def main():
     for p, s in sorted(callers.items()):
         for m in re.finditer(r"onDone\s*=\s*\{([^\n]*?)->", s):
             params = [x.strip() for x in m.group(1).split(",")]
-            check("%s：onDone 綁滿 5 個參數" % name(p), len(params) == 5,
+            # 簽名：(edited, all, iou, newArea, tissueFrac, raster)
+            # `all` 是 2026-08-07 為了多處傷口加的——只用 edited 的話，
+            # 第二個傷口會被標成背景，等於教模型「那不是傷口」。
+            check("%s：onDone 綁滿 6 個參數" % name(p), len(params) == 6,
                   "實際 %d 個：%s" % (len(params), m.group(1).strip()))
-            if len(params) == 5:
-                check("%s：onDone 的組織比例參數沒被丟棄" % name(p), params[3] != "_",
-                      "第 4 參數＝%s" % params[3])
-                check("%s：onDone 的修邊柵格參數沒被丟棄" % name(p), params[4] != "_",
-                      "第 5 參數＝%s" % params[4])
+            if len(params) == 6:
+                for idx, what in ((1, "所有輪廓"), (4, "組織比例"), (5, "修邊柵格")):
+                    check("%s：onDone 的%s參數沒被丟棄" % (name(p), what), params[idx] != "_",
+                          "第 %d 參數＝%s" % (idx + 1, params[idx]))
 
     # ── 3. submitAnnotation 要送組織遮罩 ───────────────────────────────
     # ⚠ 只算**真正打到後端**的那一層。`vm.submitAnnotation(...)` 是 ViewModel 的轉發，
@@ -175,6 +177,27 @@ def main():
     # 存了不讀等於沒存。從時間軸回頭修邊時就是靠這個欄位重建底稿。
     check("EditRasterCodec 對 wb_gains 有存也有讀", erc.count("wb_gains") >= 2,
           "出現 %d 次" % erc.count("wb_gains"))
+
+    # ── 4d. 多處傷口的輪廓不得在任何一段被丟掉 ──────────────────────
+    #
+    # 同一肢體多處傷口是臨床常態。舊版三處各自獨立地只取最大連通元件，
+    # 而醫師在修邊畫面明明兩個都標了。後果不只是「參照圖沒更新」——
+    # **送進訓練集的 GT 會把第二個傷口標成背景**。
+    wes_all = next((s for q, s in srcs.items() if name(q) == "WoundEditScreen.kt"), "")
+    check("修邊追**所有**連通元件（不是只取最大）",
+          "traceAllBoundaries" in wes_all and "traceLargestBoundary(" not in wes_all)
+    vm = next((s for q, s in srcs.items() if name(q) == "MeasureViewModel.kt"), "")
+    check("ViewModel 保存所有輪廓", "lastPolygons" in vm)
+    check("applyEditedPolygon 收得下所有輪廓", "allPolygons" in vm)
+    bc = next((s for q, s in srcs.items() if name(q) == "BackendClient.kt"), "")
+    check("送出時帶 gt_polygons", "gt_polygons" in bc)
+    check("送出時帶 area_cm2（面積以遮罩為真值，不由多邊形反算）", '"area_cm2"' in bc)
+    for p, s2 in sorted(srcs.items()):
+        for m in re.finditer(r"AnalysisPreview\(", s2):
+            if name(p).startswith("AnalysisPreview"):
+                continue
+            check("%s：AnalysisPreview 有傳 polygons" % name(p),
+                  "polygons" in s2[m.start():m.start() + 2600])
 
     # ── 5. peek 期間不得作畫 ───────────────────────────────────────────
     #
