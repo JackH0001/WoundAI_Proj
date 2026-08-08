@@ -225,6 +225,7 @@ class MeasureViewModel(
                 // 否則後端會用原圖尺度乘縮圖像素數,面積差 1/scale²,而且錯的尺度會被寫進訓練集。
                 val cppWork = cmPerPixel?.let { it / scale }
                 var polyCap: List<List<Int>> = emptyList()
+                var polysCap: List<List<List<Int>>> = emptyList()
                 var mmCap: Double? = null
                 var quadCap: List<List<Int>>? = null; var calibCap: String? = null
                 var wbCap: DoubleArray? = null
@@ -235,6 +236,7 @@ class MeasureViewModel(
                     val jpeg = work.toJpeg()
                     val c = backend.classify(jpeg, cppWork, seg)
                     polyCap = c.woundPolygon
+                    polysCap = c.woundPolygons
                     mmCap = c.mmPerPx
                     quadCap = c.markerQuad
                     calibCap = c.calibMethod
@@ -256,9 +258,10 @@ class MeasureViewModel(
                 }
                 bindImage(identity = bitmap, canvas = work)   // 編輯/顯示用縮圖(polygon 座標即此圖座標)
                 lastPolygon = polyCap
-                // 後端目前只回一個輪廓（wound_polygon 取最大連通元件）。
-                // 醫師修邊後才會有多輪廓——那時 applyEditedPolygon 會覆蓋這裡。
-                lastPolygons = if (polyCap.size >= 3) listOf(polyCap) else emptyList()
+                // 後端已改為回傳所有連通元件；舊後端只有一個時退回單一輪廓。
+                lastPolygons = polysCap.ifEmpty {
+                    if (polyCap.size >= 3) listOf(polyCap) else emptyList()
+                }
                 lastCorrectionIou = null   // 新分析→重置修邊修正量
                 lastDoctorVerified = false // 新分析→醫師尚未確認
                 lastMmPerPx = mmCap

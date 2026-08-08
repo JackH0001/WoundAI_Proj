@@ -168,6 +168,8 @@ fun MeasureValidationEntry(
         WoundEditScreen(
             bitmap = eb,
             initialPolygon = vm.lastPolygon,
+            // 多處傷口：不傳的話第二個傷口沒有初始遮罩，醫師要從零畫。
+            initialPolygons = vm.lastPolygons,
             originalArea = st.result?.areaCm2,
             tissueFrac = st.result?.tissueFrac ?: emptyMap(),
             exudate = exudate,

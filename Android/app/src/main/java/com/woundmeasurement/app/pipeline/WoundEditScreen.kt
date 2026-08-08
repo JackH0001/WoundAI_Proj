@@ -254,7 +254,15 @@ private class RasterState(
 @Composable
 fun WoundEditScreen(
     bitmap: Bitmap,
+    /** AI 的初始輪廓（最大的那一個）。相容用——實際填充以 [initialPolygons] 為準。 */
     initialPolygon: List<List<Int>>,
+    /**
+     * AI 分割到的**所有**輪廓。空的話退回只填 [initialPolygon]。
+     *
+     * ⚠ 多處傷口時只填一個，醫師得自己把第二個補畫出來；沒注意到的話
+     * 那個傷口在訓練集裡會被標成背景——等於教模型「那不是傷口」。
+     */
+    initialPolygons: List<List<List<Int>>> = emptyList(),
     originalArea: Double?,
     tissueFrac: Map<String, Double>,
     exudate: Int?,
@@ -289,7 +297,13 @@ fun WoundEditScreen(
     }
     var version by remember { mutableStateOf(0) }
 
-    val st = remember(initialPolygon, resume) {
+    // 實際要填的輪廓集合。以 initialPolygons 為準，空的才退回單一輪廓。
+    val initPolys = remember(initialPolygon, initialPolygons) {
+        initialPolygons.filter { it.size >= 3 }.ifEmpty {
+            if (initialPolygon.size >= 3) listOf(initialPolygon) else emptyList()
+        }
+    }
+    val st = remember(initPolys, resume) {
         if (resume != null) {
             RasterState(resume.rx0, resume.ry0, resume.mw, resume.mh, resume.mScale, bw, bh).apply {
                 System.arraycopy(resume.mask, 0, mask, 0, mask.size)
@@ -302,8 +316,10 @@ fun WoundEditScreen(
             }
         } else {
             // 初始 ROI=AI 遮罩外框+60% 邊距(AI 低估時仍可自動擴張,不受限)
-            val xs = initialPolygon.map { it[0] }; val ys = initialPolygon.map { it[1] }
-            val hasPoly = initialPolygon.size >= 3
+            // ROI 外框要涵蓋**所有**輪廓，否則第二個傷口一開始就在框外，
+            // 醫師得先把框撐過去才畫得到它。
+            val xs = initPolys.flatten().map { it[0] }; val ys = initPolys.flatten().map { it[1] }
+            val hasPoly = initPolys.isNotEmpty() && xs.isNotEmpty()
             val w = if (hasPoly) (xs.max() - xs.min()).coerceAtLeast(16) else bw
             val h = if (hasPoly) (ys.max() - ys.min()).coerceAtLeast(16) else bh
             val mgx = (w * 0.6f).roundToInt().coerceAtLeast(48); val mgy = (h * 0.6f).roundToInt().coerceAtLeast(48)
@@ -314,7 +330,8 @@ fun WoundEditScreen(
             val rw = x1 - x0 + 1; val rh = y1 - y0 + 1
             val sc = min(1f, 1024f / max(rw, rh))
             RasterState(x0.toFloat(), y0.toFloat(), max(8, (rw * sc).roundToInt()), max(8, (rh * sc).roundToInt()), sc, bw, bh).apply {
-                scanlineFill(initialPolygon, mScale, mw, mh, mask, rx0, ry0)
+                // 每個輪廓各填一次。只填最大的那一個，第二個傷口就沒有初始遮罩。
+                initPolys.forEach { scanlineFill(it, mScale, mw, mh, mask, rx0, ry0) }
                 // 逐像素分區作為修邊起點。auto 算不出來時（極小遮罩、影像異常）才退回
                 // 單一 defaultClass——那是降級，不是預設行為。
                 seedAuto(this, bitmap, wbGains)

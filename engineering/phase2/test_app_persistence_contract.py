@@ -192,12 +192,36 @@ def main():
     bc = next((s for q, s in srcs.items() if name(q) == "BackendClient.kt"), "")
     check("送出時帶 gt_polygons", "gt_polygons" in bc)
     check("送出時帶 area_cm2（面積以遮罩為真值，不由多邊形反算）", '"area_cm2"' in bc)
+    check("classify 回應解析 wound_polygons（AI 的初始輪廓也要多個）",
+          "wound_polygons" in bc)
+    wes2 = next((s for q, s in srcs.items() if name(q) == "WoundEditScreen.kt"), "")
+    check("修邊畫面的初始遮罩填**所有**輪廓", "initPolys.forEach { scanlineFill" in wes2)
+    # ⚠ 只檢查參數名在不在是不夠的：`initialPolygons = emptyList()` 照樣含那個字串，
+    # 而它等於完全沒傳。與 `resume = null` 是同一類弱點——
+    # 一個「傳了但傳空的」參數在原始碼裡看起來完全正常。
+    for p2, s3 in sorted(srcs.items()):
+        for m in re.finditer(r"WoundEditScreen\(", s3):
+            if name(p2).startswith("WoundEditScreen"):
+                continue
+            seg = s3[m.start():m.start() + 2600]
+            got = re.search(r"initialPolygons\s*=\s*([A-Za-z_][\w.]*(?:\([^)]*\))?)", seg)
+            check("%s：WoundEditScreen 有傳 initialPolygons" % name(p2), got is not None)
+            if got:
+                check("%s：initialPolygons 不是寫死的空清單" % name(p2),
+                      got.group(1) not in ("emptyList()", "listOf()"), got.group(1))
+    mrs = next((s for q, s in srcs.items() if name(q) == "MeasurementReviewScreen.kt"), "")
+    check("時間軸回頭修邊用 PolygonJson 解析（舊解析法碰到多輪廓會解成空）",
+          "parsePolygons(cur.gtPolygon)" in mrs)
     for p, s2 in sorted(srcs.items()):
         for m in re.finditer(r"AnalysisPreview\(", s2):
             if name(p).startswith("AnalysisPreview"):
                 continue
-            check("%s：AnalysisPreview 有傳 polygons" % name(p),
-                  "polygons" in s2[m.start():m.start() + 2600])
+            seg2 = s2[m.start():m.start() + 2600]
+            g2 = re.search(r"polygons\s*=\s*([A-Za-z_][\w.]*(?:\([^)]*\))?)", seg2)
+            check("%s：AnalysisPreview 有傳 polygons" % name(p), g2 is not None)
+            if g2:
+                check("%s：polygons 不是寫死的空清單" % name(p),
+                      g2.group(1) not in ("emptyList()", "listOf()"), g2.group(1))
 
     # ── 5. peek 期間不得作畫 ───────────────────────────────────────────
     #

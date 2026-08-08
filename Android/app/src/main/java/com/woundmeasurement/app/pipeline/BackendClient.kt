@@ -23,7 +23,14 @@ data class ClassifyResult(
     val areaCm2: Double?, val tissueFrac: Map<String, Double>,
     val pushPartial: Int?, val pushFull: Int?, val confidence: Double, val route: String,
     val escalated: Boolean = false,
-    val woundPolygon: List<List<Int>> = emptyList(),  // 傷口輪廓(供醫師修邊/飛輪標註)
+    val woundPolygon: List<List<Int>> = emptyList(),  // 最大的那一個(相容用)
+    /**
+     * **所有**傷口輪廓（由大到小）。同一肢體多處傷口是臨床常態。
+     *
+     * ⚠ 只用 [woundPolygon] 的話，AI 分割到的第二個傷口在修邊畫面就不會有初始輪廓，
+     * 醫師得自己補畫；沒注意到的話那個傷口在訓練集裡會被標成背景。
+     */
+    val woundPolygons: List<List<List<Int>>> = emptyList(),
     val mmPerPx: Double? = null,                      // ArUco 尺度(mm/影像px):修邊面積=像素數×(mm/px)²
     /**
      * ArUco 標記的四個角點（TL,TR,BR,BL，與 imageW/H 同一座標空間）。
@@ -200,13 +207,23 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
             val s2 = j.getJSONObject("stage2_segment")
             val tissue = listOf("necrosis","slough","granulation","epithelial","other")
                 .associateWith { if (s4.isNull(it)) 0.0 else s4.getDouble(it) }
-            val poly = ArrayList<List<Int>>()
-            if (!s2.isNull("wound_polygon")) {
-                val pa = s2.getJSONArray("wound_polygon")
-                for (i in 0 until pa.length()) {
-                    val pt = pa.getJSONArray(i); poly.add(listOf(pt.getInt(0), pt.getInt(1)))
+            fun pts(a: JSONArray): List<List<Int>> {
+                val o = ArrayList<List<Int>>(a.length())
+                for (i in 0 until a.length()) {
+                    val pt = a.optJSONArray(i) ?: continue
+                    if (pt.length() >= 2) o.add(listOf(pt.optInt(0), pt.optInt(1)))
                 }
+                return o
             }
+            val poly = if (s2.isNull("wound_polygon")) emptyList()
+                       else pts(s2.getJSONArray("wound_polygon"))
+            // 舊後端沒有這個鍵 → optJSONArray 回 null，退回單一輪廓。
+            // 用 getJSONArray 的話 App 一連上舊後端整個 classify 就拋例外。
+            val polys = s2.optJSONArray("wound_polygons")?.let { arr ->
+                (0 until arr.length()).mapNotNull { i ->
+                    arr.optJSONArray(i)?.let { pts(it) }?.takeIf { it.size >= 3 }
+                }
+            } ?: emptyList()
             return ClassifyResult(
                 areaCm2 = if (s3.isNull("area_cm2")) null else s3.getDouble("area_cm2"),
                 tissueFrac = tissue,
@@ -217,6 +234,7 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
                 route = if (s2.isNull("route")) "cloud" else s2.getString("route"),
                 escalated = !s2.isNull("escalated") && s2.getBoolean("escalated"),
                 woundPolygon = poly,
+                woundPolygons = polys.ifEmpty { if (poly.size >= 3) listOf(poly) else emptyList() },
                 mmPerPx = if (s3.isNull("mm_per_px")) null else s3.getDouble("mm_per_px"),
                 markerQuad = if (s3.isNull("marker_quad")) null else runCatching {
                     val qa = s3.getJSONArray("marker_quad")

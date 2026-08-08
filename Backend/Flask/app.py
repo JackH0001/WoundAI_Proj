@@ -1722,12 +1722,29 @@ def classify_wound():
         t = tissue_proxy_v2(img, mask, gray_patch_rgb=_gp)
         push = push_score(area_cm2, t)
         # 傷口輪廓多邊形(最大連通、approxPolyDP 精簡)→ 供 App 醫師修邊/飛輪標註
-        wound_poly = []
+        # ── 傷口輪廓：**所有**連通元件，不是只有最大的那一個 ──────────
+        #
+        # 同一肢體多處傷口是臨床常態（小腿同時有兩處潰瘍）。舊版寫成
+        # `max(_cnts, key=cv2.contourArea)`，於是 AI 明明分割到兩個傷口，
+        # 回傳的初始輪廓只框一個——醫師得自己把第二個補畫出來，
+        # 而如果他沒注意到，那個傷口在訓練集裡就被標成背景。
+        #
+        # 面積（measure_area_cm2_ratio）本來就用整張遮罩、涵蓋所有元件，
+        # 所以舊版的「面積算兩個、輪廓只有一個」是自相矛盾的。
+        #
+        # 雜點過濾：小於 64 px 的元件不回傳。分割模型的邊緣毛邊會產生
+        # 幾像素的孤立點，把它們當成獨立傷口只會讓醫師多刪幾次。
+        wound_polys = []
         _cnts, _hh = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if _cnts:
-            _bc = max(_cnts, key=cv2.contourArea)
-            _ap = cv2.approxPolyDP(_bc, 0.003 * cv2.arcLength(_bc, True), True).reshape(-1, 2)  # 0.01→0.003:初始點加密(~3x),描邊更貼
-            wound_poly = [[int(x), int(y)] for x, y in _ap.tolist()]
+        for _c in sorted(_cnts, key=cv2.contourArea, reverse=True):
+            if cv2.contourArea(_c) < 64:
+                continue
+            # 0.01→0.003:初始點加密(~3x),描邊更貼
+            _ap = cv2.approxPolyDP(_c, 0.003 * cv2.arcLength(_c, True), True).reshape(-1, 2)
+            if len(_ap) >= 3:
+                wound_polys.append([[int(x), int(y)] for x, y in _ap.tolist()])
+        # 相容用：舊版 App 只讀 wound_polygon，拿到的仍是主要傷口。
+        wound_poly = wound_polys[0] if wound_polys else []
         return jsonify({
             # 飛輪資料鏈:image_id 綁後端已存影像;image_w/h = wound_polygon 與醫師修邊 GT 的座標空間
             # (缺尺寸則 polygon 無法柵格化成遮罩 → 樣本不可訓練,見 api_flywheel 稽核註記)
@@ -1737,7 +1754,10 @@ def classify_wound():
             'image_reused': bool(image_reused),
             'stage2_segment': {'model': seg_model, 'wound_ratio': round(float(mask.mean()), 4), 'confidence': round(conf, 4),
                                'route': route, 'escalated': escalated, 'au_area_ratio': au_ratio, 'iou_student_au': iou_sa,
-                               'wound_polygon': wound_poly},
+                               'wound_polygon': wound_poly,
+                               # 所有輪廓（由大到小）。只讀 wound_polygon 的話，
+                               # 多處傷口時第二個之後都看不到。
+                               'wound_polygons': wound_polys},
             'stage3_calibrate': {'method': calib, 'area_cm2': (round(area_cm2, 2) if area_cm2 is not None else None),
                                  'mm_per_px': (round(mm_per_px, 6) if mm_per_px is not None else None),
                                  # 角點順序 TL,TR,BR,BL(影像座標,與 image_w/h 同一空間)。供 App 畫出校正框。

@@ -18,7 +18,6 @@ import com.woundmeasurement.app.data.store.LocalImageStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -73,19 +72,14 @@ fun MeasurementReviewScreen(
     /** 送出前的人工確認彈窗。資料離開手機是不可逆動作，不採「按了就送」。 */
     var confirmSubmit by remember { mutableStateOf(false) }
 
-    // 輪廓 JSON → List<List<Int>>（座標空間＝imageW×imageH，也就是存下來的那張 work 影像）
-    val poly = remember(cur.gtPolygon) {
-        val out = ArrayList<List<Int>>()
-        runCatching {
-            cur.gtPolygon?.let { js ->
-                val a = JSONArray(js)
-                for (i in 0 until a.length()) {
-                    val p = a.getJSONArray(i); out.add(listOf(p.getInt(0), p.getInt(1)))
-                }
-            }
-        }
-        out
-    }
+    // 輪廓 JSON → 多輪廓（座標空間＝imageW×imageH，也就是存下來的那張 work 影像）。
+    //
+    // ⚠ 一定要用 PolygonJson 解析。舊寫法直接 `a.getJSONArray(i)` 當成點讀，
+    // 碰到多輪廓格式 `[[[x,y],...],[[x,y],...]]` 會把整個**輪廓**當成一個點，
+    // getInt(0) 拿到的是 JSONArray → 例外 → runCatching 吞掉 → 輪廓變空，
+    // 而畫面只會顯示「沒有 GT 輪廓，不能補送」。
+    val polys = remember(cur.gtPolygon) { parsePolygons(cur.gtPolygon) }
+    val poly = remember(polys) { PolygonJson.largest(polys) }
 
     /**
      * 影像尺寸與 `gtPolygon` 座標空間是否一致。
@@ -142,6 +136,8 @@ fun MeasurementReviewScreen(
         WoundEditScreen(
             bitmap = b,
             initialPolygon = poly,
+            // 從時間軸回頭修邊：DB 裡存的可能是多輪廓（見 PolygonJson）。
+            initialPolygons = polys,
             originalArea = cur.estimatedArea,
             // v5 起組織比例有存下來。傳 emptyMap 會讓 defaultClass 退回 1（肉芽），
             // 而那是「AI 覺得最多的那一類」的猜測——有真值就不該用猜的。
@@ -341,7 +337,8 @@ fun MeasurementReviewScreen(
                 Text(
                     "· 去識別代碼　${cur.wdCode}\n" +
                     "· 影像綁定　　${cur.imageId}（後端既有，不重新上傳）\n" +
-                    "· 傷口輪廓　　${poly.size} 個點 @ ${cur.imageW}×${cur.imageH}\n" +
+                    "· 傷口輪廓　　" + (if (polys.size > 1) "${polys.size} 處傷口・共 ${polys.sumOf { it.size }} 個點"
+                                       else "${poly.size} 個點") + " @ ${cur.imageW}×${cur.imageH}\n" +
                     "· 面積　　　　${cur.estimatedArea?.let { "%.2f cm²".format(it) } ?: "未校正"}\n" +
                     "· 滲液　　　　${cur.exudate ?: "—"}\n" +
                     "· 樣本來源　　${cur.source ?: "clinical"}",
@@ -389,6 +386,10 @@ fun MeasurementReviewScreen(
                             backend.submitAnnotation(
                                 code = cur.wdCode!!, gtPolygon = poly, exudate = cur.exudate,
                                 imageId = cur.imageId, imageW = cur.imageW ?: 0, imageH = cur.imageH ?: 0,
+                                // 多處傷口：只送 poly 的話其餘傷口在訓練集裡是背景。
+                                allPolygons = polys,
+                                // 面積以本機紀錄為真值（來自遮罩像素數），不讓後端由多邊形反算。
+                                areaCm2 = cur.estimatedArea,
                                 mmPerPx = cur.mmPerPx, route = cur.route, segModel = null,
                                 correctionIou = cur.correctionIou, careNote = "resubmit from timeline",
                                 source = cur.source ?: "clinical", consentTrain = okNow,

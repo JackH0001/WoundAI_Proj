@@ -181,6 +181,43 @@ def main():
     check("舊格式預覽仍畫得出輪廓",
           len(re.findall(r'stroke="#00e5ff"', svg5)) == 1)
 
+    # ── 6. 後端 classify 的輪廓萃取：所有連通元件 ─────────────────
+    #
+    # 醫師修邊後會覆蓋 AI 的輪廓，所以訓練 GT 靠修邊就正確了。但**初始輪廓**
+    # 若只框一個，多處傷口時醫師得自己把第二個補畫出來——沒注意到的話
+    # 那個傷口在訓練集裡仍然是背景。
+    print("\n── 6 classify 的輪廓萃取 ──")
+    try:
+        import numpy as np
+        import cv2
+        # 兩塊分離的方形「傷口」，面積差 3.5 倍
+        m = np.zeros((400, 600), np.uint8)
+        m[50:250, 50:250] = 1          # 200×200 = 40000
+        m[150:250, 400:500] = 1        # 100×100 = 10000
+        m[380:383, 590:593] = 1        # 3×3 = 9 px 的雜點，應被過濾
+
+        polys = []
+        cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for c in sorted(cnts, key=cv2.contourArea, reverse=True):
+            if cv2.contourArea(c) < 64:
+                continue
+            ap = cv2.approxPolyDP(c, 0.003 * cv2.arcLength(c, True), True).reshape(-1, 2)
+            if len(ap) >= 3:
+                polys.append([[int(x), int(y)] for x, y in ap.tolist()])
+        check("兩個傷口都萃取到（雜點被過濾）", len(polys) == 2, "%d 個" % len(polys))
+        if len(polys) == 2:
+            check("由大到小排序（相容路徑拿到的是主要傷口）",
+                  cv2.contourArea(np.array(polys[0], np.int32)) >
+                  cv2.contourArea(np.array(polys[1], np.int32)))
+        # app.py 裡的實作要與這裡一致
+        app_src = open(os.path.join(FLASK_DIR, "app.py"), encoding="utf-8").read()
+        check("app.py 已改為萃取所有元件", "wound_polys" in app_src
+              and "_bc = max(_cnts, key=cv2.contourArea)" not in app_src)
+        check("app.py 回應含 wound_polygons", "'wound_polygons': wound_polys" in app_src)
+        check("app.py 有雜點過濾", "cv2.contourArea(_c) < 64" in app_src)
+    except ImportError:
+        print("SKIP  6（無 OpenCV／numpy）")
+
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n%d 項檢查，%d 項失敗" % (TOTAL[0], len(FAILED)))
     if FAILED:
