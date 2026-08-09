@@ -154,18 +154,29 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
                         val r: Triple<Boolean, String, Pair<Boolean, String>?> =
                             withContext(Dispatchers.IO) {
                                 val c = BackendClient(norm)
+                                // 健康度**在登入之前問**（/api/health 免認證）。
+                                // 放在登入成功之後的話，帳密還沒設對時就永遠看不到降級——
+                                // 而這兩件事的處置完全不同：一個叫人改帳密，一個叫人找管理者。
+                                val h = c.health()
+                                val hLine = when {
+                                    h == null -> ""
+                                    h.degraded -> "\n⚠ 服務降級：${h.degradedReason ?: "原因未提供"}" +
+                                                  "\n此狀態下的面積或組織判讀不具參考價值，請通知管理者。"
+                                    else -> "\n伺服器狀態:${h.status}" +
+                                            (h.revision?.let { "（版次 $it）" } ?: "")
+                                }
                                 // 「連不上」與「連得上但帳密錯」要分開講:在醫院現場這是兩種完全不同的處置
                                 //（改網段/防火牆 vs 改帳密），合成一句「登入失敗」只會讓人亂試。
                                 try {
                                     if (c.login(u, p)) {
                                         me = c.identity
                                         client = c
-                                        Triple(true, "✅ 連線成功（${c.identity?.label() ?: u}）",
+                                        Triple(true, "✅ 連線成功（${c.identity?.label() ?: u}）$hLine",
                                                c.flywheelStats())
                                     }
                                     else Triple(
                                         false,
-                                        "⚠ 連得到後端，但**帳密不正確**。位址沒問題，請確認帳號密碼。", null)
+                                        "⚠ 連得到後端，但**帳密不正確**。位址沒問題，請確認帳號密碼。$hLine", null)
                                 } catch (e: Exception) {
                                     Triple(
                                         false,

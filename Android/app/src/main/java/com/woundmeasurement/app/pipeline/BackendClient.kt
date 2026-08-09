@@ -43,6 +43,17 @@ data class ClassifyResult(
     val markerMm: Double? = null,
     val calibMethod: String? = null,
     /**
+     * 影像品質指標：`focus_lapvar`（清晰度）、`clipped_frac`（過曝／死黑比例）、
+     * `roi_short_px`（傷口短邊像素）、`marker_frac`／`marker_skew`（貼紙大小與斜視角）。
+     *
+     * ⚠ 這些要**跟著標註一起送回後端**，不是拿來給端上判斷用的。
+     * 匯出訓練集時 `dataset manifest` 會依門檻篩掉模糊、過曝、角度過斜的樣本——
+     * 而缺這幾個欄位的紀錄一律**不擋**（舊紀錄沒有欄位，擋掉會把早期樣本整批丟掉）。
+     * 結果就是：Android 不送的話，品質門檻**只篩得掉 iOS 收的樣本**，
+     * 兩端收的資料在同一個門檻下受到不同待遇，而報表上看不出來。
+     */
+    val quality: Map<String, Double> = emptyMap(),
+    /**
      * 後端由**校正貼紙中性色塊**算出的白平衡增益 [R,G,B]（含曝光係數）。
      *
      * ⚠ 端上一定要用這一組，不可自行算灰世界。後端的組織比例已經是用它算的，
@@ -110,6 +121,44 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
         private set
 
     /** 登入取得 JWT(後端 /api/auth/login)。成功回 true 並存 token 供後續呼叫。同步阻塞,請於 IO 執行。 */
+    /**
+     * `/api/health` 的結果。[degraded] 為 true 時 [degradedReason] 一定有值。
+     */
+    data class Health(
+        val status: String,                  // healthy / degraded
+        val degraded: Boolean,
+        val degradedReason: String?,
+        val revision: String?                // Cloud Run 版次，用來確認「部署到底上去了沒」
+    )
+
+    /**
+     * `GET /api/health`（**免認證**）。
+     *
+     * 免認證是刻意的：連線測試要能在「帳密還沒設對」的情況下分辨
+     * 「連不到」與「連得到但服務降級」。如果它需要 token，那兩件事就永遠混在一起。
+     *
+     * ⚠ degraded 不是「慢一點」，是**分割模型或色準模組沒載到**——
+     * 服務照樣回 200、面積照樣有數字，只是那個數字不具參考價值。
+     * 這正是必須講出來的那一類故障：它不會自己現形。
+     */
+    fun health(): Health? = try {
+        val req = Request.Builder().url("$baseUrl/api/health").get().build()
+        http.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) null else {
+                val j = JSONObject(resp.body!!.string())
+                val st = j.optString("status", "unknown")
+                Health(
+                    status = st,
+                    degraded = st == "degraded",
+                    degradedReason = j.optString("degraded_reason").ifBlank { null },
+                    revision = j.optJSONObject("build")?.optString("revision")?.ifBlank { null }
+                )
+            }
+        }
+    } catch (e: Exception) {
+        null      // 連不上與降級是兩件事，這裡只回報「問不到」，由呼叫端區分
+    }
+
     fun login(username: String, password: String): Boolean {
         val body = JSONObject(mapOf("username" to username, "password" to password)).toString()
             .toRequestBody("application/json".toMediaType())
@@ -244,6 +293,17 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
                 }.getOrNull(),
                 markerMm = if (s3.isNull("marker_mm")) null else s3.getDouble("marker_mm"),
                 calibMethod = if (s3.isNull("method")) null else s3.getString("method"),
+                // 品質指標。鍵是後端決定的，端上不要硬編一份清單去挑——
+                // 後端加了新指標而端上沒跟著改，那個指標就永遠不會落盤，
+                // 而且沒有任何地方會報錯。全收就沒有這個問題。
+                quality = j.optJSONObject("quality")?.let { q ->
+                    val m = LinkedHashMap<String, Double>()
+                    q.keys().forEach { k ->
+                        val v = q.opt(k)
+                        if (v is Number) m[k] = v.toDouble()
+                    }
+                    m
+                } ?: emptyMap(),
                 // 色準校正（stage3b）。舊版後端沒有這個鍵——用 optJSONObject 而非
                 // getJSONObject，否則 App 一連上舊後端就整個 classify 拋例外。
                 wbGains = j.optJSONObject("stage3b_colorcal")?.takeIf { it.optBoolean("ok") }
@@ -298,6 +358,11 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
         /** 組織分割 GT（base64 PNG，值＝組織碼）與其柵格→影像座標的仿射參數。 */
         tissueMaskPng: String? = null,
         tissueRaster: EditRaster? = null,
+        /**
+         * classify 當下算出的影像品質指標，原樣回送。
+         * 不送的話這筆在訓練集匯出時**篩不掉也擋不住**——見 [ClassifyResult.quality]。
+         */
+        quality: Map<String, Double>? = null,
         correctionIou: Double? = null, careNote: String? = null,
         source: String? = null,  // clinical(預設)/sample/phantom/external;範例集不可灌進臨床樣本數
         /**
@@ -349,6 +414,11 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
         if (mmPerPx != null) obj.put("mm_per_px", mmPerPx)
         if (route != null) obj.put("route", route)
         if (segModel != null) obj.put("seg_model", segModel)
+        if (!quality.isNullOrEmpty()) {
+            val qo = JSONObject()
+            quality.forEach { (k, v) -> qo.put(k, v) }
+            obj.put("quality", qo)
+        }
         if (correctionIou != null) obj.put("correction_iou", correctionIou)
         if (careNote != null) obj.put("care_note", careNote)
         if (source != null) obj.put("source", source)

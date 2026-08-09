@@ -113,6 +113,15 @@ class MeasureViewModel(
     /** 被自動排除的「貼紙誤認傷口」數（AI 把 ArUco 印刷方塊當壞死組織）。UI 要明講並可在修邊補畫。 */
     @Volatile var lastMarkerDropped: Int = 0
         private set
+    /**
+     * classify 當下算出的影像品質指標，原樣保留待送出。
+     *
+     * ⚠ 一定要跟著標註回送：訓練集匯出的品質門檻對**沒有這些欄位的紀錄一律放行**
+     * （舊紀錄本來就沒有，擋掉會把早期樣本整批丟掉）。所以不送不是「少一點資訊」，
+     * 而是這一筆變成篩不掉的——模糊、過曝、角度過斜的樣本會照樣進訓練集。
+     */
+    @Volatile var lastQuality: Map<String, Double> = emptyMap()
+        private set
 
     /**
      * 換一張影像時清空所有「上一次分析」的殘留。
@@ -235,6 +244,7 @@ class MeasureViewModel(
                 var idCap: String? = null; var wCap = 0; var hCap = 0
                 var routeCap: String? = null; var modelCap: String? = null
                 var hintCap = false; var reusedCap = false
+                var qualCap: Map<String, Double> = emptyMap()
                 val r = withContext(Dispatchers.IO) {
                     val jpeg = work.toJpeg()
                     val c = backend.classify(jpeg, cppWork, seg)
@@ -247,6 +257,7 @@ class MeasureViewModel(
                     idCap = c.imageId; wCap = c.imageW; hCap = c.imageH
                     routeCap = c.route; modelCap = c.segModel; hintCap = c.phantomHint
                     reusedCap = c.imageReused
+                    qualCap = c.quality
                     MeasureResult(
                         areaCm2 = c.areaCm2,
                         tissueFrac = c.tissueFrac,
@@ -293,6 +304,7 @@ class MeasureViewModel(
                 lastImageId = idCap; lastImageW = wCap; lastImageH = hCap
                 lastRoute = routeCap; lastSegModel = modelCap; lastPhantomHint = hintCap
                 lastImageReused = reusedCap
+                lastQuality = qualCap
                 _state.value = MeasureUiState(loading = false, result = r)
             } catch (e: Exception) {
                 clearBackendBinding(alsoBitmap = true)
@@ -349,6 +361,9 @@ class MeasureViewModel(
                         areaCm2 = _state.value.result?.areaCm2,
                         imageId = lastImageId, imageW = lastImageW, imageH = lastImageH,
                         mmPerPx = lastMmPerPx, route = lastRoute, segModel = lastSegModel,
+                        // 品質指標原樣回送。不送的話這一筆在訓練集匯出時篩不掉——
+                        // 缺欄位的紀錄門檻一律放行。
+                        quality = lastQuality,
                         correctionIou = lastCorrectionIou, careNote = careNote, source = source,
                         // 醫師修邊後的組織比例（含「其他」）。用 state 裡的值而不是 lastXxx——
                         // 修邊完成時 applyEditedPolygon 已把它寫回 result，那才是醫師確認過的版本。

@@ -55,6 +55,12 @@ fun CaseSelectScreen(
     val ctx = androidx.compose.ui.platform.LocalContext.current
     /** 尚未同步到雲端的撤回。沒有完成的撤回必須**一直看得見**，不能只閃一次訊息。 */
     var pendingWd by remember { mutableStateOf<String?>(null) }
+    /**
+     * 後端服務降級。**這是「答案看起來正常但不可信」的那一類故障**：
+     * 分割模型或色準模組沒載到時服務照樣回 200、面積照樣有數字。
+     * 不主動講出來就沒有任何後續步驟會報錯，醫師會拿到一個沒有警告的錯答案。
+     */
+    var degraded by remember { mutableStateOf<String?>(null) }
     // 新增病患欄位
     var newName by remember { mutableStateOf("") }
     var newMrn by remember { mutableStateOf("") }
@@ -79,6 +85,10 @@ fun CaseSelectScreen(
         // 補做不會被感知到；而沒有完成的撤回代表病患的資料還留在雲端訓練佇列裡。
         runCatching { ConsentWithdrawal.retryPending(ctx) }
         pendingWd = ConsentWithdrawal.pendingBanner(ctx)
+        // 順便問一次健康度。ping 本來就會打 /api/health，這裡只是把它已經解出來的
+        // 降級狀態拿來顯示——不會多一次網路往返。
+        runCatching { BackendWarmup.ping(ctx) }
+        degraded = BackendWarmup.degradedBanner()
     }
 
     // 返回鍵逐層退出:簽名 → 傷口選取 → 病患選取 → 才真的離開。
@@ -141,6 +151,14 @@ fun CaseSelectScreen(
             style = MaterialTheme.typography.bodyMedium) }
         // 未完成的撤回：**常駐顯示直到真的完成**。
         // 一次性的訊息會被下一則蓋掉或被滑走，而這件事沒做完就等於同意書的承諾沒兌現。
+        degraded?.let {
+            Surface(color = MaterialTheme.colorScheme.errorContainer,
+                shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()) {
+                Text(it, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.padding(10.dp))
+            }
+        }
         pendingWd?.let {
             Surface(color = MaterialTheme.colorScheme.errorContainer,
                 shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()) {

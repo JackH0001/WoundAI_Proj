@@ -112,4 +112,10 @@ jobs:
           # 兩個 job 用同一個指令、結果不同，看起來會像模擬器的問題，
           # 而實際差別在 PATH 上的 Gradle 是哪一版。
           # wrapper（`gradle-wrapper.properties` 釘 8.13）本來就在版控裡，用它最省事。
-          script: ./gradlew connectedDebugAndroidTest --no-daemon
+          #
+          # `chmod +x` 是保險，不是多餘的：git 只記 100644/100755 這一個位元，
+          # 而 Windows 的檔案系統沒有執行位——從 Windows 提交 `gradlew` 就會把它記成
+          # 100644，Linux runner 上 `./gradlew` 直接 "Permission denied"。
+          # 2026-08-10 實際發生過（本次修的第二層）。已用 `git update-index --chmod=+x`
+          # 修正模式位，這一行保證未來再被 Windows 覆寫掉時 CI 仍然跑得起來。
+          script: chmod +x ./gradlew && ./gradlew connectedDebugAndroidTest --no-daemon

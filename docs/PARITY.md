@@ -24,30 +24,42 @@
 
 ```yaml
 # 格式：<檢查項>: <識別子>  # 理由
-allow:
-  classify_key_missing_android: [quality]
-  annotation_field_missing_android: [quality]
-  endpoint_missing_android: [/api/health]
+allow: {}
 ```
 
-### `quality`（iOS 有、Android 無）
+**目前沒有任何宣告的不對稱。** 空的 allow 清單是好事，但它有個前提：
+**過期的宣告比沒有宣告更危險**——它會讓一個真正的新落差被當成「早就允許了」而放行。
+所以補完一項就要從這裡刪掉，不要留著當歷史紀錄（歷史請看 git log）。
 
-iOS 讀取 classify 的 `quality`（對焦、過曝、marker 大小與傾斜）並隨標註送回後端。
-Android 目前不讀。
+### 已消除：`quality`（2026-08-10）
 
-**後果**：後端 `/api/v1/dataset/manifest` 的品質門檻（`min_focus` / `max_clipped` /
-`max_skew` / `min_marker_frac`）**只篩得掉 iOS 收的樣本**——Android 收的樣本缺這些欄位，
-會被當成「沒有品質資訊」而通過或漏掉，取決於門檻實作。
+iOS 讀取 classify 的 `quality`（對焦、過曝、marker 大小與傾斜）並隨標註送回後端，
+Android 先前不讀。後果是後端 `/api/v1/dataset/manifest` 的品質門檻
+（`min_focus` / `max_clipped` / `max_skew` / `min_marker_frac`）**只篩得掉 iOS 收的樣本**——
+門檻對缺欄位的紀錄一律放行（舊紀錄本來就沒有，擋掉會把早期樣本整批丟掉），
+於是 Android 收的模糊、過曝、角度過斜樣本會照樣進訓練集，而報表上看不出來。
 
-**打算**：Android 補上。這是**應該消除**的差異，不是設計選擇。
+Android 已於 `ClassifyResult.quality` 讀取、`submitAnnotation(quality=)` 回送。
+端上**不挑鍵、整包收**：後端加了新指標而端上硬編一份清單去挑，那個指標就永遠不會落盤，
+且沒有任何地方會報錯。
 
-### `/api/health`（iOS 有、Android 無）
+### 已消除：`/api/health` 降級警示（2026-08-10）
 
-iOS 啟動時打 `/api/health`，在服務降級（缺分割模型／缺色準模組）時警示使用者
-「面積與組織判讀不具臨床參考價值」。Android 用 `BackendWarmup` 只做冷啟動預熱，
-不檢查降級狀態。
+Android 已在 `BackendClient.health()`、`BackendWarmup.degradedBanner()` 補上，
+顯示於個案管理頁常駐橫幅與連線測試結果。
 
-**打算**：Android 補上降級警示。同上，應該消除。
+⚠ 健康度**在登入之前問**（`/api/health` 免認證）。放在登入成功之後的話，
+帳密還沒設對時就永遠看不到降級——而這兩件事的處置完全不同：
+一個叫人改帳密，一個叫人找管理者。
+
+### 兩端共有的限制：補送路徑不帶 `quality`
+
+`quality` 只在**當次量測**送得出去。從時間軸補送標註時，那些指標已經不在手上——
+兩端的 measurement 紀錄都只存 `quality: String`（值是 `"backend"`，是資料來源標記，
+不是品質指標），沒有欄位放這幾個數字。
+
+後果：補送的那一筆在訓練集匯出時**篩不掉**。這是兩端一致的行為，所以不是 parity 落差，
+但仍是缺陷。要消除得加一個 DB 欄位（`qualityJson`）與 migration，兩端同步做。
 
 ## 不在自動檢查範圍內的（需人工確認）
 

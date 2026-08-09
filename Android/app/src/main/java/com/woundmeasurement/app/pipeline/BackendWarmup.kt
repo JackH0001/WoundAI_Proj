@@ -45,6 +45,25 @@ object BackendWarmup {
 
     @Volatile private var lastOkAt: Long = 0L
 
+    /**
+     * 最近一次 `/api/health` 回報的降級原因；服務正常時為 null。
+     *
+     * ⚠ 這與下面 `ping` 註解裡「暖機失敗不在這裡跳警告」是**兩件不同的事**，
+     * 不要一起處理：
+     *
+     *  · 連不上 → 使用者按下量測時自然會看到錯誤，開 App 時先嚇一次沒有幫助。
+     *  · **降級 → 服務會照樣回 200、面積照樣有數字**，而分割模型或色準模組沒載到。
+     *    沒有任何後續步驟會報錯，醫師會拿到一個看起來正常的錯答案。
+     *    這種故障不講出來就永遠不會被發現。
+     */
+    @Volatile private var degradedReason: String? = null
+
+    /** 給畫面用的降級橫幅；服務正常或問不到時回 null。 */
+    fun degradedBanner(): String? = degradedReason?.let {
+        "⚠ 後端服務降級：$it\n" +
+        "此狀態下的面積或組織判讀不具參考價值，請先不要用於臨床決策，並通知管理者。"
+    }
+
     /** 距離最近一次成功接觸後端過了多久（毫秒）。未曾成功則回 Long.MAX_VALUE。 */
     fun sinceLastOkMs(): Long =
         if (lastOkAt == 0L) Long.MAX_VALUE else System.currentTimeMillis() - lastOkAt
@@ -61,8 +80,17 @@ object BackendWarmup {
             val req = Request.Builder().url("$base/api/health").get().build()
             http.newCall(req).execute().use { resp ->
                 val ok = resp.isSuccessful
-                if (ok) lastOkAt = System.currentTimeMillis()
-                Log.d(TAG, "warmup $base → ${resp.code}")
+                if (ok) {
+                    lastOkAt = System.currentTimeMillis()
+                    // 反正回應已經在手上，順手把降級狀態解出來——不必為此多打一次。
+                    degradedReason = runCatching {
+                        val j = org.json.JSONObject(resp.body!!.string())
+                        if (j.optString("status") == "degraded")
+                            j.optString("degraded_reason").ifBlank { "原因未提供" }
+                        else null
+                    }.getOrNull()
+                }
+                Log.d(TAG, "warmup $base → ${resp.code}${if (degradedReason != null) " (degraded)" else ""}")
                 ok
             }
         } catch (e: Exception) {
