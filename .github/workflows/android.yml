@@ -102,4 +102,14 @@ jobs:
           arch: x86_64
           profile: pixel_5
           working-directory: Android
-          script: gradle connectedDebugAndroidTest --no-daemon
+          # ⚠ 用 `./gradlew`，不要用裸的 `gradle`。
+          #
+          # 上面 assemble 那個 job 有一步 `gradle/actions/setup-gradle@v3` 把版本釘在 8.13，
+          # 註解寫明理由：runner 預設的 Gradle 9.6.x 移除了 AGP 依賴的內部 API。
+          # 但**那一步只作用於它自己的 job**——這個 job 沒有，於是 `gradle` 解析到
+          # runner 的預設版本，撞上同一個不相容。
+          #
+          # 兩個 job 用同一個指令、結果不同，看起來會像模擬器的問題，
+          # 而實際差別在 PATH 上的 Gradle 是哪一版。
+          # wrapper（`gradle-wrapper.properties` 釘 8.13）本來就在版控裡，用它最省事。
+          script: ./gradlew connectedDebugAndroidTest --no-daemon

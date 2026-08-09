@@ -41,6 +41,10 @@ import sys
 
 # 目錄 → 唯一寫者。比對時取**最長前綴**，所以 tools/ 可以覆寫 Android/ 之類的規則。
 OWNERS = [
+    # workflow 也要分寫者：ios.yml 只有 Mac 驗得了、android.yml 只有 Windows 驗得了。
+    # 一台機器改另一台的 CI，錯誤要等對方推下一筆才會浮現。
+    (".github/workflows/ios.yml", "mac"),
+    (".github/workflows/android.yml", "windows"),
     ("iOS/", "mac"),
     ("Android/", "windows"),
     ("Backend/", "windows"),
@@ -60,6 +64,24 @@ def sh(args):
     return r.returncode, (r.stdout or ""), (r.stderr or "")
 
 
+def sh_z(args):
+    """走 `-z`（NUL 分隔、原始位元組）的版本。
+
+    ⚠ git 預設會把**非 ASCII 檔名**用雙引號包起來並轉成八進位跳脫
+    （`"iOS/\\345\\256\\211..."`）。本工具第一版沒處理，於是
+    `iOS/安裝測試指南.md` 與 `iOS/首次編譯預檢_2026-08-08.md` 兩個**明明有追蹤**的
+    檔案被跳過，再被目錄掃描當成「多出來」報出來——第一次實戰就誤報兩筆。
+
+    一支會誤報的守門程式，用不了幾次就會被當成雜訊略過，那比沒有更糟。
+    `-z` 不做跳脫也不加引號，直接消滅整類問題。
+    """
+    r = subprocess.run(args, capture_output=True)
+    if r.returncode != 0:
+        return r.returncode, [], (r.stderr or b"").decode("utf-8", "replace")
+    parts = r.stdout.split(b"\0")
+    return 0, [p.decode("utf-8", "replace") for p in parts if p], ""
+
+
 def detect_platform():
     if sys.platform == "darwin":
         return "mac"
@@ -77,42 +99,89 @@ def owner_of(path):
 
 
 def changed_paths():
-    """已暫存＋未暫存＋未追蹤，全部算。未追蹤的最危險——它們不會出現在 diff 裡。"""
-    rc, out, err = sh(["git", "status", "--porcelain", "-uall"])
+    """已暫存＋未暫存＋未追蹤，全部算。未追蹤的最危險——它們不會出現在 diff 裡。
+
+    `-z` 格式：每筆是 `XY <path>\\0`；改名或複製會多接一個 `<old path>\\0`。
+    """
+    rc, items, err = sh_z(["git", "status", "--porcelain", "-uall", "-z"])
     if rc != 0:
         print("git status 失敗：" + err.strip())
         return None
-    paths = []
-    for line in out.splitlines():
-        if len(line) < 4:
+    paths, i = [], 0
+    while i < len(items):
+        it = items[i]
+        i += 1
+        if len(it) < 4:
             continue
-        p = line[3:].strip().strip('"')
-        # 改名是 "old -> new"，兩邊都要檢查
-        for part in p.split(" -> "):
-            part = part.strip().strip('"')
-            if part:
-                paths.append(part.replace("\\", "/"))
+        code, p = it[:2], it[3:]
+        paths.append(p.replace("\\", "/"))
+        if code[0] in ("R", "C"):      # 改名／複製的來源路徑另成一筆
+            if i < len(items):
+                paths.append(items[i].replace("\\", "/"))
+                i += 1
     return sorted(set(paths))
+
+
+def ref_blob(ref, path):
+    """該路徑在權威 ref 裡的 blob hash；不存在回 None。"""
+    rc, out, _ = sh_z(["git", "ls-tree", "-z", ref, "--", path])
+    if rc != 0 or not out:
+        return None
+    try:
+        return out[0].split("\t", 1)[0].split()[2]
+    except (IndexError, ValueError):
+        return None
+
+
+def matches_authority(path):
+    """這個檔案目前的內容，是否已經等於權威 ref 的版本（含「兩邊都不存在」）。
+
+    ⚠ 沒有這一段的話，**把別人的子樹還原成他的權威版本**會被當成違規擋下——
+    而那正是修復倒退時唯一該做的事。2026-08-09 第一次實戰就是這樣：
+    `git checkout cb7f3a9 -- iOS` 之後守門仍報 5 個違規，人只好無視它提交。
+    **被無視過一次的守門，之後就不再是守門了。**
+    """
+    ref = None
+    for prefix, r in SYNC_REFS.items():
+        if path.startswith(prefix):
+            ref = r
+            break
+    if ref is None:
+        return False
+    want = ref_blob(ref, path)
+    if not os.path.isfile(path):
+        return want is None          # 刪掉了，而權威版本本來也沒有 → 一致
+    rc, cur, _ = sh(["git", "hash-object", path])
+    return rc == 0 and want is not None and cur.strip() == want
 
 
 def check_ownership(platform):
     paths = changed_paths()
     if paths is None:
         return 1
-    bad = [(p, owner_of(p)) for p in paths
-           if owner_of(p) not in (platform, "both")]
+    viol = [p for p in paths if owner_of(p) not in (platform, "both")]
+    restored = [p for p in viol if matches_authority(p)]
+    bad = [p for p in viol if p not in restored]
+
     print("── 所有權 ──")
     print("  這台機器：%s ／ 有異動的檔案：%d" % (platform, len(paths)))
+    if restored:
+        print("  ○ %d 個檔案雖屬別台機器，但內容已等於權威版本（還原，放行）：" % len(restored))
+        for p in restored[:10]:
+            print("      " + p)
+        if len(restored) > 10:
+            print("      …另外 %d 個" % (len(restored) - 10))
     if not bad:
-        print("  ✓ 沒有動到別台機器負責的目錄")
+        print("  ✓ 沒有把別台機器的東西改成非權威內容")
         return 0
-    print("  ✗ 以下 %d 個檔案的寫者是別台機器：" % len(bad))
-    for p, who in bad[:40]:
-        print("      %-70s （屬於 %s）" % (p, who))
+    print("  ✗ 以下 %d 個檔案的寫者是別台機器，且內容與權威版本不同：" % len(bad))
+    for p in bad[:40]:
+        print("      %-70s （屬於 %s）" % (p, owner_of(p)))
     if len(bad) > 40:
         print("      …另外 %d 個" % (len(bad) - 40))
     print("\n  這些改動不該從這台機器提交。處置：")
-    print("      git checkout -- <目錄>     # 已追蹤檔案還原成 HEAD")
+    for prefix, ref in SYNC_REFS.items():
+        print("      git checkout %s -- %s" % (ref, prefix.rstrip("/")))
     print("      未追蹤的新增檔請自行移出工作區（先備份）")
     return 1
 
@@ -126,22 +195,18 @@ def check_sync():
     print("\n── 與遠端同步 ──")
     worst = 0
     for prefix, ref in SYNC_REFS.items():
-        rc, out, _ = sh(["git", "ls-tree", "-r", ref, "--", prefix.rstrip("/")])
+        rc, entries, _ = sh_z(["git", "ls-tree", "-r", "-z", ref, "--", prefix.rstrip("/")])
         if rc != 0:
             print("  ? 取不到 %s（沒 fetch 過？）—— 略過 %s" % (ref, prefix))
             worst = max(worst, 2)
             continue
+        out = "\n".join(entries)     # 供下方 known 集合沿用同一份資料
         diff, miss, total = [], [], 0
-        for line in out.splitlines():
+        for line in entries:
             try:
                 meta, path = line.split("\t", 1)
                 sha = meta.split()[2]
             except (ValueError, IndexError):
-                continue
-            path = path.strip().strip('"')
-            # git 對非 ASCII 檔名會輸出八進位跳脫；那種檔名這裡不比對，
-            # 硬解跳脫容易解錯，而誤報比漏報更會讓人不再相信這支工具。
-            if "\\" in path:
                 continue
             total += 1
             if not os.path.isfile(path):
