@@ -46,6 +46,11 @@ TISSUE_DIR = os.path.join(FLYWHEEL_DIR, "tissue_masks")
 # 深度圖與置信度圖（WoundAI3D）。同樣與影像分開：深度是另一個感測器的產物，
 # 保存期限、撤回隔離、匯出規則都可能與 RGB 不同，混在一起之後再分很痛。
 DEPTH_DIR = os.path.join(FLYWHEEL_DIR, "depth_maps")
+# 補傳深度的索引。**為什麼要側檔而不是改佇列裡那一筆**：
+# retrain_queue.jsonl 是唯讀累加的稽核物件，就地改寫會破壞它的意義
+# （withdrawn / retracted 也都是側檔，同一條原則）。
+# 而 iOS 的深度是「先送標註、之後才補傳 sidecar」，補傳時那筆標註早就落盤了。
+DEPTH_INDEX = os.path.join(FLYWHEEL_DIR, "depth_index.jsonl")
 AUDIT = os.path.join(FLYWHEEL_DIR, "audit.jsonl")
 IMAGES_DIR = os.path.join(FLYWHEEL_DIR, "images")
 QUARANTINE_DIR = os.path.join(FLYWHEEL_DIR, "quarantine")
@@ -365,6 +370,93 @@ def is_duplicate(path, poly, image_id=None):
     sig = poly_sig(poly)
     if not sig or sig == poly_sig([]): return False
     return any(poly_sig(r.get("gt_polygon")) == sig for r in read_jsonl(path))
+
+
+DEPTH_MIN_M = 0.05      # 5 cm：鏡頭最近對焦距離之內不可能是傷口
+DEPTH_MAX_M = 5.0       # 5 m：手持近拍不會到這麼遠；到了就是單位或座標系不對
+
+
+def validate_depth_payload(raw: bytes, meta: dict):
+    """原始 float32 深度圖的守門。回 `(ok, issues)`。
+
+    ## 為什麼這裡要擋得比 PNG 那條路徑更用力
+
+    16-bit PNG 至少有 IHDR：位元深度寫在檔頭裡，錯了看得出來。
+    **原始 f32 沒有任何自我描述**——截斷的、全零的、大端序的、
+    單位寫成毫米的，全都只是一串長度不同的位元組，不會有任何一步報錯。
+
+    它們會在半年後有人要拿這批資料建模時才現形，而深度圖**事後補不回來**
+    （它只存在於拍攝當下）。所以寧可在這裡退件，也不要收下一份不能用的檔案：
+    退件會被看見並重傳，收下不能用的則會安靜地變成假庫存。
+    """
+    import struct
+    issues = []
+
+    w, h = meta.get("width"), meta.get("height")
+    if not isinstance(w, int) or not isinstance(h, int) or w <= 0 or h <= 0:
+        return False, ["meta 缺 width/height（正整數）；沒有尺寸就無法驗證完整性"]
+
+    # 唯一抓得到截斷的檢查。少了它，一個傳到一半斷線的檔案會被當成正常收下。
+    want = w * h * 4
+    if len(raw) != want:
+        issues.append("深度資料長度 %d 與 width×height×4=%d 不符（截斷或尺寸宣告錯誤）"
+                      % (len(raw), want))
+        return False, issues
+    if want > 64 * 1024 * 1024:
+        return False, ["深度圖超過 64MB"]
+
+    fmt = (meta.get("format") or "f32_le_meters").lower()
+    if fmt not in ("f32_le_meters", "raw_f32_m"):
+        issues.append("format 只接受 f32_le_meters（實際：%s）。"
+                      "本端點不做單位或位元組序轉換——猜錯了不會有任何錯誤訊息" % fmt)
+
+    ci = meta.get("camera_intrinsics") or {}
+    miss = [k for k in ("fx", "fy", "cx", "cy") if not isinstance(ci.get(k), (int, float))]
+    if miss:
+        issues.append("camera_intrinsics 缺 %s。沒有內參就反投影不了（X=(u−cx)·Z/fx），"
+                      "深度圖存下來也建不了模，而那些值事後查不到" % "、".join(miss))
+    # 內參的參考解析度若與深度圖不同，反投影要先縮放；沒宣告就無從得知該不該縮。
+    rw, rh = ci.get("ref_width"), ci.get("ref_height")
+    if isinstance(rw, int) and isinstance(rh, int) and (rw <= 0 or rh <= 0):
+        issues.append("camera_intrinsics.ref_width/ref_height 必須是正整數")
+
+    # ⚠ 這個函式**不可以拋例外**。呼叫端（端點）雖然有 try/except 兜著，
+    # 但那樣一來退件理由會從「截斷或尺寸宣告錯誤」變成
+    # `unpack requires a buffer of 768 bytes`——技術上沒錯，對要重傳的人卻沒有用。
+    # 上面的長度檢查照理已經擋掉所有會讓 unpack 失敗的情況；這一層是防它日後被改壞。
+    try:
+        vals = struct.unpack("<%df" % (w * h), raw)
+    except struct.error as e:
+        return False, ["深度資料解不開（%s）：長度與宣告的 %dx%d 不相符" % (e, w, h)]
+    finite = [v for v in vals if v == v and -1e30 < v < 1e30]      # v == v 濾掉 NaN
+    valid = [v for v in finite if DEPTH_MIN_M <= v <= DEPTH_MAX_M]
+    cov = len(valid) / float(w * h)
+    if cov < 0.05:
+        # 全零、全 NaN、單位寫成毫米（於是每個值都 > 5.0）都會落在這裡。
+        big = sum(1 for v in finite if v > DEPTH_MAX_M)
+        hint = ""
+        if big > 0.5 * len(finite):
+            hint = ("；超過一半的值 > %g，看起來像是**單位是毫米而不是公尺**"
+                    % DEPTH_MAX_M)
+        elif all(v == 0.0 for v in finite[:1000]) and finite:
+            hint = "；前 1000 個值全為 0，看起來像是未寫入的緩衝區"
+        issues.append("有效深度覆蓋率只有 %.1f%%（%g–%g m 之內），低於 5%%%s"
+                      % (cov * 100, DEPTH_MIN_M, DEPTH_MAX_M, hint))
+    meta.setdefault("coverage", round(cov, 4))
+    if valid:
+        meta.setdefault("min_m", round(min(valid), 4))
+        meta.setdefault("max_m", round(max(valid), 4))
+    return (not issues), issues
+
+
+def depth_index_map(path=None):
+    """image_id → 最後一筆深度索引。佇列是唯讀累加的，補傳只能靠側檔 join。"""
+    out = {}
+    for e in read_jsonl(path or DEPTH_INDEX):
+        iid = e.get("image_id")
+        if iid:
+            out[iid] = e          # 後寫的覆蓋先寫的：重傳以最新那一份為準
+    return out
 
 
 def withdrawn_keys(withdrawn_path=None):
@@ -945,6 +1037,114 @@ try:
                         "image_id": image_id, "note": note}), 200
 
 
+    @flywheel_bp.route("/api/v1/depth", methods=["POST"])
+    @jwt_required()
+    def post_depth():
+        """補傳原始深度圖（WoundAI3D）。`multipart/form-data`。
+
+            image_id   : 既有標註的影像代碼（綁定用）
+            depth_f32  : 原始位元組，float32 little-endian，**單位公尺**
+            meta       : JSON 字串（見下）
+
+        ## 為什麼要一個獨立端點，而不是塞進 annotation
+
+        1. **時序不同。** iOS 的深度是 sidecar：標註當下先存本機（`depth_source=lidar_local`），
+           有網路時才補傳。那時標註早已落盤，塞不進去。
+        2. **量體不同。** LiDAR 深度 256×192×4B ≈ 200KB 原始位元組；
+           base64 進 JSON 會膨脹成 ~260KB，而 annotation 的 JSON 還帶著遮罩 PNG。
+        3. **格式不同。** annotation 走的是 16-bit PNG（毫米整數，Android/ARCore）；
+           這裡是 float32 公尺原樣。**量化對曲率是不可逆的損失**，所以不轉換。
+
+        ## 為什麼驗證得這麼囉嗦
+
+        原始位元組**沒有魔術數字**——PNG 至少有 IHDR 可以驗位元深度，f32 沒有。
+        一段截斷的、全零的、或大端序的資料看起來完全一樣，都是一串 bytes。
+        它們不會在這裡出錯，會在半年後有人要建模時才發現整批不能用，
+        而那時深度圖已經補不回來了。所以：
+
+          · `len(bytes) == w*h*4`：唯一能抓到截斷的檢查
+          · 內參必填：沒有 fx/fy/cx/cy 就反投影不了，存下來是「有資料但不能用」的假庫存
+          · 有限值比例與距離範圍：全零／全 NaN／單位寫成毫米的，在這裡就要擋下
+        """
+        actor, role, org = _who()
+        if not _can(role, "annotation.submit"):
+            audit(actor, "depth_rejected", "?", f"角色 {role} 不具送標註權限", role, org)
+            return jsonify({"error": "權限不足",
+                            "issues": [f"角色 {role} 不得上傳深度資料。"]}), 403
+
+        image_id = (request.form.get("image_id") or "").strip()
+        if not image_id:
+            return jsonify({"error": "缺 image_id"}), 400
+
+        # 同意檢查排在最前面，理由與 annotation 相同：撤回後的補傳若先撞上
+        # 「查無標註」，稽核軌跡記下的就是錯誤的拒絕理由，而 IRB 要看的正是這件事。
+        wd_codes, wd_imgs = withdrawn_keys()
+        if image_id in wd_imgs or is_quarantined(image_id):
+            msg = f"影像 {image_id} 已撤回訓練同意，不接受深度補傳"
+            audit(actor, "depth_rejected", image_id, msg, role, org)
+            return jsonify({"error": "不符上傳規範", "issues": [msg]}), 400
+
+        # 必須綁得到既有標註。孤兒深度圖沒有 GT 可以配對，
+        # 只會佔空間並在盤點時製造「有 N 筆深度」的錯覺。
+        recs = [r for r in read_jsonl(QUEUE) if r.get("image_id") == image_id]
+        if not recs:
+            msg = f"查無 image_id={image_id} 的標註。請先送出標註再補傳深度"
+            audit(actor, "depth_rejected", image_id, msg, role, org)
+            return jsonify({"error": "不符上傳規範", "issues": [msg]}), 400
+        rec = recs[-1]
+        if rec.get("code") in wd_codes:
+            msg = f"代碼 {rec.get('code')} 已撤回訓練同意，不接受深度補傳"
+            audit(actor, "depth_rejected", rec.get("code", "?"), msg, role, org)
+            return jsonify({"error": "不符上傳規範", "issues": [msg]}), 400
+
+        f = request.files.get("depth_f32")
+        if f is None:
+            return jsonify({"error": "缺 depth_f32"}), 400
+        raw = f.read()
+
+        try:
+            meta = json.loads(request.form.get("meta") or "{}")
+            if not isinstance(meta, dict):
+                raise ValueError("meta 必須是 JSON 物件")
+            ok, issues = validate_depth_payload(raw, meta)
+            if not ok:
+                raise ValueError("；".join(issues))
+        except Exception as e:
+            audit(actor, "depth_rejected", rec.get("code", "?"), str(e), role, org)
+            return jsonify({"error": "深度資料不符規範", "issues": [str(e)]}), 400
+
+        key = _key(os.path.join(DEPTH_DIR, image_id + ".f32"))
+        _store().put_blob(key, raw)
+        _store().put_blob(_key(os.path.join(DEPTH_DIR, image_id + ".meta.json")),
+                          json.dumps(meta, ensure_ascii=False).encode("utf-8"))
+
+        entry = {
+            "image_id": image_id,
+            "code": rec.get("code"),
+            "depth_key": "depth_maps/%s.f32" % image_id,
+            "depth_meta_key": "depth_maps/%s.meta.json" % image_id,
+            "depth_format": "raw_f32_m",
+            "depth_source": meta.get("depth_source") or "lidar",
+            "bytes": len(raw),
+            # 內容雜湊。重傳（斷網重試很正常）要能分辨「同一份又送一次」與
+            # 「換了一份蓋掉」——後者在稽核上是完全不同的事件。
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "actor": actor, "received_at": utc_now(),
+        }
+        prev = [x for x in read_jsonl(DEPTH_INDEX) if x.get("image_id") == image_id]
+        replaced = bool(prev) and prev[-1].get("sha256") != entry["sha256"]
+        append_jsonl(DEPTH_INDEX, entry)
+        audit(actor, "depth_stored", rec.get("code", "?"),
+              "%d bytes %dx%d；%s" % (len(raw), meta.get("width", 0), meta.get("height", 0),
+                                      "覆蓋前一份" if replaced else
+                                      ("重複上傳，內容相同" if prev else "首次")),
+              role, org)
+        return jsonify({"status": "stored", "image_id": image_id,
+                        "depth_id": entry["sha256"][:16],
+                        "depth_source": entry["depth_source"],
+                        "replaced_previous": replaced}), 200
+
+
     @flywheel_bp.route("/api/v1/retract", methods=["POST"])
     @jwt_required()
     def post_retract():
@@ -1068,6 +1268,10 @@ try:
             else:
                 rt_meta[r.get("image_id")] = r
 
+        # 補傳深度的側檔索引。一次讀完再 join，不要在迴圈裡逐筆查——
+        # 佇列上千筆時那是上千次檔案讀取。
+        _dix = depth_index_map()
+
         f_status = request.args.get("status")
         out = []
         for r, st in tagged:
@@ -1101,9 +1305,15 @@ try:
                 "tissue_edited": bool(r.get("tissue_edited")),
                 "tissue_edit_px": r.get("tissue_edit_px"),
                 "tissue_frac": r.get("tissue_frac"),
-                # 深度：現在一律 none。**明確顯示 none 比欄位缺席重要**——
-                # 日後回頭看「這批為什麼沒有 3D」時，要分得出「沒拍」與「拍了沒存」。
-                "depth_source": r.get("depth_source") or "none",
+                # 深度。**明確顯示 none 比欄位缺席重要**——日後回頭看
+                # 「這批為什麼沒有 3D」時，要分得出「沒拍」「拍了沒傳」「傳了被拒」。
+                #
+                # ⚠ 側檔優先：補傳的深度（POST /api/v1/depth）不會、也不該回頭改寫
+                # 佇列裡那一筆（唯讀累加）。只看紀錄本身的話，補傳成功的樣本會
+                # 永遠顯示 lidar_local——主控台說沒傳，而檔案其實躺在 depth_maps/。
+                "depth_source": (_dix.get(r.get("image_id"), {}).get("depth_source")
+                                 or r.get("depth_source") or "none"),
+                "depth_bytes": _dix.get(r.get("image_id"), {}).get("bytes"),
                 "capture_device": r.get("capture_device"),
                 # 影像品質旗標。對焦不足／過曝／標記太小都會讓面積不可信，
                 # 而那是排除的正當理由之一（且比事後看面積異常更早發現）。

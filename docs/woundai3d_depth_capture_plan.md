@@ -53,10 +53,34 @@ MVP 刻意選**單張 RGB-D**：醫師工作流完全不變（按一次快門）
 
 「沒拍」與「拍了沒傳」分得出來，日後盤點資料集才知道哪些樣本可以回收深度。
 
-**後端端點提案（P2，後端工作）**：`POST /api/v1/depth`
-`multipart: {image_id, depth_f32(raw bytes), meta(json)}`；以 `image_id` 綁定既有影像；
-守門同 annotation（JWT＋consent_train）；存 GCS `depth/` 前綴；回 `depth_id`。
-App 端屆時把 sidecar 補傳並將 `depth_source` 升級為 `lidar`（本機 sidecar 保留為原始檔）。
+**後端端點（2026-08-10 已實作）**：`POST /api/v1/depth`，`multipart/form-data`
+
+    image_id   既有標註的影像代碼
+    depth_f32  原始位元組，float32 little-endian，單位公尺（不壓縮、不量化）
+    meta       JSON：width/height/format/camera_intrinsics{fx,fy,cx,cy,ref_width,ref_height}
+
+回 `{status, image_id, depth_id, depth_source, replaced_previous}`。
+守門同 annotation（JWT ＋ `annotation.submit` 權限 ＋ 撤回同意檢查）。
+
+**退件條件**（都會寫進 `audit.jsonl` 的 `depth_rejected`）：
+
+| 條件 | 為什麼一定要在收之前擋 |
+|---|---|
+| `len(bytes) ≠ w×h×4` | 原始 f32 沒有魔術數字，這是唯一抓得到截斷的檢查 |
+| 缺 `fx/fy/cx/cy` | 反投影不了（X=(u−cx)·Z/fx），存下來是「有資料但不能用」的假庫存 |
+| 有效覆蓋率 < 5%（0.05–5 m） | 一次擋掉全零、單位寫成毫米、大端序三種——它們在位元組層面看起來完全一樣 |
+| `format` 不是 `f32_le_meters` | 本端點不做單位或位元組序轉換：猜錯了不會有任何錯誤訊息 |
+
+**儲存**：`depth_maps/<image_id>.f32` ＋ `.meta.json`。補傳寫進側檔
+`depth_index.jsonl`，**不改寫 `retrain_queue.jsonl`**（唯讀累加的稽核物件，
+與 withdrawn / retracted 同一條原則）。`/api/v1/flywheel/records` 以側檔優先 join，
+所以補傳成功後主控台顯示 `lidar` 而非 `lidar_local`。
+
+重傳以 sha256 分辨「斷網重試（同一份）」與「換了一份蓋掉」，回應的
+`replaced_previous` 與稽核訊息都分得出來。
+
+**待 iOS 端接上**：有網路時補傳 sidecar，成功後把該筆的 `depth_source` 由
+`lidar_local` 升級為 `lidar`（本機 sidecar 保留為原始檔）。
 
 ## 五、驗證計劃
 
