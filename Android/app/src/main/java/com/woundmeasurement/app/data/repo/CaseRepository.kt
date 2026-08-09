@@ -112,6 +112,32 @@ class CaseRepository(
     suspend fun getCase(id: Long) = withContext(Dispatchers.IO) { cases.getById(id) }
     suspend fun closeCase(id: Long) = withContext(Dispatchers.IO) { cases.close(id, Date()) }
 
+    /**
+     * 刪除**空**個案（建錯的那種）。有任何量測就拒絕——那是病歷，走「結案」。
+     * 空個案可真刪：沒有臨床紀錄要保全；wdCode 即使已隨②同意同步上雲，
+     * 留在雲端的只是沒資料掛著的代碼，無害。規則與 iOS 完全一致。
+     */
+    suspend fun deleteCaseIfEmpty(id: Long): Boolean = withContext(Dispatchers.IO) {
+        if (measurements.getCountByCase(id) > 0) return@withContext false
+        cases.deleteById(id); true
+    }
+
+    /**
+     * 刪除單筆量測。**只允許沒送出過訓練標註的**——送出過的已進雲端 append-only 佇列，
+     * 本機刪了兩邊對不上帳；那種用主控台「誤送排除」。連同加密影像與柵格檔一起清
+     * （先刪列再刪檔，反向會留死路徑）。
+     */
+    suspend fun deleteMeasurementIfUnsubmitted(
+        id: Long, imageStore: com.woundmeasurement.app.data.store.LocalImageStore
+    ): Boolean = withContext(Dispatchers.IO) {
+        val m = measurements.getById(id) ?: return@withContext false
+        if (m.annotationSubmitted) return@withContext false
+        measurements.deleteById(id)
+        if (m.imagePath.isNotEmpty()) runCatching { imageStore.delete(m.imagePath) }
+        m.rasterPath?.takeIf { it.isNotEmpty() }?.let { runCatching { imageStore.delete(it) } }
+        true
+    }
+
     // ---------- 知情同意 ----------
 
     /**

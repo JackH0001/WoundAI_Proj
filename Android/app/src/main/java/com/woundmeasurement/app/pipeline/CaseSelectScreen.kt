@@ -319,6 +319,20 @@ fun CaseSelectScreen(
                                  else "查看此傷口時間軸（尚無紀錄）")
                         }
                     }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        // 結案＝有紀錄的正途：清單消失、數字趨勢保留、90 天後影像自動清。
+                        TextButton({ scope.launch {
+                            repo.closeCase(c.id); selectedCaseId = null; reloadPatient(p)
+                            msg = "已結案 ${c.wdCode}。紀錄與趨勢保留，不再出現在開啟清單。"
+                        } }, Modifier.weight(1f)) { Text("結案") }
+                        // 刪除僅限空個案（建錯的）；有量測會被 repo 擋下——病歷要留痕。
+                        TextButton({ scope.launch {
+                            if (repo.deleteCaseIfEmpty(c.id)) {
+                                selectedCaseId = null; reloadPatient(p)
+                                msg = "已刪除空個案 ${c.wdCode}。"
+                            } else msg = "⚠ 此個案已有量測紀錄，不可刪除——請改用「結案」。"
+                        } }, Modifier.weight(1f)) { Text("刪除（限空個案）", color = MaterialTheme.colorScheme.error) }
+                    }
                     Text("（再點一次上方傷口可取消選取，並顯示「新增個案傷口」）",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)

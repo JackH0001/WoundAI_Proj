@@ -34,6 +34,9 @@ interface WoundCaseDao {
     @Query("SELECT COUNT(*) FROM wound_cases WHERE wdCode = :wdCode")
     suspend fun countByWdCode(wdCode: String): Int
 
+    @Query("DELETE FROM wound_cases WHERE id = :id")
+    suspend fun deleteById(id: Long)
+
     @Query("UPDATE wound_cases SET closedAt = :closedAt WHERE id = :id")
     suspend fun close(id: Long, closedAt: java.util.Date)
 }

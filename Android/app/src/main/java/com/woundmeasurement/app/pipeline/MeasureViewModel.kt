@@ -110,6 +110,9 @@ class MeasureViewModel(
      */
     @Volatile var lastImageReused: Boolean = false
         private set
+    /** 被自動排除的「貼紙誤認傷口」數（AI 把 ArUco 印刷方塊當壞死組織）。UI 要明講並可在修邊補畫。 */
+    @Volatile var lastMarkerDropped: Int = 0
+        private set
 
     /**
      * 換一張影像時清空所有「上一次分析」的殘留。
@@ -257,6 +260,27 @@ class MeasureViewModel(
                     )
                 }
                 bindImage(identity = bitmap, canvas = work)   // 編輯/顯示用縮圖(polygon 座標即此圖座標)
+                // ArUco 認到貼紙時，剔除「大部分壓在貼紙上」的輪廓（≥70% 點落在外擴 15% 框內）。
+                // 只沾到邊的不動；剔了一定說出來（lastMarkerDropped）且可在修邊畫面手動補畫。
+                lastMarkerDropped = 0
+                quadCap?.takeIf { it.size == 4 }?.let { q ->
+                    val x0 = q.minOf { it[0] }.toDouble(); val x1 = q.maxOf { it[0] }.toDouble()
+                    val y0 = q.minOf { it[1] }.toDouble(); val y1 = q.maxOf { it[1] }.toDouble()
+                    val ex = (x1 - x0) * 0.15; val ey = (y1 - y0) * 0.15
+                    fun onMarker(poly: List<List<Int>>): Boolean {
+                        if (poly.isEmpty()) return false
+                        val inside = poly.count {
+                            it[0] >= x0 - ex && it[0] <= x1 + ex && it[1] >= y0 - ey && it[1] <= y1 + ey
+                        }
+                        return inside.toDouble() / poly.size >= 0.7
+                    }
+                    val kept = polysCap.filter { !onMarker(it) }
+                    lastMarkerDropped = polysCap.size - kept.size
+                    if (lastMarkerDropped > 0) {
+                        polysCap = kept
+                        polyCap = kept.maxByOrNull { it.size } ?: emptyList()
+                    }
+                }
                 lastPolygon = polyCap
                 // 後端已改為回傳所有連通元件；舊後端只有一個時退回單一輪廓。
                 lastPolygons = polysCap.ifEmpty {

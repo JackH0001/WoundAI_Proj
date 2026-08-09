@@ -219,6 +219,13 @@ fun MeasureValidationEntry(
                     color = MaterialTheme.colorScheme.error)
             }
 
+            if (vm.lastMarkerDropped > 0) {
+                Text("⚠ 已自動排除 ${vm.lastMarkerDropped} 個與校正貼紙重疊的辨識區域" +
+                     "（AI 把貼紙認成了傷口）。若貼紙旁確有傷口，請在「醫師確認・修邊」手動補畫。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error)
+            }
+
             // 選錯來源的救援提示:AI 空手但後端色彩分割抓得到 → 這幾乎一定是印刷模擬圖被選成臨床/範例。
             // 沒有這個提示,使用者只會看到「AI 未偵測到傷口」,誤以為模型壞了而去手畫。
             if (vm.lastPhantomHint && source != "phantom") {
