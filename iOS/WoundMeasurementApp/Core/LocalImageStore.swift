@@ -98,7 +98,8 @@ final class LocalImageStore {
         guard let items = try? FileManager.default.contentsOfDirectory(
             at: dir, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
         return items.reduce(Int64(0)) { acc, u in
-            acc + Int64((try? u.resourceValues(forKeys: [.fileSizeKey]).fileSize) as? Int ?? 0)
+            // `try?` 已把 Int?? 攤平成 Int?，再 `as? Int` 是 no-op（編譯器警告），?? 即可。
+            acc + Int64((try? u.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         }
     }
 }

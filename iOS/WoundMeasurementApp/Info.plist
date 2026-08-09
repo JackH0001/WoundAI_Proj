@@ -2,8 +2,76 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!--
+	  ===== bundle 必要鍵 =====
+
+	  這一段不能省。`GENERATE_INFOPLIST_FILE = NO` 時 Xcode **不會**自動補任何
+	  CFBundle* 鍵——它只是照抄這個檔案再展開 $() 變數。Xcode 13 之前的專案樣板
+	  是把這些鍵直接寫在 Info.plist 裡的，13 之後改成由建置設定生成，於是手寫
+	  Info.plist 很容易只寫了自訂鍵、漏掉樣板本來就有的這一批。
+
+	  漏掉的症狀不是編譯錯誤，是安裝到裝置時的：
+	    The item at WoundMeasurementApp.app is not a valid bundle.
+	    Ensure that your bundle's Info.plist contains a value for the CFBundleIdentifier key.
+	  ——編譯、連結、簽章全部成功，最後一步才失敗。
+
+	  值一律用 $() 引用建置設定，讓 project.yml 維持單一事實來源
+	  （版號對齊 Android version.properties 的機制才不會被這裡的硬編碼繞過）。
+	-->
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+
 	<key>CFBundleDisplayName</key>
 	<string>WoundAI</string>
+
+	<!--
+	  UILaunchScreen 少了會怎樣：iOS 14 以後沒有這一鍵（也沒有舊式 LaunchScreen.storyboard）
+	  的 App 會被當成舊版相容模式，在現代機型上以 320×568 放大顯示、上下留黑邊。
+	  它不報錯，只是整個 App 看起來像壞掉。空 dict = 用系統背景色的純色啟動畫面。
+	-->
+	<key>UILaunchScreen</key>
+	<dict/>
+
+	<!--
+	  TARGETED_DEVICE_FAMILY = "1,2"（iPhone + iPad），所以兩組方向都要給。
+	  目前開放橫向是保守作法——之後修邊畫面若確定只在直向操作，把 iPhone 這組
+	  收成只剩 Portrait，別讓醫師在描邊到一半時因為手滑轉向而重繪畫布。
+	-->
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+	</array>
+	<key>UIApplicationSupportsIndirectInputEvents</key>
+	<true/>
 
 	<key>NSCameraUsageDescription</key>
 	<string>拍攝傷口影像以進行面積量測與組織判讀。影像加密儲存於本機。</string>

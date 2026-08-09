@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WoundAI 使用說明書</title>
+<!--
+  ⚠ 這份手冊的每一個按鈕名稱、訊息文字、閘門條件都取自原始碼。
+  改程式時請一併更新，並跑 engineering/phase2/test_manual_consistency.py
+  ——手冊寫錯會讓醫師照著做錯事，而那比沒有手冊更糟。
+-->
+<style>
+:root{
+  --bg:#fbfbfd; --fg:#1a1c1e; --dim:#5f6368; --line:#e3e5e8;
+  --card:#fff; --accent:#1a5fb4; --ok:#1d7a4d; --warn:#a3620a; --bad:#b3261e;
+  --t1:#1d9e75; --t2:#ef9f27; --t3:#3c3489; --t4:#ed93b1; --t5:#b4b2a9; --edge:#00e5ff;
+}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.7 -apple-system,"Noto Sans TC","Microsoft JhengHei",sans-serif;
+     background:var(--bg);color:var(--fg);-webkit-text-size-adjust:100%}
+.wrap{max-width:860px;margin:0 auto;padding:16px 16px 64px}
+h1{font-size:26px;margin:8px 0 4px;letter-spacing:-.3px}
+h2{font-size:21px;margin:36px 0 10px;padding-top:14px;border-top:2px solid var(--line)}
+h3{font-size:17px;margin:22px 0 8px}
+p,li{margin:8px 0}
+code{background:#eef1f4;padding:1px 5px;border-radius:4px;font-size:.9em;
+     font-family:ui-monospace,Menlo,Consolas,monospace;word-break:break-all}
+.sub{color:var(--dim);font-size:14px;margin-top:0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin:14px 0}
+.warn{border-left:4px solid var(--warn);background:#fff8ec}
+.bad{border-left:4px solid var(--bad);background:#fdf0ef}
+.ok{border-left:4px solid var(--ok);background:#f0f8f3}
+.info{border-left:4px solid var(--accent);background:#eff5fd}
+.card h4{margin:0 0 6px;font-size:16px}
+table{width:100%;border-collapse:collapse;margin:12px 0;font-size:14px;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+th{background:#f2f4f7;font-weight:600;white-space:nowrap}
+.btn{display:inline-block;border:1.5px solid var(--accent);color:var(--accent);
+     border-radius:20px;padding:1px 11px;font-size:13px;white-space:nowrap;font-weight:600}
+.btn.fill{background:var(--accent);color:#fff}
+.role-bar{position:sticky;top:0;background:var(--bg);padding:10px 0;z-index:9;
+          border-bottom:1px solid var(--line);display:flex;gap:6px;flex-wrap:wrap}
+.role-bar button{flex:1 1 auto;min-width:76px;border:1.5px solid var(--line);background:#fff;
+     color:var(--dim);border-radius:20px;padding:7px 6px;font-size:14px;cursor:pointer;font-family:inherit}
+.role-bar button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.r{display:none}
+.r.show{display:block}
+svg{max-width:100%;height:auto;display:block;margin:10px auto}
+.swatch{display:inline-block;width:15px;height:15px;border-radius:3px;
+        vertical-align:-2px;margin-right:5px;border:1px solid rgba(0,0,0,.25)}
+.toc a{display:block;padding:4px 0;color:var(--accent);text-decoration:none}
+ol{padding-left:22px}ul{padding-left:20px}
+.kbd{font-size:13px;color:var(--dim)}
+footer{margin-top:44px;padding-top:14px;border-top:1px solid var(--line);
+       color:var(--dim);font-size:13px}
+@media print{
+  .role-bar{display:none}.r{display:block !important}
+  body{background:#fff}.card{break-inside:avoid}h2{break-before:auto}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>WoundAI 使用說明書</h1>
+<p class="sub">傷口量測與標註 App ・ 臨床人員操作指南</p>
+
+<div class="card bad">
+<h4>先讀這一段</h4>
+<p><b>本系統是輔助工具，不是診斷器材。</b>面積、組織比例、PUSH 分數都需要醫師確認後才有意義。
+AI 給出的初始輪廓經常需要修正——那不是故障，那正是設計上要醫師介入的地方。</p>
+<p style="margin-bottom:0"><b>病患姓名與病歷號永遠不會離開這支手機。</b>送到雲端的只有去識別代碼
+（<code>WD-</code> 開頭）、傷口輪廓與影像。這是同意書對病患的承諾。</p>
+</div>
+
+<div class="role-bar" id="rolebar">
+  <button data-r="all" class="on">全部</button>
+  <button data-r="doc">醫師</button>
+  <button data-r="nur">護理師</button>
+  <button data-r="asi">助理</button>
+  <button data-r="eng">工程師／管理者</button>
+</div>
+
+<!-- ═══════════════ 共通：整體流程 ═══════════════ -->
+<div class="r show" data-r="all doc nur asi eng">
+
+<h2 id="flow">一、整體流程一眼看懂</h2>
+
+<svg viewBox="0 0 820 470" role="img" aria-label="臨床量測完整流程圖">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5f6368"/>
+    </marker>
+    <style>
+      .bx{fill:#fff;stroke:#c8ccd2;stroke-width:1.5;rx:10}
+      .bd{fill:#eff5fd;stroke:#1a5fb4;stroke-width:2;rx:10}
+      .bn{fill:#f0f8f3;stroke:#1d7a4d;stroke-width:1.5;rx:10}
+      .t{font:14px sans-serif;fill:#1a1c1e}
+      .ts{font:11.5px sans-serif;fill:#5f6368}
+      .tw{font:11.5px sans-serif;fill:#a3620a}
+      .ln{stroke:#5f6368;stroke-width:1.6;fill:none;marker-end:url(#a)}
+    </style>
+  </defs>
+
+  <rect class="bn" x="16" y="14" width="180" height="56"/>
+  <text class="t" x="30" y="38">① 個案</text>
+  <text class="ts" x="30" y="56">建病患 → 簽同意 → 建傷口</text>
+
+  <rect class="bx" x="228" y="14" width="176" height="56"/>
+  <text class="t" x="242" y="38">② 拍照／選圖</text>
+  <text class="ts" x="242" y="56">貼紙要完整入鏡</text>
+
+  <rect class="bx" x="436" y="14" width="176" height="56"/>
+  <text class="t" x="450" y="38">③ AI 量測</text>
+  <text class="ts" x="450" y="56">面積・組織・PUSH</text>
+
+  <rect class="bx" x="644" y="14" width="160" height="56"/>
+  <text class="t" x="658" y="38">④ 輸入滲液</text>
+  <text class="ts" x="658" y="56">0–3，必填</text>
+
+  <rect class="bd" x="436" y="120" width="176" height="62"/>
+  <text class="t" x="450" y="145">⑤ 醫師確認・修邊</text>
+  <text class="ts" x="450" y="163">邊界＋組織分區</text>
+  <text class="tw" x="450" y="177">僅醫師產生「已驗證」</text>
+
+  <rect class="bx" x="228" y="120" width="176" height="62"/>
+  <text class="t" x="242" y="145">⑥ 存入個案時間軸</text>
+  <text class="ts" x="242" y="163">病歷紀錄・趨勢圖</text>
+  <text class="tw" x="242" y="177">醫師／護理師</text>
+
+  <rect class="bd" x="228" y="232" width="384" height="62"/>
+  <text class="t" x="242" y="257">⑦ 醫師確認・送出標註 → 再訓練佇列</text>
+  <text class="ts" x="242" y="275">去識別後上雲，用於改進模型</text>
+  <text class="tw" x="242" y="289">僅醫師 ・ 需②訓練同意</text>
+
+  <rect class="bx" x="16" y="232" width="180" height="62"/>
+  <text class="t" x="30" y="257">回診</text>
+  <text class="ts" x="30" y="275">沿用同一 WD- 代碼</text>
+  <text class="ts" x="30" y="289">時間軸自動接續</text>
+
+  <path class="ln" d="M196,42 H224"/>
+  <path class="ln" d="M404,42 H432"/>
+  <path class="ln" d="M612,42 H640"/>
+  <path class="ln" d="M724,70 V100 H524 V116"/>
+  <path class="ln" d="M436,151 H408"/>
+  <path class="ln" d="M316,182 V228"/>
+  <path class="ln" d="M524,182 V214 H420 V228"/>
+  <path class="ln" d="M228,263 H200"/>
+
+  <text class="ts" x="640" y="92">⑤⑥ 順序可對調</text>
+  <text class="tw" x="628" y="256">⑦ 需先完成 ⑤ 或 ⑥</text>
+</svg>
+
+<div class="card info">
+<h4>兩條路都到得了「送出標註」</h4>
+<ol style="margin-bottom:0">
+<li><b>當場送</b>：量測 → 修邊 → 輸入滲液 → 直接按「醫師確認・送出標註」</li>
+<li><b>事後補送</b>：先存入時間軸 → 日後從時間軸點該筆 → 「重新修邊」→「補送訓練標註」<br>
+<span class="kbd">病患當下還沒簽②訓練同意時走這條。後端靠影像編號找得到當初的照片，<b>不必重測</b>。</span></li>
+</ol>
+</div>
+
+</div><!-- /all -->
+
+<!-- ═══════════════ 角色能做什麼 ═══════════════ -->
+<div class="r show" data-r="all doc nur asi eng">
+
+<h2 id="home">二、主畫面五個入口</h2>
+
+<table>
+<tr><th>按鈕</th><th>什麼時候按</th></tr>
+<tr><td><span class="btn">個案（病患・同意書・個案傷口・量測）</span></td>
+    <td><b>臨床量測一律從這裡進</b>。紀錄才會歸戶到正確的傷口，代碼也才穩定（回診沿用同一組）。</td></tr>
+<tr><td><span class="btn">最近就診</span></td>
+    <td>快速找到最近量測過的個案，不必從病患列表一層層點進去。</td></tr>
+<tr><td><span class="btn">快速量測（範例／模擬圖・不綁個案）</span></td>
+    <td>練習操作、測試貼紙擺法。<b>紀錄不屬於任何個案，不計入臨床收案進度。</b></td></tr>
+<tr><td><span class="btn">設定（後端連線・帳號・佇列健康度）</span></td>
+    <td>填後端位址與帳號密碼、按 <span class="btn">連線測試</span> 確認、進主控台。</td></tr>
+<tr><td><span class="btn">使用說明書（依角色分頁・可離線查閱）</span></td>
+    <td>就是你現在看的這一份。<b>不需要網路</b>。</td></tr>
+</table>
+
+<h2 id="roles">三、你的角色能做什麼</h2>
+
+<p>權限由<b>後端</b>決定，不是 App 畫面決定。換一個帳號登入才會改變，
+在畫面上找不到按鈕不是故障。</p>
+
+<table>
+<tr><th>動作</th><th>醫師</th><th>護理師</th><th>助理</th><th>工程師</th><th>管理者</th></tr>
+<tr><td>建病患・簽同意・撤回</td><td>✓</td><td>✓</td><td>—</td><td>—</td><td>—</td></tr>
+<tr><td>臨床量測</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>—</td></tr>
+<tr><td>存入個案時間軸</td><td>✓</td><td>✓</td><td>—</td><td>—</td><td>—</td></tr>
+<tr><td>完成修邊＝醫師已驗證</td><td>✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+<tr><td>送出訓練標註</td><td>✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+<tr><td>範例／模擬圖量測</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td></tr>
+<tr><td>我的送件（飛輪統計）</td><td>✓</td><td>✓</td><td>—</td><td>✓</td><td>✓</td></tr>
+<tr><td>稽核軌跡・系統狀態</td><td>—</td><td>—</td><td>—</td><td>✓</td><td>✓</td></tr>
+<tr><td>帳號管理</td><td>—</td><td>—</td><td>—</td><td>—</td><td>✓</td></tr>
+<tr><td>GCP 雲端主控台</td><td>—</td><td>—</td><td>—</td><td>✓</td><td>✓</td></tr>
+</table>
+
+<div class="card warn">
+<h4>工程師與管理者<b>沒有</b>臨床權限</h4>
+<p style="margin-bottom:0">這是刻意的。工程師帳號能看稽核與系統狀態，但不能建病患、不能量測臨床個案、
+不能存病歷。要做臨床操作請用臨床帳號登入。</p>
+</div>
+
+</div>
+
+<!-- ═══════════════ 醫師 ═══════════════ -->
+<div class="r" data-r="doc all">
+
+<h2 id="doc">四、醫師：修邊與送出標註</h2>
+
+<p><b>只有你能做兩件事：完成修邊（＝「醫師已驗證」）與送出訓練標註。</b>
+整個系統的訓練資料品質建立在你的修邊上——AI 之後學到的東西，就是你畫的東西。</p>
+
+<h3>3-1 修邊畫面按鍵圖解</h3>
+
+<svg viewBox="0 0 700 420" role="img" aria-label="修邊畫面按鍵配置圖">
+  <defs><style>
+    .p{fill:#fff;stroke:#c8ccd2;stroke-width:1.4;rx:8}
+    .pa{fill:#eff5fd;stroke:#1a5fb4;stroke-width:1.8;rx:8}
+    .pt{font:13px sans-serif;fill:#1a1c1e;text-anchor:middle}
+    .pn{font:11px sans-serif;fill:#5f6368}
+    .hd{font:13px sans-serif;fill:#1a5fb4;font-weight:600}
+  </style></defs>
+
+  <text class="hd" x="14" y="20">修邊(=GT)　面積 50.16 cm² · PUSH 13　[尺度:ArUco✓]</text>
+  <text class="pn" x="14" y="40">組織　肉芽56% · 腐肉41% · 壞死0% · 上皮0% · 其他1%</text>
+
+  <rect x="14" y="54" width="672" height="150" fill="#f2f4f7" stroke="#c8ccd2" rx="8"/>
+  <ellipse cx="290" cy="129" rx="150" ry="62" fill="#1d9e75" opacity=".45"/>
+  <ellipse cx="255" cy="122" rx="80" ry="40" fill="#ef9f27" opacity=".55"/>
+  <ellipse cx="290" cy="129" rx="150" ry="62" fill="none" stroke="#00e5ff" stroke-width="3"/>
+  <rect x="500" y="96" width="66" height="66" fill="#fff" stroke="#9aa0a6"/>
+  <rect x="516" y="112" width="34" height="34" fill="#222"/>
+  <text class="pn" x="486" y="182">ArUco 校正貼紙（必須完整入鏡）</text>
+
+  <rect class="pa" x="14" y="220" width="126" height="40"/><text class="pt" x="77" y="245">邊界＋</text>
+  <rect class="p"  x="150" y="220" width="126" height="40"/><text class="pt" x="213" y="245">邊界－</text>
+  <rect class="p"  x="286" y="220" width="126" height="40"/><text class="pt" x="349" y="245">移動</text>
+  <rect class="p"  x="422" y="220" width="126" height="40"/><text class="pt" x="485" y="245">組織🖌</text>
+  <rect class="p"  x="558" y="220" width="128" height="40"/><text class="pt" x="622" y="245">按住看原圖</text>
+
+  <rect class="p" x="14" y="272" width="126" height="34"/><text class="pt" x="77" y="294">肉芽</text>
+  <rect class="p" x="150" y="272" width="126" height="34"/><text class="pt" x="213" y="294">腐肉</text>
+  <rect class="p" x="286" y="272" width="126" height="34"/><text class="pt" x="349" y="294">壞死</text>
+  <rect class="p" x="422" y="272" width="126" height="34"/><text class="pt" x="485" y="294">上皮</text>
+  <rect class="p" x="558" y="272" width="128" height="34"/><text class="pt" x="622" y="294">其他</text>
+  <text class="pn" x="14" y="322">↑ 永遠顯示（按鈕本身就是該類的疊色）；非組織筆刷時停用</text>
+
+  <text class="pn" x="14" y="348">筆刷</text>
+  <line x1="60" y1="343" x2="620" y2="343" stroke="#c8ccd2" stroke-width="4"/>
+  <circle cx="245" cy="343" r="9" fill="#1a5fb4"/>
+  <text class="pn" x="640" y="348">36</text>
+
+  <rect class="p" x="14" y="362" width="102" height="34"/><text class="pt" x="65" y="384">－</text>
+  <rect class="p" x="126" y="362" width="102" height="34"/><text class="pt" x="177" y="384">＋</text>
+  <rect class="p" x="238" y="362" width="102" height="34"/><text class="pt" x="289" y="384">ROI</text>
+  <rect class="p" x="350" y="362" width="102" height="34"/><text class="pt" x="401" y="384">全圖</text>
+  <rect class="p" x="462" y="362" width="102" height="34"/><text class="pt" x="513" y="384">↺</text>
+  <rect class="p" x="574" y="362" width="112" height="34"/><text class="pt" x="630" y="384">↩</text>
+</svg>
+
+<table>
+<tr><th>控制項</th><th>作用</th></tr>
+<tr><td><span class="btn">邊界＋</span></td><td>把筆刷經過的地方<b>加進</b>傷口範圍。<b>這是進入畫面時的預設工具。</b>
+新加的像素會自動帶上 AI 的組織判斷，不會整片變同一色。</td></tr>
+<tr><td><span class="btn">邊界－</span></td><td>把筆刷經過的地方<b>移出</b>傷口範圍。</td></tr>
+<tr><td><span class="btn">移動</span></td><td>只平移，不會畫到東西。單指拖曳畫面。</td></tr>
+<tr><td><span class="btn">組織🖌</span></td><td>改組織分類。<b>只會改傷口範圍內</b>的像素，塗到外面不會有作用。
+下方五個組織按鈕<b>永遠都在</b>（顏色就是塗上去的實際疊色），選了這個工具之後才能按。
+<b>預設選中的是「腐肉」</b>。</td></tr>
+<tr><td><span class="btn">按住看原圖</span></td><td><b>按住</b>時暫時隱藏組織顏色看原始照片，<b>手指放開立刻回來</b>。
+按住期間畫筆完全停用（另一隻手也畫不上去），畫面大小不會變動。</td></tr>
+<tr><td><span class="btn">－</span> <span class="btn">＋</span></td><td>縮小／放大。也可以用<b>兩指捏合</b>。</td></tr>
+<tr><td><span class="btn">ROI</span></td><td>把畫面拉近到目前的傷口範圍。</td></tr>
+<tr><td><span class="btn">全圖</span></td><td>退回看整張照片。</td></tr>
+<tr><td><span class="btn">↺</span> <span class="btn">↩</span></td><td>復原／重做。<b>畫到框邊讓範圍自動擴張時，這兩個會被清空</b>——擴張前請先確認。</td></tr>
+<tr><td><span class="btn">取消</span></td><td>整批放棄。<b>按取消不算完成修邊</b>，之後不能送訓練標註。</td></tr>
+<tr><td><span class="btn fill">完成修邊</span></td><td>存下你的判斷。傷口範圍是空的時候按不下去。</td></tr>
+</table>
+
+<h3>3-2 組織顏色對照</h3>
+<table>
+<tr><th>顏色</th><th>組織</th><th>為什麼是這個顏色</th></tr>
+<tr><td><span class="swatch" style="background:#1d9e75"></span>綠</td><td>肉芽</td>
+    <td>紅色的互補色。疊在紅色肉芽上對比最大，而且不會被誤認成組織本身的顏色。</td></tr>
+<tr><td><span class="swatch" style="background:#ef9f27"></span>琥珀</td><td>腐肉</td><td>接近腐肉本身的黃。</td></tr>
+<tr><td><span class="swatch" style="background:#3c3489"></span>深紫</td><td>壞死</td><td>不用純黑——純黑會與傷口陰影混淆。</td></tr>
+<tr><td><span class="swatch" style="background:#ed93b1"></span>粉</td><td>上皮</td><td>接近新生上皮的淡粉。</td></tr>
+<tr><td><span class="swatch" style="background:#b4b2a9"></span>灰</td><td>其他</td>
+    <td>判不出類別的：肌腱、異物、血水、遮蔽物、反光。</td></tr>
+<tr><td><span class="swatch" style="background:#00e5ff"></span>亮青線</td><td>傷口邊界</td>
+    <td>不是組織。<b>關掉組織圖層時它仍然在</b>，所以你永遠看得見自己在畫什麼。</td></tr>
+</table>
+
+<div class="card info">
+<h4>「其他」不是逃生門，但也不要硬塞</h4>
+<p style="margin-bottom:0">畫面出現「有 X% 判不出類別」時，請用「組織🖌 → 其他」把那一塊<b>確認</b>起來，
+或改標成正確的組織。把肌腱硬塞進「壞死」會把錯誤的定義教給模型；
+標成「其他」是誠實的，那一塊會照原樣進訓練集。</p>
+</div>
+
+<h3>3-3 完成修邊之後會怎樣</h3>
+<ul>
+<li>畫面出現 <b>✓ 已完成醫師修邊確認 — 可送訓練標註</b></li>
+<li>面積會用<b>你畫的範圍</b>重新計算（尺度來自 ArUco 貼紙，不依賴 AI 的初始面積）</li>
+<li>你沒動邊界時，面積<b>不會變動</b>——那是刻意的，避免每進出一次就漂移一點</li>
+</ul>
+
+<div class="card warn">
+<h4>只改組織、沒動邊界，也要按「完成修邊」</h4>
+<p style="margin-bottom:0">組織分區與傷口邊界是<b>兩份獨立的資料</b>。只改了組織一樣要按「完成修邊」才會存下來，
+按「取消」的話組織標註也會一起丟掉。</p>
+</div>
+
+<h3>3-4 送出訓練標註</h3>
+<p>按 <span class="btn fill">醫師確認・送出標註 → 再訓練佇列</span>。這顆按鈕要滿足全部條件才出現且可按：</p>
+<ol>
+<li>已輸入滲液量</li>
+<li>已完成修邊確認（或已存入時間軸）</li>
+<li>臨床樣本必須已選個案傷口</li>
+<li>該病患有有效的<b>②訓練同意</b></li>
+</ol>
+
+<h3>3-5 事後補送（病患當下還沒簽②訓練同意時）</h3>
+<ol>
+<li>個案頁 →「查看此傷口時間軸」→ 點該筆紀錄</li>
+<li><span class="btn">重新修邊（載回原影像與輪廓）</span> —— 影像與輪廓都會載回來，<b>不必重測</b></li>
+<li>修完按「完成修邊」</li>
+<li><span class="btn fill">補送訓練標註 → 再訓練佇列</span></li>
+</ol>
+
+<div class="card ok">
+<h4>從時間軸補送時，確認視窗會列出每一個要離開手機的欄位</h4>
+<p>包含代碼、影像編號、輪廓點數、面積、滲液、樣本來源，以及<b>組織遮罩的狀態</b>：</p>
+<ul style="margin-bottom:0">
+<li><b>✓ 含醫師修正 N 像素</b> — 會進入組織分割訓練集</li>
+<li><b>△ 會送出，但標記為「未經醫師修正」</b> — 不會進訓練集。未修正的遮罩是 AI 自己的輸出，
+拿去訓練等於自我確認。</li>
+<li><b>✗ 不送（本筆沒有修邊柵格）</b> — 請先按「重新修邊」</li>
+</ul>
+</div>
+
+<div class="card info">
+<h4>看到「已在佇列（去重）」的意思</h4>
+<p style="margin-bottom:0">代表這一筆與雲端既有樣本的<b>影像、傷口輪廓、組織遮罩三者完全相同</b>。
+如果你剛才確實有修改卻看到這則訊息，請確認是不是<b>按了「取消」而不是「完成修邊」</b>。</p>
+</div>
+
+</div><!-- /doc -->
+
+<!-- ═══════════════ 護理師 ═══════════════ -->
+<div class="r" data-r="nur all">
+
+<h2 id="nur">五、護理師：建檔、同意書、量測、存病歷</h2>
+
+<p>你能做整條流程的前半段，<b>但修邊不會產生「醫師已驗證」，也不能送訓練標註</b>。
+這是後端強制的，不是畫面問題。你的量測與存檔一樣完整有效。</p>
+
+<h3>4-1 建立病患與個案傷口</h3>
+<ol>
+<li>主畫面 → <span class="btn">個案（病患・同意書・個案傷口・量測）</span></li>
+<li>填<b>姓名</b>與<b>病歷號</b> → <span class="btn">＋新增病患</span><br>
+    <span class="kbd">這兩項只存在這支手機，加密保存，永遠不會上雲。</span></li>
+<li>選病患 → <span class="btn">簽署同意書</span>（見下一節）</li>
+<li>填<b>部位</b>（如 薦骨/右足跟）與<b>類型</b>（如 壓瘡/糖尿病足）→ <span class="btn">＋新增個案傷口</span><br>
+    <span class="kbd">系統會配一組 <code>WD-</code> 代碼。<b>回診請沿用同一個傷口</b>，時間軸才接得起來。</span></li>
+</ol>
+
+<h3>4-2 兩種同意，用途完全不同</h3>
+<table>
+<tr><th></th><th>① 照護同意</th><th>② 研究／訓練同意</th></tr>
+<tr><th>必填？</th><td><b>必填</b></td><td>選填，可隨時撤回</td></tr>
+<tr><th>沒有它就不能</th><td>建傷口、量測、存病歷</td><td>送訓練標註</td></tr>
+<tr><th>用途</th><td>本人傷口照護之量測與紀錄</td><td>去識別後用於演算法改良</td></tr>
+</table>
+<p><b>簽名是必要的</b>——沒有簽名按不下「確認簽署」。②勾不勾都可以簽送。</p>
+<p>兩個項目下方都有可展開的 <b>詳細說明</b>，內容包含：拍什麼、存在哪、誰看得到、
+保留多久、用途限制、如何撤回、以及撤回的實際效果。
+<b>②訓練同意的說明標示「請務必閱讀」，請與病患一起看過再勾選。</b></p>
+
+<div class="card warn">
+<h4>撤回訓練同意：本機立刻生效，雲端會自動同步</h4>
+<p>按下 <span class="btn">撤回訓練同意</span> 之後：</p>
+<ol>
+<li><b>本機立刻生效</b>——這是病患的權利，不會因為當下沒網路而被拒絕</li>
+<li>App 隨即向雲端撤回，成功的話顯示<br>
+<i>「✅ 已撤回訓練同意，雲端也已排除…這些代碼的影像已移入隔離區，不再進入任何訓練集。」</i></li>
+</ol>
+<p><b>如果當下沒有網路或後端連不上</b>，畫面會誠實地說：</p>
+<p><i>「⚠ 本機已撤回，但雲端尚未完成…這些代碼的資料<b>目前仍在雲端訓練佇列中</b>。」</i></p>
+<p style="margin-bottom:0">這些未完成的撤回會<b>持續顯示在個案管理頁最上方</b>，直到真的完成為止。
+下次連上後端時 App 會自動重試，也可以按「立即重試」。
+一直失敗的話請找管理者到主控台手動撤回。</p>
+</div>
+
+<div class="card info">
+<h4>要對病患誠實說明的一件事</h4>
+<p style="margin-bottom:0">撤回會讓資料<b>立即退出未來的訓練</b>，但如果在撤回之前系統已經用那些資料
+訓練過某個版本的模型，<b>那個已完成的模型無法「忘記」學過的東西</b>。
+這是這類技術的性質，同意書的「詳細說明」裡已寫明，簽署前請確認病患理解。</p>
+</div>
+
+<h3>4-3 量測</h3>
+<ol>
+<li>選傷口 → <span class="btn">開始量測</span></li>
+<li><span class="btn">拍照</span> / <span class="btn">相簿</span> / <span class="btn">檔案</span> 三選一</li>
+<li>等 AI 跑完，看<b>量測結果</b>卡片</li>
+<li>輸入<b>滲液量</b>（0 無／1 少量／2 中量／3 大量）——<b>不輸入的話後面兩顆按鈕都是灰的</b></li>
+<li><span class="btn">存入個案時間軸</span></li>
+</ol>
+
+<div class="card warn">
+<h4>拍照三個要點</h4>
+<ul style="margin-bottom:0">
+<li><b>ArUco 校正貼紙要完整入鏡</b>，而且不要有反光或摺到——沒有它就量不出真實尺寸</li>
+<li><b>盡量正對傷口拍</b>。斜拍會讓面積偏低</li>
+<li><b>貼紙與傷口盡量在同一個平面</b>。貼在隆起處會讓比例算錯</li>
+</ul>
+</div>
+
+</div><!-- /nur -->
+
+<!-- ═══════════════ 助理 ═══════════════ -->
+<div class="r" data-r="asi all">
+
+<h2 id="asi">六、助理／技術員：量測與檢視</h2>
+
+<p>你可以<b>量測</b>與<b>檢視</b>，但不能建病患、不能存入時間軸、不能送訓練標註。</p>
+
+<h3>你的典型流程</h3>
+<ol>
+<li>請護理師或醫師先建好病患與傷口、簽好同意書</li>
+<li>主畫面 → <span class="btn">個案（…）</span> → 選病患 → 選傷口 → <span class="btn">開始量測</span></li>
+<li>拍照 → 等 AI 跑完 → 輸入滲液量</li>
+<li><b>請護理師或醫師接手按「存入個案時間軸」</b></li>
+</ol>
+
+<div class="card info">
+<h4>按了「存入個案時間軸」會看到什麼</h4>
+<p style="margin-bottom:0"><i>「⚠️ 角色「助理」不得存入個案時間軸。請由護理師或醫師完成存檔（量測結果不會遺失）。」</i></p>
+<p style="margin:6px 0 0">量測結果<b>不會不見</b>，換人登入或請對方在這台手機上接手即可。</p>
+</div>
+
+<h3>你可以自由使用的部分</h3>
+<p>主畫面的 <span class="btn">快速量測（範例／模擬圖・不綁個案）</span> 對所有角色開放。
+用它練習操作、測試貼紙擺法、確認相機角度都不會影響臨床資料。</p>
+
+</div><!-- /asi -->
+
+<!-- ═══════════════ 工程師／管理者 ═══════════════ -->
+<div class="r" data-r="eng all">
+
+<h2 id="eng">七、工程師／管理者</h2>
+
+<p>你<b>沒有</b>臨床權限：不能建病患、不能做臨床量測、不能存病歷。這是刻意的設計。</p>
+
+<h3>6-1 設定頁的入口</h3>
+<table>
+<tr><th>按鈕</th><th>誰看得到</th><th>用途</th></tr>
+<tr><td><span class="btn">開啟「我的送件」（可自行標記排除誤送）</span></td><td>醫師・護理師・工程師・管理者</td>
+    <td>看自己送出的每一筆、狀態、組織／深度／品質欄位，並可排除誤送</td></tr>
+<tr><td><span class="btn">開啟管理主控台（帳號管理・稽核・系統狀態）</span></td><td>管理者</td>
+    <td>Dashboard／我的送件／系統狀態／稽核軌跡／帳號管理</td></tr>
+<tr><td><span class="btn">開啟主控台（稽核・系統狀態・佇列）</span></td><td>工程師</td><td>同上，但沒有帳號管理</td></tr>
+<tr><td><span class="btn">開啟 GCP 雲端主控台（需 Google 帳號授權）</span></td><td>工程師・管理者</td>
+    <td>雲端基礎設施。<b>臨床角色一律不給</b>——那裡看得到原始傷口影像。</td></tr>
+</table>
+<p class="kbd">主控台以一次性登入碼自動登入（60 秒有效、用過即失效，且放在網址的 <code>#</code> 之後，
+那一段不會送到伺服器，因此不會留在雲端日誌裡）。</p>
+
+<h3>6-2 系統狀態要看的三件事</h3>
+<table>
+<tr><th>項目</th><th>紅了代表</th></tr>
+<tr><td>ONNX Runtime／分割模型</td><td>退回 HSV 色彩分割。<b>服務仍回 200、面積仍有數字，但不可作臨床用途。</b></td></tr>
+<tr><td>色準校正</td><td>白平衡退回 gray-world，紅色被系統性壓抑，<b>肉芽會被低估</b>。同樣不會報錯。</td></tr>
+<tr><td>儲存後端</td><td>不是 GCS 的話，佇列與影像會在實例回收時<b>無聲消失</b>。</td></tr>
+</table>
+<p>「部署身分」區塊顯示雲端跑的 git commit，與本機 <code>git rev-parse --short HEAD</code>
+比對即可確認部署是否生效。</p>
+
+<h3>6-3 帳號原則</h3>
+<ul>
+<li>帳號用<b>編號</b>（dr01、ns01…）不用姓氏——帳號會永久留在稽核軌跡裡</li>
+<li>帳號<b>只停用、不刪除</b>——稽核軌跡引用著那些識別碼</li>
+<li>密碼絕不寫進程式或版控</li>
+</ul>
+<p class="kbd">詳細操作見 <code>docs/admin_operations.md</code>。</p>
+
+</div><!-- /eng -->
+
+<!-- ═══════════════ 共通：疑難排解 ═══════════════ -->
+<div class="r show" data-r="all doc nur asi eng">
+
+<h2 id="trouble">八、常見狀況與對策</h2>
+
+<table>
+<tr><th>畫面顯示</th><th>意思與對策</th></tr>
+<tr><td>⚠ 請先選擇個案傷口</td><td>臨床量測一定要先綁傷口，紀錄才歸得了戶。回個案頁選一個。</td></tr>
+<tr><td>⚠ 此病患尚未取得①照護同意（或已撤回），不得進行量測</td>
+    <td>回個案頁 →「簽署同意書」，①照護同意是必填。</td></tr>
+<tr><td>⚠ 請先輸入滲液量，才能進行「修邊」或「存入時間軸」</td>
+    <td>點一下 0／1／2／3 其中一個。PUSH 分數需要它。</td></tr>
+<tr><td>尚未完成醫師修邊確認：此結果為 AI 原始輸出</td>
+    <td>可以存病歷，但不能送訓練標註。請醫師按「醫師確認・修邊」<b>並完成</b>（按取消不算）。</td></tr>
+<tr><td>⚠ AI 未偵測到傷口</td>
+    <td>用「邊界＋」從零塗抹即可。<b>ArUco 尺度仍然有效，面積照樣精確。</b></td></tr>
+<tr><td>⚠ AI 沒偵測到傷口，但影像中有明顯的印刷色塊</td>
+    <td>這多半是印刷模擬圖。請到快速量測把來源改選「模擬圖」，會改走色彩分割。</td></tr>
+<tr><td>⚠ 這張影像後端先前已收過（逐位元相同）</td>
+    <td>回診照片不可能與上次完全一樣，這多半是先前用過的範例圖。<b>不要存入病歷</b>，
+    否則會計入臨床收案進度，還會讓癒合曲線變成兩張不同傷口相比。</td></tr>
+<tr><td>ℹ 後端可能處於休眠</td>
+    <td>雲端閒置會自動縮容。第一次量測約需 10–30 秒喚醒，之後正常。</td></tr>
+<tr><td>⚠️ 連不到後端</td>
+    <td>到「設定」確認位址；真機不能用 <code>10.0.2.2</code>（那是模擬器專用）。</td></tr>
+<tr><td>⚠️ 連得到後端但帳密不正確</td><td>位址沒問題，到「設定」重新輸入帳號密碼。</td></tr>
+<tr><td>⚠ 影像與輪廓座標空間不符，已停用重新修邊</td>
+    <td>這筆是舊格式的紀錄。<b>面積數值仍可作病歷保留</b>，但要重新量測一次才能再修邊。</td></tr>
+</table>
+
+<h2 id="privacy">九、隱私與資料界線</h2>
+
+<div class="card ok">
+<h4>永遠留在這支手機</h4>
+<p style="margin-bottom:0">病患姓名、病歷號、同意書簽名影像。這些以手機的安全金鑰加密保存。</p>
+</div>
+<div class="card info">
+<h4>會離開手機（僅在②訓練同意有效時）</h4>
+<p style="margin-bottom:0">去識別代碼 <code>WD-xxxxxxxx</code>、傷口影像、輪廓、組織遮罩、面積、滲液、樣本來源、機型。
+<b>沒有姓名、沒有病歷號。</b>資料存放在台灣境內（asia-east1）。</p>
+</div>
+<div class="card warn">
+<h4>臨床影像不會寫進手機相簿</h4>
+<p style="margin-bottom:0">只有「範例」與「模擬圖」會匯出到相簿的 <code>WoundAI_驗證</code> 資料夾。</p>
+</div>
+
+</div>
+
+<footer>
+WoundAI 使用說明書 ・ 本文件內容取自程式原始碼，改版時會一併更新。<br>
+本系統為輔助工具，非診斷器材；所有數值需經醫師確認。
+</footer>
+
+</div>
+
+<script>
+// 角色切換。用 data-r 白名單而非 class 疊加——
+// 疊加寫法在「全部」與單一角色之間切換時很容易漏掉某個區塊。
+var bar = document.getElementById('rolebar');
+bar.addEventListener('click', function(e){
+  var b = e.target.closest('button'); if(!b) return;
+  var r = b.dataset.r;
+  [].forEach.call(bar.querySelectorAll('button'), function(x){ x.classList.toggle('on', x === b); });
+  [].forEach.call(document.querySelectorAll('.r'), function(s){
+    s.classList.toggle('show', s.dataset.r.split(' ').indexOf(r) >= 0);
+  });
+  window.scrollTo(0, 0);
+});
+</script>
+</body>
+</html>

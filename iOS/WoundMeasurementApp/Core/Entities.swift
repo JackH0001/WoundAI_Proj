@@ -150,10 +150,13 @@ struct Measurement: Identifiable, Equatable {
         ]
     }
 
-    var polygonPoints: [[Int]] {
-        guard let s = gtPolygon, let d = s.data(using: .utf8), let j = JSONAny(data: d) else { return [] }
-        return j.intPointList
-    }
+    /// `gtPolygon` 解成多輪廓（新舊兩種 JSON 格式都吃）。修邊載回與補送標註用這個。
+    var polygons: [[[Int]]] { return PolygonJson.parse(gtPolygon) }
+
+    /// 相容取用：最大的那一個輪廓。舊呼叫端（只吃單輪廓）沿用。
+    /// ⚠ 舊實作直接 `intPointList` 讀——碰到多輪廓格式會把整個**輪廓**當成一個點，
+    ///   解出空清單，畫面只會顯示「沒有 GT 輪廓」。一律走 PolygonJson。
+    var polygonPoints: [[Int]] { return PolygonJson.largest(polygons) }
 }
 
 // MARK: - 個案摘要

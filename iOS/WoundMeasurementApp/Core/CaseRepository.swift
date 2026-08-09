@@ -302,6 +302,38 @@ actor CaseRepository {
         )
     }
 
+    /**
+     刪除**空**個案（建錯的「未指定」這類）。有任何量測就拒絕——那是病歷，走「結案」。
+
+     為什麼空個案可以真刪：它沒有任何臨床紀錄要保全；wdCode 即使已隨②同意同步到雲端，
+     留在雲端的只是一個沒有資料掛著的代碼，無害。有量測的個案永遠不硬刪（病歷留痕），
+     結案後 90 天影像自動清除、數字與趨勢保留——與 Android 同一套規則。
+     */
+    func deleteCaseIfEmpty(id: Int64) -> Bool {
+        let n = store.query("SELECT COUNT(*) AS n FROM measurements WHERE caseId = ?", [id]) {
+            $0.int("n") ?? 0
+        }.first ?? 0
+        guard n == 0 else { return false }
+        _ = store.write("DELETE FROM wound_cases WHERE id = ?", [id])
+        return true
+    }
+
+    /**
+     刪除單筆量測。**只允許沒送出過訓練標註的**——送出過的資料已進雲端 append-only 佇列，
+     本機刪了雲端還在，兩邊就對不上帳；那種要用主控台的「誤送排除」（tombstone），不是刪除。
+     連同加密影像與柵格檔一起清（先刪列再刪檔，反向會留死路徑）。
+     */
+    func deleteMeasurementIfUnsubmitted(id: Int64, imageStore: LocalImageStore) -> Bool {
+        guard let m = measurement(id: id), !m.annotationSubmitted else { return false }
+        _ = store.write("DELETE FROM measurements WHERE id = ?", [id])
+        if !m.imagePath.isEmpty {
+            imageStore.delete(m.imagePath)
+            DepthStore.purge(imagePath: m.imagePath, store: imageStore)
+        }
+        if let rp = m.rasterPath { imageStore.delete(rp) }
+        return true
+    }
+
     @discardableResult
     func insertMeasurement(_ m: Measurement) -> Int64? {
         return store.write("""
@@ -317,6 +349,43 @@ actor CaseRepository {
                   m.imageW, m.imageH, m.exudate, m.correctionIou, m.annotationSubmitted,
                   m.doctorVerified, m.tissueGranulation, m.tissueSlough, m.tissueNecrosis,
                   m.tissueEpithelial, m.tissueOther, m.rasterPath, m.rasterMeta])
+    }
+
+    /**
+     覆寫既有量測列（同一輪量測重複存檔時用）。
+
+     ## 為什麼需要這一支，而不是每次都 INSERT
+
+     醫師常常會存兩次：先存一次，再回頭補滲液、或修完邊再存。每一次都 INSERT 的話，
+     時間軸上會多出一個**面積相同、時間戳不同**的點——而癒合曲線上那看起來像
+     「這段期間完全沒有進展」。它不是錯誤資料，它是**看起來很合理的錯誤資料**。
+
+     ## 不在這裡更新的欄位
+
+     `timestamp` 與 `annotationSubmitted` 由呼叫端決定要不要沿用舊值（見
+     `MeasureViewModel.saveToTimeline`）——這一支只負責照 `m` 的內容整列寫入。
+
+     ⚠ **組織比例五欄每次都要寫。** Android 的 update 分支曾經漏掉它們，症狀是
+     第一次存的比例正確、補完滲液再存一次就悄悄沿用舊值。影像 90 天後會被清除，
+     組織比例是那之後唯一還原得回來的東西，寫錯了就沒有第二次機會。
+     */
+    func updateMeasurement(_ m: Measurement) {
+        guard m.id > 0 else { return }
+        _ = store.write("""
+            UPDATE measurements SET
+              patientId = ?, timestamp = ?, hasWound = ?, confidence = ?, estimatedArea = ?,
+              woundTypeLabel = ?, quality = ?, imagePath = ?, notes = ?, isPatientIdentified = ?,
+              caseId = ?, wdCode = ?, imageId = ?, mmPerPx = ?, route = ?, source = ?,
+              gtPolygon = ?, imageW = ?, imageH = ?, exudate = ?, correctionIou = ?,
+              annotationSubmitted = ?, doctorVerified = ?, tissueGranulation = ?, tissueSlough = ?,
+              tissueNecrosis = ?, tissueEpithelial = ?, tissueOther = ?, rasterPath = ?, rasterMeta = ?
+            WHERE id = ?
+            """, [m.patientId, m.timestamp, m.hasWound, m.confidence, m.estimatedArea,
+                  m.woundTypeLabel, m.quality, m.imagePath, m.notes, m.isPatientIdentified,
+                  m.caseId, m.wdCode, m.imageId, m.mmPerPx, m.route, m.source, m.gtPolygon,
+                  m.imageW, m.imageH, m.exudate, m.correctionIou, m.annotationSubmitted,
+                  m.doctorVerified, m.tissueGranulation, m.tissueSlough, m.tissueNecrosis,
+                  m.tissueEpithelial, m.tissueOther, m.rasterPath, m.rasterMeta, m.id])
     }
 
     /// 時間軸正解：**依個案分組**，時間由舊到新。
@@ -375,6 +444,8 @@ actor CaseRepository {
         for (id, path) in rows {
             _ = store.write("UPDATE measurements SET imagePath = '' WHERE id = ?", [id])
             imageStore.delete(path)
+            // WoundAI3D 深度 sidecar 與影像同保存政策，一併清除。
+            DepthStore.purge(imagePath: path, store: imageStore)
             n += 1
         }
         return n

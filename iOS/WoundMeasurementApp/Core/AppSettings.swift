@@ -36,11 +36,30 @@ enum AppSettings {
      兩邊的預設值不能互抄。
      */
     static var defaultURL: String {
-        #if DEBUG
+        // ⚠ 分流條件是「模擬器 vs 實機」，不只是 Debug vs Release：
+        //   實機上的 localhost 指向**手機自己**，Debug 版裝上實機的第一個畫面就是
+        //   「後端未連線」，而測試者不會知道要去設定頁改網址。
+        //   模擬器的 localhost 才是 Mac 本機（開發迴圈用）。
+        #if DEBUG && targetEnvironment(simulator)
         return "http://localhost:5000"
         #else
-        return "https://wound-ai-867037876992.asia-east1.run.app"
+        // ⚠ 必須與 Android release 的 DEFAULT_BACKEND_URL（app/build.gradle）**同一個字串**。
+        //   2026-08-08 發現這裡寫的是一個舊部署（wound-ai-867037876992），而 Android 與
+        //   docs/admin_operations.md 都指向 woundai-backend-421209514056——iOS release 裝上
+        //   就會連到不存在／過期的服務，畫面只會說「後端未連線」，看不出是網址錯。
+        //   換部署位址時，三處（這裡、build.gradle、admin docs）要一起改。
+        return "https://woundai-backend-421209514056.asia-east1.run.app"
         #endif
+    }
+
+    // MARK: - 冷啟動追蹤（對等 Android BackendWarmup.sinceLastOkMs）
+
+    /// 最近一次後端成功回應的時刻。>15 分鐘沒成功過＝Cloud Run 幾乎已縮到零，
+    /// 下一次呼叫要吃 10–30 秒冷啟動——提示要在**喚醒前**就講，不是等逾時。
+    static func markBackendOk() { d.set(Date().timeIntervalSince1970, forKey: "last_backend_ok") }
+    static func backendLikelyCold() -> Bool {
+        let t = d.double(forKey: "last_backend_ok")
+        return Date().timeIntervalSince1970 - t > 15 * 60
     }
 
     // MARK: - 後端連線
