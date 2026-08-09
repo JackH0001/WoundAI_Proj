@@ -47,6 +47,14 @@ jobs:
       - name: Select Xcode ${{ matrix.xcode }}
         run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app
 
+      # ⚠ 這一步不可省：xcodeproj 自 70572ce 起是 XcodeGen 產物、不進版控
+      #   （單一事實來源是 project.yml，理由見該檔檔頭）。少了這步，
+      #   下面每一個 -project 引用都會以「找不到專案」秒失敗。
+      - name: Generate Xcode project (XcodeGen)
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
       - name: Show SDK / Simulator list
         run: |
           xcodebuild -version
