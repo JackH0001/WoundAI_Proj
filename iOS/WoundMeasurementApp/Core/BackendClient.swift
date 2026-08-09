@@ -1,9 +1,5 @@
 import Foundation
 
-#if canImport(UIKit)
-import UIKit
-#endif
-
 /**
  後端 HTTP 客戶端（對接 `Backend/Flask/app.py`）。**逐欄位對齊 Android `BackendClient.kt`。**
 
@@ -60,16 +56,15 @@ struct ClassifyResult {
     var route: String
     var escalated: Bool = false
 
-    /// 傷口輪廓（供醫師修邊／飛輪標註）。座標空間＝`imageW × imageH`。
+    /// 最大的那一個輪廓（相容用）。座標空間＝`imageW × imageH`。
     var woundPolygon: [[Int]] = []
 
     /**
      **所有**傷口輪廓（由大到小）。同一肢體多處傷口是臨床常態。
 
-     ⚠ `woundPolygon` 只是它的第一個元素，保留給只吃單一輪廓的舊路徑。
-     修邊畫布的初始填充與送訓練標註都要用這一個——只用 `woundPolygon` 的話，
-     第二個傷口會被標成背景，而那是在**教模型「那不是傷口」**（Android 2026-08-07 實測）。
-     舊版後端沒有 `wound_polygons` 鍵時退回 `[woundPolygon]`。
+     ⚠ 只用 `woundPolygon` 的話，AI 分割到的第二個傷口在修邊畫面就不會有初始輪廓，
+     醫師得自己補畫；沒注意到的話**那個傷口在訓練集裡會被標成背景**——
+     沒有錯誤、沒有警告，只有訓練資料悄悄變錯。
      */
     var woundPolygons: [[[Int]]] = []
 
@@ -479,22 +474,19 @@ actor BackendClient {
             }
         }
 
+        // 舊後端沒有 `wound_polygons` 這個鍵 → 退回單一輪廓。
+        // 這裡必須容忍缺席，否則 App 一連上舊後端 classify 就整支失敗。
+        let polyMain = s2["wound_polygon"].intPointList
+        let polyAll: [[[Int]]] = {
+            let arr = s2["wound_polygons"].array.map { $0.intPointList }.filter { $0.count >= 3 }
+            if !arr.isEmpty { return arr }
+            return polyMain.count >= 3 ? [polyMain] : []
+        }()
+
         let quad: [[Int]]? = {
             guard s3["marker_quad"].exists else { return nil }
             let pts = s3["marker_quad"].intPointList
             return pts.count == 4 ? pts : nil
-        }()
-
-        let poly = s2["wound_polygon"].intPointList
-        // 多輪廓（wound_polygons）。舊版後端沒有這個鍵 → 退回單輪廓包一層，
-        // 讓下游（修邊畫布、送標註）永遠拿得到「輪廓的清單」而不必自己判版本。
-        let polys: [[[Int]]] = {
-            let arr = s2["wound_polygons"].array.compactMap { p -> [[Int]]? in
-                let pts = p.intPointList
-                return pts.count >= 3 ? pts : nil
-            }
-            if !arr.isEmpty { return arr }
-            return poly.count >= 3 ? [poly] : []
         }()
 
         return ClassifyResult(
@@ -506,8 +498,8 @@ actor BackendClient {
             // 後端雙軌路由：student（端上主力）或 cloud_escalated(AU)（難例自動上雲集成）
             route:        s2["route"].string("cloud"),
             escalated:    s2["escalated"].bool(false),
-            woundPolygon: poly,
-            woundPolygons: polys,
+            woundPolygon: polyMain,
+            woundPolygons: polyAll,
             mmPerPx:      s3["mm_per_px"].double,
             markerQuad:   quad,
             markerMm:     s3["marker_mm"].double,
@@ -545,18 +537,10 @@ actor BackendClient {
     func submitAnnotation(
         code: String,
         gtPolygon: [[Int]],
-        exudate: Int?,
-        /**
-         **所有**傷口輪廓。空的話只送 `gtPolygon`（最大的那一個），而其餘傷口在訓練集裡
-         會被標成背景——那是在教模型「那不是傷口」，比少收一筆資料糟得多。
-         線上欄位名是 `gt_polygons`（僅 >1 個時送出；`gt_polygon` 永遠保留最大者供舊後端）。
-         */
+        /// 全部輪廓。多於一個時另外送 `gt_polygons`；`gt_polygon` 保留最大的那個供舊後端。
         allPolygons: [[[Int]]] = [],
-        /**
-         面積（cm²）。來自**遮罩像素數 × 鎖定係數**，是唯一真值。
-         不給的話後端會由多邊形反算，而那個數字與 App 顯示的必然不同：
-         RDP 簡化有損、多輪廓還要合計。兩個都合理、都沒有警告的數字最難查。
-         */
+        exudate: Int?,
+        /// 修邊後的面積（以遮罩像素為真值）。與 Android 的 `area_cm2` 同義。
         areaCm2: Double? = nil,
         imageId: String?,
         imageW: Int,
@@ -571,9 +555,6 @@ actor BackendClient {
         careNote: String? = nil,
         source: String? = nil,
         quality: [String: Double]? = nil,
-        /// WoundAI3D 深度來源真值：`none`＝沒拍；`lidar_local`＝已加密存本機、未上傳；
-        /// `lidar`＝已上傳（深度端點上線後）。「沒拍」與「拍了沒傳」必須分得出來。
-        depthSource: String = "none",
         consentTrain: Bool,
         doctorVerified: Bool
     ) async throws -> AnnotationOutcome {
@@ -594,12 +575,11 @@ actor BackendClient {
             "image_w":         imageW,
             "image_h":         imageH
         ]
-        // 多輪廓。與 Android 同規則：>1 個才送 gt_polygons，gt_polygon 保留最大的那一個，
-        // 新舊後端都收得下。
+        // 多輪廓。`gt_polygon` 保留最大的那一個供舊後端使用——新舊後端都收得下。
         let polysOut = allPolygons.filter { $0.count >= 3 }
         if polysOut.count > 1 {
-            obj["gt_polygons"] = polysOut.map { p in
-                p.map { [$0.count > 0 ? $0[0] : 0, $0.count > 1 ? $0[1] : 0] }
+            obj["gt_polygons"] = polysOut.map { poly in
+                poly.map { [$0.count > 0 ? $0[0] : 0, $0.count > 1 ? $0[1] : 0] }
             }
         }
         if let v = areaCm2       { obj["area_cm2"] = v }
@@ -611,7 +591,9 @@ actor BackendClient {
         if let v = source        { obj["source"] = v }
         if let v = quality, !v.isEmpty { obj["quality"] = v }
 
-        obj["depth_source"] = depthSource
+        // WoundAI3D 預留：iOS 有 LiDAR，但在深度擷取鏈通過驗證之前一律送 none。
+        // **明確標記**比欄位缺席好——日後分析時「沒拍深度」與「拍了但沒存」要分得出來。
+        obj["depth_source"] = "none"
         obj["capture_device"] = Self.deviceModelString()
 
         // 醫師修邊後的組織比例（含「其他」）。不是分割 GT，是未來訓練組織分類的種子——
@@ -710,7 +692,7 @@ actor BackendClient {
         uname(&sysinfo)
         let machine = withUnsafeBytes(of: &sysinfo.machine) { raw -> String in
             let bytes = raw.bindMemory(to: CChar.self)
-            return String(cString: bytes.baseAddress!)
+            return String(decodingCString: bytes.baseAddress!, as: UTF8.self)
         }
         return "Apple \(machine)"
     }

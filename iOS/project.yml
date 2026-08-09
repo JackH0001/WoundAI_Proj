@@ -65,9 +65,6 @@ targets:
       - path: WoundMeasurementApp/Assets.xcassets
         type: folder.assetcatalog
         buildPhase: resources
-      # 使用手冊：與 Android assets/manual.html 同一份檔（兩端共用，內容才不會分岔）。
-      - path: WoundMeasurementApp/Resources/manual.html
-        buildPhase: resources
       - path: WoundMeasurementApp/Info.plist
         buildPhase: none
     settings:
@@ -101,30 +98,3 @@ targets:
         # 這裡把兩者都擺正。
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/WoundMeasurementApp.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/WoundMeasurementApp"
         BUNDLE_LOADER: "$(TEST_HOST)"
-        # 測試 bundle 沒有自己的 Info.plist，讓 Xcode 產生一份。上面 App target 關掉
-        # GENERATE_INFOPLIST_FILE 是因為它有實體檔；這裡沒有，關掉會直接 build 失敗。
-        GENERATE_INFOPLIST_FILE: YES
-        PRODUCT_BUNDLE_IDENTIFIER: com.woundmeasurement.app.tests
-
-## `xcodebuild -scheme WoundMeasurementApp` 需要 scheme 存在。XcodeGen 預設**不會**
-## 自動產生 scheme（除非在 target 下寫 `scheme:`），少了這一段，BUILD_RELEASE.md 的
-## 指令會以 "scheme not found" 直接失敗——而那看起來像環境問題，不像設定漏了。
-schemes:
-  WoundMeasurementApp:
-    build:
-      targets:
-        WoundMeasurementApp: all
-        WoundMeasurementAppTests: [test]
-    run:
-      config: Debug
-    test:
-      config: Debug
-      gatherCoverageData: true
-      targets:
-        - WoundMeasurementAppTests
-    profile:
-      config: Release
-    analyze:
-      config: Debug
-    archive:
-      config: Release

@@ -126,6 +126,47 @@ def check_unterminated_comments(paths):
     return bad
 
 
+# 符號 → 提供它的 module。Swift 的 import 是**逐檔案作用域**，而跨 module 的
+# 頂層型別名稱不會透過傳遞性 import 可見（只有 extension 成員會）。
+# 這一類錯誤在這個專案一次就出現四個，值得自動抓。
+MODULE_SYMBOLS = {
+    'Security': ['SecRandomCopyBytes', 'kSecRandomDefault', 'SecItemCopyMatching',
+                 'SecItemAdd', 'kSecClass', 'kSecAttrService', 'SecKeyCreateRandomKey'],
+    'UIKit': ['UIImage', 'UIColor', 'UIBezierPath', 'UIGraphicsImageRenderer',
+              'UIApplication', 'UIScreen', 'UIDevice', 'UIViewController'],
+    'ImageIO': ['CGImageSourceCreateWithData', 'CGImageSourceCreateThumbnailAtIndex',
+                'kCGImageSourceThumbnailMaxPixelSize',
+                'kCGImageSourceCreateThumbnailFromImageAlways'],
+    'CryptoKit': ['SymmetricKey', 'AES', 'HMAC', 'SHA256'],
+    'SQLite3': ['sqlite3_open_v2', 'sqlite3_prepare_v2', 'sqlite3_step', 'sqlite3_bind_text'],
+    'PhotosUI': ['PhotosPicker', 'PhotosPickerItem'],
+    'CoreGraphics': ['CGContext', 'CGColorSpaceCreateDeviceRGB', 'CGImage'],
+}
+# 這些 module 會 re-export 下列 module，因此有前者就等於有後者
+REEXPORTS = {'UIKit': {'CoreGraphics', 'Foundation'}, 'SwiftUI': {'CoreGraphics'},
+             'Foundation': set(), 'PhotosUI': {'UIKit', 'CoreGraphics'}}
+
+
+def check_imports(paths, files):
+    """找出用了某 module 的符號、卻沒有 import 該 module 的檔案。"""
+    bad = []
+    for p in paths:
+        raw = open(p, encoding='utf-8', errors='replace').read()
+        imported = set(re.findall(r'^\s*import\s+(\w+)', raw, re.M))
+        effective = set(imported)
+        for m in list(imported):
+            effective |= REEXPORTS.get(m, set())
+        clean = files.get(p, '')
+        for mod, syms in MODULE_SYMBOLS.items():
+            if mod in effective:
+                continue
+            for sym in syms:
+                if re.search(r'\b' + re.escape(sym) + r'\b', clean):
+                    bad.append((p, mod, sym))
+                    break
+    return bad
+
+
 def check_braces(files):
     bad = []
     for p, clean in files.items():
@@ -163,7 +204,11 @@ Scene WindowGroup EnvironmentValues Namespace FocusState AppStorage SceneStorage
 ISO8601DateFormatter DateFormatter NumberFormatter IndexSet EdgeInsets Angle UnitPoint
 SQLITE_OK SQLITE_ROW SQLITE_DONE SQLITE_NULL SQLITE_OPEN_READWRITE SQLITE_OPEN_CREATE
 SQLITE_OPEN_FULLMUTEX SQLITE_TRANSIENT NSRegularExpression NSRange XCTAssertEqual
-XCTAssertNil XCTAssertNotNil XCTAssertTrue XCTAssertFalse
+XCTAssertNil XCTAssertNotNil XCTAssertTrue XCTAssertFalse XCTFail XCTAssertGreaterThan
+XCTAssertLessThan XCTAssertGreaterThanOrEqual XCTAssertLessThanOrEqual
+Rectangle Circle Capsule RoundedRectangle Ellipse ScrollViewReader LazyVStack LazyHStack
+UIGraphicsImageRendererFormat CGImageSourceCreateThumbnailAtIndex CGAffineTransform
+PhotosPickerItem UTType Transferable Shape InsettableShape UTF8 UTF16 Unicode ImageIO Security
 """.split())
 
 
@@ -180,7 +225,7 @@ def main():
     paths = sorted(set(paths))
     decls, exts, files, nested = scan(paths)
 
-    problems = {'redeclarations': [], 'unterminated_comment': [], 'unbalanced': [], 'undefined_refs': []}
+    problems = {'redeclarations': [], 'missing_import': [], 'unterminated_comment': [], 'unbalanced': [], 'undefined_refs': []}
 
     # 1. 重複宣告
     for name, sites in decls.items():
@@ -190,6 +235,12 @@ def main():
                 'symbol': name,
                 'sites': [{'file': os.path.relpath(f, root), 'kind': k, 'line': l} for f, k, l in sites]
             })
+
+    # 2b. 缺 import
+    for p, mod, sym in check_imports(paths, files):
+        problems.setdefault('missing_import', []).append(
+            {'file': os.path.relpath(p, root), 'module': mod, 'symbol': sym,
+             'hint': f'用到 {sym} 但沒有 import {mod}（Swift 的 import 是逐檔作用域）'})
 
     # 2a. 未終結的區塊註解（巢狀 /* 吞掉整個檔案）
     for p, depth in check_unterminated_comments(paths):

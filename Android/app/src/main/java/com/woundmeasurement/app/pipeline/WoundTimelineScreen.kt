@@ -21,9 +21,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.woundmeasurement.app.data.database.WoundMeasurementDatabase
 import com.woundmeasurement.app.data.entity.MeasurementEntity
+import com.woundmeasurement.app.data.repo.CaseRepository
 import com.woundmeasurement.app.data.store.LocalImageStore
 import java.text.SimpleDateFormat
 import java.util.Locale
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
@@ -69,6 +71,14 @@ fun WoundTimelineScreen(
     val measurements by flow.collectAsState(initial = emptyList())
     val fmt = remember { SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()) }
     val fmtShort = remember { SimpleDateFormat("MM/dd", Locale.getDefault()) }
+
+    // 單筆刪除。**確認對話框放在這一層而不是每一列**——放在列裡的話，
+    // 清單一長就有幾十個 AlertDialog 掛在 composition 上；而且 LazyColumn 回收列時
+    // 對話框會跟著消失，使用者滑一下手指、確認框就不見了。
+    val repo = remember { CaseRepository.from(WoundMeasurementDatabase.getDatabase(ctx)) }
+    val scope = rememberCoroutineScope()
+    var pendingDelete by remember { mutableStateOf<MeasurementEntity?>(null) }
+    var msg by remember { mutableStateOf<String?>(null) }
 
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(when {
@@ -129,12 +139,52 @@ fun WoundTimelineScreen(
                     val prevArea = if (idx > 0) asc[idx - 1].estimatedArea else null
                     TimelineRow(
                         m = m, prevArea = prevArea, timeText = fmt.format(m.timestamp),
-                        imageStore = imageStore, onOpen = onOpenRecord
+                        imageStore = imageStore, onOpen = onOpenRecord,
+                        onDelete = { pendingDelete = m }
                     )
                 }
             }
         }
+        msg?.let { Text(it, style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant) }
         OutlinedButton(onBack, Modifier.fillMaxWidth()) { Text("返回") }
+    }
+
+    // 對話框對兩種情況說**不同的話**。做不到的時候只說「失敗」，
+    // 使用者唯一能做的就是再按一次——而規則不會因為再按一次而改變。
+    pendingDelete?.let { target ->
+        val submitted = target.annotationSubmitted
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text(if (submitted) "這筆不可刪除" else "刪除這筆量測？") },
+            text = {
+                Text(if (submitted)
+                    "此筆已送出訓練標註，不可刪除；誤送請用主控台「誤送排除」。\n\n" +
+                    "雲端的訓練佇列是唯讀累加的，本機刪掉之後兩邊對不上帳；" +
+                    "而**撤回同意要靠這筆紀錄裡的影像代碼**才做得到——刪了就再也撤不回來。"
+                else
+                    "將刪除這筆量測，連同加密影像與組織柵格檔，無法復原。\n\n" +
+                    "面積與趨勢也會一起消失，後面那一次的「較上次 %」會改跟更早的一次比。")
+            },
+            confirmButton = {
+                if (submitted) {
+                    TextButton({ pendingDelete = null }) { Text("知道了") }
+                } else {
+                    TextButton({
+                        val id = target.id
+                        pendingDelete = null
+                        // repo 會再檢查一次 annotationSubmitted：對話框開著的時候
+                        // 補送有可能剛好完成，那時這筆就不該刪了。
+                        scope.launch {
+                            msg = if (repo.deleteMeasurementIfUnsubmitted(id, imageStore))
+                                "已刪除該筆量測。"
+                            else "⚠ 未刪除：這筆在剛才已送出訓練標註。"
+                        }
+                    }) { Text("刪除", color = MaterialTheme.colorScheme.error) }
+                }
+            },
+            dismissButton = { if (!submitted) TextButton({ pendingDelete = null }) { Text("取消") } }
+        )
     }
 }
 
@@ -144,7 +194,9 @@ private fun TimelineRow(
     prevArea: Double?,
     timeText: String,
     imageStore: LocalImageStore,
-    onOpen: ((MeasurementEntity) -> Unit)?
+    onOpen: ((MeasurementEntity) -> Unit)?,
+    /** 交給上層開確認框；這一列不自己決定刪不刪得掉。 */
+    onDelete: (() -> Unit)? = null
 ) {
     // 縮圖在背景解密＋降採樣;不快取整張 2048 影像(清單捲幾列就 OOM)
     var thumb by remember(m.id, m.imagePath) { mutableStateOf<android.graphics.Bitmap?>(null) }
@@ -200,6 +252,12 @@ private fun TimelineRow(
                 }
                 if (canOpen) Text("點卡片可回頭修邊／補送標註（不必重測）", fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
+                // 刪除入口對已送訓練的那些**也顯示**——按下去會說明為什麼不能刪、
+                // 以及該走哪條路。藏起來的話，想刪的人只會反覆找，最後去刪整個個案。
+                if (onDelete != null) TextButton(
+                    onClick = onDelete,
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                ) { Text("刪除這筆", fontSize = 11.sp, color = MaterialTheme.colorScheme.error) }
             }
             Spacer(Modifier.width(10.dp))
             Box(

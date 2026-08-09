@@ -169,6 +169,24 @@ ck('Preproc.tissueWorstOrder' in pipe, "WoundPipeline.swift 未引用 Preproc.ti
 ck('Preproc.markerMmActive' in pipe, "WoundPipeline.swift 未引用 Preproc.markerMmActive")
 ck(not re.search(r'\b0\.3\s*,\s*1\b', pipe), "WoundPipeline.swift 疑似硬編碼面積帶")
 
+# ── iOS ↔ Android 預設後端網址必須一致 ────────────────────────────────────
+# 不一致的症狀是「登入失敗」，而訊息會叫人去查帳密——錯的其實是網址。
+import os as _os
+_ios = open(_os.path.join(ROOT,'iOS/WoundMeasurementApp/Core/AppSettings.swift'),encoding='utf-8').read()
+_gradle_path = _os.path.join(ROOT,'Android/app/build.gradle')
+_ios_url = re.search(r'return "(https://[^"]+run\.app)"', _ios)
+ck(_ios_url is not None, "iOS AppSettings 找不到 release 預設後端網址")
+if _os.path.exists(_gradle_path):
+    _g = open(_gradle_path,encoding='utf-8').read()
+    _and_url = re.search(r'DEFAULT_BACKEND_URL",\s*\n?\s*\'"(https://[^"]+run\.app)"\'', _g)
+    ck(_and_url is not None, "Android build.gradle 找不到 release DEFAULT_BACKEND_URL")
+    if _ios_url and _and_url:
+        ck(_ios_url.group(1) == _and_url.group(1),
+           f"預設後端網址不一致：iOS={_ios_url.group(1)} vs Android={_and_url.group(1)}")
+    print(f"  預設後端網址：iOS={_ios_url.group(1) if _ios_url else '?'}")
+else:
+    print("  (沙箱快照無 Android/app/build.gradle，跳過跨端網址比對)")
+
 # ── 結果 ───────────────────────────────────────────────────────────────────
 print(f"\n檢查項目：{checks}　失敗：{len(fails)}")
 for f in fails:

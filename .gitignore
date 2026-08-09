@@ -127,3 +127,5 @@ iOS/DerivedData/
 # 固定作法是把訊息寫進這個檔再 `git commit -F COMMIT_MSG.txt`。
 # 它是過程產物，不該進版控（訊息本身已經在 git log 裡了）。
 /COMMIT_MSG.txt
+
+.DS_Store
