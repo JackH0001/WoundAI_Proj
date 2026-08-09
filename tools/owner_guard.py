@@ -55,8 +55,13 @@ OWNERS = [
 ]
 DEFAULT_OWNER = "both"          # 根目錄的 .gitignore、COMMIT_MSG.txt 等
 
-# `--sync` 要核對的子樹 → 該子樹的權威來源 ref
-SYNC_REFS = {"iOS/": "origin/ios-verify"}
+# `--sync` 要核對的子樹 → 權威來源 ref。
+#
+# ⚠ 這裡一定要是**兩台機器都會推到的那個分支**（`origin/main`），
+# 不可以指向某一次的功能分支。第一版寫 `origin/ios-verify`，那支在合進 main 之後
+# 就凍住了：main 每往前一步，守門就多報一筆「不一致」，而那些全是雜訊。
+# **會愈用愈吵的守門，最後一定會被關掉。**
+SYNC_REFS = {"iOS/": "origin/main"}
 
 
 def sh(args):
@@ -242,7 +247,10 @@ def check_sync():
             print("      改動／缺席  " + p)
         for p in extra[:20]:
             print("      多出來      " + p)
-        print("    還原：git checkout %s -- %s" % (ref, prefix.rstrip("/")))
+        # 不一致有兩種成因，而這支程式分不出來——所以兩種都講，不要假裝知道是哪一種。
+        print("    可能一：**你還沒 pull**（對方剛推了新東西）→ git pull --rebase")
+        print("    可能二：這台機器改到了不該改的 → git checkout %s -- %s"
+              % (ref, prefix.rstrip("/")))
         if extra:
             print("    ⚠ 多出來的檔案 checkout 不會移除，要自己刪")
     return worst
