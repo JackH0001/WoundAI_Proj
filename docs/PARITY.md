@@ -41,7 +41,21 @@ LiDAR 差一級。**消除計畫**：iOS phantom 誤差表已完成（2026-08-18
 斜拍校正 ÷cosθ ±3%），供 Windows 端評估 ARCore 路線是否值得做；決策後
 要嘛 Android 補上（宣告刪除），要嘛在此改註「Android 不做，永久宣告」。
 
-### 已消除：`quality`（2026-08-10）
+### ⚠ 更正（2026-08-19）：`quality` 的方向先前寫反了
+
+原本宣告「`quality`：iOS 有、Android 無」。**實際是 iOS 讀了但從來沒送出。**
+
+證據：主控台送件清單裡每一筆的品質欄都是 `—`，含 2026-08-09 那四筆 iOS 紀錄。
+讀碼確認 `BackendClient.swift:617` 有 `obj["quality"] = v`，但兩個呼叫端
+（`MeasureFlowView.swift:500`、`ReviewView.swift:271`）都沒有傳。
+
+`parity_check` 報不出來——它檢查「送出程式碼裡有沒有出現這個欄位名」，
+而那行確實在。缺的是呼叫端。**這是「宣告在、值不在」的第三次**
+（前兩次：`resume = null`、`initialPolygons = emptyList()`）。
+
+已交辦 iOS 端補呼叫端，見 `docs/handoff_2026-08-19_windows_to_mac.md` 第 1 項。
+
+### 已消除：`quality`（Android，2026-08-10）
 
 iOS 讀取 classify 的 `quality`（對焦、過曝、marker 大小與傾斜）並隨標註送回後端，
 Android 先前不讀。後果是後端 `/api/v1/dataset/manifest` 的品質門檻
