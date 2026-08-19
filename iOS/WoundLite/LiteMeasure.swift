@@ -87,7 +87,13 @@ final class LiteMeasureVM: ObservableObject {
         if LitePrefs.researchConsent == true {
             busyHint = "雲端辨識中…（約數秒）"
             switch await liteCloudSegment(work, depth: dd) {
-            case .ok(let cloud, let stored):
+            case .ok(let cloud, let stored, let route, let raw):
+                // Debug 組建把路由與輪廓數直接掛在畫面上：route 說出後端走哪條路、
+                // 「後端 N・解析 M」不一致＝客戶端解析問題——兩種病一眼分開。
+                var dbg: String? = nil
+                #if DEBUG
+                dbg = "🔧 route=\(route ?? "—")・後端輪廓 \(raw)・解析成功 \(cloud.count)"
+                #endif
                 let picked = Self.centerWound(cloud, w: imageW, h: imageH)
                 if !picked.isEmpty {
                     polys = picked
@@ -98,15 +104,18 @@ final class LiteMeasureVM: ObservableObject {
                     }
                     // 據實告知有沒有上傳——同意分流講給人聽才有意義（後端 stored 欄位）。
                     if stored { lines.append("去識別影像與深度資料已上傳供研究（可於設定撤回未來上傳）。") }
+                    if let d = dbg { lines.append(d) }
                     note = lines.isEmpty ? nil : lines.joined(separator: "\n")
                     await runEstimate()
                     return true
                 }
                 // 空輪廓時後端照樣落地（同意者）——難例正是研究最需要的樣本，
                 // 而「有沒有上傳」必須據實告知，不因辨識失敗而略過。
-                note = stored
+                var msg = stored
                     ? "雲端未辨識到傷口，請手動圈選。去識別資料已上傳供研究（正是改進辨識所需的難例）。"
                     : "雲端未辨識到傷口，請手動圈選。"
+                if let d = dbg { msg += "\n" + d }
+                note = msg
                 return false
             case .softFail(let message):
                 // 429 配額／人臉退件：不是錯誤，是流程分流。訊息照後端的說法給。
@@ -162,7 +171,7 @@ final class LiteMeasureVM: ObservableObject {
     }
 
     enum LiteCloudOutcome {
-        case ok([[[Int]]], stored: Bool)
+        case ok([[[Int]]], stored: Bool, route: String?, raw: Int)
         case softFail(String)     // 429 配額／人臉退件：後端給的可讀訊息
         case hardFail
     }
@@ -200,10 +209,16 @@ final class LiteMeasureVM: ObservableObject {
             if r.imageH > 0 { imageH = r.imageH }
             depth?.rgbWidth = imageW
             depth?.rgbHeight = imageH
-            return r.polygons.isEmpty ? .ok([], stored: r.stored)
-                                      : .ok(r.polygons, stored: r.stored)
+            return .ok(r.polygons, stored: r.stored, route: r.route, raw: r.rawPolyCount)
         } catch {
+            // Debug 組建把確切錯誤（HTTP 狀態＋伺服器訊息／逾時）掛上畫面——
+            // 「連線或服務問題」六個字對排錯毫無鑑別力（2026-08-19 教訓：
+            // 端點 500、404、逾時、DNS 全都長這樣）。
+            #if DEBUG
+            return .softFail("雲端辨識未成功，請手動圈選。\n🔧 \(String(describing: error))")
+            #else
             return .hardFail
+            #endif
         }
     }
 }

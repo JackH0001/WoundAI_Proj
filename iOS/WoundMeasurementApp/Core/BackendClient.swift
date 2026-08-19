@@ -457,6 +457,12 @@ actor BackendClient {
         var imageId: String?
         /// 非失敗的退回訊息（429 配額、人臉退件）——App 顯示它並改走手動圈選。
         var userMessage: String?
+        /// 走了哪條辨識路徑（student / cloud_escalated(AU)…）。2026-08-19 後端加回，
+        /// 空結果排錯的第一手證據。
+        var route: String?
+        /// 後端回傳的輪廓「原始個數」（解析前）。與 `polygons.count` 不一致＝
+        /// **客戶端解析問題**，一致且為 0＝後端真的空手——兩種病要分得開。
+        var rawPolyCount: Int
     }
 
     /**
@@ -502,20 +508,31 @@ actor BackendClient {
             let msg = jOpt?["message"].string ?? ""
             return LiteSegmentResult(polygons: [], imageW: 0, imageH: 0, confidence: 0,
                                      stored: false, imageId: nil,
-                                     userMessage: msg.isEmpty ? "自動辨識暫不可用，請手動圈選。" : msg)
+                                     userMessage: msg.isEmpty ? "自動辨識暫不可用，請手動圈選。" : msg,
+                                     route: jOpt?["route"].string, rawPolyCount: 0)
         }
         guard code == 200, let j = jOpt else {
             throw BackendError.http(status: code, message: summarize(data))
         }
+        // ⚠ 逐層防禦式解析，不用 `as? [[[Any]]]` 三層硬轉型——bridging 對巢狀
+        //   異質陣列的行為不保證，硬轉失敗是**靜默回 nil**，症狀與「後端空手」
+        //   完全相同，會把排錯帶去錯的那一端（2026-08-19 排錯教訓，rawPolyCount
+        //   就是為了讓這兩種病永遠分得開）。
         var polys: [[[Int]]] = []
-        if let arr = j["wound_polygons"].raw as? [[[Any]]] {
-            polys = arr.map { poly in
-                poly.compactMap { pt -> [Int]? in
-                    guard pt.count >= 2,
-                          let x = pt[0] as? NSNumber, let y = pt[1] as? NSNumber else { return nil }
-                    return [x.intValue, y.intValue]
+        var rawCount = 0
+        if let arr = j["wound_polygons"].raw as? [Any] {
+            rawCount = arr.count
+            for polyAny in arr {
+                guard let polyArr = polyAny as? [Any] else { continue }
+                var poly: [[Int]] = []
+                for ptAny in polyArr {
+                    if let pt = ptAny as? [Any], pt.count >= 2,
+                       let x = pt[0] as? NSNumber, let y = pt[1] as? NSNumber {
+                        poly.append([x.intValue, y.intValue])
+                    }
                 }
-            }.filter { $0.count >= 3 }
+                if poly.count >= 3 { polys.append(poly) }
+            }
         }
         let iid = j["image_id"].string
         return LiteSegmentResult(polygons: polys,
@@ -524,7 +541,9 @@ actor BackendClient {
                                  confidence: j["confidence"].double(0),
                                  stored: j["stored"].bool(false),
                                  imageId: (iid?.isEmpty == false) ? iid : nil,
-                                 userMessage: nil)
+                                 userMessage: nil,
+                                 route: j["route"].string,
+                                 rawPolyCount: rawCount)
     }
 
     /**
