@@ -164,8 +164,10 @@ def main():
     # 民眾版必須套用 SSOT 門檻，否則機率圖被當成遮罩，整張圖都是傷口而不報錯。
     lite_fn = src[src.find("def segment_for_lite"):]
     lite_fn = lite_fn[:lite_fn.find("\n@app.route")] if "\n@app.route" in lite_fn else lite_fn[:3000]
+    # 門檻已抽成 `student_threshold()`（唯一來源）。這裡只確認 Lite 有用它——
+    # 逐像素等值與「只有一份拷貝」由 test_threshold_parity.py 負責。
     check("segment_for_lite 有套用 SSOT threshold（機率圖不可直接當遮罩）",
-          "threshold" in lite_fn and "> thr" in lite_fn,
+          "student_threshold()" in lite_fn,
           "少了門檻，mask>0 會把整張圖當傷口，而且不會有任何錯誤")
 
     # ── 匿名端點的最外層必須有 catch-all ──────────────────────────

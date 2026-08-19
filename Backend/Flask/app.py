@@ -1181,6 +1181,30 @@ def _au_infer(sess, image_rgb):
     if o.min() < 0 or o.max() > 1: o = 1.0/(1.0+np.exp(-np.clip(o,-30,30)))
     return o
 
+def student_threshold():
+    """student 機率圖轉二值遮罩的門檻。**唯一來源。**
+
+    `segment_wound_ai` 回的是機率圖，不是遮罩。要用 SSOT 裡該模型的 threshold 去切。
+
+    ## 為什麼要一個函式，而不是「兩邊都寫同一個運算式」
+
+    2026-08-19 的教訓有兩層。第一層是我在 `segment_for_lite` 裡漏了門檻——
+    `mask > 0` 會把整張圖當成傷口，**而且不會有任何錯誤**。
+    第二層是即使補上了，那個運算式就有了兩份拷貝：
+
+        thr = float(((_load_ssot().get("models", {}) or {})
+                     .get(_active_model_key() or "", {}) or {}).get("threshold", 0.4))
+
+    兩份拷貝之後，只要有人改其中一邊，同一張照片在醫療版與民眾版就會得到
+    不同的遮罩——而兩邊各自都「有套用 SSOT 門檻」，靜態檢查看不出來，
+    使用者只會發現兩個 App 對同一張傷口說了不同的話。
+
+    測「兩份拷貝有沒有同步」是治標。**讓拷貝不存在才是治本。**
+    """
+    cfg = (_load_ssot().get("models", {}) or {}).get(_active_model_key() or "", {}) or {}
+    return float(cfg.get("threshold", 0.4))
+
+
 def escalate_mask(img_rgb, mask, W, H, policy="always"):
     """難例升級：student 的遮罩不夠好時，改用雲端 A∪U 集成。
 
@@ -1271,9 +1295,7 @@ def segment_for_lite(image_rgb):
     if wound_prob is None:
         mask = _np.zeros(image_rgb.shape[:2], bool)
     else:
-        thr = float(((_load_ssot().get("models", {}) or {})
-                     .get(_active_model_key() or "", {}) or {}).get("threshold", 0.4))
-        mask = _np.asarray(wound_prob) > thr
+        mask = _np.asarray(wound_prob) > student_threshold()
     h, w = image_rgb.shape[:2]
     mask, info = escalate_mask(image_rgb, mask, w, h, policy="on_weak")
     info.setdefault("route", "student")
@@ -1743,7 +1765,10 @@ def classify_wound():
         else:
             # Stage2 分割(端上主力 student)
             wound_prob, conf = segment_wound_ai(img)
-            thr = float(((_load_ssot().get("models", {}) or {}).get(_active_model_key() or "", {}) or {}).get("threshold", 0.4))
+            # 門檻只有一個來源（`student_threshold()`）。先前這裡與 segment_for_lite
+            # 各寫一份同樣的運算式——兩份拷貝一旦分岔，同一張照片在醫療版與
+            # 民眾版會得到不同遮罩，而兩邊看起來都「有套用 SSOT 門檻」。
+            thr = student_threshold()
             mask = wound_prob > thr
             # AI 回空遮罩時,順手用色彩分割探一下:若找得到形狀合理的飽和紅色塊,
             # 幾乎可以確定使用者把「印刷模擬圖」誤選成了臨床/範例(選錯來源就會走 AI,而 AI 對
