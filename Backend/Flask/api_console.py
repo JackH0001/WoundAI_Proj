@@ -723,7 +723,12 @@ async function renameUser(u){
 async function changeRole(u){
   const rec = users.find(x => x.user === u); if(!rec) return;
   const opts = Array.from($("nr").options).map(o => ({v:o.value, t:o.textContent}));
-  const list = opts.map(o => `  ${o.v} = ${o.t}`).join("\n");
+  // ⚠ 換行必須寫成雙反斜線加 n。`_PAGE` 是**非 raw** 的三引號字串，
+  // Python 會把單反斜線的那個序列解成真的換行，而 JS 的雙引號字串**不能跨行**——
+  // 結果是整個 <script> 解析失敗，連登入函式都不存在。
+  // 2026-08-19 主控台就是這樣整個掛掉的，而且**連這段註解的第一版也踩了同一個坑**：
+  // 註解裡寫出那個序列，一樣會被切成兩行，第二行以反引號開頭又開一個 template literal。
+  const list = opts.map(o => `  ${o.v} = ${o.t}`).join("\\n");
   const to = prompt(`把 ${u} 的角色改成（輸入英文代碼）：\n\n${list}\n\n目前：${rec.role}`, rec.role);
   if(to === null) return;
   const pick = opts.find(o => o.v === to.trim());

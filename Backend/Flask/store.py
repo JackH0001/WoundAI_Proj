@@ -59,12 +59,31 @@ class Store:
     """飛輪儲存介面。key 一律是相對於飛輪根目錄的 POSIX 風格路徑，例如
     `retrain_queue.jsonl`、`images/70e4e34b.jpg`、`quarantine/70e4e34b.jpg`。"""
 
+    # 稽核鍵清單。**定義在基底類別**，理由同下面的 `_is_audit`：
+    # 「稽核不可刪」不該取決於今天跑在哪一種儲存後端。
+    AUDIT_KEYS = ("audit.jsonl",)
+
+    # ⚠ 這個判斷放在基底類別，不放在某一個實作裡。
+    #
+    # 先前它只定義在 `GcsStore` 上，而 `LocalStore` 沒有——本機模式下任何呼叫
+    # `self._is_audit()` 的程式碼都會 AttributeError。加 `delete()` 時就踩到了：
+    # 守衛寫好了，卻只在雲端生效，本機是**直接崩潰**。
+    # 稽核不可刪這條規則不該取決於今天跑在哪一種儲存後端。
+    def _is_audit(self, key: str) -> bool:
+        k = (key or "").strip("/")
+        return any(k == a or k.startswith(a + "/") for a in self.AUDIT_KEYS)
+
     def append_line(self, key: str, line: str) -> None: raise NotImplementedError
     def read_lines(self, key: str): raise NotImplementedError
     def put_blob(self, key: str, data: bytes) -> None: raise NotImplementedError
     def get_blob(self, key: str): raise NotImplementedError
     def exists(self, key: str) -> bool: raise NotImplementedError
     def move(self, src: str, dst: str) -> bool: raise NotImplementedError
+    # ⚠ 刪除是為了**民眾版的撤回**（`DELETE /api/v1/lite/data/<anon_id>`）而加的。
+    # 臨床側一律不用它：那邊的規則是「排除／撤回都不刪除，另寫一筆紀錄」，
+    # 因為 append-only 的佇列本身就是稽核軌跡。兩者的差別不是潔癖：
+    # 民眾提供的是自己的資料且有被遺忘的期待；臨床樣本背後是 IRB 與病歷。
+    def delete(self, key: str) -> bool: raise NotImplementedError
     def list_keys(self, prefix: str): raise NotImplementedError
     def describe(self) -> str: raise NotImplementedError
 
@@ -118,6 +137,15 @@ class LocalStore(Store):
     def exists(self, key: str) -> bool:
         return os.path.exists(self._p(key))
 
+    def delete(self, key: str) -> bool:
+        if self._is_audit(key):
+            raise PermissionError("稽核軌跡不可刪除")
+        p = self._p(key)
+        if not os.path.exists(p):
+            return False
+        os.remove(p)
+        return True
+
     def move(self, src: str, dst: str) -> bool:
         s, d = self._p(src), self._p(dst)
         if not os.path.exists(s):
@@ -151,7 +179,7 @@ class GcsStore(Store):
     #
     # 沒有這段路由的話，稽核桶就只是一個空的、有保留政策的桶——看起來合規，
     # 實際上稽核紀錄還是寫在刪得掉的主桶裡。
-    AUDIT_KEYS = ("audit.jsonl",)
+    # （`AUDIT_KEYS` 已移到基底 `Store`，兩種後端共用同一份清單。）
 
     def __init__(self, bucket: str, prefix: str = "flywheel", audit_bucket: str = None):
         from google.cloud import storage  # noqa: 延後 import，見 docstring
@@ -171,10 +199,6 @@ class GcsStore(Store):
         # 所以其他實例寫入的新紀錄一定看得到（正確性不依賴快取）。
         self._line_cache = {}
         self._CACHE_MAX_LINES = 200_000
-
-    def _is_audit(self, key: str) -> bool:
-        k = key.strip("/")
-        return any(k == a or k.startswith(a + "/") for a in self.AUDIT_KEYS)
 
     def _target(self, key: str):
         """(bucket 物件, bucket 名稱)。稽核鍵在有設定稽核桶時走那一個。"""
@@ -248,6 +272,17 @@ class GcsStore(Store):
     def exists(self, key: str) -> bool:
         bucket, _ = self._target(key)
         return bucket.blob(self._k(key)).exists()
+
+    def delete(self, key: str) -> bool:
+        # 與 move 同一條守則：稽核鍵不可刪，而且要**明確失敗**而不是靜默照做。
+        if self._is_audit(key):
+            raise PermissionError("稽核軌跡不可刪除")
+        bucket, _ = self._target(key)
+        b = bucket.blob(self._k(key))
+        if not b.exists():
+            return False
+        b.delete()
+        return True
 
     def move(self, src: str, dst: str) -> bool:
         # 稽核鍵不該被 move；真的發生就是有人想搬走軌跡，讓它明確失敗而不是靜默照做。

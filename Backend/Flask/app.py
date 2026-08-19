@@ -152,6 +152,18 @@ try:
 except Exception as _ce:
     print(f"主控台未載入: {_ce}")
 
+# ── WoundLite 民眾版的**匿名**端點 ────────────────────────────────────
+#
+# ⚠ 這是整個服務唯一不需要登入的資料端點。分割函式用注入而不是讓 api_lite
+# 反向 import 本模組：一來避免循環匯入，二來讓它在沒有 ONNX 模型的環境下
+# 也 import 得起來（契約測試因此不必載入模型就跑得動）。
+try:
+    from api_lite import lite_bp, init_lite
+    init_lite(segment_wound_ai)
+    app.register_blueprint(lite_bp)
+except Exception as _le:
+    print(f"民眾版端點未載入: {_le}")
+
 # ── 帳號與角色（RBAC S1）────────────────────────────────────────────
 #
 # 帳號改由 `auth_users` 管理（存在儲存層、PBKDF2 雜湊、可停用、帶角色）。
