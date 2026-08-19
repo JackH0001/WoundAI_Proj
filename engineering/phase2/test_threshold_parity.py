@@ -145,6 +145,58 @@ def main():
     check("segment_for_lite 用的是 student_threshold()",
           "> student_threshold()" in code)
 
+    # ── on_weak 的「弱」定義（回歸樣本：0c8dab2b）────────────────────
+    #
+    # 2026-08-20 00:15 實測：student 對印刷樣例吐出一個 0.76 cm²、約佔畫面
+    # 千分之三的小遮罩。第一版門檻 0.001——**過了門檻所以沒升級**，
+    # 而那正是集成救得回來的難例。「有一點輸出」和「輸出可信」是兩回事。
+    # 這一節把那個樣本的形狀寫成回歸：0.3% 應升級、5% 不應。
+    print("\n── on_weak 的弱定義 ──")
+    # ⚠ 數的是 `_au_infer`（真正貴的推論），不是 `_load_cloud_au`（載入，有快取）。
+    # 第一版數載入次數，結果抓到程式碼的另一個問題：載入排在 policy 檢查之前，
+    # on_weak 提早返回時模型已經載了。順序修掉後，計數也改到對的東西上——
+    # 成本上界要守的是「每個請求跑幾次推論」，不是「模型載過幾次」。
+    calls = {"n": 0}
+    orig_au, orig_inf = A._load_cloud_au, A._au_infer
+
+    big = np.zeros((64, 48), np.float32)
+    big[10:40, 10:40] = 0.9
+
+    def fake_infer(sess, img):
+        calls["n"] += 1
+        return big
+
+    try:
+        A._load_cloud_au = lambda: (object(), object())
+        A._au_infer = fake_infer
+        # 千分之三的遮罩（0c8dab2b 的形狀）→ 應該去問集成
+        tiny = np.zeros((64, 48), bool)
+        tiny[0, :9] = True                      # 9/3072 ≈ 0.003
+        m1, i1 = A.escalate_mask(np.zeros((64, 48, 3), np.uint8), tiny,
+                                 48, 64, policy="on_weak")
+        # 一次升級＝兩次推論（A 與 U 各一）
+        check("千分之三的小遮罩會觸發升級（0c8dab2b 回歸）",
+              calls["n"] == 2 and i1.get("escalated") is True,
+              "推論 %d 次，info=%s" % (calls["n"], i1))
+        check("  並記下 weak_reason（tiny_mask）",
+              str(i1.get("weak_reason", "")).startswith("tiny_mask"), i1.get("weak_reason"))
+        # 5% 的正常遮罩 → 不跑集成（匿名端點的成本上界）
+        normal = np.zeros((64, 48), bool)
+        normal[:16, :10] = True                 # 160/3072 ≈ 0.052
+        m2, i2 = A.escalate_mask(np.zeros((64, 48, 3), np.uint8), normal,
+                                 48, 64, policy="on_weak")
+        check("正常大小的遮罩不跑推論（匿名端點的成本上界）",
+              calls["n"] == 2 and not i2,
+              "推論被呼叫 %d 次（應維持 2）" % calls["n"])
+        # always 政策不受 weak 門檻影響（醫療版每次都要第二意見）
+        m3, i3 = A.escalate_mask(np.zeros((64, 48, 3), np.uint8), normal,
+                                 48, 64, policy="always")
+        check("always 政策照樣跑推論（醫療版不受弱門檻影響）",
+              calls["n"] == 4, calls["n"])
+    finally:
+        A._load_cloud_au = orig_au
+        A._au_infer = orig_inf
+
     print("\n%d 項檢查，%d 項失敗" % (TOTAL[0], len(FAILED)))
     if FAILED:
         print("失敗：")

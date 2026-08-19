@@ -1236,16 +1236,31 @@ def escalate_mask(img_rgb, mask, W, H, policy="always"):
     """
     info = {}
     try:
+        # 弱門檻的判斷放在**載入集成之前**。第一版順序相反——on_weak 提早返回時
+        # 兩顆模型已經載進來了（有快取所以第二次起不貴，但首次載入是實際成本，
+        # 而且「不會用到的東西不該先載」這個順序錯了，日後在這前面加任何昂貴
+        # 操作都會被靜默執行）。測試改數 _au_infer 的呼叫次數時抓到的。
+        if policy == "on_weak":
+            # 「夠弱才升級」的門檻。
+            #
+            # ⚠ 第一版設 0.001（千分之一畫面），實測第一晚就漏掉一個活樣本：
+            # `0c8dab2b`（2026-08-20 00:15）——student 吐出一個 0.76 cm² 的小遮罩，
+            # 佔畫面約千分之三，**過了門檻所以沒升級**，而那其實是集成救得回來的
+            # 難例。「有一點輸出」和「輸出可信」是兩回事。
+            #
+            # 改成 1%：民眾版的拍攝指引是傷口部位特寫，傷口正常會佔畫面數個百分點；
+            # 小於 1% 的遮罩要嘛是真的極小傷口（遠拍，違反指引）、要嘛是 student
+            # 低估——兩種都值得再問一次集成。成本上界仍然有效：升級只在弱輸出時
+            # 觸發，正常照片（遮罩 >1%）不會多跑模型。
+            # 可用 LITE_WEAK_FRAC 調整；回歸樣本＝0c8dab2b（應升級）與正常特寫（不應）。
+            weak_frac = float(os.environ.get("LITE_WEAK_FRAC", "0.01"))
+            frac = float(np.asarray(mask, bool).sum()) / max(1, mask.size)
+            if frac >= weak_frac:
+                return mask, info
+            info["weak_reason"] = "empty" if frac == 0.0 else ("tiny_mask %.4f" % frac)
         _a, _u = _load_cloud_au()
         if _a is None or _u is None:
             return mask, info
-        if policy == "on_weak":
-            # 「夠弱才升級」的門檻：空遮罩，或小於千分之一畫面。
-            # 後者是因為 student 偶爾會吐出幾個雜點而不是真的空——
-            # 那種輸出與空手的臨床意義相同，都該再問一次。
-            frac = float(np.asarray(mask, bool).sum()) / max(1, mask.size)
-            if frac >= 0.001:
-                return mask, info
         _fused = 0.5 * _au_infer(_a, img_rgb) + 0.5 * _au_infer(_u, img_rgb)
         au_mask = cv2.resize(_fused, (W, H)) > 0.40
 

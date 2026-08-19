@@ -120,6 +120,7 @@ code{font-family:ui-monospace,monospace;font-size:12.5px;word-break:break-all}
   <a data-tab="sys"   class="hide" onclick="go('sys')">系統狀態</a>
   <a data-tab="audit" class="hide" onclick="go('audit')">稽核軌跡</a>
   <a data-tab="users" class="hide" onclick="go('users')">帳號管理</a>
+  <a data-tab="lite"  class="hide" onclick="go('lite')">民眾版資料</a>
   <div class="who" id="who">未登入</div>
 </nav>
 
@@ -207,6 +208,14 @@ code{font-family:ui-monospace,monospace;font-size:12.5px;word-break:break-all}
   </p>
 </section>
 
+<section id="tab-lite">
+  <h1>民眾版資料（WoundLite）</h1>
+  <p class="sub">匿名研究資料的盤點。與臨床樣本完全分開——這裡的數字不計入收案進度，
+  民眾自畫的輪廓（lay）也<b>不會</b>進入醫師 GT 訓練佇列（結構隔離，見 lite_labels.jsonl）。</p>
+  <div id="lite_stats" class="row"></div>
+  <div id="lite"></div>
+</section>
+
 <section id="tab-users">
   <h1>帳號管理</h1>
   <p class="sub">開通、停用、改名、重設密碼。<b>不提供刪除</b>——稽核軌跡引用著那些識別碼。</p>
@@ -252,7 +261,7 @@ async function api(path, opt){
    每個 API 端點都在伺服器端獨立檢查權限（fail-closed）；
    改前端 JS 打得出請求，但會拿到 403 並留下稽核紀錄。            */
 const TABS = {dash:"flywheel.stats", recs:"flywheel.stats", sys:"audit.read",
-              audit:"audit.read", users:"user.manage"};
+              audit:"audit.read", users:"user.manage", lite:"audit.read"};
 const loaded = {};
 let cur = "login";
 
@@ -271,7 +280,7 @@ function go(name){
   // 延遲載入：進到那一頁才去要資料。第一版四支請求在登入當下全部發出，
   // 其中稽核最慢，於是「只想看收案數」也得等它讀完。
   if(!loaded[name]){ loaded[name] = true; ({dash:loadDash, recs:loadRecs, sys:loadSys,
-    audit:()=>auditGo(0), users:loadUsers}[name]||(()=>{}))(); }
+    audit:()=>auditGo(0), users:loadUsers, lite:loadLite}[name]||(()=>{}))(); }
 }
 
 function applyPerms(){
@@ -652,6 +661,42 @@ function copyAnchor(){
   const t = `WoundAI 稽核鏈錨定\\nhead: ${$("hh").textContent}\\n` +
             $("a_anchor").innerText.split("\\n").filter(l=>l.includes("驗證時間")).join("");
   navigator.clipboard.writeText(t).then(()=>alert("已複製"), ()=>alert("複製失敗，請手動選取"));
+}
+
+/* ───────── 民眾版資料（WoundLite）───────── */
+async function loadLite(){
+  let j; try{ j = await api("/api/v1/lite/records"); }
+  catch(e){ $("lite").innerHTML = "<p class='bad'>讀取失敗："+esc(e.message)+"</p>"; return; }
+  const b = j.route_buckets || {}, p = j.route_pct || {};
+  // route 三桶＝模型進步的即時儀表：student 佔比升、escalated/empty 降＝模型在變好。
+  // lay 修正率是更早的訊號：模型有輸出但人改了它——empty 桶只抓全空手，這個抓「畫錯邊」。
+  $("lite_stats").innerHTML =
+    card("樣本（不含內測）", j.total ?? 0,
+         (j.internal_excluded ? `另有內測 ${j.internal_excluded} 筆已排除` : "")) +
+    card("裝置數", j.devices ?? 0, `撤回 ${j.withdrawn_devices ?? 0} 裝置`) +
+    card("student 自力", `${b.student ?? 0}（${p.student ?? 0}%）`, "基礎模型自己認得") +
+    card("集成救回", `${b.escalated ?? 0}（${p.escalated ?? 0}%）`, "難例，靠 A∪U", "warn") +
+    card("連集成都空手", `${b.empty ?? 0}（${p.empty ?? 0}%）`, "下一輪訓練優先", b.empty ? "bad" : "") +
+    card("lay 修正率", j.lay_corrected_pct == null ? "—" : `${j.lay_corrected_pct}%`,
+         `人改了 AI 的 ${j.lay_corrected ?? 0}/${j.lay_with_ai ?? 0} 筆（IoU<0.8）`,
+         (j.lay_corrected_pct ?? 0) >= 50 ? "bad" : "");
+  const rows = j.records || [];
+  $("lite").innerHTML = "<table><tr><th>時間 (UTC)</th><th>anon_id</th><th>route</th>" +
+    "<th>AI 輪廓</th><th>lay 輪廓</th><th>IoU</th><th>深度</th><th>同意版本</th></tr>" +
+    rows.map(r => `<tr class="${r.internal ? 'off' : ''}">
+      <td class="nowrap">${esc((r.received_at||"").replace("T"," ").replace("Z",""))}</td>
+      <td class="nowrap"><code>${esc((r.anon_id||"").slice(0,10))}</code>${r.internal?" <span style='font-size:10px'>內測</span>":""}</td>
+      <td class="nowrap">${esc(r.route||"")}${r.escalated?" ⬆":""}</td>
+      <td>${r.polygons ?? 0}</td>
+      <td>${r.lay_polygons == null ? "—" : r.lay_polygons}</td>
+      <td class="${r.corrected ? 'warn' : ''}">${r.iou_vs_ai == null ? "—" : r.iou_vs_ai}${r.corrected ? " 已修正" : ""}</td>
+      <td class="nowrap">${esc(r.depth||"—")}</td>
+      <td class="nowrap">${esc(r.consent_version||"—")}</td></tr>`).join("") + "</table>" +
+    (rows.length ? "" : "<p class='note'>還沒有民眾版資料。</p>") +
+    `<p class="note">lay 輪廓與 IoU：民眾修改後回傳的輪廓與 AI 輪廓的重疊度；
+     IoU&lt;0.8 標為「已修正」＝模型有輸出但畫錯了邊——這是比空手桶更早、更大量的
+     「模型哪裡錯」訊號。這些輪廓存於獨立的 lite_labels.jsonl，
+     <b>不會</b>進入醫師 GT 訓練佇列。</p>`;
 }
 
 /* ───────── 帳號管理 ───────── */

@@ -294,6 +294,10 @@ def _lite_segment_impl():
             # 回應裡有、檔案裡沒有，而只看回應完全察覺不到。
             "route": seg_info.get("route"),
             "escalated": bool(seg_info.get("escalated")),
+            # AI 自己的輪廓也要落地。**沒有它，「民眾改了什麼」就永遠算不出來**——
+            # lay 修正率（模型有輸出且人改了它）是比 empty 桶更早、更大量的
+            # 「模型哪裡錯」訊號，而它需要 AI 的答案與人的答案同時在場。
+            "ai_polygons": polys,
         }
         dp = request.form.get("depth_map_png")
         if dp:
@@ -431,9 +435,44 @@ def lite_annotation():
     if not st.exists(_fw._key(os.path.join(_dir(), "lite/%s/%s.jpg" % (anon_id, image_id)))):
         return jsonify({"error": "查無對應影像；請先以 research_consent=true 呼叫 lite/segment"}), 400
 
+    # ── lay 修正率：人改了 AI 多少（Mac review 建議的指標）──────────
+    #
+    # 在**收件當下**算一次 IoU 存起來，不在清單端每次重算：
+    # 標註只送一次，清單會被開很多次。
+    #
+    # IoU 需要 AI 的輪廓（存在 meta 的 ai_polygons）。兩組都柵格化在同一個
+    # 縮小座標系（長邊 512）再交併——IoU 對等比縮放不變，而 4000×3000 的
+    # 全解析度柵格化在匿名端點上是自找的成本。
+    iou_ai = None
+    try:
+        mraw = st.get_blob(_fw._key(os.path.join(
+            _dir(), "lite/%s/%s.json" % (anon_id, image_id))))
+        ai_polys = (json.loads(mraw.decode("utf-8")) if mraw else {}).get("ai_polygons") or []
+        iw, ih = int(d.get("image_w") or 0), int(d.get("image_h") or 0)
+        if ai_polys and iw > 0 and ih > 0:
+            import numpy as np
+            import cv2
+            s = 512.0 / max(iw, ih)
+            sw, sh = max(1, int(iw * s)), max(1, int(ih * s))
+            def _rast(pls):
+                m = np.zeros((sh, sw), np.uint8)
+                cv2.fillPoly(m, [np.round(np.asarray(p, np.float32) * s).astype(np.int32)
+                                 for p in pls], 1)
+                return m
+            a, b = _rast(ai_polys), _rast(clean)
+            uni = float(np.logical_or(a, b).sum())
+            iou_ai = round(float(np.logical_and(a, b).sum()) / uni, 3) if uni > 0 else None
+    except Exception:
+        iou_ai = None      # 算不出來就留 None；不可因為指標算不出來而拒收標註
+
     rec = {
         "anon_id": anon_id, "image_id": image_id,
         "polygons": clean, "polygon_count": len(clean),
+        # AI 有輸出且 IoU<0.8 ＝「人修正了模型」。門檻掛環境變數，
+        # 研究端要改敏感度不必動程式。None＝AI 空手（那是 empty 桶的事，不算修正）。
+        "iou_vs_ai": iou_ai,
+        "corrected": (iou_ai is not None
+                      and iou_ai < float(os.environ.get("LITE_CORRECTED_IOU", "0.8"))),
         "image_w": d.get("image_w"), "image_h": d.get("image_h"),
         "source": (str(d.get("source") or "manual"))[:16],
         "consent_version": (str(d.get("consent_version") or "").strip()[:32]) or None,
@@ -522,6 +561,13 @@ def lite_records():
     deleted = {e["anon_id"] for e in idx if e.get("action") == "deleted"}
     rows = [e for e in idx if e.get("action") != "deleted"
             and e.get("anon_id") not in deleted]
+    # 內測機。**列出但不計入統計**：藏起來會讓「清單有 7 筆、統計說 5 筆」
+    # 變成一個沒人解釋得了的謎；計入則污染 route 儀表（內測都是印刷樣例，
+    # escalated 占比會被灌高）。逗號分隔的 anon_id 前綴，掛環境變數。
+    _internal = {p.strip() for p in os.environ.get("LITE_INTERNAL_ANON", "").split(",")
+                 if p.strip()}
+    def _is_internal(aid):
+        return any((aid or "").startswith(p) for p in _internal)
     labels = [e for e in _fw.read_jsonl(os.path.join(_dir(), "lite_labels.jsonl"))
               if e.get("action") != "deleted"]
     lab_by_img = {}
@@ -532,15 +578,22 @@ def lite_records():
     #   student            → 基礎模型自己認得（最好）
     #   cloud_escalated(AU) → 要集成才救得回來（難例）
     #   （空）              → 連集成都空手（下一輪訓練的優先目標）
+    stat_rows = [e for e in rows if not _is_internal(e.get("anon_id"))]
     buckets = {"student": 0, "escalated": 0, "empty": 0}
-    for e in rows:
+    for e in stat_rows:
         if not e.get("polygons"):
             buckets["empty"] += 1
         elif e.get("escalated"):
             buckets["escalated"] += 1
         else:
             buckets["student"] += 1
-    total = max(1, len(rows))
+    total = max(1, len(stat_rows))
+    # lay 修正率：AI 有輸出、人畫了、而且改動夠大（IoU < 門檻）。
+    # 這比 empty 桶更早也更大量——模型完全空手是少數，
+    # 「有輸出但畫錯邊」才是日常，而只有人的修正看得出它。
+    lab_ai = [e for e in labels if e.get("iou_vs_ai") is not None
+              and not _is_internal(e.get("anon_id"))]
+    n_corrected = sum(1 for e in lab_ai if e.get("corrected"))
     out = []
     for e in sorted(rows, key=lambda x: x.get("received_at") or "", reverse=True)[:300]:
         lab = lab_by_img.get(e.get("image_id"))
@@ -553,14 +606,24 @@ def lite_records():
             # 民眾自己畫的輪廓數。**與 polygons（AI 的）分開兩欄**——
             # 合成一欄會讓「AI 空手但人畫了」這個最有價值的組合看不出來。
             "lay_polygons": (lab or {}).get("polygon_count"),
+            "iou_vs_ai": (lab or {}).get("iou_vs_ai"),
+            "corrected": (lab or {}).get("corrected"),
+            "internal": _is_internal(e.get("anon_id")),
         })
     return jsonify({
-        "records": out, "total": len(rows),
-        "devices": len({e.get("anon_id") for e in rows}),
+        "records": out, "total": len(stat_rows), "listed": len(rows),
+        "devices": len({e.get("anon_id") for e in stat_rows}),
+        "internal_excluded": len(rows) - len(stat_rows),
         "labels": len(labels),
         # AI 空手而民眾有畫的——難例採礦的第一優先，因為它同時有影像與人的判斷
-        "hard_with_lay": sum(1 for e in rows if not e.get("polygons")
+        "hard_with_lay": sum(1 for e in stat_rows if not e.get("polygons")
                              and lab_by_img.get(e.get("image_id"))),
+        # lay 修正率：AI 有輸出且人改了它（IoU < 門檻）。
+        # 分母是「AI 有輸出且有人畫」，不是全部標註——AI 空手的歸 empty 桶。
+        "lay_corrected": n_corrected,
+        "lay_with_ai": len(lab_ai),
+        "lay_corrected_pct": (round(100.0 * n_corrected / len(lab_ai), 1)
+                              if lab_ai else None),
         "route_buckets": buckets,
         "route_pct": {k: round(100.0 * v / total, 1) for k, v in buckets.items()},
         "withdrawn_devices": len(deleted),

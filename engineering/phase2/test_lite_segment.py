@@ -110,9 +110,19 @@ def main():
     lite.init_lite(fake_segment)
 
     from flask import Flask
+    from flask_jwt_extended import JWTManager, create_access_token
     app = Flask(__name__)
+    app.config["JWT_SECRET_KEY"] = "test-only-please-ignore"
+    JWTManager(app)
     app.register_blueprint(lite.lite_bp)
     cli = app.test_client()
+    with app.app_context():
+        H_ENG = {"Authorization": "Bearer " + create_access_token(
+            identity="default:eng01",
+            additional_claims={"role": "engineer", "org": "default", "user": "eng01"})}
+        H_DR = {"Authorization": "Bearer " + create_access_token(
+            identity="default:dr01",
+            additional_claims={"role": "physician", "org": "default", "user": "dr01"})}
 
     def post(anon="dev-a", consent="true", ip="203.0.113.9", salt=b"", **extra):
         data = {"anon_id": anon, "client": "woundlite-ios",
@@ -286,6 +296,66 @@ def main():
         check("落地的 meta 記下 route（日後才篩得出哪些靠集成救回）",
               json.load(open(mp, encoding="utf-8")).get("route") == "cloud_escalated(AU)")
     lite.init_lite(fake_segment)     # 還原，免得影響後續
+
+    print("\n── 10 lay 修正率（Mac review：比 empty 桶更早的「模型哪裡錯」訊號）──")
+    # fake_segment 的遮罩是 [60:180, 80:240] 的矩形 → AI 輪廓即該矩形。
+    r = post(anon="dev-corr", consent="true", ip="203.0.113.90", salt=b"c1")
+    iid_c = (r.get_json() or {}).get("image_id")
+    mp = os.path.join(tmp, "lite", "dev-corr", (iid_c or "") + ".json")
+    ai_ok = False
+    if os.path.isfile(mp):
+        ai_ok = bool(json.load(open(mp, encoding="utf-8")).get("ai_polygons"))
+    check("meta 落地 AI 輪廓（沒有它，「人改了什麼」永遠算不出來）", ai_ok)
+
+    def annot(anon, iid, poly, **over):
+        body = {"anon_id": anon, "image_id": iid, "polygons": [poly],
+                "image_w": 320, "image_h": 240, "research_consent": "true"}
+        body.update(over)
+        return cli.post("/api/v1/lite/annotation", json=body,
+                        headers={"X-Forwarded-For": "203.0.113.90"})
+
+    # 與 AI 幾乎相同的輪廓 → IoU 高 → 不算修正
+    same = [[80, 60], [239, 60], [239, 179], [80, 179]]
+    r = annot("dev-corr", iid_c, same)
+    check("回收與 AI 相同的輪廓成功", r.status_code == 200, (r.get_json() or {}))
+    labs = [e for e in fw.read_jsonl(os.path.join(tmp, "lite_labels.jsonl"))
+            if e.get("image_id") == iid_c]
+    check("IoU 已在收件當下算好（不留到清單端重算）",
+          labs and labs[-1].get("iou_vs_ai") is not None,
+          labs[-1] if labs else None)
+    check("幾乎相同 → 不算修正", labs and labs[-1].get("corrected") is False,
+          labs[-1].get("iou_vs_ai") if labs else None)
+
+    # 明顯不同的輪廓 → corrected
+    r2 = post(anon="dev-corr2", consent="true", ip="203.0.113.91", salt=b"c2")
+    iid_c2 = (r2.get_json() or {}).get("image_id")
+    shifted = [[10, 10], [100, 10], [100, 80], [10, 80]]
+    annot("dev-corr2", iid_c2, shifted)
+    labs2 = [e for e in fw.read_jsonl(os.path.join(tmp, "lite_labels.jsonl"))
+             if e.get("image_id") == iid_c2]
+    check("明顯改動 → corrected=True（IoU<0.8）",
+          labs2 and labs2[-1].get("corrected") is True,
+          labs2[-1].get("iou_vs_ai") if labs2 else None)
+
+    print("\n── 11 records 統計與內測排除 ──")
+    r = cli.get("/api/v1/lite/records", headers=H_ENG)
+    j = r.get_json() or {}
+    check("工程師看得到 records", r.status_code == 200, r.status_code)
+    check("統計含 lay 修正率欄位", "lay_corrected_pct" in j and j.get("lay_with_ai", 0) >= 2,
+          {k: j.get(k) for k in ("lay_corrected", "lay_with_ai", "lay_corrected_pct")})
+    check("醫師角色被擋（民眾版資料非臨床業務）",
+          cli.get("/api/v1/lite/records", headers=H_DR).status_code == 403)
+    check("匿名被擋", cli.get("/api/v1/lite/records").status_code == 401)
+
+    os.environ["LITE_INTERNAL_ANON"] = "dev-corr"
+    j2 = cli.get("/api/v1/lite/records", headers=H_ENG).get_json() or {}
+    os.environ.pop("LITE_INTERNAL_ANON", None)
+    check("內測機從統計排除但仍列出（total 降、listed 不變）",
+          j2.get("total", 0) < j.get("total", 0) and j2.get("listed") == j.get("listed"),
+          "total %s→%s listed %s→%s" % (j.get("total"), j2.get("total"),
+                                         j.get("listed"), j2.get("listed")))
+    check("排除數有明講（internal_excluded）", j2.get("internal_excluded", 0) >= 2,
+          j2.get("internal_excluded"))
 
     print("\n%d 項檢查，%d 項失敗" % (TOTAL[0], len(FAILED)))
     if FAILED:
