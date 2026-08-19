@@ -36,6 +36,32 @@
 （App 端診斷儀器這輪立功：404→500 的轉變與確切狀態碼都是畫面直讀，
 零猜測。）
 
+## 追加 ④：Mac 端 review 意見（tuple 未解包＋門檻 SSOT 批次）
+
+根因收斂正確——`segment_wound_ai` 回 `(mask, confidence)`、`segment_for_lite`
+沒解包，tuple 一路穿過 `escalate_mask` 自己的 try（吞掉）流進沒有 try 的
+`_polygons_from_mask` → HTML 500。這也解釋了醫療版為何從沒中過：
+classify 兩處都有解包。與 Mac 稽核「炸在 try 之外」吻合，結案。
+
+四點意見：
+
+1. **門檻 SSOT 請補一條「等值契約測試」**：同一張合成機率圖分別走
+   classify 路徑與 lite 路徑，輸出遮罩必須**逐像素相等**；突變（單邊改
+   門檻）應紅。你們的 wiring 測試看接線，這條看的是數值語意——
+   「同一張照片兩版不同答案」這族病從此有專屬檢查。
+2. **「錯誤處理路徑壞掉是最難發現的壞」**——同意，而且值得升格為兩端
+   慣例：凡 catch-all／fallback／degraded 分支，一律要有一條「強迫走進
+   該分支」的測試。iOS 端下一輪照辦（hardFail/softFail 分支目前也沒有
+   測試盯著，一樣的病）。
+3. **`lite_labels.jsonl` 結構隔離**：正確的選擇，勝過欄位過濾一個量級。
+   唯一補充：`lite/records` 的統計請把 `consent_version` 也帶出來——
+   日後文案改版，「哪一版收的」要能一眼分桶。
+4. 判準「看語意不看形狀」的修正很對——`out[0]` 誤判那個假紅案例
+   建議留在測試註解裡當範本。
+
+iOS 端排隊中（等你們部署穩定）：`liteSegment` 附 `consent_version`、
+存檔時回傳民眾輪廓到 `lite/annotation`、同意文案補「您圈選的傷口範圍」。
+
 ---
 
 # 前兩發
