@@ -68,13 +68,11 @@ struct LiteConsentView: View {
     }
 }
 
-/// 設定：研究同意開關＋拍攝要領＋（開發用）後端連線。
+/// 設定：研究同意開關＋拍攝要領。
+/// 2026-08-19 移除「進階（開發測試）」帳密區——雲端辨識已切換到匿名
+/// `lite/segment` 端點，民眾版不再有任何帳號概念（交辦清單第 5 項）。
 struct LiteSettingsView: View {
     @State private var consent = LitePrefs.researchConsent ?? false
-    @State private var devURL = AppSettings.backendURL()
-    @State private var devUser = AppSettings.backendUser()
-    @State private var devPass = ""
-    @State private var devMsg: String?
 
     var body: some View {
         NavigationStack {
@@ -101,24 +99,11 @@ struct LiteSettingsView: View {
                          + "本 App 為健康參考工具，非醫療診斷；傷口有惡化跡象請就醫。")
                         .font(.footnote)
                 }
-                // 開發驗證用：正式民眾版走匿名 lite 端點（見 docs/lite_backend_contract.md），
-                // 帳密欄位只供內部測試對照醫療後端。帳密由使用者自行輸入，App 不預填。
-                Section("進階（開發測試）") {
-                    TextField("後端網址", text: $devURL)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    TextField("帳號", text: $devUser)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    SecureField("密碼", text: $devPass)
-                    Button("儲存連線設定") {
-                        AppSettings.setBackendURL(devURL)
-                        if !devUser.isEmpty, !devPass.isEmpty {
-                            devMsg = AppSettings.setCredentials(user: devUser, password: devPass)
-                                ? "已儲存" : "儲存失敗"
-                        } else {
-                            devMsg = "已儲存網址（帳密未變更）"
-                        }
-                    }
-                    if let m = devMsg { Text(m).font(.footnote).foregroundStyle(.secondary) }
+                Section("資料與撤回") {
+                    Text("研究上傳採裝置匿名代碼歸檔（不連結任何身分）。關閉上方開關即停止"
+                         + "未來上傳；如需刪除已上傳的去識別資料，之後版本會提供一鍵撤回"
+                         + "（後端刪除通道已就緒）。")
+                        .font(.footnote).foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("設定")

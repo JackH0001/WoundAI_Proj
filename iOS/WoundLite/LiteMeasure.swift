@@ -84,24 +84,36 @@ final class LiteMeasureVM: ObservableObject {
                 }
             }
         }
-        if LitePrefs.researchConsent == true, !AppSettings.backendUser().isEmpty {
+        if LitePrefs.researchConsent == true {
             busyHint = "雲端辨識中…（約數秒）"
-            if let cloud = await cloudSegment(work) {
+            switch await liteCloudSegment(work, depth: dd) {
+            case .ok(let cloud, let stored):
                 let picked = Self.centerWound(cloud, w: imageW, h: imageH)
                 if !picked.isEmpty {
                     polys = picked
                     source = "cloud"
+                    var lines: [String] = []
                     if cloud.count > 1 {
-                        note = "已自動取畫面中央的傷口（偵測到 \(cloud.count) 處，其餘忽略）。可用「重新圈選」改為手動。"
+                        lines.append("已自動取畫面中央的傷口（偵測到 \(cloud.count) 處，其餘忽略）。可用「重新圈選」微調。")
                     }
+                    // 據實告知有沒有上傳——同意分流講給人聽才有意義（後端 stored 欄位）。
+                    if stored { lines.append("去識別影像與深度資料已上傳供研究（可於設定撤回未來上傳）。") }
+                    note = lines.isEmpty ? nil : lines.joined(separator: "\n")
                     await runEstimate()
                     return true
                 }
+                note = "雲端未辨識到傷口，請手動圈選。"
+                return false
+            case .softFail(let message):
+                // 429 配額／人臉退件：不是錯誤，是流程分流。訊息照後端的說法給。
+                note = message
+                return false
+            case .hardFail:
+                note = "雲端辨識未成功（連線或服務問題），請手動圈選傷口。"
+                return false
             }
-            note = "雲端辨識未成功，請手動圈選傷口。"
-            return false
         }
-        return false   // 未同意研究 → 一律手動
+        return false   // 未同意研究 → 一律手動，資料不離機
     }
 
     /// 手動圈選完成。
@@ -145,23 +157,50 @@ final class LiteMeasureVM: ObservableObject {
         if gen == g { estimate = est }
     }
 
-    private func cloudSegment(_ work: UIImage) async -> [[[Int]]]? {
-        guard let jpeg = await Task.detached(priority: .userInitiated, operation: {
-            work.jpegData(compressionQuality: 0.92)
-        }).value else { return nil }
+    enum LiteCloudOutcome {
+        case ok([[[Int]]], stored: Bool)
+        case softFail(String)     // 429 配額／人臉退件：後端給的可讀訊息
+        case hardFail
+    }
+
+    /**
+     匿名辨識（`/api/v1/lite/segment`，2026-08-19 切換；免帳號免登入）。
+
+     同意研究時一併附上深度研究資料：png16_mm 深度圖＋置信度＋**深度圖像素空間**
+     內參（與醫療版 annotation 同一 wire format、後端同一驗證器）。
+     編碼是 MB 級工作，照例移出主執行緒。
+     */
+    private func liteCloudSegment(_ work: UIImage, depth d: DepthCapture?) async -> LiteCloudOutcome {
+        let payload: (jpeg: Data, dep: String?, conf: String?, k: [String: Double]?)? =
+            await Task.detached(priority: .userInitiated) {
+                guard let jpeg = work.jpegData(compressionQuality: 0.92) else { return nil }
+                guard let d, let enc = DepthAreaEstimator.encodePng16mm(d) else {
+                    return (jpeg, nil, nil, nil)
+                }
+                return (jpeg,
+                        enc.depthPng.base64EncodedString(),
+                        enc.confPng.base64EncodedString(),
+                        DepthAreaEstimator.intrinsicsForUpload(d))
+            }.value
+        guard let payload else { return .hardFail }
         let c = BackendClient(baseUrl: AppSettings.backendURL())
-        guard (try? await c.login(username: AppSettings.backendUser(),
-                                  password: AppSettings.backendPassword())) == true else { return nil }
-        guard let r = try? await c.classify(jpeg: jpeg) else { return nil }
-        // 以後端回覆的座標空間為準（它處理的那張圖才是輪廓所在的空間）。
-        imageW = r.imageW > 0 ? r.imageW : imageW
-        imageH = r.imageH > 0 ? r.imageH : imageH
-        depth?.rgbWidth = imageW
-        depth?.rgbHeight = imageH
-        let ps = r.woundPolygons.isEmpty
-            ? (r.woundPolygon.count >= 3 ? [r.woundPolygon] : [])
-            : r.woundPolygons
-        return ps.isEmpty ? nil : ps
+        do {
+            let r = try await c.liteSegment(jpeg: payload.jpeg,
+                                            anonId: LitePrefs.anonId,
+                                            depthMapPngBase64: payload.dep,
+                                            depthConfPngBase64: payload.conf,
+                                            cameraIntrinsics: payload.k)
+            if let m = r.userMessage { return .softFail(m) }
+            // 以後端回覆的座標空間為準（它處理的那張圖才是輪廓所在的空間）。
+            if r.imageW > 0 { imageW = r.imageW }
+            if r.imageH > 0 { imageH = r.imageH }
+            depth?.rgbWidth = imageW
+            depth?.rgbHeight = imageH
+            return r.polygons.isEmpty ? .ok([], stored: r.stored)
+                                      : .ok(r.polygons, stored: r.stored)
+        } catch {
+            return .hardFail
+        }
     }
 }
 
