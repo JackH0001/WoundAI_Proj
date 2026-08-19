@@ -574,6 +574,11 @@ actor BackendClient {
         /// WoundAI3D 深度來源真值：`none`＝沒拍；`lidar_local`＝已加密存本機、未上傳；
         /// `lidar`＝已上傳（深度端點上線後）。「沒拍」與「拍了沒傳」必須分得出來。
         depthSource: String = "none",
+        /// 16-bit 灰階 PNG（值=mm、0=無效）base64——契約 docs/depth_capture_contract.md。
+        depthMapPngBase64: String? = nil,
+        depthConfPngBase64: String? = nil,
+        /// **深度圖像素空間**的 {fx, fy, cx, cy}。契約明言：少了它整批深度資料報廢。
+        cameraIntrinsics: [String: Double]? = nil,
         consentTrain: Bool,
         doctorVerified: Bool
     ) async throws -> AnnotationOutcome {
@@ -612,6 +617,13 @@ actor BackendClient {
         if let v = quality, !v.isEmpty { obj["quality"] = v }
 
         obj["depth_source"] = depthSource
+        if let png = depthMapPngBase64 {
+            obj["depth_map_png"] = png
+            obj["depth_format"] = "png16_mm"
+            obj["depth_scale"] = 0.001          // mm → m
+            if let c = depthConfPngBase64 { obj["depth_conf_png"] = c }
+            if let k = cameraIntrinsics { obj["camera_intrinsics"] = k }
+        }
         obj["capture_device"] = Self.deviceModelString()
 
         // 醫師修邊後的組織比例（含「其他」）。不是分割 GT，是未來訓練組織分類的種子——

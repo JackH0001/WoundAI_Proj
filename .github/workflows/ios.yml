@@ -29,13 +29,9 @@ on:
 
 jobs:
   build-and-test:
-    name: xcodebuild (${{ matrix.xcode }})
-    runs-on: macos-14
+    name: xcodebuild (newest on runner)
+    runs-on: macos-15
     timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        xcode: ['15.4']
 
     defaults:
       run:
@@ -44,8 +40,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode ${{ matrix.xcode }}
-        run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app
+      # ⚠ 不再釘死 Xcode 版本（原本是 15.4）。brew 裝的 XcodeGen 是最新版，
+      #   產出的專案格式（objectVersion 77）舊 Xcode 讀不懂——
+      #   「future Xcode project file format」那個 25 秒必倒就是這把剪刀差。
+      #   選 runner 上最新的 Xcode，image 更新時兩邊一起前進，不會再被剪到。
+      - name: Select newest installed Xcode
+        run: |
+          XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "Using $XCODE"
+          sudo xcode-select -s "$XCODE"
 
       # ⚠ 這一步不可省：xcodeproj 自 70572ce 起是 XcodeGen 產物、不進版控
       #   （單一事實來源是 project.yml，理由見該檔檔頭）。少了這步，

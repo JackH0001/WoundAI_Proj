@@ -21,15 +21,25 @@
 ## 已宣告的差異
 
 改動這一節時，請一併寫下**為什麼**與**打算什麼時候消除**。
+**過期的宣告比沒有宣告更危險**——它會讓一個真正的新落差被當成「早就允許了」而放行。
+所以補完一項就要從這裡刪掉，不要留著當歷史紀錄（歷史請看 git log）。
 
 ```yaml
 # 格式：<檢查項>: <識別子>  # 理由
-allow: {}
+allow:
+  annotation_field_missing_android: [depth_map_png, depth_conf_png, depth_format, depth_scale, camera_intrinsics]
 ```
 
-**目前沒有任何宣告的不對稱。** 空的 allow 清單是好事，但它有個前提：
-**過期的宣告比沒有宣告更危險**——它會讓一個真正的新落差被當成「早就允許了」而放行。
-所以補完一項就要從這裡刪掉，不要留著當歷史紀錄（歷史請看 git log）。
+### annotation 深度欄位（iOS 有、Android 無，2026-08-18 宣告）
+
+iOS 隨標註上傳 LiDAR 深度圖（`depth_map_png` png16_mm）＋置信度＋內參＋尺度，
+供 WoundAI3D 精度研究與訓練（wire format：`docs/depth_capture_contract.md`；
+②訓練同意閘門；後端 `/api/v1/annotation` 已驗證與儲存）。
+
+Android 硬體無 LiDAR，可走 ARCore Depth（`depth_source: arcore_depth`），但精度與
+LiDAR 差一級。**消除計畫**：iOS phantom 誤差表已完成（2026-08-18：正拍投影 ±5%、
+斜拍校正 ÷cosθ ±3%），供 Windows 端評估 ARCore 路線是否值得做；決策後
+要嘛 Android 補上（宣告刪除），要嘛在此改註「Android 不做，永久宣告」。
 
 ### 已消除：`quality`（2026-08-10）
 
@@ -63,24 +73,25 @@ Android 已在 `BackendClient.health()`、`BackendWarmup.degradedBanner()` 補�
 
 ## 不在自動檢查範圍內的（需人工確認）
 
-契約一致 ≠ 功能等價。以下要靠實機測試與這張表：
+契約一致 ≠ 功能等價。以下要靠實機測試與這張表（iOS 欄 2026-08-18 更新）：
 
 | 功能 | Android | iOS | 備註 |
 |---|---|---|---|
 | 個案結案 | ✅ | ⚠ repo 有方法，UI 無入口 | iOS 待補按鈕 |
 | 個案刪除（限空個案） | ✅ | ❌ | iOS 待補 |
 | 時間軸單筆刪除 | ❌ | ❌ | 兩端都待補（規則已在 repo 層） |
-| ArUco 貼紙誤認排除 | ✅ | ❌ | iOS 待補；Android 的過濾規則見 `analyzeViaBackend` |
+| ArUco 貼紙誤認排除 | ✅ | ✅ | iOS：≥70% 落在貼紙外擴 15% 框內的輪廓自動剔除＋提示 |
 | 多處傷口：讀 `wound_polygons` | ✅ | ✅ | |
 | 多處傷口：修邊畫面初始輪廓 | ✅ | ✅ | iOS 走 `RasterOps.buildRaster(polygons:)` |
 | 多處傷口：送 `gt_polygons` | ✅ | ✅ | iOS 走 `RasterOps.rasterToPolygons` |
-| 修邊：組織按鈕呈現實際疊色 | ✅ | ❓ | Android `fda4c8a` 修的三項，iOS 是從修正前版本移植 |
-| 修邊：工具切換不讓影像跳動 | ✅ | ❓ | 同上，需實機確認 |
-| 修邊：擴張不造成過標 | ✅ | ❓ | 同上；iOS 目前沒有柵格擴張功能 |
-| App 內使用說明書 | ✅ | ❌ | |
-| 我的送件清單 | ✅ | ❌ | |
-| 時間軸趨勢圖 | ✅ | ❌ | |
-| 端上分割 / 端上 ArUco | ❌ | ❌ | 兩端都缺模型與 framework，一律走後端 |
+| 修邊：組織按鈕呈現實際疊色 | ✅ | ✅ | iOS 實色 chips（2026-08 實機修正） |
+| 修邊：工具切換不讓影像跳動 | ✅ | ✅ | iOS tissueRow 恆定高度 |
+| 修邊：擴張不造成過標 | ✅ | ✅ | iOS `expandIfNeeded`＋段落過長不補間；實機多輪驗證 |
+| App 內使用說明書 | ✅ | ✅ | 共用 `manual.html` 單一來源 |
+| 我的送件清單 | ✅ | ❌ | iOS 為單筆複核（ReviewView），清單視圖待補 |
+| 時間軸趨勢圖 | ✅ | ✅ | iOS `TimelineCharts` 面積/PUSH 雙圖＋±% |
+| 免貼紙深度量測（LiDAR） | ❌ | ✅ | iOS 專屬硬體；對照卡＋品質閘；Android 見上方 ARCore 宣告 |
+| 端上分割 / 端上 ArUco | ❌ | ❌ | 兩端一律走後端；iOS 民眾版留有地端模型槽（`WoundLite/Models`） |
 
 ## 加新功能時的流程
 

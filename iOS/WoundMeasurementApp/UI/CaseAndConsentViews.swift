@@ -310,9 +310,11 @@ struct ConsentSignatureView: View {
                     Toggle(isOn: $train) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("② 同意去識別化影像用於 AI 模型訓練（選填，可隨時撤回）")
-                            Text("影像在去除姓名、病歷號等識別資訊後，用於改進傷口分割與組織判讀模型。"
+                            Text("影像在去除姓名、病歷號等識別資訊後，用於改進傷口分割與組織判讀模型；"
+                                 + "拍攝時的**去識別深度幾何資料**（LiDAR 深度圖與相機參數，不含任何"
+                                 + "可辨識個人的影像）一併用於 3D 量測精度研究。"
                                  + "**不同意不影響您的照護權益**；同意後仍可隨時撤回，"
-                                 + "撤回後該影像不再納入後續訓練。")
+                                 + "撤回後該影像與深度資料不再納入後續訓練。")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
