@@ -79,6 +79,32 @@ Multipart 欄位：
 4. 撤回：`DELETE /api/v1/lite/data/{anon_id}`（後續版本；v1 先保留 anon_id
    欄位讓資料可撤）。
 
+## 商業模式與 entitlement 規劃（2026-08-19 產品定案）
+
+三層階梯（取代「免費 N 次後收費」的單一額度制）：
+
+| 層 | 內容 | 對價 | escalate 政策 |
+|---|---|---|---|
+| 免費・離線 | 手動圈選＋深度量測＋本地時間軸 | 無（永久免費，資料不離機） | 不適用 |
+| 同意研究 | 雲端自動辨識**每月 15–20 次**（月初重置） | 去識別影像＋深度回流研究 | `on_weak`（現制） |
+| 付費 | 無限自動辨識＋進階功能；地端模型落地後：**買斷解鎖地端**、訂閱維持雲端 | IAP（訂閱／買斷） | 訂閱者 `always`（收據驗證＝可控裝置量，濫用面等同醫療版） |
+
+設計理由摘要：
+- 免額度斷供在癒合中途（傷口追蹤以週為單位）→ 月額度而非一次性試用。
+- 地端推論邊際成本為零 → 買斷最誠實（離線＋隱私＋快）；雲端集成精度＝訂閱價值。
+- 付費收據（`originalTransactionId`）本身就是**假名化的裝置證明**，與 App Attest
+  併用後，`escalate=always` 對付費者開放不再是「誰都能按的計費按鈕」。
+
+### 後端預留（Windows，實作時點＝上架前，現在只留欄位）
+
+- `lite/segment` 增選填 `entitlement`：`"free"`（預設）／`"cloud_sub"`／`"local_pro"`，
+  由 App 附上、伺服器以 IAP 收據驗證背書後生效（未驗證一律當 free）。
+- 額度：`free` 月計數（鍵＝anon_id，月初重置；沿用現有 rate 檔機制加月桶即可）；
+  超額回 429 帶 `reason: "monthly_quota"` 與 `quota_remaining: 0`。
+- 建議回應順手加 `quota_remaining`（App 顯示「本月剩 N 次」，額度用罄不意外）。
+- escalate 政策改由 entitlement 決定：free=`on_weak`、cloud_sub=`always`。
+- TestFlight 階段維持現制（同意＋30/日濫用配額），本節不阻擋任何當前工作。
+
 ## PARITY 影響
 
 無。此檔為文件提案；後端欄位落地時再依慣例更新 `docs/PARITY.md`
