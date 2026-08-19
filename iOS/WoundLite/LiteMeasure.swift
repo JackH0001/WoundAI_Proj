@@ -259,7 +259,10 @@ struct LiteMeasureView: View {
             .navigationTitle("量測")
             .fullScreenCover(isPresented: $showCamera) {
                 CameraCaptureView(
-                    hintText: "請正對傷口、距離 25–40 公分，讓傷口在中央對焦框內，框變綠再拍。",
+                    // 「只拍傷口」不只是構圖建議，是去識別化的一環：協定層去得掉 EXIF 與
+                    // 檔名身分，去不掉畫面裡的臉、證件與環境——那只能靠拍攝當下不要入鏡。
+                    hintText: "請正對傷口、距離 25–40 公分，框變綠再拍。畫面只拍傷口部位，"
+                        + "避免臉部或可辨識個人的物品入鏡。",
                     onCapture: { img, dep in
                         showCamera = false
                         Task {

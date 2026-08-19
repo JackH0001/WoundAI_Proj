@@ -94,6 +94,18 @@ Multipart 欄位：
   - 方案 B（最小）：普通帳號＋約定 Lite 只呼叫 classify。無強制力，
     僅可短期內測，不可帶到 TestFlight 之外。
 
+### 2026-08-19 後端實況核對（Mac 端讀碼確認）
+
+- `/api/v1/classify`＝`@jwt_required()` **無角色檢查** → 任何已登入帳號可辨識、
+  影像以 sha1[:16] 內容雜湊存 `images/`（去識別檔名）。
+- `auth_users.ROLES` **沒有 lite 角色**（physician/nurse/assistant/engineer/admin）。
+  ⚠ 目前的 `lite01` 必掛其中之一——assistant 有 `clinical.view`、engineer 有
+  `audit.read`/`gcp.console`，都超過民眾版所需。**最小改法**：`ROLES` 加
+  `"lite": "民眾版"`、不加入任何 `PERMS` 集合（敏感端點全查 perm 會自動 403，
+  classify/health 只驗 jwt 照常可用），再把 lite01 改指 lite 角色。
+- `/api/v1/depth` 要求 `annotation.submit`（僅醫師）＋既有標註綁定 →
+  **設計上就不是給 Lite 用的**；Lite 深度／量測數值上傳仍以 `lite/segment` 為準。
+
 ## Windows 端交辦清單（推送後接手）
 
 1. `lite01` 帳號＋上述 role 權限機制（方案 A）。
@@ -107,6 +119,14 @@ Multipart 欄位：
 6. 順帶確認：Mac 工作樹出現三個非 iOS 端的變更
    （`Android/bugreport-*.zip`、兩份 `wsm_stub.onnx` 131B→262KB）——
    若是 Windows 端的真實產出請在該端 commit，否則查一下同步來源。
+7. **（2026-08-19 新增）** `ROLES` 補 `lite` 角色（見上方最小改法），並確認
+   現有 `lite01` 帳號改指 lite；順帶告知它目前掛的角色以評估暴露面。
+8. **（2026-08-19 新增）** `lite/segment` 落地時建議加**人臉偵測**（偵測到
+   臉部即拒收並回可讀訊息）：協定層去識別擋不住畫面內容，App 端已加
+   「只拍傷口」指引，後端這道是縱深防禦。
+9. **（2026-08-19 新增）** 2026-08-19 下午以 lite01 上傳的兩張印刷範例影像
+   為內測件（無 anon_id、無 consent 標記）——正式統計時請按 actor=lite01
+   時段清點或標記排除。
 
 ## 地端模型保留槽（iOS 端已鑄好）
 
