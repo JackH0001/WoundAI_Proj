@@ -372,7 +372,16 @@ let recsData = [], recsMeta = {};
 async function loadRecs(){
   const q = new URLSearchParams();
   if($("r_status").value) q.set("status", $("r_status").value);
-  if(window._recScopeAll) q.set("scope", "all");
+  // ⚠ 一旦使用者表達過選擇，就**明確送出** scope，不可以靠「不送參數」表示 mine。
+  //
+  // 後端對「沒有這個參數」的解讀是「伺服器替你決定」（送不出件的角色給 all）。
+  // 前端若把「沒有參數」當成 mine，取消勾選 → 不送參數 → 後端回 all →
+  // 勾選框又被畫回勾起來，**那個框就永遠取消不了**。2026-08-19 admin 實測踩到。
+  //
+  // 同一個「參數缺席」在兩端有兩種意思，就是這一類 bug 的共同形狀。
+  // 第一次載入（undefined）才讓伺服器決定；之後一律明講。
+  if(window._recScopeAll !== undefined)
+    q.set("scope", window._recScopeAll ? "all" : "mine");
   let j; try{ j = await api("/api/v1/flywheel/records?" + q.toString()); }
   catch(e){ $("recs").innerHTML = "<p class='bad'>讀取失敗："+esc(e.message)+"</p>"; return; }
   recsData = j.records || []; recsMeta = j;

@@ -149,6 +149,22 @@ def main():
     check("nurse 送 scope=all 仍看不到醫師的紀錄",
           len(j.get("records", [])) == 0, len(j.get("records", [])))
 
+    print("\n── 6 前端必須明確送出 scope ──")
+    # 後端把「沒有 scope 參數」解讀為「伺服器替你決定」。前端若把它當成 mine，
+    # 取消勾選「看全部人的」→ 不送參數 → 後端回 all → 勾選框又被畫回勾起來，
+    # **那個框就永遠取消不了**（2026-08-19 admin 實測踩到，是本輪自己引入的）。
+    #
+    # 這是純前端 JS，Python 測不到行為，只能守原始碼的形狀——
+    # 但守得住的是「同一個參數缺席在兩端有兩種意思」這個共同形狀。
+    js = open(os.path.join(FLASK_DIR, "api_console.py"), encoding="utf-8").read()
+    check("取消勾選時會明確送 scope=mine（不是靠不送參數）",
+          'q.set("scope", window._recScopeAll ? "all" : "mine")' in js,
+          "找不到明確送出 scope 的程式碼")
+    check("不再是「只有 true 才送 scope」的舊寫法",
+          'if(window._recScopeAll) q.set("scope", "all");' not in js)
+    check("勾選框的 checked 依伺服器回的 scope，而非本地變數",
+          '${j.scope==="all"?"checked":""}' in js)
+
     print("\n%d 項檢查，%d 項失敗" % (TOTAL[0], len(FAILED)))
     if FAILED:
         print("失敗：")
