@@ -1,4 +1,44 @@
-# Handoff 2026-08-19（Mac → Windows）：lite/segment 兩連發
+# Handoff 2026-08-19（Mac → Windows）：lite/segment 三連發
+
+## 追加 ③（18:29）：404 已修，現在是**未接住的 HTML 500**
+
+### 現象與時間線
+
+- revision 00029（b749f49，18:13 部署）：health 顯示 `blueprint_failures: []`、
+  `endpoints_registered: true` ——註冊修好了 ✅
+- 18:29 App 實測：`🔧 http(status: 500, "<!doctype html>…Internal Server Error…")`
+  ——**Flask 預設 HTML 500**，不是端點自己包的 JSON 500 → 例外發生在
+  handler 內所有 try 範圍之外。
+
+### Mac 端逐段稽核結果（b749f49 的 api_lite.lite_segment）
+
+有防護：`_SEGMENT` 呼叫（含 escalate 鏈）、`_has_face`、`_store_depth_png`、
+`_safe_json`。**無防護且環境相依**的只剩：
+
+1. **`rate_check` → `_fw.read_jsonl(lite_rate_<今日>.jsonl)`**：
+   走 `_store().read_lines(_key(path))`。若 GcsStore.read_lines 對
+   **不存在的 blob** 拋例外而非回空——「每天第一個請求必 500」這一族。
+   （請求都到不了 handler 深處，與「每次都 500」的實測相符。）
+2. **本批 `store.py` 改動的副作用**：你們回報過 `_is_audit`/`AUDIT_KEYS`
+   搬基底類別的修正——若 GcsStore 的 `append_line`／`put_blob` 在
+   `lite/` 前綴鍵上走到新守衛的另一條路，同樣是 handler 外的爆點。
+
+### 請求與建議
+
+- **拉 revision 00029 在 18:29±5min 的 traceback**（一行 gcloud/console），
+  直接定案——上面兩個假說一看堆疊就分曉。
+- 修 bug 之外，建議 `lite_segment` 最外層加 catch-all：
+  `logger.exception` ＋ JSON 500（`{"error":"internal"}`）。匿名民眾端點
+  不該把 Flask HTML 洩給客戶端，而且 traceback 從此穩定進 log，
+  這次「只能猜」的處境不會再出現。
+- 驗收不變：診斷行 `route=cloud_escalated(AU)`、後端輪廓 ≥1。
+
+（App 端診斷儀器這輪立功：404→500 的轉變與確切狀態碼都是畫面直讀，
+零猜測。）
+
+---
+
+# 前兩發
 
 ## 追加（同日稍晚）：升級鏈修正後端點整支 404——註冊順序 NameError
 
