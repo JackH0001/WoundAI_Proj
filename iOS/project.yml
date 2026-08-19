@@ -86,6 +86,46 @@ targets:
         Debug:
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) DEBUG"
 
+  ## WoundLite——民眾版（App Store 一般用戶，免貼紙 LiDAR 量測）。
+  ##
+  ## 2026-08-18 產品決策：同 repo、共用 Core、獨立 target 與 bundle id（不開新 repo、
+  ## 不開長壽分支）。共用面＝Core/Pipeline/Generated＋相機視圖；醫療 UI 一概不進來
+  ## （民眾版沒有病歷、個案、組織分類、PUSH）。輪廓來源依研究同意分流：
+  ## 同意→雲端辨識（去識別資料供研究）；不同意→本地手動圈選（照片不離機）。
+  WoundLite:
+    type: application
+    platform: iOS
+    sources:
+      - path: WoundMeasurementApp/Generated
+      - path: WoundMeasurementApp/Core
+      - path: WoundMeasurementApp/Pipeline
+      # 醫療 UI 共用兩檔：相機擷取（LiDAR RGB-D＋中央對焦框）與修邊畫布
+      # （boundaryOnly 模式＝民眾版圈選；雙指縮放平移/undo/亮青邊界線同一套）。
+      - path: WoundMeasurementApp/UI/CameraCaptureView.swift
+      - path: WoundMeasurementApp/UI/WoundEditView.swift
+      - path: WoundLite
+      # 地端分割模型保留槽：WoundSegLite.mlmodel 丟進 WoundLite/Models/ 後
+      # 重跑 xcodegen 即編進 bundle、LiteLocalSeg.available 轉真（規格見 MODEL_SPEC.md）。
+      - path: WoundLite/Models
+        optional: true
+        excludes:
+          - "*.md"
+      # v1 先共用醫療版的資產目錄（AppIcon 之後再分家）。
+      - path: WoundMeasurementApp/Assets.xcassets
+        type: folder.assetcatalog
+        buildPhase: resources
+      - path: WoundLite/Info.plist
+        buildPhase: none
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.woundmeasurement.lite
+        INFOPLIST_FILE: WoundLite/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WOUND_LITE"
+      configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WOUND_LITE DEBUG"
+
   WoundMeasurementAppTests:
     type: bundle.unit-test
     platform: iOS
@@ -122,6 +162,19 @@ schemes:
       gatherCoverageData: true
       targets:
         - WoundMeasurementAppTests
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
+  WoundLite:
+    build:
+      targets:
+        WoundLite: all
+    run:
+      config: Debug
     profile:
       config: Release
     analyze:
