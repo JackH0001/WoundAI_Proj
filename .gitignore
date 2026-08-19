@@ -129,3 +129,6 @@ iOS/DerivedData/
 /COMMIT_MSG.txt
 
 .DS_Store
+
+Android/bugreport-*.zip
+bugreport-*.zip

@@ -1255,7 +1255,20 @@ try:
         if not _can(role, "flywheel.stats"):
             return jsonify({"error": "權限不足"}), 403
         may_see_all = _can(role, "audit.read")          # 工程師／管理者
-        scope = request.args.get("scope", "mine")
+        # ⚠ **只有醫師送得出訓練標註**（`annotation.submit` = {physician}）。
+        # 而這一頁的頁籤開放給 flywheel.stats＝{physician, nurse, engineer, admin}。
+        # 於是護理師／工程師／管理者的「我的送件」**結構上永遠是空的**——
+        # 不是篩選沒中，是那個角色不可能產生送件。
+        #
+        # 2026-08-19 admin 實際回報「送件無法呈現」。畫面說的是
+        # 「沒有符合條件的送件」，那句話讓人以為是資料或篩選出了問題，
+        # 於是去找一個不存在的故障。**空畫面必須說出它為什麼空。**
+        can_submit = _can(role, "annotation.submit")
+        scope = request.args.get("scope")
+        if scope is None:
+            # 沒指定時：送得出件的人看自己的；送不出件的人若有權限就直接看全部，
+            # 否則維持 mine（那一頁對他確實沒有內容，但至少訊息會講清楚）。
+            scope = "mine" if can_submit or not may_see_all else "all"
         all_scope = may_see_all and scope == "all"
 
         recs = read_jsonl(QUEUE)
@@ -1326,6 +1339,9 @@ try:
         return jsonify({
             "records": out, "scope": "all" if all_scope else "mine",
             "may_see_all": may_see_all, "actor": actor,
+            # 前端據此決定標題與空畫面的措辭。**不要讓前端自己從角色推導**——
+            # 推導遲早會跟伺服器的權限矩陣分岔，而分岔的方向通常是前端比較寬鬆。
+            "can_submit": can_submit, "role": role,
             "reasons": RETRACT_REASONS, "statuses": RECORD_STATUS,
         }), 200
 

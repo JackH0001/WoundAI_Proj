@@ -41,6 +41,24 @@ ROLES = {
     "assistant": "助理",
     "engineer": "工程師",
     "admin": "管理者",
+    # 民眾版（WoundLite）的過渡服務帳號。**刻意不出現在下面任何一個 PERMS 集合裡**——
+    # 「這個角色有什麼權限」的答案要是「grep 不到」，而不是「要讀完整張表才知道」。
+    #
+    # 為什麼需要它：`/api/v1/classify` 只驗登入、不查角色，所以 Lite 只要有任何
+    # 有效帳號就能辨識。但在這個角色存在之前，lite01 必須掛既有五個角色之一，
+    # 而實際掛的是 **physician**——那是權限最大的一個：
+    #
+    #     gt.verify          doctor_verified 的唯一來源
+    #     annotation.submit  送訓練標註
+    #     patient.manage     對任意 WD 代碼撤回同意
+    #
+    # 民眾版 App 的服務帳號握著「醫師背書」，意味著民眾拍的照片**有辦法**帶著
+    # 醫師身分進訓練集。擋住它的是 Lite 目前沒寫那段程式碼，不是後端的權限——
+    # 而「還沒有人這樣做」不是控制措施。
+    #
+    # 另一件今天就已經成立的損害：稽核軌跡裡 lite01 的角色記載是 physician。
+    # 那份紀錄說的不是真正發生的事，而稽核的價值正在於此。
+    "lite": "民眾版服務帳號",
 }
 
 # 權限矩陣。**這是唯一真實來源**——端點一律查這裡，不要在各處各寫一份 if。
@@ -52,7 +70,14 @@ PERMS = {
     "gt.verify":        {"physician"},                   # doctor_verified 的唯一來源
     "annotation.submit": {"physician"},
     "clinical.view":    {"physician", "nurse", "assistant"},
-    "measure.sample":   set(ROLES),                      # 範例／模擬圖：所有人
+    # ⚠ 這一條原本是 `set(ROLES)`。那寫法有個安靜的副作用：**日後任何人新增角色，
+    # 都會自動獲得這個權限**，而 code review 上看不出來——新增角色的那筆 diff 裡
+    # 完全沒有提到 measure.sample。改成明列，讓「誰能測範例圖」是一個要動手寫的決定。
+    #
+    # （查證後補記：目前後端沒有任何端點在查 measure.sample，所以 `set(ROLES)`
+    #   在今天是沒有實際效果的。這裡改的是形狀，不是修一個正在發生的漏洞——
+    #   先前把它說成「洞」是誇大了。）
+    "measure.sample":   {"physician", "nurse", "assistant", "engineer", "admin"},
     "backend.config":   {"engineer", "admin"},
     "flywheel.stats":   {"physician", "nurse", "engineer", "admin"},
     "audit.read":       {"engineer", "admin"},

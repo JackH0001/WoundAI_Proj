@@ -148,7 +148,7 @@ code{font-family:ui-monospace,monospace;font-size:12.5px;word-break:break-all}
 </section>
 
 <section id="tab-recs">
-  <h1>我的送件</h1>
+  <h1 id="recs_h1">我的送件</h1>
   <p class="sub" id="recs_sub">你送出的每一筆訓練標註與它目前的狀態。</p>
   <div class="row">
     <select id="r_status"><option value="">全部狀態</option></select>
@@ -380,8 +380,16 @@ async function loadRecs(){
     Object.entries(j.statuses||{}).forEach(([k,v]) => $("r_status").add(new Option(v, k)));
   // 「看全部」只給後端說可以的人。前端自己判斷角色遲早會跟後端對不上，
   // 而對不上的方向通常是前端比較寬鬆。
+  // 標題要跟著角色走。送不出件的人看到「我的送件」會以為那一頁該有他的東西。
+  if(j.can_submit === false){
+    $("recs_h1").textContent = "送件審閱";
+    document.querySelector('nav a[data-tab="recs"]').textContent = "送件審閱";
+  }
+  // 後端在未指定 scope 時已替送不出件的人選了 all；勾選框要反映實際生效的值，
+  // 不能只看本地的 _recScopeAll，否則畫面顯示「沒勾」而清單是全部人的。
+  if(window._recScopeAll === undefined) window._recScopeAll = (j.scope === "all");
   $("r_scope").innerHTML = j.may_see_all
-    ? `<label style="font-size:13px"><input type="checkbox" ${window._recScopeAll?"checked":""}
+    ? `<label style="font-size:13px"><input type="checkbox" ${j.scope==="all"?"checked":""}
          onchange="window._recScopeAll=this.checked;loadRecs()"> 看全部人的（非只有我）</label>`
     : `<span style="font-size:12px;color:var(--dim)">只顯示 <code>${esc(j.actor)}</code> 送出的</span>`;
   $("recs").innerHTML = "<table><tr><th>時間 (UTC)</th><th>代碼</th><th>來源</th>" +
@@ -402,7 +410,20 @@ async function loadRecs(){
       ${j.scope==="all"?`<td class="nowrap">${esc(r.actor)}</td>`:""}
       <td class="nowrap">${r.can_retract
         ? `<button onclick="askRetract(${i})">排除</button>` : ""}</td></tr>`).join("") + "</table>" +
-    (recsData.length ? "" : "<p class='note'>沒有符合條件的送件。</p>");
+    (recsData.length ? "" : emptyRecsNote(j));
+}
+/* 空畫面必須說出**它為什麼空**。
+   「沒有符合條件的送件」在角色根本送不出件時是誤導：它讓人以為資料或篩選壞了，
+   於是去找一個不存在的故障（2026-08-19 admin 實際踩到）。 */
+function emptyRecsNote(j){
+  if(j.can_submit === false && j.scope !== "all")
+    return `<p class='note'>你的角色（${esc(j.role||"")}）不會產生訓練送件——`
+         + `只有醫師送得出標註，所以「只有我」這個範圍對你永遠是空的。`
+         + (j.may_see_all ? `請勾選上方「看全部人的」。`
+                          : `檢視他人送件需要稽核權限（工程師／管理者）。`) + `</p>`;
+  if(j.can_submit === false)
+    return "<p class='note'>目前沒有任何人的送件符合這些條件。</p>";
+  return "<p class='note'>沒有符合條件的送件。</p>";
 }
 // ⚠ 三個欄位刻意分開顯示「沒有」與「有但不可用」。
 // 合成一個「可訓練 ✓／✗」會把兩種完全不同的處置混成一格：
