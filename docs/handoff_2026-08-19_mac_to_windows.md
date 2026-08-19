@@ -1,4 +1,48 @@
-# Handoff 2026-08-19（Mac → Windows）：lite/segment 對難例全空——缺升級鏈
+# Handoff 2026-08-19（Mac → Windows）：lite/segment 兩連發
+
+## 追加（同日稍晚）：升級鏈修正後端點整支 404——註冊順序 NameError
+
+### 現象
+
+revision 00028（commit 4144ad9）上 `/api/v1/lite/segment` 回 **404**
+（App 端 🔧 診斷：`http(status: 404, "<!doctype html>…Not Found…")`）。
+健康檢查、主控台、醫療端點全部正常。
+
+### 根因（app.py@4144ad9）
+
+- 註冊區塊在 **~161–169 行**：`init_lite(segment_for_lite)`
+- `def segment_for_lite` 在 **1219 行**
+
+Python 頂層逐行執行 → 執行註冊時名稱還不存在 → `NameError` →
+被 `except Exception as _le: print(...)` 吞掉 → blueprint 從未註冊 →
+**每次部署必然 404**。Cloud Run 啟動 log 裡現在就有那行
+「民眾版端點未載入: name 'segment_for_lite' is not defined」。
+
+契約測試抓不到：`test_lite_segment.py` 直接 import api_lite 注入 mock，
+不執行 app.py 的頂層順序——與主控台 JS 事件同族：檢查全過、跑起來才炸。
+
+### 建議修法（最小 diff 二選一）
+
+1. `init_lite(lambda img: segment_for_lite(img))` —— lambda 延遲解名，
+   呼叫時 def 早已存在；註冊區塊與那 60 行註解都不用搬。
+2. 或把整個 try 註冊區塊搬到 `segment_for_lite` 定義之後。
+
+### 一起補的防線
+
+- except 那行改 `logger.error`（print 在 Cloud Run 也進 log，但 error 級
+  才會被人看到）。
+- `deploy_cloudrun.ps1` 部署後驗證加一條：**GET `/api/v1/lite/segment`
+  應回 405**（在=405、沒掛上=404）——「try/except 吞掉註冊」這一族病
+  從此在部署當下現形。
+
+### 驗收
+
+同一張印刷樣例：App 診斷行應顯示 `route=cloud_escalated(AU)`、
+後端輪廓 ≥1，自動圈選成功。
+
+---
+
+# 原始交辦（同日稍早）：lite/segment 對難例全空——缺升級鏈
 
 ## 現象（實機重現）
 
