@@ -102,7 +102,11 @@ final class LiteMeasureVM: ObservableObject {
                     await runEstimate()
                     return true
                 }
-                note = "雲端未辨識到傷口，請手動圈選。"
+                // 空輪廓時後端照樣落地（同意者）——難例正是研究最需要的樣本，
+                // 而「有沒有上傳」必須據實告知，不因辨識失敗而略過。
+                note = stored
+                    ? "雲端未辨識到傷口，請手動圈選。去識別資料已上傳供研究（正是改進辨識所需的難例）。"
+                    : "雲端未辨識到傷口，請手動圈選。"
                 return false
             case .softFail(let message):
                 // 429 配額／人臉退件：不是錯誤，是流程分流。訊息照後端的說法給。
