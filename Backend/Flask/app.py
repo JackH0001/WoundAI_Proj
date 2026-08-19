@@ -57,6 +57,18 @@ from PIL import Image, ImageEnhance
 import requests
 
 # 初始化Flask應用
+# 註冊失敗的 blueprint。**這個清單存在的理由是一次真實事故。**
+#
+# 2026-08-19：`/api/v1/lite/segment` 部署後一直 404。註冊寫在 try/except 裡，
+# 而註冊時參照了一個尚未定義的函式 → NameError → `except` 印一行日誌就過去了。
+# 服務照常啟動、`/api/health` 全綠、主控台正常，**唯獨那條路不存在**。
+# 從 App 端看到的症狀是「偵測不到傷口」，離根因有三層遠。
+#
+# 「印到 stdout」在 Cloud Run 上等於沒說——沒有人會為了確認端點在不在而去翻日誌。
+# 註冊失敗必須出現在健康檢查裡，和「模型沒載到」同一個規格：
+# 服務可以降級運作，但不可以假裝自己是完整的。
+BLUEPRINT_FAILURES = []
+
 app = Flask(__name__)
 CORS(app)
 
@@ -135,8 +147,11 @@ try:
     from api_flywheel import flywheel_bp
     if flywheel_bp is not None:
         app.register_blueprint(flywheel_bp)
-except Exception:
-    pass
+except Exception as _fe:
+    # 原本是 `except Exception: pass`——**連日誌都沒有**。
+    # 飛輪端點沒掛上的話，App 送標註會 404，而後端看起來完全健康。
+    BLUEPRINT_FAILURES.append(("flywheel", "%s: %s" % (type(_fe).__name__, _fe)))
+    print(f"飛輪端點未載入: {_fe}")
 
 # C0 唯讀主控台(/console)。掛在同一個 Flask，不另外部署——
 # 多一個服務就多一套權限、憑證與稽核要對，而這一版只是把既有的 stats 端點畫成一頁。
@@ -144,12 +159,14 @@ try:
     from api_users import users_bp
     app.register_blueprint(users_bp)
 except Exception as _ue:
+    BLUEPRINT_FAILURES.append(("users", "%s: %s" % (type(_ue).__name__, _ue)))
     print(f"帳號管理端點未載入: {_ue}")
 
 try:
     from api_console import console_bp
     app.register_blueprint(console_bp)
 except Exception as _ce:
+    BLUEPRINT_FAILURES.append(("console", "%s: %s" % (type(_ce).__name__, _ce)))
     print(f"主控台未載入: {_ce}")
 
 # ── WoundLite 民眾版的**匿名**端點 ────────────────────────────────────
@@ -157,17 +174,15 @@ except Exception as _ce:
 # ⚠ 這是整個服務唯一不需要登入的資料端點。分割函式用注入而不是讓 api_lite
 # 反向 import 本模組：一來避免循環匯入，二來讓它在沒有 ONNX 模型的環境下
 # 也 import 得起來（契約測試因此不必載入模型就跑得動）。
-try:
-    from api_lite import lite_bp, init_lite
-    # ⚠ 注入的是 `segment_for_lite`，不是 `segment_wound_ai`。
-    #
-    # 第一版只給了 student 一顆，結果 `/api/v1/lite/segment` 對印刷樣例**一律回空**，
-    # 而醫療版認得出來——因為 classify 有難例升級鏈而 Lite 沒有。
-    # 兩邊的程式碼各自都沒有 bug，缺的是接線。
-    init_lite(segment_for_lite)
-    app.register_blueprint(lite_bp)
-except Exception as _le:
-    print(f"民眾版端點未載入: {_le}")
+# ⚠ 民眾版端點**不在這裡註冊**，它搬到 `segment_for_lite` 定義之後（見該函式下方）。
+#
+# 為什麼：Python 的頂層是逐行執行的。原本寫在這裡的 `init_lite(segment_for_lite)`
+# 在第 167 行執行，而那個函式定義在第 1219 行——必然 NameError。
+# 而 `except Exception: print(...)` 把它吞成一行日誌，服務照常啟動：
+# 健康檢查全綠、主控台正常、**唯獨那條路 404**。
+#
+# 這個 bug 從端點加進來的第一天就存在（第一版注入的 `segment_wound_ai`
+# 定義在 1073 行，同樣在後面），兩輪都沒被發現，因為沒有任何東西會報錯。
 
 # ── 帳號與角色（RBAC S1）────────────────────────────────────────────
 #
@@ -539,7 +554,12 @@ def health_check():
     # 而健康檢查依舊全綠（實際發生過：登入 200、stats 200、classify 503）。
     # 健康檢查要涵蓋「主要功能真的能用」，不只是「行程還活著」。
     classify_ready = _load_classify_mods() is not None
-    degraded = (not model_ready) or (not classify_ready) or (not colorcal_ready)
+    # blueprint 沒掛上＝**整條路不存在**（404），而服務其餘部分完全正常。
+    # 這比模型沒載到更難察覺：模型缺席至少 classify 會回錯，
+    # 端點缺席則是「App 說偵測不到傷口」，離根因三層遠。
+    bp_ok = not BLUEPRINT_FAILURES
+    degraded = ((not model_ready) or (not classify_ready)
+                or (not colorcal_ready) or (not bp_ok))
     status = {
         'status': 'degraded' if degraded else 'healthy',
         'timestamp': datetime.now().isoformat(),
@@ -550,8 +570,12 @@ def health_check():
             'segmentation_model': model_ready,
             'classify_modules': classify_ready,
             'color_calibration': colorcal_ready,
+            'endpoints_registered': bp_ok,
             'database': True
         },
+        # 哪一個沒掛上、以及原始例外。沒有這個，看到 endpoints_registered=false
+        # 也還是得去翻容器日誌。
+        'blueprint_failures': [{'name': n, 'error': e} for n, e in BLUEPRINT_FAILURES],
         'store': None,
         'version': '1.0.0',
         # ── 「跑的是不是我推的那份程式碼」──────────────────────────────
@@ -575,6 +599,10 @@ def health_check():
     }
     if degraded:
         reasons = []
+        for _bn, _be in BLUEPRINT_FAILURES:
+            reasons.append(
+                f'`{_bn}` 端點**未註冊**，該路徑一律 404，而服務其餘部分正常。'
+                f'原始例外：{_be}')
         if not model_ready:
             reasons.append(
                 '無可用的 ML 分割模型，已退回 HSV 色彩法。面積與組織判讀不具臨床參考價值。'
@@ -1231,6 +1259,28 @@ def segment_for_lite(image_rgb):
     info.setdefault("route", "student")
     info.setdefault("escalated", False)
     return mask, info
+
+
+# ── WoundLite 民眾版的**匿名**端點（註冊點刻意放在這裡）─────────────────
+#
+# 這是整個服務唯一不需要登入的資料端點。
+#
+# ⚠ 位置是刻意的，不是隨手擺的：它必須在 `segment_for_lite` **定義之後**。
+# 放在檔案上方那一區（其他 blueprint 旁邊）會 NameError，而那個錯誤會被
+# `except` 吞成一行日誌——服務照常啟動、健康檢查全綠、端點 404。
+# 用「Python 自己會擋」取代「記得順序」：搬到這裡之後，順序錯了就是啟動失敗。
+#
+# 分割函式用注入而不是讓 api_lite 反向 import 本模組：避免循環匯入，
+# 也讓它在沒有 ONNX 模型的環境下 import 得起來（契約測試因此不必載入模型）。
+try:
+    from api_lite import lite_bp as _lite_bp, init_lite as _init_lite
+    _init_lite(segment_for_lite)
+    app.register_blueprint(_lite_bp)
+except Exception as _le:
+    # 仍然不讓它擋住服務啟動（其他端點該照常運作），但**要留下痕跡**，
+    # 而且那個痕跡必須出現在 /api/health——只印到 stdout 等於沒有人會看到。
+    BLUEPRINT_FAILURES.append(("lite", "%s: %s" % (type(_le).__name__, _le)))
+    print(f"民眾版端點未載入: {_le}")
 
 
 @app.route('/api/v1/segment/escalate', methods=['POST'])

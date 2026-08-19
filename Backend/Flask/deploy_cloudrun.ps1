@@ -362,6 +362,30 @@ try {
         Warn "❌ 後端處於降級模式：$($h.degraded_reason)"
         Warn "   量測結果不具臨床參考價值。請確認 requirements.txt 含 onnxruntime 且 models/ 內有 .onnx。"
     } else { Write-Host "  ✓ 分割模型已載入（非降級模式）" }
+    # ── 端點真的掛上了嗎 ──────────────────────────────────────────
+    #
+    # blueprint 註冊被包在 try/except 裡，失敗只印一行 stdout。
+    # 2026-08-19：`/api/v1/lite/segment` 因為註冊時參照了尚未定義的函式而
+    # NameError，服務照常啟動、健康檢查全綠、**那條路一直 404**，兩輪沒被發現。
+    #
+    # 用 GET 去打一個只收 POST 的端點：**掛上了會回 405，沒掛上才是 404**。
+    # 這一條分得出「端點存在但方法不對」與「端點根本不存在」，
+    # 而後者正是那次事故的形狀。
+    if ($h.blueprint_failures -and $h.blueprint_failures.Count -gt 0) {
+        foreach ($bf in $h.blueprint_failures) {
+            Warn "❌ 端點未註冊：$($bf.name) —— $($bf.error)"
+        }
+    }
+    foreach ($ep in @("/api/v1/lite/segment", "/api/v1/annotation", "/api/v1/depth")) {
+        $r = Get-HttpResult -Uri "$url$ep"
+        if ($r.StatusCode -eq 404) {
+            Warn "❌ $ep 回 404 —— 這條路**沒有掛上**（blueprint 註冊失敗），不是權限問題。"
+        } elseif ($r.StatusCode -in 401, 403, 405) {
+            Write-Host "  ✓ $ep 已註冊（GET → $($r.StatusCode)）"
+        } else {
+            Write-Host "  ? $ep → $($r.StatusCode)（非預期，但至少不是 404）"
+        }
+    }
     # classify 模組單獨檢查：登入與 stats 會照常 200，只有量測會 503，
     # 光看 status 綠燈是抓不到的（實際發生過）。
     if ($h.services.classify_modules -ne $true) {
