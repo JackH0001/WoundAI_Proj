@@ -159,7 +159,12 @@ except Exception as _ce:
 # 也 import 得起來（契約測試因此不必載入模型就跑得動）。
 try:
     from api_lite import lite_bp, init_lite
-    init_lite(segment_wound_ai)
+    # ⚠ 注入的是 `segment_for_lite`，不是 `segment_wound_ai`。
+    #
+    # 第一版只給了 student 一顆，結果 `/api/v1/lite/segment` 對印刷樣例**一律回空**，
+    # 而醫療版認得出來——因為 classify 有難例升級鏈而 Lite 沒有。
+    # 兩邊的程式碼各自都沒有 bug，缺的是接線。
+    init_lite(segment_for_lite)
     app.register_blueprint(lite_bp)
 except Exception as _le:
     print(f"民眾版端點未載入: {_le}")
@@ -1148,6 +1153,86 @@ def _au_infer(sess, image_rgb):
     if o.min() < 0 or o.max() > 1: o = 1.0/(1.0+np.exp(-np.clip(o,-30,30)))
     return o
 
+def escalate_mask(img_rgb, mask, W, H, policy="always"):
+    """難例升級：student 的遮罩不夠好時，改用雲端 A∪U 集成。
+
+    回 `(mask, info)`。`info` 含 route / escalated / seg_model /
+    iou_student_au / au_area_ratio；沒有升級時這些鍵可能缺席。
+
+    ## 為什麼抽成共用函式
+
+    2026-08-19：`/api/v1/lite/segment` 對同一批印刷樣例**一律回空**，而醫療版
+    認得出來——因為 Lite 只接了 student 一顆，沒有這段升級鏈。
+    印刷翻拍正是 student 最弱的 domain shift，也正是集成救得回來的那種難例。
+
+    兩條路徑吃同一組判準，才不會再出現「醫療版看得到、民眾版看不到」而
+    兩邊的程式碼各自都沒有 bug 的情況。
+
+    ## `policy` 為什麼要分兩種
+
+    · `"always"`（醫療版）：**每次都跑集成**取第二意見。student 漏掉一個區域時
+      自己不會有任何訊號，所以要靠另一組模型比對才判斷得出「這次不可靠」。
+      代價是每一次請求都多跑兩顆模型。臨床端是登入使用者、量可控，付得起。
+
+    · `"on_weak"`（民眾版）：**只在 student 空手或極小時**才跑集成。
+      理由不是省錢那麼簡單——`lite/segment` 是匿名端點，
+      「每次都跑集成」等於把每個請求的運算成本乘三，而任何人都打得到它。
+      刻意送難例就能放大成本，這是限流擋不住的那一類濫用。
+
+      取捨是明確的：民眾版會漏掉「student 有輸出但低估」的那種難例
+      （只救得回「完全空手」的）。這是**已知的降級**，不是疏忽。
+    """
+    info = {}
+    try:
+        _a, _u = _load_cloud_au()
+        if _a is None or _u is None:
+            return mask, info
+        if policy == "on_weak":
+            # 「夠弱才升級」的門檻：空遮罩，或小於千分之一畫面。
+            # 後者是因為 student 偶爾會吐出幾個雜點而不是真的空——
+            # 那種輸出與空手的臨床意義相同，都該再問一次。
+            frac = float(np.asarray(mask, bool).sum()) / max(1, mask.size)
+            if frac >= 0.001:
+                return mask, info
+        _fused = 0.5 * _au_infer(_a, img_rgb) + 0.5 * _au_infer(_u, img_rgb)
+        au_mask = cv2.resize(_fused, (W, H)) > 0.40
+
+        def _big(m):
+            cs, _h = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL,
+                                      cv2.CHAIN_APPROX_SIMPLE)
+            return max((cv2.contourArea(c) for c in cs), default=0.0)
+
+        _sp, _ap = _big(mask), _big(au_mask)
+        _inter = float(np.logical_and(mask, au_mask).sum())
+        _uni = float(np.logical_or(mask, au_mask).sum())
+        info["iou_student_au"] = round(_inter / _uni, 3) if _uni > 0 else 1.0
+        info["au_area_ratio"] = round(_ap / _sp, 2) if _sp > 0 else (999.0 if _ap > 0 else 0.0)
+        if _ap > 0 and (info["au_area_ratio"] > 1.5 or info["iou_student_au"] < 0.5):
+            info.update({"route": "cloud_escalated(AU)", "escalated": True,
+                         "seg_model": "ensemble.AU"})
+            return au_mask, info
+    except Exception as _e:
+        logger.warning(f"escalate 略過: {_e}")
+    return mask, info
+
+
+def segment_for_lite(image_rgb):
+    """民眾版用的分割：student ＋ 只在空手時觸發的集成。
+
+    回 `(mask, info)`。`api_lite` 依此回報 route，讓「這張是靠集成救回來的」
+    在民眾版也看得見——不然同一張照片在兩個 App 得到不同結果時，無從歸因。
+    """
+    mask = segment_wound_ai(image_rgb)
+    if mask is None:
+        import numpy as _np
+        mask = _np.zeros(image_rgb.shape[:2], bool)
+    h, w = image_rgb.shape[:2]
+    mask, info = escalate_mask(image_rgb, mask, w, h, policy="on_weak")
+    info.setdefault("route", "student")
+    info.setdefault("escalated", False)
+    return mask, info
+
+
 @app.route('/api/v1/segment/escalate', methods=['POST'])
 @jwt_required()
 def segment_escalate():
@@ -1609,22 +1694,12 @@ def classify_wound():
         # 判難靠「第二意見」(student vs A∪U),因 student 漏 segment 區域機率≈0、無自我訊號
         # phantom 走色彩分割,沒有「第二意見」可言,直接跳過
         if not phantom and str(request.form.get('escalate', 'on')).lower() not in ('off', '0', 'false'):
-            try:
-                _a, _u = _load_cloud_au()
-                if _a is not None and _u is not None:
-                    _fused = 0.5 * _au_infer(_a, img) + 0.5 * _au_infer(_u, img)
-                    au_mask = cv2.resize(_fused, (W, H)) > 0.40
-                    def _big(m):
-                        cs, _h = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                        return max((cv2.contourArea(c) for c in cs), default=0.0)
-                    _sp, _ap = _big(mask), _big(au_mask)
-                    _inter = float(np.logical_and(mask, au_mask).sum()); _uni = float(np.logical_or(mask, au_mask).sum())
-                    iou_sa = round(_inter / _uni, 3) if _uni > 0 else 1.0
-                    au_ratio = round(_ap / _sp, 2) if _sp > 0 else (999.0 if _ap > 0 else 0.0)
-                    if _ap > 0 and (au_ratio > 1.5 or (iou_sa is not None and iou_sa < 0.5)):
-                        mask = au_mask; route = "cloud_escalated(AU)"; escalated = True; seg_model = "ensemble.AU"
-            except Exception as _e:
-                logger.warning(f"escalate 略過: {_e}")
+            mask, _esc = escalate_mask(img, mask, W, H, policy="always")
+            route = _esc.get("route") or route
+            escalated = _esc.get("escalated", escalated)
+            seg_model = _esc.get("seg_model") or seg_model
+            iou_sa = _esc.get("iou_student_au", iou_sa)
+            au_ratio = _esc.get("au_area_ratio", au_ratio)
 
         # ⚠ phantom_hint 必須在**最終遮罩定案後**重新評估。
         #

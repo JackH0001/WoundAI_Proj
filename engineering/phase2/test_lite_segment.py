@@ -253,6 +253,40 @@ def main():
         check("稽核鍵刪除拋 PermissionError（本機後端也要成立）", False,
               "AttributeError：守衛只在雲端實作上存在 → %s" % e)
 
+    print("\n── 9 難例升級鏈 ──")
+    # 2026-08-19：Lite 對印刷樣例**一律回空**，而醫療版認得出來——
+    # 因為 `init_lite` 只注入了 student 一顆，沒接 classify 的 A∪U 升級鏈。
+    # 印刷翻拍正是 student 最弱的 domain shift，也正是集成救得回來的難例。
+    # 兩邊的程式碼各自都沒有 bug，缺的是接線；這一節就是盯那條線。
+    app_src = open(os.path.join(FLASK_DIR, "app.py"), encoding="utf-8").read()
+    check("注入的是含升級鏈的 segment_for_lite，不是裸的 student",
+          "init_lite(segment_for_lite)" in app_src and
+          "init_lite(segment_wound_ai)" not in app_src)
+    check("升級邏輯抽成共用函式（兩條路徑吃同一組判準）",
+          "def escalate_mask(" in app_src)
+    check("classify 也改用共用函式（沒有留下第二份實作）",
+          'escalate_mask(img, mask, W, H, policy="always")' in app_src)
+    check("民眾版用 on_weak 政策（匿名端點不可每次都跑集成）",
+          'policy="on_weak"' in app_src)
+
+    # 端點層：注入的函式回 (mask, info) 時要讀得懂，回單一 mask 也要相容
+    def seg_pair(rgb):
+        m = np.zeros(rgb.shape[:2], np.uint8)
+        m[60:180, 80:240] = 1
+        return m, {"route": "cloud_escalated(AU)", "escalated": True}
+    lite.init_lite(seg_pair)
+    r = post(anon="dev-esc", consent="true", ip="203.0.113.77", salt=b"e1")
+    j = r.get_json() or {}
+    check("回應帶出 route（救回來的那條路看得見）",
+          j.get("route") == "cloud_escalated(AU)", j.get("route"))
+    check("回應帶出 escalated", j.get("escalated") is True, j.get("escalated"))
+    ie = j.get("image_id")
+    mp = os.path.join(tmp, "lite", "dev-esc", (ie or "") + ".json")
+    if os.path.isfile(mp):
+        check("落地的 meta 記下 route（日後才篩得出哪些靠集成救回）",
+              json.load(open(mp, encoding="utf-8")).get("route") == "cloud_escalated(AU)")
+    lite.init_lite(fake_segment)     # 還原，免得影響後續
+
     print("\n%d 項檢查，%d 項失敗" % (TOTAL[0], len(FAILED)))
     if FAILED:
         print("失敗：")

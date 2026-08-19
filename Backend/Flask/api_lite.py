@@ -217,12 +217,17 @@ def lite_segment():
     if _SEGMENT is None:
         return jsonify({"error": "分割模型未載入"}), 503
     try:
-        mask = _SEGMENT(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+        out = _SEGMENT(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+        # 注入的函式可以只回遮罩，也可以回 (mask, info)。
+        # 後者讓民眾版也報得出 route——同一張照片在兩個 App 得到不同結果時，
+        # 沒有 route 就無從歸因。
+        mask, seg_info = out if isinstance(out, tuple) else (out, {})
     except Exception as e:
         return jsonify({"error": "分割失敗：%s" % e}), 500
     if mask is None:
         return jsonify({"wound_polygons": [], "image_w": w, "image_h": h,
-                        "confidence": 0.0, "stored": False, "image_id": None}), 200
+                        "confidence": 0.0, "stored": False, "image_id": None,
+                        "route": "none"}), 200
 
     polys = _polygons_from_mask(mask)
     conf = float(np.asarray(mask, np.float32).mean()) if len(polys) else 0.0
@@ -246,6 +251,11 @@ def lite_segment():
             "camera_intrinsics": _safe_json(request.form.get("camera_intrinsics")),
             "depth_format": request.form.get("depth_format"),
             "depth_scale": request.form.get("depth_scale"),
+            # ⚠ route 必須在 put_blob **之前**寫進 meta。
+            # 第一版設在 put_blob 之後，於是落地的 JSON 少了它——
+            # 回應裡有、檔案裡沒有，而只看回應完全察覺不到。
+            "route": seg_info.get("route"),
+            "escalated": bool(seg_info.get("escalated")),
         }
         dp = request.form.get("depth_map_png")
         if dp:
@@ -257,15 +267,23 @@ def lite_segment():
             "anon_id": anon_id, "image_id": image_id, "client": client,
             "received_at": meta["received_at"], "bytes": len(raw),
             "polygons": len(polys), "depth": meta.get("depth"),
+            # 難例（辨識空手）正是最需要拿去改進模型的樣本。
+            # 記下 route 與輪廓數，日後才篩得出「哪些是集成救回來的」
+            # 與「哪些連集成都空手」——後者是下一輪訓練的優先目標。
+            "route": meta["route"], "escalated": meta["escalated"],
         })
 
     rate_record(anon_id, ip)
     return jsonify({
         "wound_polygons": polys, "image_w": w, "image_h": h,
         "confidence": round(conf, 4),
-        # 契約沒有這兩個欄位，但加上去是相容的，而且它讓 App 能對使用者
-        # **據實**說明這張照片有沒有被保存——同意分流講給人聽才有意義。
+        # 契約沒有這幾個欄位，但加上去是相容的。
+        # `stored` 讓 App 能對使用者**據實**說明這張照片有沒有被保存
+        # ——同意分流講給人聽才有意義。
         "stored": bool(consent), "image_id": image_id,
+        # `route` 讓「醫療版看得到、民眾版看不到」這種問題可以在一次回應裡歸因。
+        "route": seg_info.get("route") or "student",
+        "escalated": bool(seg_info.get("escalated")),
     }), 200
 
 
