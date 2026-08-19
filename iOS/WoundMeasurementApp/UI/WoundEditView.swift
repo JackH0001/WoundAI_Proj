@@ -199,26 +199,30 @@ private final class RasterState {
 }
 
 /**
- 用 `TissueSeg.classify` 重算整個柵格的分類底稿（`auto`）。
+ 用 `TissueSeg.classify` 重算整個柵格的分類底稿（`auto`）——**純計算，背景緒可跑**。
 
  在**取樣網格**上分類再最近鄰放大，不在柵格解析度上逐像素跑：2200² 要 484 萬次 HSV 換算，
  而且結果是椒鹽狀雜點；512² 上算完再放大既快又平滑，代價只是分區邊界精細度——
  那本來就要靠醫師修。
+
+ ⚠ 2026-08-18 改版：原本這件事在 `EditCanvasModel.init` 內同步做（MainActor），
+ Debug 組建（-Onone）要 2–10 秒——「進入修邊畫面白凍」的根因。現在改為
+ 開畫面後由 `runSeed()` 丟到背景，這裡只吃值、不碰 `RasterState`，算完回主緒套用。
  */
-@MainActor
-private func seedAuto(_ st: RasterState, src: CGImage, wbGains: [Double]?) {
-    let x0 = max(0, min(src.width - 2, Int(st.rx0.rounded())))
-    let y0 = max(0, min(src.height - 2, Int(st.ry0.rounded())))
-    let x1 = max(x0 + 2, min(src.width, Int((st.rx0 + Double(st.mw) / st.mScale).rounded())))
-    let y1 = max(y0 + 2, min(src.height, Int((st.ry0 + Double(st.mh) / st.mScale).rounded())))
+private func computeAutoGrid(rx0: Double, ry0: Double, mw: Int, mh: Int, mScale: Double,
+                             mask: [UInt8], src: CGImage, wbGains: [Double]?) -> [UInt8]? {
+    let x0 = max(0, min(src.width - 2, Int(rx0.rounded())))
+    let y0 = max(0, min(src.height - 2, Int(ry0.rounded())))
+    let x1 = max(x0 + 2, min(src.width, Int((rx0 + Double(mw) / mScale).rounded())))
+    let y1 = max(y0 + 2, min(src.height, Int((ry0 + Double(mh) / mScale).rounded())))
     let (gw, gh) = TissueSeg.grid(x1 - x0, y1 - y0)
     // 只在遮罩內分類。遮罩外是皮膚與背景，分類它們既浪費又會把白平衡增益拉偏。
     var inside = [UInt8](repeating: 0, count: gw * gh)
     for gy in 0..<gh {
         for gx in 0..<gw {
-            let mx = max(0, min(st.mw - 1, gx * st.mw / gw))
-            let my = max(0, min(st.mh - 1, gy * st.mh / gh))
-            if st.mask[my * st.mw + mx] != 0 { inside[gy * gw + gx] = 1 }
+            let mx = max(0, min(mw - 1, gx * mw / gw))
+            let my = max(0, min(mh - 1, gy * mh / gh))
+            if mask[my * mw + mx] != 0 { inside[gy * gw + gx] = 1 }
         }
     }
     // 遮罩太小（例如 AI 沒抓到）時網格上可能一格都不落——那就整片算，之後由筆刷決定範圍。
@@ -226,13 +230,27 @@ private func seedAuto(_ st: RasterState, src: CGImage, wbGains: [Double]?) {
         for i in inside.indices { inside[i] = 1 }
     }
     guard let g = TissueSeg.classify(src, x0: x0, y0: y0, x1: x1, y1: y1,
-                                     gw: gw, gh: gh, inside: inside, wbGains: wbGains) else { return }
-    for y in 0..<st.mh {
-        let gy = max(0, min(gh - 1, y * gh / st.mh))
-        for x in 0..<st.mw {
-            let gx = max(0, min(gw - 1, x * gw / st.mw))
-            st.auto[y * st.mw + x] = g[gy * gw + gx]
+                                     gw: gw, gh: gh, inside: inside, wbGains: wbGains) else { return nil }
+    var auto = [UInt8](repeating: 0, count: mw * mh)
+    for y in 0..<mh {
+        let gy = max(0, min(gh - 1, y * gh / mh))
+        for x in 0..<mw {
+            let gx = max(0, min(gw - 1, x * gw / mw))
+            auto[y * mw + x] = g[gy * gw + gx]
         }
+    }
+    return auto
+}
+
+/// 同步版（MainActor）：**畫布擴張的當下**要立即補算新視窗的底稿——筆畫接著就要讀
+/// `st.auto` 給新像素帶分類，async 會讓這些像素落到預設類。擴張視窗遠小於初始整圖，
+/// 單次耗時可接受；初始的大計算已移到 `runSeed()` 背景。
+@MainActor
+private func seedAutoSync(_ st: RasterState, src: CGImage, wbGains: [Double]?) {
+    if let auto = computeAutoGrid(rx0: st.rx0, ry0: st.ry0, mw: st.mw, mh: st.mh,
+                                  mScale: st.mScale, mask: st.mask, src: src, wbGains: wbGains),
+       auto.count == st.mw * st.mh {
+        st.auto = auto
     }
 }
 
@@ -254,6 +272,9 @@ private final class EditCanvasModel: ObservableObject {
     @Published var boxSize = CGSize.zero
     @Published var undoCount = 0
     @Published var redoCount = 0
+    /// 組織底稿（auto）背景計算中。期間畫布觸控與「完成修邊」鎖定——
+    /// 底稿沒好之前塗抹會蓋在待覆寫的資料上，鎖住比事後解釋一致性簡單。
+    @Published var seeding = false
 
     let st: RasterState
     let cg: CGImage?
@@ -262,6 +283,10 @@ private final class EditCanvasModel: ObservableObject {
     let defaultClass: Int
     let wbGains: [Double]?
     let originalArea: Double?
+    /// true＝全新編修（底稿算完要拿 auto 種 tissue）；false＝續編（tissue 已有人修過，auto 只供自動筆用）。
+    private let freshSeed: Bool
+    /// 民眾版借用：只圈邊界，不算組織底稿（TissueSeg 對 Lite 無意義，白耗 2–5 秒）。
+    let boundaryOnly: Bool
     private var viewInit = false
 
     // 覆蓋圖 CGImage：每個 bump 失效一次，同一幀內多筆塗抹只重建一張。
@@ -285,7 +310,8 @@ private final class EditCanvasModel: ObservableObject {
 
     init(image: UIImage, initialPolygons: [[[Int]]], originalArea: Double?,
          tissueFrac: [String: Double], mmPerPx: Double?, resume: EditRaster?,
-         wbGains: [Double]?) {
+         wbGains: [Double]?, boundaryOnly: Bool = false) {
+        self.boundaryOnly = boundaryOnly
         let cgImg = image.cgImage
         self.cg = cgImg
         self.bw = cgImg?.width ?? 1
@@ -304,10 +330,11 @@ private final class EditCanvasModel: ObservableObject {
             let s = RasterState(rx0: r.rx0, ry0: r.ry0, mw: r.mw, mh: r.mh,
                                 mScale: r.mScale, bw: bw, bh: bh)
             s.mask = r.mask; s.tissue = r.tissue; s.orig = r.origMask
-            // 續編時 auto 不隨 EditRaster 保存，重算即可（便宜且必然一致）。
-            if let cgImg { seedAuto(s, src: cgImg, wbGains: wbGains) }
+            // 續編時 auto 不隨 EditRaster 保存，開畫面後由 runSeed() 背景重算
+            //（原本在這裡同步算＝進畫面白凍的根因）。
             s.cm2PerPx = mmPerPx.map { ($0 * $0 / 100.0) / (r.mScale * r.mScale) } ?? r.cm2PerPx
             s.recount(); s.syncAll()
+            self.freshSeed = false
             self.st = s
         } else {
             // 初始 ROI＝AI 遮罩外框＋60% 邊距（AI 低估時仍可自動擴張，不受限）。
@@ -334,12 +361,12 @@ private final class EditCanvasModel: ObservableObject {
                 MaskTrace.scanlineFill(p, s: sc, mw: s.mw, mh: s.mh,
                                        into: &s.mask, ox: s.rx0, oy: s.ry0)
             }
-            if let cgImg { seedAuto(s, src: cgImg, wbGains: wbGains) }
+            // 底稿（auto）改由 runSeed() 背景計算；這裡先以預設類種 tissue，
+            // 算完後在 runSeed 內用 auto 覆寫——期間畫布鎖定，語意與舊版同步計算一致。
             var c = 0
             for i in 0..<(s.mw * s.mh) where s.mask[i] != 0 {
                 c += 1
-                let a = Int(s.auto[i])
-                s.tissue[i] = UInt8((a >= 1 && a <= TissueCode.maxCode) ? a : defaultClass)
+                s.tissue[i] = UInt8(defaultClass)
             }
             s.maskCount = c
             s.orig = s.mask
@@ -347,7 +374,39 @@ private final class EditCanvasModel: ObservableObject {
             s.cm2PerPx = mmPerPx.map { ($0 * $0 / 100.0) / (sc * sc) }
                 ?? (originalArea != nil && c > 0 ? originalArea! / Double(c) : nil)
             s.recount(); s.syncAll()
+            self.freshSeed = true
             self.st = s
+        }
+        // 有影像才需要底稿；設了這個旗標，畫布觸控與「完成修邊」會鎖到 runSeed 完成。
+        // 民眾版（boundaryOnly）不算底稿：組織分類對它無意義，開畫面即可用。
+        self.seeding = (cgImg != nil) && !boundaryOnly
+    }
+
+    /**
+     進畫面後補算組織底稿。`computeAutoGrid` 丟背景緒（純值進出、不碰 `RasterState`），
+     算完回主緒套用：全新編修同時以 auto 種 tissue（與舊版 init 內的種子邏輯逐位一致）；
+     續編只更新 auto 供「自動筆」使用。期間 `seeding=true` 鎖畫布。
+     */
+    func runSeed() async {
+        guard seeding else { return }
+        guard let src = cg else { seeding = false; return }
+        let s = st
+        let (rx0, ry0, mw, mh, mScale) = (s.rx0, s.ry0, s.mw, s.mh, s.mScale)
+        let mask = s.mask
+        let gains = wbGains
+        let auto = await Task.detached(priority: .userInitiated) {
+            computeAutoGrid(rx0: rx0, ry0: ry0, mw: mw, mh: mh, mScale: mScale,
+                            mask: mask, src: src, wbGains: gains)
+        }.value
+        defer { seeding = false; bump() }
+        guard let auto, auto.count == mw * mh else { return }
+        s.auto = auto
+        if freshSeed {
+            for i in 0..<(mw * mh) where s.mask[i] != 0 {
+                let a = Int(auto[i])
+                s.tissue[i] = UInt8((a >= 1 && a <= TissueCode.maxCode) ? a : defaultClass)
+            }
+            s.recount(); s.syncAll()
         }
     }
 
@@ -476,7 +535,9 @@ private final class EditCanvasModel: ObservableObject {
                 // seedAuto **只有 B_PAINT 需要**（新遮罩像素要帶分類）。它在 2200² 上是
                 // 近千萬次寫入，跑在筆畫中的主執行緒——B_ERASE／組織🖌 不跑，
                 // 才不會「擴張時卡一下、手指帶過頭、邊界突然過標」。
-                if tool == .bPaint, let cg { seedAuto(st, src: cg, wbGains: wbGains) }
+                if tool == .bPaint, !boundaryOnly, let cg {
+                    seedAutoSync(st, src: cg, wbGains: wbGains)
+                }
                 cx = (Double(imgPt.x) - st.rx0) * st.mScale
                 cy = (Double(imgPt.y) - st.ry0) * st.mScale
             }
@@ -757,6 +818,10 @@ struct WoundEditView: View {
     let mmPerPx: Double?
     let resume: EditRaster?
     let wbGains: [Double]?
+    /// true＝民眾版（WoundLite）借用模式：**只圈邊界**。隱藏組織筆刷／PUSH／GT 等
+    /// 醫療概念與文案，保留雙指縮放平移、筆刷、undo、亮青邊界線——兩個 App 的
+    /// 畫布操作因此完全一致（2026-08-18 使用者要求）。
+    let boundaryOnly: Bool
     let onCancel: () -> Void
     let onDone: (_ edited: [[Int]], _ all: [[[Int]]], _ correctionIou: Double?,
                  _ newArea: Double?, _ tissue: [String: Double], _ raster: EditRaster) -> Void
@@ -766,6 +831,7 @@ struct WoundEditView: View {
     init(image: UIImage, initialPolygons: [[[Int]]], originalArea: Double?,
          tissueFrac: [String: Double], exudate: Int?, mmPerPx: Double?,
          resume: EditRaster?, wbGains: [Double]?,
+         boundaryOnly: Bool = false,
          onCancel: @escaping () -> Void,
          onDone: @escaping (_ edited: [[Int]], _ all: [[[Int]]], _ correctionIou: Double?,
                             _ newArea: Double?, _ tissue: [String: Double],
@@ -778,11 +844,13 @@ struct WoundEditView: View {
         self.mmPerPx = mmPerPx
         self.resume = resume
         self.wbGains = wbGains
+        self.boundaryOnly = boundaryOnly
         self.onCancel = onCancel
         self.onDone = onDone
         _m = StateObject(wrappedValue: EditCanvasModel(
             image: image, initialPolygons: initialPolygons, originalArea: originalArea,
-            tissueFrac: tissueFrac, mmPerPx: mmPerPx, resume: resume, wbGains: wbGains))
+            tissueFrac: tissueFrac, mmPerPx: mmPerPx, resume: resume, wbGains: wbGains,
+            boundaryOnly: boundaryOnly))
     }
 
     var body: some View {
@@ -792,12 +860,27 @@ struct WoundEditView: View {
         let livePush = WoundPipeline.push(cm2: liveArea, frac: lf, exudate: exudate).partial
 
         VStack(alignment: .leading, spacing: 6) {
-            header(lf: lf, liveArea: liveArea, livePush: livePush)
+            if boundaryOnly {
+                liteHeader
+            } else {
+                header(lf: lf, liveArea: liveArea, livePush: livePush)
+            }
+
+            if m.seeding {
+                HStack(spacing: 6) {
+                    ProgressView()
+                    Text("組織底稿計算中…（約數秒，完成前畫布暫時鎖定）")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+            }
 
             GeometryReader { geo in
                 ZStack {
                     canvasLayer
-                    TouchProxy { phase, pts in m.touchesChanged(phase, pts) }
+                    // 底稿沒好前吞掉觸控：塗抹會被 runSeed 的 tissue 覆寫掉，鎖住最誠實。
+                    TouchProxy { phase, pts in
+                        if !m.seeding { m.touchesChanged(phase, pts) }
+                    }
                 }
                 .onAppear { m.boxSize = geo.size; m.ensureInitialFit() }
                 .onChange(of: geo.size) { _, s in m.boxSize = s; m.ensureInitialFit() }
@@ -807,15 +890,28 @@ struct WoundEditView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             toolRow
-            tissueRow
+            if !boundaryOnly { tissueRow }
             brushRow
             zoomRow
             bottomRow
         }
         .padding(10)
+        .task { await m.runSeed() }
     }
 
     // MARK: 區塊
+
+    /// 民眾版標頭：白話操作說明，不出現面積/PUSH/GT/ArUco 等醫療與技術詞彙。
+    @ViewBuilder
+    private var liteHeader: some View {
+        Text("圈選傷口範圍").font(.subheadline).bold()
+        Text("單指塗抹・雙指縮放與移動・畫錯用「擦除」或 ↺ 復原。亮青色線＝目前圈選的邊界。")
+            .font(.caption).foregroundStyle(.secondary)
+        if m.st.maskCount == 0 {
+            Text("請把整個傷口塗滿（不必沿邊描線，整片塗滿即可）")
+                .font(.caption).foregroundStyle(.red)
+        }
+    }
 
     @ViewBuilder
     private func header(lf: [String: Double], liveArea: Double?, livePush: Int?) -> some View {
@@ -895,10 +991,12 @@ struct WoundEditView: View {
 
     private var toolRow: some View {
         HStack(spacing: 6) {
-            chip("邊界＋", selected: m.tool == .bPaint) { m.tool = .bPaint }
-            chip("邊界－", selected: m.tool == .bErase) { m.tool = .bErase }
+            chip(boundaryOnly ? "圈選＋" : "邊界＋", selected: m.tool == .bPaint) { m.tool = .bPaint }
+            chip(boundaryOnly ? "擦除" : "邊界－", selected: m.tool == .bErase) { m.tool = .bErase }
             chip("移動", selected: m.tool == .pan) { m.tool = .pan }
-            chip("組織🖌", selected: m.tool == .tissue) { m.tool = .tissue }
+            if !boundaryOnly {
+                chip("組織🖌", selected: m.tool == .tissue) { m.tool = .tissue }
+            }
             // 「按住才隱藏，放開就回來」：切換式有三個實測問題（版面跳動、關著仍可塗、
             // 要按兩次）；peek 期間手指壓在鈕上本來就碰不到畫布，放開立刻回到組織圖層。
             Text(m.peeking ? "原圖🚫" : "按住看原圖")
@@ -971,14 +1069,15 @@ struct WoundEditView: View {
             Button("取消") { onCancel() }
                 .buttonStyle(.bordered)
                 .frame(maxWidth: .infinity)
-            Button("完成修邊") {
+            Button(boundaryOnly ? "完成圈選" : "完成修邊") {
                 if let r = m.finish() {
                     onDone(r.poly, r.all, r.iou, r.area, r.frac, r.raster)
                 }
             }
             .buttonStyle(.borderedProminent)
             .frame(maxWidth: .infinity)
-            .disabled(m.st.maskCount == 0)
+            // seeding 中不可完成：此刻 tissue 還是預設類佔位，送出去就是假 GT。
+            .disabled(m.st.maskCount == 0 || m.seeding)
         }
     }
 

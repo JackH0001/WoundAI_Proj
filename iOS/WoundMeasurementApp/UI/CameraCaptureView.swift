@@ -12,6 +12,9 @@ import UIKit
  模擬器沒有相機：`AVCaptureDevice.default` 回 nil → 顯示明確訊息而不是黑畫面。
  */
 struct CameraCaptureView: View {
+    /// 取景提示。預設是醫療版的貼紙構圖文案；WoundLite（免貼紙）傳入自己的版本。
+    /// 放在 closure 參數之前且帶預設值——既有呼叫端（省略此參數）不需改動。
+    var hintText: String = "請讓校正貼紙**完整入鏡且清晰**（約佔畫面 1/6）——沒有貼紙就沒有尺度，面積無法回推。"
     let onCapture: (UIImage, DepthCapture?) -> Void
     let onCancel: () -> Void
 
@@ -23,6 +26,21 @@ struct CameraCaptureView: View {
             if cam.ready {
                 CameraPreview(session: cam.session)
                     .ignoresSafeArea()
+                // 中央自動對焦框：黃＝對焦中、綠＝完成對焦（KVO `isAdjustingFocus` 驅動）。
+                // 拍傷口是近距特寫，對焦沒鎖定時快門拍出來就是糊的——狀態要看得見。
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(cam.focusing ? Color.yellow : Color.green, lineWidth: 2)
+                    .frame(width: 130, height: 130)
+                    .overlay(alignment: .bottom) {
+                        Text(cam.focusing ? "對焦中…" : "✓ 完成對焦")
+                            .font(.caption2).bold()
+                            .foregroundStyle(cam.focusing ? Color.yellow : Color.green)
+                            .padding(.horizontal, 8).padding(.vertical, 3)
+                            .background(Color.black.opacity(0.55))
+                            .cornerRadius(5)
+                            .offset(y: 26)
+                    }
+                    .animation(.easeInOut(duration: 0.2), value: cam.focusing)
             }
             VStack {
                 if let e = cam.error {
@@ -33,7 +51,7 @@ struct CameraCaptureView: View {
                         .cornerRadius(8)
                         .padding(.top, 8)
                 }
-                Text("請讓校正貼紙**完整入鏡且清晰**（約佔畫面 1/6）——沒有貼紙就沒有尺度，面積無法回推。")
+                Text(hintText)
                     .font(.caption).foregroundStyle(.white.opacity(0.9))
                     .padding(8)
                     .background(Color.black.opacity(0.45))
@@ -85,10 +103,33 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var ready = false
     @Published var error: String?
     @Published var depthSupported = false
+    /// 相機正在自動對焦（KVO `isAdjustingFocus`）。false ＝ 已鎖定，可以按快門。
+    @Published var focusing = false
 
     private let output = AVCapturePhotoOutput()
     private var completion: ((UIImage, DepthCapture?) -> Void)?
     private var configured = false
+    private var focusObs: NSKeyValueObservation?
+    private var lensObs: NSKeyValueObservation?
+    private var lastLens: Float = -1
+    private var settle: Task<Void, Never>?
+
+    /// 鏡片位置有感變動 → 對焦中；0.45 秒無變動 → 判定完成對焦。
+    private func lensMoved(_ v: Float) {
+        let moved = lastLens >= 0 && abs(v - lastLens) > 0.004
+        lastLens = v
+        if moved { focusPulse() }
+    }
+
+    private func focusPulse() {
+        focusing = true
+        settle?.cancel()
+        settle = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            guard !Task.isCancelled else { return }
+            self?.focusing = false
+        }
+    }
 
     func start() async {
         let granted = await AVCaptureDevice.requestAccess(for: .video)
@@ -117,6 +158,30 @@ final class CameraModel: NSObject, ObservableObject {
                 depthSupported = true
             }
             session.commitConfiguration()
+            // 中央自動對焦：POI 置中＋連續對焦。傷口就是要擺畫面中央拍，
+            // 讓 AF 的判斷區域跟構圖指引一致；失敗不致命（維持系統預設行為）。
+            do {
+                try dev.lockForConfiguration()
+                if dev.isFocusPointOfInterestSupported {
+                    dev.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5)
+                }
+                if dev.isFocusModeSupported(.continuousAutoFocus) {
+                    dev.focusMode = .continuousAutoFocus
+                }
+                dev.unlockForConfiguration()
+            } catch { /* 對焦設定失敗維持預設 AF，不擋拍照 */ }
+            // 對焦狀態雙訊號源：`isAdjustingFocus` 是官方通道，但實測在 LiDAR 深度相機上
+            // **不觸發**（框永遠綠色）。改以 `lensPosition` 為主——AF 掃焦時鏡片位置必然
+            // 連續變動：有感變動＝對焦中，0.45s 靜止＝完成。isAdjustingFocus 留作輔助
+            // （有觸發就當一次「對焦中」脈衝）。KVO 回呼在任意緒 → hop 回主緒再發佈。
+            focusObs = dev.observe(\.isAdjustingFocus, options: [.new]) { [weak self] _, ch in
+                guard ch.newValue == true else { return }
+                Task { @MainActor in self?.focusPulse() }
+            }
+            lensObs = dev.observe(\.lensPosition, options: [.initial, .new]) { [weak self] _, ch in
+                guard let v = ch.newValue else { return }
+                Task { @MainActor in self?.lensMoved(v) }
+            }
             configured = true
         }
         // startRunning 會阻塞呼叫緒——不可在主執行緒上跑。

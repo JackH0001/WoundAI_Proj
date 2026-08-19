@@ -74,7 +74,7 @@ final class MeasureViewModel: ObservableObject {
 
      ⚠ `format.scale = 1` 不可省：預設是螢幕倍率（3x），輸出會是要求尺寸的 9 倍像素。
      */
-    static func normalizeForBackend(_ img: UIImage, maxDim: CGFloat = 2048) -> UIImage {
+    nonisolated static func normalizeForBackend(_ img: UIImage, maxDim: CGFloat = 2048) -> UIImage {
         let pw = CGFloat(img.cgImage?.width ?? Int(img.size.width))
         let ph = CGFloat(img.cgImage?.height ?? Int(img.size.height))
         // 方向旗標非 .up 時就算尺寸夠小也要重畫（烘方向）。
@@ -88,6 +88,42 @@ final class MeasureViewModel: ObservableObject {
         fmt.scale = 1
         return UIGraphicsImageRenderer(size: target, format: fmt).image { _ in
             img.draw(in: CGRect(origin: .zero, size: target))
+        }
+    }
+
+    /// 免貼紙深度估算（表面積/投影/體積）。隨輪廓與深度成對更新。
+    @Published private(set) var depthEstimate: DepthAreaResult?
+    /// 深度估算背景計算中（畫面顯示轉圈；**不再凍結 UI**）。
+    @Published private(set) var depthBusy = false
+    /// 世代票：計算期間影像／輪廓又換了的話，舊結果回來直接作廢，
+    /// 不會把上一張的幾何貼到這一張的畫面上。
+    private var depthGen = 0
+
+    private func recomputeDepthEstimate() {
+        depthGen += 1
+        let gen = depthGen
+        guard let d = pendingDepth, let r = result, r.imageW > 0 else {
+            depthEstimate = nil; depthBusy = false; return
+        }
+        let polys = effectivePolygons
+        guard !polys.isEmpty else { depthEstimate = nil; depthBusy = false; return }
+        // ⚠ estimate 在 Debug 組建（-Onone）是秒級工作（320×240、平滑核 13²×2 趟）。
+        //   原本同步跑在 MainActor 上——「分析完／修邊完成畫面凍住 10 秒」的主因之一。
+        //   舊卡先清掉：修邊改了輪廓後，舊幾何數字繼續掛在畫面上比空白更誤導。
+        depthEstimate = nil
+        depthBusy = true
+        let iw = r.imageW, ih = r.imageH
+        // @MainActor 類別本身 Sendable，強持有跨緒安全；weak 反而是「captured var」
+        // ——Swift 6 語言模式下會升級成錯誤。世代票已擋掉過期結果，強持有無害。
+        Task.detached(priority: .userInitiated) {
+            let est = DepthAreaEstimator.estimate(polygons: polys, depth: d,
+                                                  imageW: iw, imageH: ih)
+            await MainActor.run {
+                if self.depthGen == gen {
+                    self.depthEstimate = est
+                    self.depthBusy = false
+                }
+            }
         }
     }
 
@@ -110,10 +146,16 @@ final class MeasureViewModel: ObservableObject {
         guard await ensureLogin(), let backend else { return }
         AppSettings.markBackendOk()
         loadingHint = "分析中…（上傳與辨識約數秒）"
-        let work = Self.normalizeForBackend(img)
+        // 12MP 重畫＋JPEG 編碼是秒級 CPU 工作——放背景緒，轉圈圈才轉得動
+        // （之前在 MainActor 同步做，spinner 畫不出來，看起來像當機）。
         // ⚠ 一律送原始像素、不自行套白平衡。先套的話，後端會在已校正的圖上再做一次
         //   gray-world，兩層疊起來的結果沒有人推得出來，而且它不會報錯。
-        guard let jpeg = work.jpegData(compressionQuality: 0.92) else {
+        let prep: (work: UIImage, jpeg: Data?) = await Task.detached(priority: .userInitiated) {
+            let w = Self.normalizeForBackend(img)
+            return (w, w.jpegData(compressionQuality: 0.92))
+        }.value
+        let work = prep.work
+        guard let jpeg = prep.jpeg else {
             error = "影像編碼失敗"; return
         }
         do {
@@ -166,6 +208,9 @@ final class MeasureViewModel: ObservableObject {
             //   而畫面上只會顯示「已更新」。
             lastSavedId = nil
             saveNote = nil
+            // ⚠ 估算必須在上面清空 editedPolygons **之後**——否則會拿上一張的修邊輪廓
+            //   去配這一張的深度圖，得到一個看起來合理的錯數字。
+            recomputeDepthEstimate()
             var notes = Self.advisories(r, clinical: source == "clinical")
             if let n = markerNote { notes.insert(n, at: 0) }
             statusNote = notes.joined(separator: "\n")
@@ -228,6 +273,7 @@ final class MeasureViewModel: ObservableObject {
             r.pushFull = p.full
             result = r
         }
+        recomputeDepthEstimate()
         saveNote = String(format: "已套用修邊（面積 %@ cm²，修正 IoU %@）",
                           newArea.map { String(format: "%.2f", $0) } ?? "—",
                           iou.map { String(format: "%.2f", $0) } ?? "—")
@@ -429,6 +475,26 @@ final class MeasureViewModel: ObservableObject {
         }
         // 臨床用個案的**穩定** wdCode（回診沿用同一組）；範例／模擬圖沒有個案才另發。
         let code = woundCase?.wdCode ?? WoundCase.newWdCode()
+        // 深度研究資料（去識別幾何：深度圖＋內參，無 RGB、無 PHI）。
+        // 隨②同意把關的標註一起上傳——契約 docs/depth_capture_contract.md。
+        // 深度 PNG／組織遮罩的編碼＋base64 是 MB 級工作，移出主執行緒；
+        // 上傳期間掛進度圈——沒有回饋的 10–20 秒會被當成當機（2026-08-10 實測回報）。
+        loading = true
+        loadingHint = "上傳標註與深度研究資料中…（約 10–20 秒，請勿離開此頁）"
+        defer { loading = false }
+        let dep = pendingDepth
+        let depthUpload: (d: String, c: String, k: [String: Double])? = await Task.detached {
+            () -> (d: String, c: String, k: [String: Double])? in
+            guard let dep, let enc = DepthAreaEstimator.encodePng16mm(dep) else { return nil }
+            return (enc.depthPng.base64EncodedString(),
+                    enc.confPng.base64EncodedString(),
+                    DepthAreaEstimator.intrinsicsForUpload(dep))
+        }.value
+        let ras = raster
+        let tissueMaskB64: String? = await Task.detached {
+            ras.flatMap { TissueMaskCodec.encodeBase64(tissue: $0.tissue, mask: $0.mask,
+                                                       mw: $0.mw, mh: $0.mh) }
+        }.value
         submitStatus = "送出中…"
         do {
             let outcome = try await backend.submitAnnotation(
@@ -445,15 +511,16 @@ final class MeasureViewModel: ObservableObject {
                 tissueFrac: r.tissueFrac,
                 // 柵格為 nil（理論上不會，doctorVerified 已保證修過）就整組不送——
                 // 硬用輪廓補一張遮罩只會製造假 GT。
-                tissueMaskPngBase64: raster.flatMap {
-                    TissueMaskCodec.encodeBase64(tissue: $0.tissue, mask: $0.mask,
-                                                 mw: $0.mw, mh: $0.mh)
-                },
+                tissueMaskPngBase64: tissueMaskB64,
                 tissueRaster: raster,
                 correctionIou: correctionIou,
                 careNote: "app confirm",
                 source: source,
-                depthSource: pendingDepth != nil ? "lidar_local" : "none",
+                depthSource: depthUpload != nil ? "lidar"
+                            : (pendingDepth != nil ? "lidar_local" : "none"),
+                depthMapPngBase64: depthUpload?.d,
+                depthConfPngBase64: depthUpload?.c,
+                cameraIntrinsics: depthUpload?.k,
                 consentTrain: true,          // 上面已重讀驗證；範例／模擬圖無受試者
                 doctorVerified: doctorVerified)
             switch outcome {
@@ -485,6 +552,66 @@ struct MeasureFlowView: View {
     @State private var statusDlg: String?
     @State private var seenStatus: String?
 
+    /// 免貼紙深度估算對照卡。誤差告知放在數字旁邊，不是藏在說明頁。
+    @ViewBuilder
+    private func depthCard(_ de: DepthAreaResult, sticker: Double?) -> some View {
+        let line1: String = {
+            var s = String(format: "📐 深度估算（免貼紙）：表面積 %.2f cm²・投影 %.2f cm²",
+                           de.surfaceAreaCm2, de.projectedAreaCm2)
+            if let a = sticker, a > 0 {
+                s += String(format: "\n　vs 貼紙 %.2f cm²（差 %+.1f%%）",
+                            a, (de.projectedAreaCm2 - a) / a * 100)
+            }
+            return s
+        }()
+        let line2: String = {
+            var s = ""
+            if let v = de.volumeMl, let dm = de.maxDepthMm {
+                s = String(format: "容積約 %.2f mL・最深 %.1f mm（相對周邊皮膚擬合面）", v, dm)
+            }
+            return s
+        }()
+        let ratio = de.projectedAreaCm2 > 0 ? de.surfaceAreaCm2 / de.projectedAreaCm2 : 1
+        VStack(alignment: .leading, spacing: 3) {
+            Text(line1).font(.footnote)
+            if let t = de.tiltDeg {
+                Text(String(format: "拍攝傾角約 %.0f°%@", t,
+                            t > 25 ? "——斜拍會低估投影面積，建議近正拍" : ""))
+                    .font(.caption2).foregroundStyle(t > 25 ? .orange : .secondary)
+                // 平面／近平面時投影÷cosθ 是傾斜不變量（2026-08-10 實測多角度 ±3%）。
+                // 真實肢體曲面此校正只是近似，故標明平面假設。
+                if t > 10, t < 65 {
+                    Text(String(format: "斜拍校正投影 ≈ %.2f cm²（÷cos%.0f°，平面假設）",
+                                de.projectedAreaCm2 / cos(t * .pi / 180), t))
+                        .font(.caption2).foregroundStyle(.blue)
+                }
+            }
+            if ratio > 1.25 {
+                // 平坦表面的表面/投影比應 ≈1；偏高＝深度雜訊被三角化放大，
+                // 表面積與體積此時是雜訊的積分，不是幾何。
+                Text(String(format: "⚠ 深度雜訊偏高（表面/投影比 %.2f），本次表面積與容積不可採用", ratio))
+                    .font(.caption2).foregroundStyle(.orange)
+            } else if !line2.isEmpty {
+                Text(line2).font(.caption).foregroundStyle(.secondary)
+            }
+            if de.coverage < 0.7 {
+                Text(String(format: "⚠ 深度覆蓋率僅 %.0f%%（濕亮面會讓 LiDAR 出洞），此估算僅供參考",
+                            de.coverage * 100))
+                    .font(.caption2).foregroundStyle(.orange)
+            }
+            if de.medianDistanceM < 0.22 {
+                Text("⚠ 攝距過近（<22cm），LiDAR 深度不可靠，請退後一些重拍")
+                    .font(.caption2).foregroundStyle(.orange)
+            }
+            Text("研究對照值，非病歷數值；病歷面積以貼紙校正為準。")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.blue.opacity(0.08))
+        .cornerRadius(8)
+    }
+
     /// 臨床模式下沒有個案就不該存——`caseId` 為 null 的列進不了任何一條時間軸，
     /// 只會落到「快速量測紀錄」裡，而醫師以為自己存進了病患的病歷。
     ///
@@ -508,16 +635,16 @@ struct MeasureFlowView: View {
                     // 三個影像入口（對齊 Android SamplePicker）：臨床現場以「拍照」為主——
                     // 事後從相簿補件有壓縮／裁切破壞尺度的風險；「檔案」可讀 Files app 裡
                     // 相簿看不到的圖（AirDrop 進來的範例圖）。
+                    // 2026-08-17 UI 修訂：三入口全部**空心框線**呈現，按下瞬間實心填滿
+                    // 再觸發動作（isPressed 過場）。「拍照」是預選項——框線加粗＋淡底標示，
+                    // 但不再用常駐實心（實心被實測誤讀為「正在進行中」的狀態）。
                     HStack(spacing: 8) {
                         Button("拍照") { showCamera = true }
-                            .buttonStyle(.borderedProminent)
-                            .frame(maxWidth: .infinity)
+                            .buttonStyle(OutlinePressButtonStyle(preselected: true))
                         PhotosPicker("相簿", selection: $pick, matching: .images)
-                            .buttonStyle(.bordered)
-                            .frame(maxWidth: .infinity)
+                            .buttonStyle(OutlinePressButtonStyle())
                         Button("檔案") { showImporter = true }
-                            .buttonStyle(.bordered)
-                            .frame(maxWidth: .infinity)
+                            .buttonStyle(OutlinePressButtonStyle())
                     }
 
                     if !clinicalMode {
@@ -535,6 +662,20 @@ struct MeasureFlowView: View {
                         AnalysisPreview(image: img, result: r)
 
                         ResultCard(result: r)
+
+                        if let de = vm.depthEstimate {
+                            depthCard(de, sticker: r.areaCm2)
+                        } else if vm.depthBusy {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                Text("深度幾何計算中…（背景執行，可先檢視上方結果）")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.blue.opacity(0.08))
+                            .cornerRadius(8)
+                        }
 
                         if let note = vm.statusNote, !note.isEmpty {
                             Text(note)
@@ -761,6 +902,39 @@ struct MeasureFlowView: View {
 // MARK: - 校正框目視複核
 
 /**
+ 空心→實心按壓過場按鈕（快速量測三入口用）。
+
+ - 平時：框線＋透明底（`preselected` 的預設入口框線加粗、加淡色底，指出「按這個」）。
+ - 按下（`isPressed`）：實心填滿＋白字，0.12s 過場——按壓當下有明確的視覺回饋，
+   放開才觸發動作（SwiftUI Button 語意本來就是 touch-up）。
+
+ 之前「拍照」用 `.borderedProminent` 常駐實心，實測被誤讀為「正在拍照中」的狀態，
+ 故改為全空心、以框線層級區分預選。PhotosPicker 也吃 ButtonStyle 環境，三顆一致。
+ */
+struct OutlinePressButtonStyle: ButtonStyle {
+    var preselected: Bool = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.body.weight(preselected ? .semibold : .regular))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .foregroundStyle(configuration.isPressed ? Color.white : Color.accentColor)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(configuration.isPressed
+                          ? Color.accentColor
+                          : (preselected ? Color.accentColor.opacity(0.12) : Color.clear)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(Color.accentColor.opacity(preselected ? 1.0 : 0.55),
+                                  lineWidth: preselected ? 2 : 1))
+            .contentShape(RoundedRectangle(cornerRadius: 10))
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+/**
  把後端回傳的輪廓與**校正框**畫在照片上。
 
  ## 為什麼校正框圖層是必要的，不是裝飾
@@ -826,17 +1000,39 @@ struct AnalysisPreview: View {
             .frame(height: 300)
             .background(Color.black.opacity(0.05))
 
-            HStack {
-                Toggle("傷口輪廓", isOn: $showWound).font(.caption)
-                Toggle("校正框", isOn: $showMarker).font(.caption)
+            // 圖層開關：**實心＝顯示中、空心＝已隱藏**，顏色對應圖上的框色
+            // （青＝傷口輪廓、黃＝校正框），眼睛圖示雙重編碼——只靠深淺在強光下看不出狀態。
+            HStack(spacing: 8) {
+                overlayToggle("傷口輪廓", tint: .cyan, isOn: $showWound)
+                overlayToggle("校正框", tint: .yellow, isOn: $showMarker)
             }
-            .toggleStyle(.button)
 
             if result.markerQuad != nil {
                 Text("請確認**黃框**確實套在校正貼紙上。框錯了的話面積會整筆錯，而系統無法自行察覺。")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
+    }
+
+    /// 單顆圖層開關：實心（顯示）↔ 空心（隱藏），帶 0.15s 過場。
+    private func overlayToggle(_ title: String, tint: Color, isOn: Binding<Bool>) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) { isOn.wrappedValue.toggle() }
+        } label: {
+            Label(title, systemImage: isOn.wrappedValue ? "eye.fill" : "eye.slash")
+                .font(.caption.weight(.medium))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                // 實心底用黑字：青與黃的底上白字對比都不夠。
+                .foregroundStyle(isOn.wrappedValue ? Color.black : tint)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(isOn.wrappedValue ? tint : Color.clear))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(tint, lineWidth: 1.5))
+        }
+        .buttonStyle(.plain)   // 避免外層 ButtonStyle 環境（若有）覆蓋自訂外觀
     }
 }
 
