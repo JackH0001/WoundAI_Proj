@@ -474,6 +474,7 @@ actor BackendClient {
      - 429／人臉退件不拋錯誤：回空輪廓＋`userMessage`，呼叫端退手動圈選。
     */
     func liteSegment(jpeg: Data, anonId: String,
+                     consentVersion: String? = nil,
                      depthMapPngBase64: String? = nil,
                      depthConfPngBase64: String? = nil,
                      cameraIntrinsics: [String: Double]? = nil,
@@ -483,6 +484,8 @@ actor BackendClient {
             "client": "woundlite-ios",
             "research_consent": "true",
         ]
+        // 文案版本綁每筆資料：日後同意書改版，「哪一版收的」要能分桶（治理需求）。
+        if let v = consentVersion { fields["consent_version"] = v }
         if let d = depthMapPngBase64 {
             fields["depth_map_png"] = d
             fields["depth_format"] = "png16_mm"
@@ -544,6 +547,34 @@ actor BackendClient {
                                  userMessage: nil,
                                  route: j["route"].string,
                                  rawPolyCount: rawCount)
+    }
+
+    /**
+     回收民眾**自己畫的**輪廓（`POST /api/v1/lite/annotation`，JSON、免登入）。
+
+     只在使用者動過手時呼叫（App 端規則）：把模型自己的輸出回傳是自我確認雜訊。
+     後端以 `lite_labels.jsonl` **結構隔離**（label_grade=lay，程式上進不了
+     retrain_queue）——民眾邊界是臨床偏差不是雜訊，不與醫師 GT 混用。
+     前提：該影像已經由 lite/segment 以 consent=true 落地（有 image_id）。
+     */
+    func liteAnnotation(anonId: String, imageId: String,
+                        polygons: [[[Int]]], imageW: Int, imageH: Int,
+                        source: String, consentVersion: String) async throws {
+        var r = try request("POST", "/api/v1/lite/annotation", auth: false)
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let obj: [String: Any] = [
+            "anon_id": anonId, "image_id": imageId,
+            "polygons": polygons, "image_w": imageW, "image_h": imageH,
+            "research_consent": true,
+            "consent_version": consentVersion,
+            "source": source,
+        ]
+        r.httpBody = try JSONSerialization.data(withJSONObject: obj)
+        let (code, data) = try await send(r)
+        guard code == 200, let j = JSONAny(data: data),
+              j["status"].string("") == "stored" else {
+            throw BackendError.http(status: code, message: summarize(data))
+        }
     }
 
     /**

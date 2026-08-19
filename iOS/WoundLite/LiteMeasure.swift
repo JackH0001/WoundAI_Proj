@@ -22,6 +22,13 @@ final class LiteMeasureVM: ObservableObject {
     @Published var savedId: String?
     /// 輪廓來源（存進紀錄）："manual" / "cloud"
     @Published var source = "manual"
+    /// 這張影像在 lite/segment 落地後的 image_id（lay label 回收的綁定鍵）。
+    private(set) var cloudImageId: String?
+    /// 雲端當時有沒有給出輪廓（lay label 的 source 語意：有→edited、無→manual）。
+    private var cloudHadPolys = false
+    /// 使用者動過手（手動圈選或對雲端結果重新圈選）。沒動過手不回收
+    /// ——模型自己的輸出回傳是自我確認雜訊。
+    private var userEdited = false
     private var gen = 0
 
     /// 長邊 ≤2048＋方向烘進像素（與醫療版 `normalizeForBackend` 同規則；
@@ -52,6 +59,9 @@ final class LiteMeasureVM: ObservableObject {
         note = nil
         estimate = nil
         polys = []
+        cloudImageId = nil
+        cloudHadPolys = false
+        userEdited = false
         let work = await Task.detached(priority: .userInitiated) {
             Self.normalize(raw)
         }.value
@@ -88,6 +98,7 @@ final class LiteMeasureVM: ObservableObject {
             busyHint = "雲端辨識中…（約數秒）"
             switch await liteCloudSegment(work, depth: dd) {
             case .ok(let cloud, let stored, let route, let raw):
+                cloudHadPolys = !cloud.isEmpty
                 // Debug 組建把路由與輪廓數直接掛在畫面上：route 說出後端走哪條路、
                 // 「後端 N・解析 M」不一致＝客戶端解析問題——兩種病一眼分開。
                 var dbg: String? = nil
@@ -134,6 +145,7 @@ final class LiteMeasureVM: ObservableObject {
         let picked = Self.centerWound(traced, w: imageW, h: imageH)
         polys = picked
         source = "manual"
+        userEdited = true
         if traced.count > 1, picked.count == 1 {
             note = "圈選含多個分離區塊，已取最靠近畫面中央的一塊。"
         }
@@ -170,6 +182,25 @@ final class LiteMeasureVM: ObservableObject {
         if gen == g { estimate = est }
     }
 
+    /**
+     存檔後回收民眾輪廓（lay label）。三個前提**缺一不送**：研究同意、
+     該影像已由 lite/segment 落地（有 image_id）、使用者動過手。
+     射後不理（try?）：lay label 掉一筆是可接受損失，不值得為它擋存檔流程。
+     */
+    func submitLayLabel() {
+        guard LitePrefs.researchConsent == true,
+              let iid = cloudImageId, userEdited, !polys.isEmpty else { return }
+        let p = polys, iw = imageW, ih = imageH
+        let src = cloudHadPolys ? "edited" : "manual"
+        Task {
+            let c = BackendClient(baseUrl: AppSettings.backendURL())
+            try? await c.liteAnnotation(anonId: LitePrefs.anonId, imageId: iid,
+                                        polygons: p, imageW: iw, imageH: ih,
+                                        source: src,
+                                        consentVersion: LitePrefs.consentVersion)
+        }
+    }
+
     enum LiteCloudOutcome {
         case ok([[[Int]]], stored: Bool, route: String?, raw: Int)
         case softFail(String)     // 429 配額／人臉退件：後端給的可讀訊息
@@ -200,10 +231,12 @@ final class LiteMeasureVM: ObservableObject {
         do {
             let r = try await c.liteSegment(jpeg: payload.jpeg,
                                             anonId: LitePrefs.anonId,
+                                            consentVersion: LitePrefs.consentVersion,
                                             depthMapPngBase64: payload.dep,
                                             depthConfPngBase64: payload.conf,
                                             cameraIntrinsics: payload.k)
             if let m = r.userMessage { return .softFail(m) }
+            cloudImageId = r.imageId   // 落地鍵（stored=false 時後端本來就回 nil）
             // 以後端回覆的座標空間為準（它處理的那張圖才是輪廓所在的空間）。
             if r.imageW > 0 { imageW = r.imageW }
             if r.imageH > 0 { imageH = r.imageH }
@@ -378,6 +411,8 @@ struct LiteMeasureView: View {
                     depthName: depthName)
                 store.add(rec)
                 vm.savedId = rec.id
+                // 存檔即回收 lay label（前提檢查在 vm 內；不動手/未同意/未落地都靜默略過）
+                vm.submitLayLabel()
             }
             .buttonStyle(.bordered)
             .disabled(vm.savedId != nil)

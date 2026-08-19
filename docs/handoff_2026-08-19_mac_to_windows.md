@@ -36,6 +36,28 @@
 （App 端診斷儀器這輪立功：404→500 的轉變與確切狀態碼都是畫面直讀，
 零猜測。）
 
+## 追加 ⑤（19:27 實測）：端到端通了；兩個收尾
+
+實測：上傳成功、自動圈選、`route=student・後端輪廓 1・解析成功 1`——
+**管線全通**。但那顆輪廓圈的是**校正貼紙**（1.26 cm² ≈ 貼紙尺寸）。
+
+1. **`on_weak` 的「weak」定義要放寬**：student 回了「非空但荒謬小」的
+   遮罩（把貼紙當傷口）→ 不算空手 → 不升級 → 錯的小輪廓直接勝出。
+   真實民眾照沒有貼紙，但**小傷口／碎片遮罩同樣踩這個洞**。建議：
+   `weak ＝ 空 或 遮罩面積 < 0.3~0.5% 畫面`——觸發面仍受控（只多收
+   極小遮罩這一族），成本上限不變。突變測試：塞一個 20px 假遮罩，
+   on_weak 應升級。
+2. **console「民眾版資料」頁籤還沒做**（admin 實際登入確認：API
+   `lite/records` 在、UI 無入口）。規劃見 `docs/lite_research_pipeline.md`
+   §1：清單（時間/anon 前8碼/bytes/輪廓數/深度/route/escalated/
+   consent_version）＋單筆預覽＋統計卡（route 三桶、`hard_with_lay`、
+   同意率、日量）。lay label（`lite_labels.jsonl`）也在這頁看。
+
+iOS 端已同步完成（本批）：`consent_version` 附帶（"2026-08-19.1"）、
+存檔回收 lay label（三前提缺一不送：同意/已落地/動過手；
+cloudHadPolys→source=edited、無雲端輪廓→manual）、同意文案補
+「您圈選的傷口範圍」。
+
 ## 追加 ④：Mac 端 review 意見（tuple 未解包＋門檻 SSOT 批次）
 
 根因收斂正確——`segment_wound_ai` 回 `(mask, confidence)`、`segment_for_lite`

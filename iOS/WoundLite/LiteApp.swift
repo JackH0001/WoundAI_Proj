@@ -37,6 +37,10 @@ enum LitePrefs {
         get { d.object(forKey: "lite_research_consent") as? Bool }
         set { d.set(newValue, forKey: "lite_research_consent") }
     }
+    /// 同意文案版本。**改了同意頁的實質內容就要遞增**——每筆上傳都帶著它，
+    /// 日後治理要能回答「這筆是在哪一版文案下同意的」。
+    static let consentVersion = "2026-08-19.1"
+
     /// 裝置匿名代碼：首用隨機生成、不連結任何身分。它是 lite/segment 的
     /// **限流鍵與撤回鍵**（`DELETE /api/v1/lite/data/<anon_id>`），不是識別碼。
     /// ⚠ 上架前要換成 App Attest 裝置證明（後端契約已載明，限流擋不住有意濫用）。
