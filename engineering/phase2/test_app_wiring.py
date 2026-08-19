@@ -122,6 +122,63 @@ def main():
     check("回應帶出 blueprint_failures 明細（不必去翻容器日誌）",
           "'blueprint_failures'" in src)
 
+    # ── segment_wound_ai 的回傳是 (prob, confidence)，每個呼叫端都要解包 ──
+    #
+    # 2026-08-19：`segment_for_lite` 寫成 `mask = segment_wound_ai(...)`，
+    # 於是 mask 是一個 tuple。`if mask is None` 不成立，後面
+    # `np.asarray(tuple, bool)` 一路炸到 `_polygons_from_mask()`——那裡沒有 try，
+    # 回的是 Flask 預設 HTML 500，連 JSON 錯誤都沒有。
+    # classify 的兩處呼叫都正確解包，只有新加的那處沒有。
+    print("")
+    # ⚠ 判準要看**語意**不是形狀。第一版只允許 `a, b = segment_wound_ai(x)`，
+    # 結果把正確的 `out = segment_wound_ai(x)` 之後取 `out[0]` 也判成錯——
+    # 假紅與假綠一樣會侵蝕對測試的信任。
+    # 合法的有兩種：解包成兩個名字，或指派給一個名字之後有取 `[0]`。
+    def _indexes_zero(scope, name):
+        for s in ast.walk(scope):
+            if isinstance(s, ast.Subscript) and getattr(s.value, "id", "") == name:
+                idx = s.slice
+                if isinstance(idx, ast.Constant) and idx.value == 0:
+                    return True
+        return False
+
+    calls = []
+    for fn in [x for x in ast.walk(tree)
+               if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call) \
+                    and getattr(n.value.func, "id", "") == "segment_wound_ai":
+                tgt = n.targets[0]
+                if isinstance(tgt, ast.Tuple):
+                    calls.append((n.lineno, True))
+                elif isinstance(tgt, ast.Name):
+                    calls.append((n.lineno, _indexes_zero(fn, tgt.id)))
+                else:
+                    calls.append((n.lineno, False))
+    bare = [ln for ln, ok in calls if not ok]
+    check("segment_wound_ai 的回傳沒有被當成單一遮罩使用（%d 處呼叫）" % len(calls),
+          not bare,
+          "第 %s 行把 (prob, conf) 指派給單一變數" % bare)
+    # 上面那條擋得住 `mask = segment_wound_ai(...)`，但擋不住
+    # `out = segment_wound_ai(...)` 之後正確地取 out[0]。所以再補一條語意檢查：
+    # 民眾版必須套用 SSOT 門檻，否則機率圖被當成遮罩，整張圖都是傷口而不報錯。
+    lite_fn = src[src.find("def segment_for_lite"):]
+    lite_fn = lite_fn[:lite_fn.find("\n@app.route")] if "\n@app.route" in lite_fn else lite_fn[:3000]
+    check("segment_for_lite 有套用 SSOT threshold（機率圖不可直接當遮罩）",
+          "threshold" in lite_fn and "> thr" in lite_fn,
+          "少了門檻，mask>0 會把整張圖當傷口，而且不會有任何錯誤")
+
+    # ── 匿名端點的最外層必須有 catch-all ──────────────────────────
+    lite_src = open(os.path.join(os.path.dirname(APP_PY), "api_lite.py"),
+                    encoding="utf-8").read()
+    check("lite/segment 最外層有 catch-all（不吐 Flask 預設 HTML 500）",
+          "def lite_segment():" in lite_src and "_lite_segment_impl()" in lite_src
+          and "logger.exception" in lite_src)
+    # 錯誤處理路徑壞掉是最難發現的一種壞：它只在出錯時執行，
+    # 而出錯時沒有人在看它有沒有正常運作。第一版就忘了定義 logger。
+    check("  而且 logger 真的有定義（否則 handler 自己會 NameError）",
+          "logger = logging.getLogger" in lite_src)
+
     print("\n%d 項檢查，%d 項失敗" % (TOTAL[0], len(FAILED)))
     if FAILED:
         print("失敗：")

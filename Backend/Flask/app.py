@@ -1249,11 +1249,31 @@ def segment_for_lite(image_rgb):
 
     回 `(mask, info)`。`api_lite` 依此回報 route，讓「這張是靠集成救回來的」
     在民眾版也看得見——不然同一張照片在兩個 App 得到不同結果時，無從歸因。
+
+    ## ⚠ 兩件第一版都寫錯的事
+
+    **一、`segment_wound_ai` 回的是 `(wound_prob, confidence)` 兩個值，不是遮罩。**
+    第一版寫成 `mask = segment_wound_ai(...)`，於是 mask 是一個 tuple。
+    `if mask is None` 當然不成立，後面 `np.asarray(tuple, bool)` 一路炸到
+    `_polygons_from_mask()`——那裡沒有 try，所以回的是 Flask 預設的 HTML 500，
+    連 JSON 錯誤都沒有。classify 的兩處呼叫（第 927、1725 行）都有正確解包，
+    只有這裡沒有。
+
+    **二、它回的是機率圖，不是二值遮罩。** 要用 SSOT 裡該模型的 threshold 去切
+    （classify 是這樣做的）。少了這一步，就算 tuple 的問題修掉，
+    `mask > 0` 也會把整張圖當成傷口——**而且不會有任何錯誤**，
+    只會回一個荒謬的輪廓。兩條路徑必須用同一個門檻，否則同一張照片
+    在醫療版與民眾版會得到不同答案，而那種差異最難歸因。
     """
-    mask = segment_wound_ai(image_rgb)
-    if mask is None:
-        import numpy as _np
+    import numpy as _np
+    out = segment_wound_ai(image_rgb)
+    wound_prob = out[0] if isinstance(out, tuple) else out
+    if wound_prob is None:
         mask = _np.zeros(image_rgb.shape[:2], bool)
+    else:
+        thr = float(((_load_ssot().get("models", {}) or {})
+                     .get(_active_model_key() or "", {}) or {}).get("threshold", 0.4))
+        mask = _np.asarray(wound_prob) > thr
     h, w = image_rgb.shape[:2]
     mask, info = escalate_mask(image_rgb, mask, w, h, policy="on_weak")
     info.setdefault("route", "student")

@@ -41,12 +41,19 @@ decorator 去確認。
 """
 import hashlib
 import json
+import logging
 import os
 import time
 
 from flask import Blueprint, jsonify, request
 
 import api_flywheel as _fw
+
+# ⚠ 這一行不是樣板。最外層的 catch-all 會呼叫 `logger.exception()`，
+# 而第一版忘了定義 logger——那個 handler 自己會 NameError，
+# 於是又回到 Flask 的預設 HTML 500。**錯誤處理路徑壞掉是最難發現的一種壞**：
+# 它只在出錯時才執行，而出錯時沒有人在看它有沒有正常運作。
+logger = logging.getLogger(__name__)
 
 lite_bp = Blueprint("lite", __name__)
 
@@ -176,12 +183,40 @@ def _polygons_from_mask(mask, min_px=64):
 
 @lite_bp.route("/api/v1/lite/segment", methods=["POST"])
 def lite_segment():
+    """匿名分割入口。最外層有 catch-all，理由見 `_lite_segment_impl` 上方。"""
+    try:
+        return _lite_segment_impl()
+    except Exception as e:
+        # ⚠ **匿名端點不可以吐 Flask 的預設 HTML 500。**
+        #
+        # 三個理由，由重到輕：
+        #  1. 排錯全靠猜。2026-08-19 實測：App 只看得到「500」，
+        #     而例外堆疊留在容器日誌裡，要拉 revision 對時間才找得到。
+        #     回 JSON ＋ `logger.exception` 之後，堆疊必定進日誌、
+        #     而錯誤類型直接回給呼叫端。
+        #  2. 預設頁面會洩漏它是 Flask（以及 debug 模式下的原始碼）。
+        #  3. App 端解析 JSON 失敗會把它報成「連線問題」，把排錯帶去錯的一端。
+        #
+        # 這一層**不吞錯**：它記錄、回報，然後結束。與「except: pass」是相反的東西。
+        logger.exception("lite/segment 未預期例外")
+        return jsonify({
+            "error": "internal_error",
+            "detail": "%s: %s" % (type(e).__name__, e),
+            "message": "伺服器處理時發生錯誤，請改用手動圈選；此問題已記錄。",
+        }), 500
+
+
+def _lite_segment_impl():
     import cv2
     import numpy as np
 
     anon_id = (request.form.get("anon_id") or "").strip()
     client = (request.form.get("client") or "").strip()
     consent = (request.form.get("research_consent") or "").strip().lower() == "true"
+    # 同意書版本。**沒有它，日後同意文案一改就分不出誰同意了哪一版**——
+    # 而「當初同意的範圍」正是撤回爭議與 IRB 審查會問的第一件事。
+    # 現在還沒有正式流量，補的成本接近零；等有了資料再補就補不回來了。
+    consent_version = (request.form.get("consent_version") or "").strip()[:32]
     if not anon_id or len(anon_id) > 64:
         return jsonify({"error": "缺 anon_id"}), 400
     if "image" not in request.files:
@@ -247,6 +282,9 @@ def lite_segment():
             "anon_id": anon_id, "client": client, "image_id": image_id,
             "image_w": w, "image_h": h, "received_at": _fw.utc_now(),
             "research_consent": True,
+            # 空字串代表「App 沒送版本」——**不要填一個預設值**。
+            # 填了就會有一批資料聲稱同意了某個版本，而那是猜的。
+            "consent_version": consent_version or None,
             "measured": _safe_json(request.form.get("measured")),
             "camera_intrinsics": _safe_json(request.form.get("camera_intrinsics")),
             "depth_format": request.form.get("depth_format"),
@@ -271,6 +309,7 @@ def lite_segment():
             # 記下 route 與輪廓數，日後才篩得出「哪些是集成救回來的」
             # 與「哪些連集成都空手」——後者是下一輪訓練的優先目標。
             "route": meta["route"], "escalated": meta["escalated"],
+            "consent_version": consent_version or None,
         })
 
     rate_record(anon_id, ip)
@@ -324,6 +363,92 @@ def _store_depth_png(st, pre, b64, conf_b64=None):
         return False, str(e)
 
 
+@lite_bp.route("/api/v1/lite/annotation", methods=["POST"])
+def lite_annotation():
+    """回收民眾**自己畫的**傷口輪廓。`application/json`。
+
+        {anon_id, image_id, polygons: [[[x,y],...],...], image_w, image_h,
+         research_consent: true, consent_version?, source: "manual"|"edited"}
+
+    ## ⚠ 這不是弱標註，是**不同定義下的標註**
+
+    規劃文件把它稱為「辨識失敗的難例自帶答案」。方向對，但要說得更準：
+
+    **傷口邊界是臨床判斷，不是感知判斷。** 傷口到哪裡結束、周邊紅斑從哪裡開始
+    ——民眾會**系統性地**多包或少包某一類組織。那是偏差不是雜訊，
+    收得再多也不會互相抵銷，只會把模型往民眾的定義拉。
+
+    醫療端整套架構正是在防這件事：`gt.verify` 只有醫師有，還有一整組測試守著
+    「護理師按了完成修邊也不會產生醫師背書」。把民眾輪廓餵進同一個訓練目標，
+    等於從另一扇門把那條線繞過去。
+
+    ## 因此：結構隔離，不是靠欄位區分
+
+    這些標註存在 `lite/` 前綴、寫進 `lite_labels.jsonl`，
+    **完全不碰 `retrain_queue.jsonl`**。飛輪的 dataset manifest 只讀後者，
+    所以它在程式上讀不到這裡的東西——要用得寫一條新的匯出路徑，
+    而那是一個明確的決定，不是一個沒人注意到的預設。
+
+    站得住腳的用途：難例採礦（哪些影像 student 失手，根本不需要這個標註）、
+    ROI 提議、自監督底料。站不住腳的：與醫師 GT 混在一起做邊界監督。
+
+    「將來能不能用於邊界監督」是臨床判斷，不是工程判斷。
+    """
+    d = request.get_json(silent=True) or {}
+    anon_id = str(d.get("anon_id") or "").strip()
+    image_id = str(d.get("image_id") or "").strip()
+    if not anon_id or not image_id or "/" in anon_id or "/" in image_id:
+        return jsonify({"error": "缺 anon_id / image_id"}), 400
+    if str(d.get("research_consent")).lower() != "true" and d.get("research_consent") is not True:
+        # 沒有研究同意就不收。與 segment 一致：不同意＝資料不離機。
+        return jsonify({"error": "未取得研究同意，不接受標註回收"}), 400
+
+    ip = _client_ip()
+    ok, retry, why = rate_check(anon_id, ip)
+    if not ok:
+        return jsonify({"error": "rate_limited", "reason": why, "retry_after": retry}), 429
+
+    polys = d.get("polygons") or []
+    clean = []
+    for p in polys[:16]:                      # 上限：民眾版是單一中心傷口，16 已經很寬鬆
+        if not isinstance(p, list) or len(p) < 3:
+            continue
+        pts = []
+        for pt in p[:4000]:
+            if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                try:
+                    pts.append([int(pt[0]), int(pt[1])])
+                except (TypeError, ValueError):
+                    pass
+        if len(pts) >= 3:
+            clean.append(pts)
+    if not clean:
+        return jsonify({"error": "polygons 為空或格式不合"}), 400
+
+    # 影像必須先透過 lite/segment 落地過。沒有像素的標註訓練不了，
+    # 而且它會讓盤點時看到一個對不上任何影像的數字。
+    st = _fw._store()
+    if not st.exists(_fw._key(os.path.join(_dir(), "lite/%s/%s.jpg" % (anon_id, image_id)))):
+        return jsonify({"error": "查無對應影像；請先以 research_consent=true 呼叫 lite/segment"}), 400
+
+    rec = {
+        "anon_id": anon_id, "image_id": image_id,
+        "polygons": clean, "polygon_count": len(clean),
+        "image_w": d.get("image_w"), "image_h": d.get("image_h"),
+        "source": (str(d.get("source") or "manual"))[:16],
+        "consent_version": (str(d.get("consent_version") or "").strip()[:32]) or None,
+        # ⚠ **這個欄位是給人看的，不是控制手段。** 真正的隔離是它存在
+        # `lite_labels.jsonl` 而不是 `retrain_queue.jsonl`。
+        # 靠欄位過濾遲早會有人忘記，靠檔案分開則忘不了。
+        "label_grade": "lay",
+        "received_at": _fw.utc_now(),
+    }
+    _fw.append_jsonl(os.path.join(_dir(), "lite_labels.jsonl"), rec)
+    rate_record(anon_id, ip)
+    return jsonify({"status": "stored", "image_id": image_id,
+                    "polygon_count": len(clean), "label_grade": "lay"}), 200
+
+
 @lite_bp.route("/api/v1/lite/data/<anon_id>", methods=["DELETE"])
 def lite_delete(anon_id):
     """撤回：刪掉這個裝置匿名代碼底下的全部資料。
@@ -340,6 +465,13 @@ def lite_delete(anon_id):
         return jsonify({"error": "anon_id 格式不合"}), 400
     idx = os.path.join(_dir(), "lite_index.jsonl")
     rows = [e for e in _fw.read_jsonl(idx) if e.get("anon_id") == anon_id]
+    # 標註也要一併撤回。只刪影像會留下「有輪廓、沒有影像」的孤兒——
+    # 那既無法訓練，也還留著一份這個裝置曾經提供過資料的痕跡。
+    labels = os.path.join(_dir(), "lite_labels.jsonl")
+    n_lab = len([e for e in _fw.read_jsonl(labels) if e.get("anon_id") == anon_id])
+    if n_lab:
+        _fw.append_jsonl(labels, {"anon_id": anon_id, "action": "deleted",
+                                  "received_at": _fw.utc_now()})
     st = _fw._store()
     n = 0
     for e in rows:
@@ -356,4 +488,80 @@ def lite_delete(anon_id):
     _fw.append_jsonl(idx, {"anon_id": anon_id, "action": "deleted",
                            "objects": n, "received_at": _fw.utc_now()})
     return jsonify({"status": "deleted", "anon_id": anon_id,
-                    "records": len(rows), "objects_removed": n}), 200
+                    "records": len(rows), "objects_removed": n,
+                    "labels_withdrawn": n_lab}), 200
+
+
+@lite_bp.route("/api/v1/lite/records", methods=["GET"])
+def lite_records():
+    """民眾版資料盤點（主控台用）。**要登入，而且只給工程師／管理者。**
+
+    與 `lite/segment` 相反：那條是匿名的公開入口，這條是內部的檢視。
+    兩者放在同一個模組是因為它們讀同一批資料，但守門完全不同——
+    所以這裡的 `@jwt_required` 不可以因為「同一個檔案」而被省略。
+
+    臨床角色刻意不給：民眾版資料是研究與運維用途，醫師護理師沒有業務理由看它，
+    而且兩邊的數字混談會讓「臨床收案進度」失去意義。
+    """
+    from flask_jwt_extended import get_jwt, jwt_required, verify_jwt_in_request
+    try:
+        verify_jwt_in_request()
+    except Exception:
+        return jsonify({"error": "需要登入"}), 401
+    role = (get_jwt() or {}).get("role")
+    try:
+        import auth_users
+        allowed = auth_users.can(role, "audit.read")
+    except Exception:
+        allowed = False          # 權限模組載不進來時 fail-closed
+    if not allowed:
+        return jsonify({"error": "權限不足", "issues": [
+            "民眾版資料僅工程師／管理者可檢視。"]}), 403
+
+    idx = _fw.read_jsonl(os.path.join(_dir(), "lite_index.jsonl"))
+    deleted = {e["anon_id"] for e in idx if e.get("action") == "deleted"}
+    rows = [e for e in idx if e.get("action") != "deleted"
+            and e.get("anon_id") not in deleted]
+    labels = [e for e in _fw.read_jsonl(os.path.join(_dir(), "lite_labels.jsonl"))
+              if e.get("action") != "deleted"]
+    lab_by_img = {}
+    for e in labels:
+        lab_by_img[e.get("image_id")] = e
+
+    # route 三桶。**這是模型進步的即時儀表**：
+    #   student            → 基礎模型自己認得（最好）
+    #   cloud_escalated(AU) → 要集成才救得回來（難例）
+    #   （空）              → 連集成都空手（下一輪訓練的優先目標）
+    buckets = {"student": 0, "escalated": 0, "empty": 0}
+    for e in rows:
+        if not e.get("polygons"):
+            buckets["empty"] += 1
+        elif e.get("escalated"):
+            buckets["escalated"] += 1
+        else:
+            buckets["student"] += 1
+    total = max(1, len(rows))
+    out = []
+    for e in sorted(rows, key=lambda x: x.get("received_at") or "", reverse=True)[:300]:
+        lab = lab_by_img.get(e.get("image_id"))
+        out.append({
+            "received_at": e.get("received_at"), "anon_id": e.get("anon_id"),
+            "image_id": e.get("image_id"), "client": e.get("client"),
+            "route": e.get("route"), "escalated": bool(e.get("escalated")),
+            "polygons": e.get("polygons"), "bytes": e.get("bytes"),
+            "depth": e.get("depth"), "consent_version": e.get("consent_version"),
+            # 民眾自己畫的輪廓數。**與 polygons（AI 的）分開兩欄**——
+            # 合成一欄會讓「AI 空手但人畫了」這個最有價值的組合看不出來。
+            "lay_polygons": (lab or {}).get("polygon_count"),
+        })
+    return jsonify({
+        "records": out, "total": len(rows),
+        "devices": len({e.get("anon_id") for e in rows}),
+        "labels": len(labels),
+        # AI 空手而民眾有畫的——難例採礦的第一優先，因為它同時有影像與人的判斷
+        "hard_with_lay": sum(1 for e in rows if not e.get("polygons")
+                             and lab_by_img.get(e.get("image_id"))),
+        "route_buckets": buckets,
+        "route_pct": {k: round(100.0 * v / total, 1) for k, v in buckets.items()},
+        "withdrawn_devices": len(deleted),
+    }), 200
