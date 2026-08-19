@@ -92,6 +92,41 @@ def main():
     check("角色驗證仍以 ROLES 為準（管理者建得出 lite 帳號）",
           "role not in ROLES" in src)
 
+    print("\n── 6 主控台跟得上角色表 ──")
+    # 角色清單先前存在兩個地方：Python 的 ROLES 與主控台寫死的 <option>。
+    # 沒有任何東西保證兩者一致——2026-08-19 加了 lite 之後，後端接受了、
+    # 下拉卻選不到，**後端做對了、畫面沒跟上**。
+    con = open(os.path.join(FLASK_DIR, "api_console.py"), encoding="utf-8").read()
+    check("角色下拉由 ROLES 產生（不是寫死的 <option>）",
+          "<!--ROLE_OPTIONS-->" in con and "_au.ROLES.items()" in con)
+    check("沒有殘留寫死的角色選項",
+          '<option value="physician">' not in con,
+          "還有寫死的 option，會與 ROLES 分岔")
+
+    # 沒有「改角色」入口的話，lite01 這種要降權的帳號只能靠重建——
+    # 而重建會換掉密碼，也會讓稽核上看起來像換了一個人。
+    check("帳號管理有「改角色」入口", "changeRole" in con and "改角色" in con)
+    check("改自己的管理者角色前有警告（改完就進不了帳號管理）",
+          "改掉**自己**的管理者角色" in con or "自己" in con and "救援" in con)
+    check("改角色不連帶重設密碼（不傳 password＝沿用既有雜湊）",
+          "改角色不該連帶換密碼" in con)
+
+    # 頁面產生器要能在測試環境跑得起來（import auth_users 不可失敗）
+    sys.path.insert(0, FLASK_DIR)
+    try:
+        import importlib
+        for m in list(sys.modules):
+            if m.startswith("api_console"):
+                del sys.modules[m]
+        ac = importlib.import_module("api_console")
+        html = ac._page_html()
+        ok = all(('value="%s"' % r) in html for r in au.ROLES)
+        check("_page_html() 產出的下拉含每一個角色", ok,
+              [r for r in au.ROLES if ('value="%s"' % r) not in html])
+        check("  其中包含 lite", 'value="lite"' in html)
+    except Exception as e:
+        check("_page_html() 可執行", False, e)
+
     print("\n%d 項檢查，%d 項失敗" % (TOTAL[0], len(FAILED)))
     if FAILED:
         print("失敗：")

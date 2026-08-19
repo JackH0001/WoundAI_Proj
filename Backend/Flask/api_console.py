@@ -212,13 +212,7 @@ code{font-family:ui-monospace,monospace;font-size:12.5px;word-break:break-all}
   <p class="sub">開通、停用、改名、重設密碼。<b>不提供刪除</b>——稽核軌跡引用著那些識別碼。</p>
   <div class="row">
     <input id="nu" placeholder="編號（如 ns05）" style="width:150px">
-    <select id="nr">
-      <option value="physician">醫師</option>
-      <option value="nurse">護理師</option>
-      <option value="assistant">助理</option>
-      <option value="engineer">工程師</option>
-      <option value="admin">管理者</option>
-    </select>
+    <select id="nr"><!--ROLE_OPTIONS--></select>
     <input id="nn" placeholder="顯示名稱（勿填真實姓名）" style="width:200px">
     <button class="primary" onclick="createUser()">新增（自動產生密碼）</button>
   </div>
@@ -235,7 +229,7 @@ code{font-family:ui-monospace,monospace;font-size:12.5px;word-break:break-all}
 </div>
 
 <script>
-let tok = "", perms = [], meRole = "";
+let tok = "", perms = [], meRole = "", meIdent = "";
 const $ = id => document.getElementById(id);
 // 凡是要放進 innerHTML 的外部字串一律經過 esc()。
 // 這裡的「外部」包含後端錯誤訊息與管理者自己填的顯示名稱——
@@ -316,7 +310,7 @@ async function login(){
     tok = j.access_token || "";
     // perms 由後端算好回傳(伺服器端的權限矩陣是唯一真相)，前端不自己推導角色能做什麼——
     // 兩邊各算一次遲早會不一致，而不一致的那一刻通常是前端顯示得比後端寬鬆。
-    perms = j.perms || []; meRole = j.role || "";
+    perms = j.perms || []; meRole = j.role || ""; meIdent = j.identity || "";
     if(!tok){ $("msg").textContent = "⚠ 回應沒有 token"; return; }
     $("msg").textContent = "";
     $("who").innerHTML = `${esc(j.display_name||j.user||"")}<br>` +
@@ -326,7 +320,7 @@ async function login(){
   }catch(e){ $("msg").textContent = "⚠ 連不到後端：" + e.message; }
 }
 function logout(){
-  tok=""; perms=[]; meRole="";
+  tok=""; perms=[]; meRole=""; meIdent="";
   Object.keys(loaded).forEach(k => delete loaded[k]);
   $("who").textContent = "未登入";
   document.querySelectorAll("nav a").forEach(a => a.classList.add("hide"));
@@ -676,6 +670,7 @@ async function loadUsers(){
       <td class="${u.disabled?'bad':'ok'}">${u.disabled?"已停用":"啟用中"}</td>
       <td class="nowrap">
         <button onclick="renameUser('${esc(u.user)}')">改名</button>
+        <button onclick="changeRole('${esc(u.user)}')">改角色</button>
         <button onclick="toggleUser('${esc(u.user)}')">${u.disabled?"啟用":"停用"}</button>
         <button onclick="resetPw('${esc(u.user)}')">重設密碼</button>
       </td></tr>`).join("") +
@@ -714,6 +709,39 @@ async function renameUser(u){
   try{
     // 不傳 password → 沿用既有雜湊；不傳 disabled → 沿用目前狀態。
     await api("/api/v1/users", {body: JSON.stringify({user:u, role:rec.role, display_name:name})});
+    loadUsers(); loaded.audit = false;
+  }catch(e){ alert("失敗：" + e.message); }
+}
+/* 改角色。
+   帳號建立之後職務會變（借調、離職接手），而先前**只能改名、停用、重設密碼**——
+   要改角色就得重建帳號，而重建會換掉密碼、也會讓人以為那是另一個人。
+   2026-08-19 具體卡住的是 `lite01`：它掛著 physician（`gt.verify`＋`annotation.submit`），
+   要降成 lite 卻沒有任何入口。
+
+   角色選項一律取自新增表單那個 select——它由後端依 `auth_users.ROLES` 產生，
+   所以新增角色時這裡自動跟上，不會有第二份清單要維護。*/
+async function changeRole(u){
+  const rec = users.find(x => x.user === u); if(!rec) return;
+  const opts = Array.from($("nr").options).map(o => ({v:o.value, t:o.textContent}));
+  const list = opts.map(o => `  ${o.v} = ${o.t}`).join("\n");
+  const to = prompt(`把 ${u} 的角色改成（輸入英文代碼）：\n\n${list}\n\n目前：${rec.role}`, rec.role);
+  if(to === null) return;
+  const pick = opts.find(o => o.v === to.trim());
+  if(!pick){ alert("沒有這個角色代碼：" + to); return; }
+  if(pick.v === rec.role) return;
+  // 自己降自己是最容易鎖死系統的一步：管理者改掉自己之後就進不了帳號管理，
+  // 而這個主控台沒有第二條救援路徑。
+  const me = (meIdent||"").split(":").pop();
+  if(u === me && rec.role === "admin" && pick.v !== "admin" &&
+     !confirm("⚠ 你正在改掉**自己**的管理者角色。改完就無法再開啟帳號管理，"
+            + "而且沒有其他救援入口。確定要繼續？")) return;
+  if(!confirm(`把 ${u} 由「${rec.role_zh||rec.role}」改為「${pick.t}」？\n\n`
+            + `權限即刻改變（下次取得 token 起生效）。這筆變更會寫進稽核軌跡。`)) return;
+  try{
+    // upsert 是整筆覆寫：display_name / disabled 要原樣帶回，否則會被清掉；
+    // 不傳 password＝沿用既有雜湊（改角色不該連帶換密碼）。
+    await api("/api/v1/users", {body: JSON.stringify({user:u, role:pick.v,
+      display_name:rec.display_name||"", disabled:!!rec.disabled})});
     loadUsers(); loaded.audit = false;
   }catch(e){ alert("失敗：" + e.message); }
 }
@@ -763,7 +791,7 @@ async function tryOneTimeCode(){
         `<span style="color:var(--dim)">代碼只有 60 秒且只能用一次。請回 App 重新按一次，或在下方直接登入。</span>`;
       return false;
     }
-    tok = j.access_token; perms = j.perms || []; meRole = j.role || "";
+    tok = j.access_token; perms = j.perms || []; meRole = j.role || ""; meIdent = j.identity || "";
     $("msg").textContent = "";
     $("who").innerHTML = `${esc(j.display_name||j.user||"")}<br>` +
       `${esc(j.role_zh||meRole)}　<code>${esc(j.identity||"")}</code><br>` +
@@ -786,4 +814,19 @@ def console_page():
     # ⚠ 用 content_type 而非 mimetype。Flask 會**再補一次** charset 到 mimetype 上，
     # 於是標頭變成 `text/html; charset=utf-8; charset=utf-8`（實測如此）。
     # 瀏覽器容忍，但重複參數在嚴格的解析器（代理、掃描器）上是未定義行為。
-    return Response(_PAGE, content_type="text/html; charset=utf-8")
+    return Response(_page_html(), content_type="text/html; charset=utf-8")
+
+
+def _page_html():
+    """把角色下拉的選項由 `auth_users.ROLES` 產生後回傳頁面。
+
+    ⚠ 先前那份 `<option>` 是**寫死在 HTML 裡**的。於是角色清單存在兩個地方：
+    Python 的 `ROLES` 與這段 HTML，而沒有任何東西保證它們一致。
+    2026-08-19 新增 `lite` 角色後，後端接受了、下拉卻選不到——
+    **後端做對了、畫面沒跟上**，正是這個專案最常見的缺陷形狀。
+
+    產生成本可忽略（一頁一次字串替換），換掉的是一整類漂移。
+    """
+    import auth_users as _au
+    opts = "".join('<option value="%s">%s</option>' % (k, v) for k, v in _au.ROLES.items())
+    return _PAGE.replace("<!--ROLE_OPTIONS-->", opts)
