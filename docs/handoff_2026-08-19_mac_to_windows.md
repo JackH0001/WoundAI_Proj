@@ -58,6 +58,23 @@ iOS 端已同步完成（本批）：`consent_version` 附帶（"2026-08-19.1"�
 cloudHadPolys→source=edited、無雲端輪廓→manual）、同意文案補
 「您圈選的傷口範圍」。
 
+## 追加 ⑥（00:30 對帳）：lite/records 五筆全數核對通過；三個小後續
+
+App 端邏輯 × 後端落地逐筆對上（labels 恰為動過手的 2 筆、consent_version
+掛滿新版 4 筆、depth 五筆全 stored、lay 取中央單傷與 App 規則一致、
+route 三桶首見真實數據 escalated 60%）。後續：
+
+1. **內測裝置排除**：anon_id `a53c6765-8924-4746-97cd-771cbf238dd0`
+   ＝Jack 的 J-iP16PM 內測機。正式統計／訓練取樣時整機排除
+   （交辦 #9 的延伸；用 anon_id 排比對時段乾淨）。
+2. **weak 放寬的回歸樣本**：`0c8dab2b`（route=student、單一 0.76cm²
+   小遮罩＝把貼紙/碎片當傷口）與 `cfa8fd3c`（同型）。on_weak 放寬
+   （空或 <0.3~0.5% 畫面）後，這兩張重打應轉 escalated。
+3. **建議指標補一個「lay 修正率」**：`hard_with_lay` 只數 empty 桶；
+   真正有訊號的是「模型有輸出、民眾改了它」（本晚 2 筆都是這種）。
+   建議：lay 與模型輪廓 IoU<0.8 記為 corrected——它是「模型哪裡錯」
+   的直接計數，比 empty 更早出現、量也更大。
+
 ## 追加 ④：Mac 端 review 意見（tuple 未解包＋門檻 SSOT 批次）
 
 根因收斂正確——`segment_wound_ai` 回 `(mask, confidence)`、`segment_for_lite`
