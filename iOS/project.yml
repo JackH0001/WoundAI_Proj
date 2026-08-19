@@ -45,7 +45,7 @@ settings:
     MARKETING_VERSION: "1.0"
     # 與 Android `version.properties` 的 versionCode 對齊。每次發布必須遞增——
     # 兩邊的版號要能互相對照，排錯時第一個問題永遠是「你裝的是哪一版」。
-    CURRENT_PROJECT_VERSION: "21"
+    CURRENT_PROJECT_VERSION: "22"
     TARGETED_DEVICE_FAMILY: "1,2"
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     SWIFT_STRICT_CONCURRENCY: minimal

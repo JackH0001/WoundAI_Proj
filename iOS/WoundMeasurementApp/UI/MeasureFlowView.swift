@@ -516,6 +516,11 @@ final class MeasureViewModel: ObservableObject {
                 correctionIou: correctionIou,
                 careNote: "app confirm",
                 source: source,
+                // ⚠ 2026-08-19 Windows 稽核發現：這裡從來沒傳過 quality——參數在、
+                //   序列化在（BackendClient:617），唯獨呼叫端漏了，於是送件清單品質欄
+                //   全是「—」，後端品質門檻對 iOS 樣本形同虛設。r.quality 即 classify
+                //   回傳的對焦/過曝/marker 指標，修邊不會動它。
+                quality: r.quality,
                 depthSource: depthUpload != nil ? "lidar"
                             : (pendingDepth != nil ? "lidar_local" : "none"),
                 depthMapPngBase64: depthUpload?.d,

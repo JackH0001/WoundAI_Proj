@@ -22,6 +22,7 @@ struct ReviewView: View {
     @State private var statusDlg: String?
     @State private var seenStatus: String?
     @State private var backend: BackendClient?
+    @State private var depthUploading = false
 
     var body: some View {
         NavigationStack {
@@ -96,6 +97,51 @@ struct ReviewView: View {
             } message: {
                 Text(disclosureText(m))
             }
+
+        // ── LiDAR 深度補傳（sidecar → /api/v1/depth，2026-08-19 後端上線）────
+        //
+        // 深度在拍攝當下已加密存本機（depth_source=lidar_local）；這裡把 f32 原樣
+        // 補傳供 3D 研究。後端拒收孤兒深度（必須先有標註綁定），所以未補送標註時
+        // 只給引導不給按鈕——按了必失敗的按鈕比沒有按鈕更糟。
+        if let entry = DepthStore.lookup(imagePath: m.imagePath), m.imageId != nil {
+            Divider()
+            Text("LiDAR 深度補傳").font(.subheadline).bold()
+            if entry["uploaded"] == "1" {
+                Text("✓ 此筆深度已補傳雲端（float32 公尺原樣，供 3D 重建研究）。")
+                    .font(.footnote).foregroundStyle(.blue)
+            } else if !m.annotationSubmitted {
+                Text("此筆有本機深度側檔。請**先補送訓練標註**——後端不收沒有標註綁定的深度（孤兒資料防護）。")
+                    .font(.footnote).foregroundStyle(.secondary)
+            } else {
+                Text("此筆有本機深度側檔（約 300KB），可補傳供 3D 量測研究。")
+                    .font(.footnote).foregroundStyle(.secondary)
+                Button(depthUploading ? "深度補傳中…" : "補傳深度 → 雲端") {
+                    Task { await uploadDepth(m) }
+                }
+                .buttonStyle(.bordered)
+                .disabled(depthUploading || !loggedIn)
+            }
+        }
+    }
+
+    @MainActor
+    private func uploadDepth(_ m: Measurement) async {
+        guard let backend, let imageId = m.imageId,
+              let side = DepthStore.load(imagePath: m.imagePath, store: app.imageStore) else {
+            msg = "⚠️ 深度側檔讀取失敗（可能已隨影像保存政策清除）"
+            return
+        }
+        depthUploading = true
+        defer { depthUploading = false }
+        msg = "深度補傳中…"
+        do {
+            let r = try await backend.uploadDepth(imageId: imageId,
+                                                  raw: side.raw, sidecarMeta: side.meta)
+            DepthStore.markUploaded(imagePath: m.imagePath)
+            msg = "✅ 深度已補傳（id \(r.depthId)\(r.replaced ? "，覆蓋前一份" : "")）"
+        } catch {
+            msg = "⚠️ 深度補傳失敗：\(error.localizedDescription)"
+        }
     }
 
     private func canSubmit(_ m: Measurement) -> Bool {

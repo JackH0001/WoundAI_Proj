@@ -445,6 +445,138 @@ actor BackendClient {
         return Self.parseClassify(j)
     }
 
+    // MARK: - WoundLite 匿名端點
+
+    struct LiteSegmentResult {
+        var polygons: [[[Int]]]
+        var imageW: Int
+        var imageH: Int
+        var confidence: Double
+        /// 後端據實回報這張有沒有被保存（同意分流講給人聽才有意義）。
+        var stored: Bool
+        var imageId: String?
+        /// 非失敗的退回訊息（429 配額、人臉退件）——App 顯示它並改走手動圈選。
+        var userMessage: String?
+    }
+
+    /**
+     民眾版匿名辨識（`POST /api/v1/lite/segment`，**免登入**；Backend/Flask/api_lite.py）。
+
+     - 只有研究同意時才可呼叫（App 端規則）；同意時附深度 png16_mm——與
+       `/api/v1/annotation` 完全同一個驗證器，兩條路徑判準不分岔。
+     - `anonId`：裝置匿名代碼（撤回鍵＋限流鍵）。
+     - 429／人臉退件不拋錯誤：回空輪廓＋`userMessage`，呼叫端退手動圈選。
+    */
+    func liteSegment(jpeg: Data, anonId: String,
+                     depthMapPngBase64: String? = nil,
+                     depthConfPngBase64: String? = nil,
+                     cameraIntrinsics: [String: Double]? = nil,
+                     measured: [String: Double]? = nil) async throws -> LiteSegmentResult {
+        var fields: [String: String] = [
+            "anon_id": anonId,
+            "client": "woundlite-ios",
+            "research_consent": "true",
+        ]
+        if let d = depthMapPngBase64 {
+            fields["depth_map_png"] = d
+            fields["depth_format"] = "png16_mm"
+            fields["depth_scale"] = "0.001"
+            if let c = depthConfPngBase64 { fields["depth_conf_png"] = c }
+            if let k = cameraIntrinsics,
+               let j = try? JSONSerialization.data(withJSONObject: k) {
+                fields["camera_intrinsics"] = String(data: j, encoding: .utf8) ?? ""
+            }
+        }
+        if let m = measured, let j = try? JSONSerialization.data(withJSONObject: m) {
+            fields["measured"] = String(data: j, encoding: .utf8) ?? ""
+        }
+        var r = try request("POST", "/api/v1/lite/segment", auth: false)
+        let boundary = "----WoundAI\(UUID().uuidString)"
+        r.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        r.httpBody = Self.multipartBody(boundary: boundary, fields: fields,
+                                        fileField: "image", fileName: "wound.jpg",
+                                        mime: "image/jpeg", fileData: jpeg)
+        let (code, data) = try await send(r)
+        let jOpt = JSONAny(data: data)
+        if code == 429 || (code == 400 && jOpt?["error"].string == "face_detected") {
+            let msg = jOpt?["message"].string ?? ""
+            return LiteSegmentResult(polygons: [], imageW: 0, imageH: 0, confidence: 0,
+                                     stored: false, imageId: nil,
+                                     userMessage: msg.isEmpty ? "自動辨識暫不可用，請手動圈選。" : msg)
+        }
+        guard code == 200, let j = jOpt else {
+            throw BackendError.http(status: code, message: summarize(data))
+        }
+        var polys: [[[Int]]] = []
+        if let arr = j["wound_polygons"].raw as? [[[Any]]] {
+            polys = arr.map { poly in
+                poly.compactMap { pt -> [Int]? in
+                    guard pt.count >= 2,
+                          let x = pt[0] as? NSNumber, let y = pt[1] as? NSNumber else { return nil }
+                    return [x.intValue, y.intValue]
+                }
+            }.filter { $0.count >= 3 }
+        }
+        let iid = j["image_id"].string
+        return LiteSegmentResult(polygons: polys,
+                                 imageW: Int(j["image_w"].double(0)),
+                                 imageH: Int(j["image_h"].double(0)),
+                                 confidence: j["confidence"].double(0),
+                                 stored: j["stored"].bool(false),
+                                 imageId: (iid?.isEmpty == false) ? iid : nil,
+                                 userMessage: nil)
+    }
+
+    /**
+     補傳原始深度圖（`POST /api/v1/depth`，2026-08-19 後端上線；
+     守門契約＝後端 `validate_depth_payload`）。
+
+     - `raw`：Float32 **little-endian、公尺**原始位元組（`DepthStore` 落地的原樣；
+       iOS 原生就是 LE，長度必須等於 width×height×4——後端唯一抓得到截斷的檢查）。
+     - `sidecarMeta`：**本機 sidecar 的 metaJson**。本機鍵名（`intrinsics.ref_w`）與
+       後端鍵名（`camera_intrinsics.ref_width`）不同——轉換集中在這裡，
+       兩邊各自已落地的格式都不動。
+     - 前置條件：該 `image_id` 已有標註且未撤回（孤兒深度後端 400 拒收，是設計）。
+     */
+    func uploadDepth(imageId: String, raw: Data,
+                     sidecarMeta: [String: Any]) async throws -> (depthId: String, replaced: Bool) {
+        var ci: [String: Any] = [:]
+        if let s = sidecarMeta["intrinsics"] as? [String: Any] {
+            for k in ["fx", "fy", "cx", "cy"] { ci[k] = s[k] }
+            if let rw = s["ref_w"] as? NSNumber { ci["ref_width"] = rw.intValue }
+            if let rh = s["ref_h"] as? NSNumber { ci["ref_height"] = rh.intValue }
+        }
+        var meta: [String: Any] = [
+            "width": sidecarMeta["width"] ?? 0,
+            "height": sidecarMeta["height"] ?? 0,
+            "format": "f32_le_meters",
+            "camera_intrinsics": ci
+        ]
+        // 快篩統計與出處照抄（後端驗證器容忍額外鍵；這些是研究端不解檔就能用的資訊）。
+        for k in ["accuracy", "filtered", "rgb_w", "rgb_h", "coverage",
+                  "min_m", "max_m", "captured_at", "device"] {
+            if let v = sidecarMeta[k] { meta[k] = v }
+        }
+        let metaStr = (try? JSONSerialization.data(withJSONObject: meta))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+
+        var r = try request("POST", "/api/v1/depth")
+        let boundary = "----WoundAI\(UUID().uuidString)"
+        r.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        r.httpBody = Self.multipartBody(boundary: boundary,
+                                        fields: ["image_id": imageId, "meta": metaStr],
+                                        fileField: "depth_f32", fileName: "depth.f32",
+                                        mime: "application/octet-stream", fileData: raw)
+        let (code, data) = try await send(r)
+        guard code == 200 else {
+            throw BackendError.http(status: code, message: summarize(data))
+        }
+        guard let j = JSONAny(data: data), j["status"].string("") == "stored" else {
+            throw BackendError.badResponse("depth")
+        }
+        return (j["depth_id"].string(""), j["replaced_previous"].bool(false))
+    }
+
     /// 拆出來是為了讓契約測試可以在沒有網路的情況下直接餵 JSON 驗證解析。
     static func parseClassify(_ j: JSONAny) -> ClassifyResult {
         let s2 = j["stage2_segment"]

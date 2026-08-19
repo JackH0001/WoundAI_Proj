@@ -150,6 +150,26 @@ enum DepthStore {
         return loadIndex()[imagePath]
     }
 
+    /// 讀回 sidecar 供補傳（`/api/v1/depth`）。回 (f32 原始位元組, 本機 metaJson)。
+    static func load(imagePath: String, store: LocalImageStore) -> (raw: Data, meta: [String: Any])? {
+        guard let e = lookup(imagePath: imagePath),
+              let dn = e["depth"], let mn = e["meta"],
+              let raw = store.rawBytes(dn),
+              let md = store.rawBytes(mn),
+              let meta = (try? JSONSerialization.jsonObject(with: md)) as? [String: Any]
+        else { return nil }
+        return (raw, meta)
+    }
+
+    /// 補傳成功後記旗標（避免重複補傳的 UI 噪音；後端本就冪等，這只是體驗）。
+    static func markUploaded(imagePath: String) {
+        var idx = loadIndex()
+        guard var e = idx[imagePath] else { return }
+        e["uploaded"] = "1"
+        idx[imagePath] = e
+        saveIndex(idx)
+    }
+
     /// 影像被 90 天清除時，深度 sidecar 一併清（同一保存政策）。
     static func purge(imagePath: String, store: LocalImageStore) {
         guard let e = lookup(imagePath: imagePath) else { return }
