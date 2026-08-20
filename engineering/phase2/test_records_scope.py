@@ -253,21 +253,40 @@ def main():
     check("影像與 SVG 分別請求，影像失敗時仍顯示標註",
           "allSettled" in js and "okImg" in js)
 
-    print("\n── 8 關閉鈕不可依賴 closest ──")
-    # 疊圖的關閉鈕曾經沒反應，而「看標註」的可以。差別：後者清面板、前者用
-    # `this.closest('.banner').remove()`。把一大段 <svg> 用 innerHTML 塞進去時，
-    # HTML 解析器處理 foreign content 可能重新安排節點，按鈕不一定還在那個
-    # .banner 底下——closest 回 null → TypeError → **整個 onclick 靜默失效**。
-    check("showOverlay 的關閉用面板 id 清空，不用 closest",
-          "document.getElementById('${pid}').innerHTML=''" in js)
-    # 註解裡會引用那個壞寫法當反例，所以剝完註解再數——
-    # 「檢查器分不出程式碼與談論程式碼的文字」已經踩過三次了。
+    print("\n── 8 疊圖檢視器不可用 inline 事件屬性 ──")
+    # 這顆關閉鈕修了三次才抓到真因：
+    #
+    #     Uncaught TypeError: URL.revokeObjectURL is not a function
+    #
+    # inline 事件處理器的**作用域鏈裡有 document**，而 `document.URL` 是文件網址
+    # **字串**——handler 裡的裸 `URL` 解析到那個字串而不是 `window.URL`。
+    # 第一行就拋錯，後面的清空永遠跑不到；而事件處理器裡的例外不會傳回
+    # `.click()` 的呼叫端，所以外面看到的是「按了沒反應、也沒有錯誤」。
+    #
+    # 「看標註」的關閉鈕沒事，只因為它剛好不碰 `URL`——那是運氣不是設計。
+    ov = js[js.find("async function showOverlay"):]
+    ov = ov[:ov.find("\nasync function showImage")] if "\nasync function showImage" in ov else ov[:4000]
+    ov_code = _re.sub(r"//[^\n]*", "", ov)
+    check("showOverlay 內沒有任何 inline on* 屬性",
+          not _re.search(r'\son(click|input|change)=', ov_code),
+          _re.findall(r'\son(?:click|input|change)="[^"]{0,40}', ov_code)[:3])
+    check("關閉與滑桿改用 addEventListener（作用域是函式，不是 DOM 樹）",
+          ov_code.count("addEventListener") >= 2, ov_code.count("addEventListener"))
+    check("revokeObjectURL 明寫 window.（不依賴裸 URL 解析到什麼）",
+          "window.URL.revokeObjectURL" in ov_code and
+          not _re.search(r'[^.\w]URL\.revokeObjectURL', ov_code))
+
+    print("\n── 8b 關閉鈕直接清面板 ──")
+    # 註解裡會引用壞寫法當反例，所以剝完註解再數——
+    # 「檢查器分不出程式碼與談論程式碼的文字」已經踩過四次了。
     js_code = _re.sub(r"//[^\n]*", "", _re.sub(r"/\*(?:.|\n)*?\*/", "", js))
+    check("showOverlay 的關閉直接清面板（閉包持有 box，不必再查 DOM）",
+          'box.innerHTML = ""' in ov_code)
     check("疊圖區塊沒有殘留 closest('.banner')（含失敗分支）",
           "closest('.banner').remove()" not in js_code,
           "還有 %d 處" % js_code.count("closest('.banner').remove()"))
     # 滑桿要看得到目前數值，否則「有沒有真的到 100」只能用猜的。
-    check("滑桿旁顯示目前百分比", "textContent=this.value+'%'" in js)
+    check("滑桿旁顯示目前百分比", 'lbl.textContent = slider.value + "%"' in js)
     check("滑桿範圍 0–100", 'min="0" max="100"' in js)
 
     print("\n%d 項檢查，%d 項失敗" % (TOTAL[0], len(FAILED)))

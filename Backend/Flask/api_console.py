@@ -518,42 +518,58 @@ async function showOverlay(box, imgUrl, svgUrl, legendHtml, note){
   const [imgRes, svgRes] = await Promise.allSettled([fetchAuth(imgUrl), fetchAuth(svgUrl)]);
   if(svgRes.status !== "fulfilled"){
     box.innerHTML = `<div class="banner"><p class="bad">無法檢視：${esc(svgRes.reason.message)}</p>
-      <button onclick="document.getElementById('${box.id}').innerHTML=''">關閉</button></div>`;
+      <button data-close>關閉</button></div>`;
+    box.querySelector("[data-close]").addEventListener("click", () => { box.innerHTML = ""; });
     return;
   }
   const svg = await svgRes.value.text();
   const okImg = imgRes.status === "fulfilled";
   const u = okImg ? URL.createObjectURL(await imgRes.value.blob()) : "";
-  const id = "ov" + Math.random().toString(36).slice(2, 8);
-  // ⚠ 關閉按鈕**不要用 `this.closest('.banner').remove()`**。
+  // ⚠⚠ 這一段**完全不用 inline on* 屬性**，理由是一個很惡毒的 JS 陷阱。
   //
-  // 2026-08-20 實測：疊圖的關閉鈕沒反應，而「看標註」的可以——差別在後者用的是
-  // `$('r_panel').innerHTML=''`。原因是這裡把一大段 SVG 用 innerHTML 塞進去，
-  // HTML 解析器處理 foreign content（<svg>）時可能重新安排節點，
-  // 按鈕就不一定還在那個 .banner 底下；`closest` 回 null → TypeError →
-  // **整個 onclick 靜默失效**，而畫面上完全看不出發生過錯誤。
+  // 2026-08-20 實測（第三次修這顆關閉鈕才抓到真因）：
   //
-  // 直接清掉呼叫端指定的面板：那個 id 是我們自己給的，不依賴解析結果。
-  const pid = box.id;
-  const closeJs = (okImg ? `URL.revokeObjectURL('${u}');` : "")
-                + `document.getElementById('${pid}').innerHTML=''`;
+  //     Uncaught TypeError: URL.revokeObjectURL is not a function
+  //
+  // inline 事件處理器的**作用域鏈裡有 `document`**，而 `document.URL` 是文件網址
+  // **字串**。所以 handler 裡的裸 `URL` 解析到那個字串，不是 `window.URL`——
+  // 第一行就拋錯，後面的清空永遠跑不到。而事件處理器裡的例外**不會**傳回
+  // `.click()` 的呼叫端，所以從外面看就是「按了沒反應、也沒有錯誤」。
+  //
+  // 「看標註」的關閉鈕沒事，只因為它的 handler 剛好不碰 `URL`——
+  // 那是運氣，不是設計。
+  //
+  // 用 addEventListener 綁真正的閉包：作用域是這個函式，不是 DOM 樹，
+  // 整類「某個元素或 document 剛好有同名屬性」的問題一次消失。
+  // 附帶好處：blob URL 留在變數裡，不必內插進 HTML 屬性。
   box.innerHTML = `<div class="banner">
     <div style="position:relative;max-width:520px;line-height:0">
       ${okImg ? `<img src="${u}" style="width:100%;display:block">` : ""}
-      <div id="${id}" style="${okImg ? "position:absolute;inset:0;" : ""}opacity:.5">${svg}</div>
+      <div data-ov style="${okImg ? "position:absolute;inset:0;" : ""}opacity:.5">${svg}</div>
     </div>
     ${okImg ? `<label style="font-size:12px">遮罩不透明度
-      <input type="range" min="0" max="100" value="50" style="vertical-align:middle;width:180px"
-        oninput="document.getElementById('${id}').style.opacity=this.value/100;
-                 document.getElementById('${id}v').textContent=this.value+'%'">
-      <b id="${id}v">50%</b></label>` : ""}
+      <input type="range" min="0" max="100" value="50" data-op
+             style="vertical-align:middle;width:180px"> <b data-opv>50%</b></label>` : ""}
     ${legendHtml || ""}
     <p class="note">${okImg
       ? "遮罩疊在去識別影像上：0% 只看照片、100% 只看遮罩。此次影像檢視已寫入稽核軌跡。"
       : "⚠ 影像無法載入（權限不足、已依撤回隔離、或已逾保存期限），以下僅為標註示意，<b>不是</b>傷口照片。"}
       ${esc(note || "")}</p>
-    <button onclick="${closeJs}">關閉</button>
+    <button data-close>關閉</button>
   </div>`;
+  const layer = box.querySelector("[data-ov]");
+  const slider = box.querySelector("[data-op]");
+  if(slider){
+    const lbl = box.querySelector("[data-opv]");
+    slider.addEventListener("input", () => {
+      layer.style.opacity = slider.value / 100;
+      lbl.textContent = slider.value + "%";
+    });
+  }
+  box.querySelector("[data-close]").addEventListener("click", () => {
+    if(u) window.URL.revokeObjectURL(u);   // 明寫 window.，不依賴裸 URL 解析到什麼
+    box.innerHTML = "";
+  });
 }
 async function showImage(iid){
   showOverlay($("r_panel"),
