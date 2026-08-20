@@ -109,16 +109,49 @@ def main():
     ap.add_argument("--allow-unedited", action="store_true",
                     help="⚠ 納入未經醫師修正的遮罩。只該用於清點，不該用於訓練。")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--seed", type=int, default=0, help="切分用亂數種子")
+    ap.add_argument("--val-frac", type=float, default=0.2)
+    ap.add_argument("--val-codes", default=None,
+                    help="逗號分隔，指定驗證集的 WD-code。"
+                         "傷口數很少時單次切分沒有意義——用它跑 leave-one-wound-out："
+                         "每個代碼各當一次驗證集，看 7 個結果的**分散程度**，"
+                         "而不是相信其中任何一個數字。")
     a = ap.parse_args()
 
     items, skipped = collect(a.data, require_edited=not a.allow_unedited)
-    tr, va, val_codes = split_by_patient(items)
+    if a.val_codes:
+        want = {c.strip() for c in a.val_codes.split(",") if c.strip()}
+        tr = [i for i in items if os.path.basename(i[0]).split("__")[0] not in want]
+        va = [i for i in items if os.path.basename(i[0]).split("__")[0] in want]
+        val_codes = sorted(want)
+    else:
+        tr, va, val_codes = split_by_patient(items, a.val_frac, a.seed)
 
+    all_codes = sorted({os.path.basename(i[0]).split("__")[0] for i in items})
     print("資料集：%s" % a.data)
-    print("  可用 %d 筆（訓練 %d / 驗證 %d，依 WD-code 切分）" % (len(items), len(tr), len(va)))
+    print("  可用 %d 筆，來自 %d 個傷口（訓練 %d / 驗證 %d，依 WD-code 切分）"
+          % (len(items), len(all_codes), len(tr), len(va)))
     for k, v in skipped.items():
         print("  略過 %s：%d" % (k, v))
-    print("  驗證集傷口：%s" % ", ".join(val_codes[:8]) + ("…" if len(val_codes) > 8 else ""))
+    print("  驗證集傷口：%s" % (", ".join(val_codes[:8]) + ("…" if len(val_codes) > 8 else "")))
+
+    # ⚠ 驗證集只有一個傷口時，所有指標都是**那一個傷口的運氣**。
+    #
+    # 7 個傷口配 val_frac=0.2 就會落到這裡（int(7*0.2)=1）。此時單次切分的
+    # 變異極大：換一個種子，Dice 可能從 0.3 跳到 0.7，而模型完全沒變。
+    # 正確做法是 leave-one-wound-out——每個代碼各當一次驗證集，
+    # 看那 N 個結果的**分散程度**，而不是相信其中任何一個。
+    if len(val_codes) < 2:
+        print("\n  ⚠ 驗證集只有 %d 個傷口。單一數字在此**不構成證據**。" % len(val_codes))
+        print("     建議跑 leave-one-wound-out（每個代碼各當一次驗證集）：")
+        for c in all_codes[:3]:
+            print("       python train_tissue_seg.py --data %s --val-codes %s" % (a.data, c))
+        if len(all_codes) > 3:
+            print("       …（共 %d 個代碼）" % len(all_codes))
+    if len(all_codes) < 15:
+        print("\n  ⚠ 只有 %d 個傷口。這個規模足以驗證**流程**（匯出→訓練→評估跑得通），"
+              % len(all_codes))
+        print("     但任何準確度數字都不該對外引用——它衡量的是這幾個傷口，不是這個任務。")
 
     if a.allow_unedited:
         print("\n⚠ --allow-unedited：納入了未經醫師修正的遮罩。")

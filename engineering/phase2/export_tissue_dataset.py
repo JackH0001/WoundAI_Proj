@@ -135,9 +135,28 @@ def fetch_backend(url, user, pw, kind, source, allow_unedited):
         with urllib.request.urlopen(req, timeout=60) as r:
             return json.loads(r.read().decode())
 
-    tok = post("/api/auth/login", {"username": user, "password": pw}).get("access_token")
+    # ⚠ 登入失敗要講得出**是哪一種**失敗。
+    # 第一版讓 HTTPError 直接冒出來，使用者看到的是 20 行 urllib 的堆疊，
+    # 而真正的資訊（401）埋在最後一行。狀態碼決定完全不同的處置：
+    # 401 改帳密、404 改網址、連不上查網路——混成一句「登入失敗」等於沒說。
+    try:
+        tok = post("/api/auth/login", {"username": user, "password": pw}).get("access_token")
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            hint = ""
+            if not pw or pw.startswith("<") or "密碼" in pw:
+                hint = ("\n   ⚠ 密碼看起來是**佔位符**（%r）——"
+                        "PowerShell 的 $env: 會留在同一個工作階段裡，"
+                        "先前設過的佔位值還在。請重新設定實際密碼。" % pw[:24])
+            raise SystemExit("登入失敗：帳號或密碼不正確（HTTP 401）。"
+                             "帳號 %r，位址 %s%s" % (user, url, hint))
+        if e.code == 404:
+            raise SystemExit("登入端點回 404：網址可能不對，或後端尚未部署。位址 %s" % url)
+        raise SystemExit("登入失敗：HTTP %d %s" % (e.code, e.reason))
+    except urllib.error.URLError as e:
+        raise SystemExit("連不到後端：%s\n   請確認網址與網路。位址 %s" % (e.reason, url))
     if not tok:
-        raise SystemExit("登入失敗")
+        raise SystemExit("登入回應沒有 access_token——後端版本可能不相容")
 
     def get(path):
         req = urllib.request.Request(url.rstrip("/") + path,
@@ -239,6 +258,12 @@ def main():
         if not pw:
             print("缺密碼：--password 或環境變數 WOUNDAI_PW")
             return 1
+        # 在打網路之前就攔下佔位符。等到 401 再說，使用者已經開始懷疑帳號被停用了。
+        if pw.startswith("<") or pw.endswith(">") or "密碼" in pw:
+            print("WOUNDAI_PW 看起來是佔位符（%r），不是實際密碼。" % pw[:24])
+            print("⚠ PowerShell 的 $env: 會留在同一個工作階段裡——"
+                  "先前設過的佔位值還在，換目錄不會清掉它。")
+            return 1
         man, blob = fetch_backend(a.url, a.user, pw, a.kind, a.source, a.allow_unedited)
     else:
         print("要嘛 --url 要嘛 --flywheel")
@@ -319,6 +344,54 @@ def main():
         pct = (100.0 * total[i] / lab) if i else 0.0
         print("  %-10s %12d %s%s" % (CLASSES[i], total[i],
                                      ("%5.1f%% " % pct) if i else "      ", bar))
+    # ── 像素數會騙人：要看的是**有幾張影像含有這個類別** ────────────
+    #
+    # 「壞死 370K 像素、佔 29.7%」看起來很健康，但如果那些像素全來自
+    # 兩張大面積壞死的照片，模型學到的是**那兩個傷口的長相**，不是壞死組織。
+    # 像素數衡量的是面積，不是獨立樣本數——而泛化能力取決於後者。
+    #
+    # 集中度＝單一影像貢獻該類別的最大比例。>0.6 代表這個類別實質上
+    # 由一張照片定義，指標會漂亮而換一個病人就掉下來。
+    print("\n類別的**樣本分佈**（像素數看不出來的部分）：")
+    n_img = max(1, len(report))
+    # ⚠ 泛化能力的單位是**傷口**，不是影像。
+    #
+    # 同一個 WD 代碼下的多次量測是同一個傷口在不同時間點——外觀高度相關。
+    # 12 張影像若來自 5 個傷口，獨立樣本數就是 5 不是 12，
+    # 而且訓練/驗證**必須依代碼切**：同一個傷口同時出現在兩邊就是資料洩漏，
+    # 指標會偏高而換一個病人就掉下來。
+    codes = sorted({r.get("code") for r in report if r.get("code")})
+    print("  影像 %d 張，來自 **%d 個傷口代碼**（%.1f 張/傷口）"
+          % (n_img, len(codes), n_img / max(1, len(codes))))
+    if len(codes) < n_img:
+        print("  ⚠ 有同一傷口的多次量測。切分訓練/驗證要依**代碼**分組，不是依影像。")
+    for i in range(1, MAX_CODE + 1):
+        if total[i] == 0:
+            continue
+        per = [r["class_px"][CLASSES[i]] for r in report]
+        have = sum(1 for v in per if v > 0)
+        # 有幾個**不同的傷口**含這個類別——這才是決定學不學得會的數字
+        have_codes = len({r.get("code") for r in report
+                          if r["class_px"][CLASSES[i]] > 0 and r.get("code")})
+        conc = max(per) / float(total[i]) if total[i] else 0.0
+        flag = ""
+        if have_codes <= 2:
+            flag = "  ⚠ 只有 %d 個傷口" % have_codes
+        elif conc > 0.6:
+            flag = "  ⚠ %.0f%% 的像素來自單一張影像" % (conc * 100)
+        print("  %-10s %2d/%d 張・**%d 個傷口**   最大單張佔比 %4.0f%%%s"
+              % (CLASSES[i], have, n_img, have_codes, conc * 100, flag))
+    thin = [CLASSES[i] for i in range(1, MAX_CODE + 1)
+            if total[i] > 0
+            and len({r.get("code") for r in report
+                     if r["class_px"][CLASSES[i]] > 0 and r.get("code")}) <= 2]
+    if thin:
+        print("\n⚠ 這些類別只來自 ≤2 個傷口：%s" % "、".join(thin))
+        print("  像素數再多也沒有用——模型會學到那一兩個傷口的長相。")
+        print("  而且**沒有辦法切出有意義的驗證集**：那個傷口分到驗證，")
+        print("  訓練集就沒有這一類；分到訓練，驗證就沒有可量的東西。")
+        print("  處置是收更多**不同的**傷口，不是把同一個多拍幾張。")
+
     absent = [CLASSES[i] for i in range(1, MAX_CODE + 1) if total[i] == 0]
     if absent:
         print("\n⚠ 完全沒有這些類別：%s" % "、".join(absent))
@@ -335,9 +408,21 @@ def main():
         return 0
 
     with open(os.path.join(a.out, "dataset_report.json"), "w", encoding="utf-8") as f:
-        json.dump({"exported": len(report), "skipped": skipped,
-                   "class_px": {CLASSES[i]: int(total[i]) for i in range(MAX_CODE + 1)},
-                   "items": report}, f, ensure_ascii=False, indent=2)
+        json.dump({
+            "exported": len(report), "skipped": skipped,
+            "class_px": {CLASSES[i]: int(total[i]) for i in range(MAX_CODE + 1)},
+            # 每類別「出現在幾張影像」與「最大單張佔比」。
+            # 切分訓練/驗證時要靠它——把某類別唯一的那張分到驗證集，
+            # 訓練集就完全沒有那一類，而指標只會顯示那一類 Dice=0，
+            # 看起來像模型學不會，實際是資料切壞了。
+            "class_images": {
+                CLASSES[i]: {
+                    "images": sum(1 for r in report if r["class_px"][CLASSES[i]] > 0),
+                    "max_single_share": round(
+                        max([r["class_px"][CLASSES[i]] for r in report] or [0])
+                        / float(total[i]), 3) if total[i] else None,
+                } for i in range(1, MAX_CODE + 1)},
+            "items": report}, f, ensure_ascii=False, indent=2)
     with open(os.path.join(a.out, "manifest_snapshot.json"), "w", encoding="utf-8") as f:
         json.dump(man, f, ensure_ascii=False, indent=2)
     print("\n報告：%s" % os.path.join(a.out, "dataset_report.json"))
