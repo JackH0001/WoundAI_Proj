@@ -411,10 +411,10 @@ async function loadRecs(){
     recsData.map((r,i) => `<tr class="${r.status==="trainable"?"":"off"}">
       <td class="nowrap">${esc((r.received_at||"").replace("T"," ").replace("Z",""))}</td>
       <td class="nowrap"><code>${esc(r.code)}</code>${r.has_preview
-        ? `<br><a href="#" onclick="showPreview('${esc(r.image_id)}');return false"
-             style="font-size:11px">看標註</a>` : ""}
-        <br><a href="#" onclick="showImage('${esc(r.image_id)}');return false"
-             style="font-size:11px">看影像</a></td>
+        ? `<br><a href="#" onclick="showImage('${esc(r.image_id)}');return false"
+             style="font-size:11px">看疊圖</a>
+           <a href="#" onclick="showPreview('${esc(r.image_id)}');return false"
+             style="font-size:11px">・僅標註</a>` : ""}</td>
       <td>${esc(r.source)}<br><span style="font-size:11px;color:var(--dim)">${esc(r.route||"")}</span></td>
       <td class="nowrap">${r.area_cm2==null?"—":esc(r.area_cm2)+" cm²"}</td>
       <td class="nowrap">${tissueCell(r)}</td>
@@ -488,42 +488,71 @@ async function showPreview(iid){
   }catch(e){ box.innerHTML = `<div class="banner"><p class="bad">預覽失敗：${esc(e.message)}</p>
     <button onclick="$('r_panel').innerHTML=''">關閉</button></div>`; }
 }
-/* 影像檢視。<a href> 直連不行——JWT 在 header 裡，瀏覽器點連結不會帶。
-   一律 fetch 帶 token → blob URL。權限在後端：自己送的可以看，
-   他人的要稽核權限；被拒時把後端的理由原文顯示出來，不要換成「載入失敗」。 */
-async function showImage(iid, url){
-  const box = $("r_panel") || $("lite_panel");
-  box.innerHTML = `<div class="banner">載入影像…</div>`;
-  try{
-    const res = await fetch(url || ("/api/v1/flywheel/record/" + encodeURIComponent(iid) + "/image.jpg"),
-                            {headers:{Authorization:"Bearer "+tok}});
-    if(!res.ok){
-      let why = "HTTP " + res.status;
-      try{ const j = await res.json(); why = j.error + (j.issues ? "：" + j.issues.join("；") : ""); }catch(_){}
-      throw new Error(why);
-    }
-    const u = URL.createObjectURL(await res.blob());
-    box.innerHTML = `<div class="banner">
-      <img src="${u}" style="max-width:480px;max-height:480px;display:block">
-      <p class="note">去識別影像（內容雜湊命名，無任何個資欄位）。此次檢視已寫入稽核軌跡。</p>
-      <button onclick="URL.revokeObjectURL('${u}');this.closest('.banner').remove()">關閉</button></div>`;
-  }catch(e){ box.innerHTML = `<div class="banner"><p class="bad">無法檢視：${esc(e.message)}</p>
-    <button onclick="this.closest('.banner').remove()">關閉</button></div>`; }
+/* 檢視器。三個共用規則：
+
+   1. **面板要指定，不可以用 `$("a") || $("b")` 挑。** 兩個面板都存在於 DOM 裡
+      （只是所屬 section 沒有 .on），所以 `||` 永遠選到前者——
+      2026-08-20 實測：在民眾版按「看影像」，圖開到送件審閱頁籤去了。
+   2. `<a href>` 直連不行——JWT 在 header 裡，瀏覽器點連結不會帶。一律 fetch → blob。
+   3. 被拒時顯示**後端的理由原文**，不要換成籠統的「載入失敗」。 */
+async function fetchAuth(url){
+  const res = await fetch(url, {headers:{Authorization:"Bearer "+tok}});
+  if(!res.ok){
+    let why = "HTTP " + res.status;
+    try{ const j = await res.json(); why = j.error + (j.issues ? "：" + j.issues.join("；") : ""); }catch(_){}
+    const e = new Error(why); e.status = res.status; throw e;
+  }
+  return res;
 }
-async function liteShow(anon, iid, kind){
-  const base = "/api/v1/lite/record/" + encodeURIComponent(anon) + "/" + encodeURIComponent(iid);
-  if(kind === "img"){ showImage(null, base + "/image.jpg"); return; }
-  const box = $("lite_panel");
-  box.innerHTML = `<div class="banner">載入對照圖…</div>`;
-  try{
-    const res = await fetch(base + "/preview.svg", {headers:{Authorization:"Bearer "+tok}});
-    if(!res.ok) throw new Error("HTTP " + res.status);
-    box.innerHTML = `<div class="banner"><div style="max-width:480px">${await res.text()}</div>
-      <p class="note">青＝AI 輪廓、橘（虛線）＝民眾修正。不含影像像素；
-      對照實際照片請用「看影像」。</p>
+/* 疊圖檢視器：照片打底、SVG 疊上、滑桿控透明度——與 App 修邊畫面同一種讀法。
+
+   合成刻意做在**瀏覽器端**：影像走 image.jpg（嚴格權限：本人或稽核角色），
+   輪廓走 preview.svg（較寬）。拿不到影像的人自動退回中性背景版，
+   **權限不必在合成這一層再判一次**，也不會有「疊圖端點忘了套嚴格權限」的漏洞。
+
+   `?overlay=1` 讓後端拿掉背景與底部文字：疊圖時 viewBox 必須恰好等於影像尺寸，
+   否則等比縮放會讓遮罩整體位移——對不準的疊圖比不疊更糟，
+   審閱者會以為模型畫歪了。 */
+async function showOverlay(box, imgUrl, svgUrl, legendHtml, note){
+  box.innerHTML = `<div class="banner">載入中…</div>`;
+  const [imgRes, svgRes] = await Promise.allSettled([fetchAuth(imgUrl), fetchAuth(svgUrl)]);
+  if(svgRes.status !== "fulfilled"){
+    box.innerHTML = `<div class="banner"><p class="bad">無法檢視：${esc(svgRes.reason.message)}</p>
       <button onclick="this.closest('.banner').remove()">關閉</button></div>`;
-  }catch(e){ box.innerHTML = `<div class="banner"><p class="bad">失敗：${esc(e.message)}</p>
-    <button onclick="this.closest('.banner').remove()">關閉</button></div>`; }
+    return;
+  }
+  const svg = await svgRes.value.text();
+  const okImg = imgRes.status === "fulfilled";
+  const u = okImg ? URL.createObjectURL(await imgRes.value.blob()) : "";
+  const id = "ov" + Math.random().toString(36).slice(2, 8);
+  box.innerHTML = `<div class="banner">
+    <div style="position:relative;max-width:520px;line-height:0">
+      ${okImg ? `<img src="${u}" style="width:100%;display:block">` : ""}
+      <div id="${id}" style="${okImg ? "position:absolute;inset:0;" : ""}opacity:.55">${svg}</div>
+    </div>
+    ${okImg ? `<label style="font-size:12px">遮罩透明度
+      <input type="range" min="0" max="100" value="55" style="vertical-align:middle"
+        oninput="document.getElementById('${id}').style.opacity=this.value/100"></label>` : ""}
+    ${legendHtml || ""}
+    <p class="note">${okImg
+      ? "遮罩疊在去識別影像上；拉到 0 只看照片、拉到 100 只看遮罩。此次影像檢視已寫入稽核軌跡。"
+      : "⚠ 影像無法載入（權限不足、已依撤回隔離、或已逾保存期限），以下僅為標註示意，<b>不是</b>傷口照片。"}
+      ${esc(note || "")}</p>
+    <button onclick="${okImg ? `URL.revokeObjectURL('${u}');` : ""}this.closest('.banner').remove()">關閉</button>
+  </div>`;
+}
+async function showImage(iid){
+  showOverlay($("r_panel"),
+    "/api/v1/flywheel/record/" + encodeURIComponent(iid) + "/image.jpg",
+    "/api/v1/flywheel/record/" + encodeURIComponent(iid) + "/preview.svg?overlay=1",
+    `<p class="note" style="margin:4px 0">青＝傷口輪廓，色塊＝組織分區（與 App 修邊畫面同配色）。</p>`);
+}
+function liteShow(anon, iid){
+  const base = "/api/v1/lite/record/" + encodeURIComponent(anon) + "/" + encodeURIComponent(iid);
+  showOverlay($("lite_panel"), base + "/image.jpg", base + "/preview.svg?overlay=1",
+    `<p class="note" style="margin:4px 0">
+      <span style="color:#00e5ff">━ AI 輪廓</span>
+      <span style="color:#ff9f1c">┄ 民眾修正</span>　兩者差異即 IoU 欄的來源。</p>`);
 }
 function askRetract(i){
   const r = recsData[i];
@@ -732,8 +761,7 @@ async function loadLite(){
       <td class="${r.corrected ? 'warn' : ''}">${r.iou_vs_ai == null ? "—" : r.iou_vs_ai}${r.corrected ? " 已修正" : ""}</td>
       <td class="nowrap">${esc(r.depth||"—")}</td>
       <td class="nowrap">${esc(r.consent_version||"—")}</td>
-      <td class="nowrap"><a href="#" onclick="liteShow('${esc(r.anon_id)}','${esc(r.image_id)}','img');return false" style="font-size:11px">看影像</a>
-        ${(r.polygons||r.lay_polygons)?`<br><a href="#" onclick="liteShow('${esc(r.anon_id)}','${esc(r.image_id)}','svg');return false" style="font-size:11px">看對照</a>`:""}</td></tr>`).join("") + "</table>" +
+      <td class="nowrap"><a href="#" onclick="liteShow('${esc(r.anon_id)}','${esc(r.image_id)}');return false" style="font-size:11px">看疊圖</a></td></tr>`).join("") + "</table>" +
     (rows.length ? "" : "<p class='note'>還沒有民眾版資料。</p>") +
     `<p class="note">lay 輪廓與 IoU：民眾修改後回傳的輪廓與 AI 輪廓的重疊度；
      IoU&lt;0.8 標為「已修正」＝模型有輸出但畫錯了邊——這是比空手桶更早、更大量的

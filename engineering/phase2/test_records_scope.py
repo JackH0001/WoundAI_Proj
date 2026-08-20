@@ -186,6 +186,29 @@ def main():
           and "撤回" in ((r.get_json() or {}).get("error") or ""),
           "%s %s" % (r.status_code, r.get_json()))
 
+    print("\n── 5c 疊圖模式：viewBox 必須恰好等於影像 ──")
+    # 疊圖時 SVG 與影像等比縮放後要逐點對齊。原本底部留 48px 給文字，
+    # 那會讓每個 y 被壓縮 h/(h+48)——遮罩整體上移，圖越小偏得越明顯。
+    # **對不準的疊圖比不疊更糟**：審閱者會以為模型畫歪了。
+    import re as _re
+    p_norm = cli.get("/api/v1/flywheel/record/%s/preview.svg" % iid,
+                     headers=H["physician"]).data.decode()
+    p_ov = cli.get("/api/v1/flywheel/record/%s/preview.svg?overlay=1" % iid,
+                   headers=H["physician"]).data.decode()
+
+    def _vb(s):
+        m = _re.search(r'viewBox="0 0 (\d+) (\d+)"', s)
+        return (int(m.group(1)), int(m.group(2))) if m else None
+
+    check("一般模式 viewBox 比影像高（底部留文字）",
+          _vb(p_norm) and _vb(p_norm)[1] > 480, _vb(p_norm))
+    check("疊圖模式 viewBox **恰好** 640×480", _vb(p_ov) == (640, 480), _vb(p_ov))
+    check("疊圖模式沒有背景矩形（否則蓋住照片）",
+          'fill="#f5f5f5"' not in p_ov and 'fill="#f5f5f5"' in p_norm)
+    check("疊圖模式沒有底部文字（會蓋到傷口）",
+          "不含任何原始影像像素" not in p_ov and "不含任何原始影像像素" in p_norm)
+    check("疊圖模式仍畫出輪廓", "<polygon" in p_ov)
+
     print("\n── 6 前端必須明確送出 scope ──")
     # 後端把「沒有 scope 參數」解讀為「伺服器替你決定」。前端若把它當成 mine，
     # 取消勾選「看全部人的」→ 不送參數 → 後端回 all → 勾選框又被畫回勾起來，
@@ -201,6 +224,21 @@ def main():
           'if(window._recScopeAll) q.set("scope", "all");' not in js)
     check("勾選框的 checked 依伺服器回的 scope，而非本地變數",
           '${j.scope==="all"?"checked":""}' in js)
+
+    print("\n── 7 檢視器的面板不可以用 || 挑 ──")
+    # 兩個面板都存在於 DOM（只是所屬 section 沒有 .on），所以
+    # `$("r_panel") || $("lite_panel")` 永遠選到前者——
+    # 2026-08-20 實測：在民眾版按「看影像」，圖開到送件審閱頁籤去了。
+    check("showOverlay 由呼叫端指定面板（不自己挑）",
+          "async function showOverlay(box," in js)
+    check("沒有殘留 `$(\"r_panel\") || $(\"lite_panel\")` 的挑法",
+          '$("r_panel") || $("lite_panel")' not in js)
+    check("民眾版走 lite_panel", 'showOverlay($("lite_panel")' in js)
+    check("送件審閱走 r_panel", 'showOverlay($("r_panel")' in js)
+    check("疊圖請求帶 overlay=1（否則 viewBox 對不準）",
+          js.count("preview.svg?overlay=1") >= 2)
+    check("影像與 SVG 分別請求，影像失敗時仍顯示標註",
+          "allSettled" in js and "okImg" in js)
 
     print("\n%d 項檢查，%d 項失敗" % (TOTAL[0], len(FAILED)))
     if FAILED:

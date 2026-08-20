@@ -603,14 +603,20 @@ def lite_record_preview(anon_id, image_id):
                 % (p, color, color, max(2, w // 300), dash))
     parts = [_poly(p, "#00e5ff") for p in ai]
     parts += [_poly(p, "#ff9f1c", ' stroke-dasharray="12,6"') for p in lay]
-    fs = max(14, w // 40)
-    legend = ('<text x="12" y="%d" font-size="%d" fill="#00e5ff">— AI（%d）</text>'
-              '<text x="12" y="%d" font-size="%d" fill="#ff9f1c">-- 民眾修正（%d）%s</text>'
-              % (fs + 8, fs, len(ai), 2 * fs + 14, fs, len(lay),
-                 ("　IoU %.3f" % iou) if iou is not None else ""))
-    svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d">'
-           '<rect width="%d" height="%d" fill="#1c1f24"/>%s%s</svg>'
-           % (w, h, w, h, "".join(parts), legend))
+    # overlay 模式：拿掉背景與圖例，讓主控台把它疊在真實照片上。
+    # 圖例由主控台在圖外畫——疊圖時寫在圖上會蓋到傷口，而且照片是彩色的，
+    # 文字不論什麼顏色都可能看不清。
+    overlay = request.args.get("overlay") == "1"
+    bg = "" if overlay else ('<rect width="%d" height="%d" fill="#1c1f24"/>' % (w, h))
+    legend = ""
+    if not overlay:
+        fs = max(14, w // 40)
+        legend = ('<text x="12" y="%d" font-size="%d" fill="#00e5ff">— AI（%d）</text>'
+                  '<text x="12" y="%d" font-size="%d" fill="#ff9f1c">-- 民眾修正（%d）%s</text>'
+                  % (fs + 8, fs, len(ai), 2 * fs + 14, fs, len(lay),
+                     ("　IoU %.3f" % iou) if iou is not None else ""))
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d">%s%s%s</svg>'
+           % (w, h, bg, "".join(parts), legend))
     from flask import Response as _Resp
     return _Resp(svg, content_type="image/svg+xml")
 

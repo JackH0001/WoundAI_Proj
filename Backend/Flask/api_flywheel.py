@@ -756,7 +756,8 @@ def _raster_rect(rec, w, h):
         return None
 
 
-def _render_preview_svg(w, h, poly, cells, gw, gh, rec, tissue_note, rect=None):
+def _render_preview_svg(w, h, poly, cells, gw, gh, rec, tissue_note, rect=None,
+                        overlay=False):
     """輸出 SVG。座標空間＝影像空間，viewBox 讓瀏覽器自己縮放。
 
     `rect` 是組織遮罩在影像座標中的位置（見 `_raster_rect`）。**None 就不畫組織**——
@@ -765,12 +766,23 @@ def _render_preview_svg(w, h, poly, cells, gw, gh, rec, tissue_note, rect=None):
     def esc(s):
         return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
-    pad = 48                                    # 底部留給文字
+    # ── overlay 模式：拿掉背景與底部文字區 ────────────────────────
+    #
+    # 疊圖時 viewBox 必須**恰好等於影像尺寸**。原本底部留 48px 給文字，
+    # 那會讓 SVG 比影像高，瀏覽器等比縮放後每個 y 座標都被壓縮
+    # `h/(h+48)`——遮罩會整體上移，而且圖越小偏得越明顯。
+    # 對不準的疊圖比不疊更糟：審閱者會以為模型畫歪了。
+    #
+    # 背景也要拿掉，否則蓋住照片。合成在**瀏覽器端**做：
+    # 影像走 image.jpg（嚴格權限）、輪廓走本端點（較寬），
+    # 拿不到影像的人自然退回中性背景版——權限不必在這裡再判一次。
+    pad = 0 if overlay else 48
     parts = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" '
              'width="100%%" font-family="sans-serif">' % (w, h + pad)]
-    # 中性背景。**不是**傷口照片——這一點要在圖上寫明，否則複核者可能以為
-    # 影像載入失敗，或更糟：以為傷口真的長這樣。
-    parts.append('<rect width="%d" height="%d" fill="#f5f5f5"/>' % (w, h))
+    if not overlay:
+        # 中性背景。**不是**傷口照片——這一點要在圖上寫明，否則複核者可能以為
+        # 影像載入失敗，或更糟：以為傷口真的長這樣。
+        parts.append('<rect width="%d" height="%d" fill="#f5f5f5"/>' % (w, h))
 
     if cells and gw and gh and rect:
         rx, ry, rw, rh = rect
@@ -814,10 +826,13 @@ def _render_preview_svg(w, h, poly, cells, gw, gh, rec, tissue_note, rect=None):
         tissue_note + (("　" + fr) if fr else ""),
         "此圖為標註示意，不含任何原始影像像素",
     ]
-    for i, t in enumerate(lines):
-        parts.append('<text x="4" y="%.1f" font-size="%.1f" fill="%s">%s</text>'
-                     % (h + fs * (i + 1.15), fs,
-                        "#c62828" if t.startswith("⚠") else "#444", esc(t)))
+    # overlay 模式沒有底部空間可寫字（viewBox 就是影像大小），
+    # 這些資訊由主控台在圖外顯示——寫在圖上會蓋到傷口。
+    if not overlay:
+        for i, t in enumerate(lines):
+            parts.append('<text x="4" y="%.1f" font-size="%.1f" fill="%s">%s</text>'
+                         % (h + fs * (i + 1.15), fs,
+                            "#c62828" if t.startswith("⚠") else "#444", esc(t)))
     parts.append("</svg>")
     return "".join(parts)
 
@@ -1418,7 +1433,8 @@ try:
                 logger.warning("預覽讀取組織遮罩失敗(%s): %s", image_id, e)
                 tissue_note = "組織遮罩讀取失敗：%s" % e
 
-        svg = _render_preview_svg(w, h, poly, cells, gw, gh, rec, tissue_note, rect)
+        svg = _render_preview_svg(w, h, poly, cells, gw, gh, rec, tissue_note, rect,
+                                  overlay=request.args.get("overlay") == "1")
         audit(actor, "record_preview", rec.get("code") or "-",
               "image_id=%s" % image_id, role, org)
         # content_type 而非 mimetype：Flask 會對後者再附一次 charset。
