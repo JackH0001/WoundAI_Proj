@@ -807,10 +807,17 @@ def _render_preview_svg(w, h, poly, cells, gw, gh, rec, tissue_note, rect=None,
         pts = " ".join("%.1f,%.1f" % (float(p[0]), float(p[1]))
                        for p in one if len(p) >= 2)
         # 雙線描邊：深色在下、亮色在上，任何背景色上都看得見。
-        parts.append('<polygon points="%s" fill="none" stroke="#000" stroke-width="%.1f" '
-                     'stroke-opacity="0.55"/>' % (pts, max(2.0, w / 300.0)))
-        parts.append('<polygon points="%s" fill="none" stroke="#00e5ff" stroke-width="%.1f"/>'
-                     % (pts, max(1.0, w / 600.0)))
+        # 疊圖時線要粗一點：照片是彩色高頻的背景，1px 的青線在傷口紋理上看不見。
+        # 描邊本身**不設 alpha**（overlay 的透明度全交給滑桿），
+        # 黑色襯線在非疊圖模式才需要——疊圖時照片本身就是對比。
+        if overlay:
+            parts.append('<polygon points="%s" fill="none" stroke="#00e5ff" '
+                         'stroke-width="%.1f"/>' % (pts, max(3.0, w / 200.0)))
+        else:
+            parts.append('<polygon points="%s" fill="none" stroke="#000" stroke-width="%.1f" '
+                         'stroke-opacity="0.55"/>' % (pts, max(2.0, w / 300.0)))
+            parts.append('<polygon points="%s" fill="none" stroke="#00e5ff" stroke-width="%.1f"/>'
+                         % (pts, max(1.0, w / 600.0)))
 
     fs = max(11.0, w / 55.0)
     frac = rec.get("tissue_frac") or {}

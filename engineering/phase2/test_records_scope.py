@@ -208,6 +208,19 @@ def main():
     check("疊圖模式沒有底部文字（會蓋到傷口）",
           "不含任何原始影像像素" not in p_ov and "不含任何原始影像像素" in p_norm)
     check("疊圖模式仍畫出輪廓", "<polygon" in p_ov)
+    # ⚠ 疊圖時 SVG 內**不可以有任何 alpha**。外層 div 還有一層 opacity，
+    # 兩者相乘——滑桿拉到 100% 實際只有 SVG 自己的 alpha，
+    # 使用者的回報是「拉到最高還是不明顯」，而且無從知道為什麼。
+    # 一個東西只由一個地方控制：透明度全交給滑桿。
+    check("疊圖模式 SVG 內沒有 stroke-opacity（避免兩層 alpha 相乘）",
+          "stroke-opacity" not in p_ov, p_ov.count("stroke-opacity"))
+    check("一般模式仍保留襯線的 stroke-opacity", "stroke-opacity" in p_norm)
+    _ov_w = _re.findall(r'stroke="#00e5ff" stroke-width="([\d.]+)"', p_ov)
+    _nm_w = _re.findall(r'stroke="#00e5ff" stroke-width="([\d.]+)"', p_norm)
+    # 照片是彩色高頻背景，1px 的青線在傷口紋理上看不見。
+    check("疊圖的輪廓線比一般模式粗",
+          _ov_w and _nm_w and float(_ov_w[0]) > float(_nm_w[0]) * 2,
+          "疊圖 %s vs 一般 %s" % (_ov_w, _nm_w))
 
     print("\n── 6 前端必須明確送出 scope ──")
     # 後端把「沒有 scope 參數」解讀為「伺服器替你決定」。前端若把它當成 mine，
@@ -239,6 +252,23 @@ def main():
           js.count("preview.svg?overlay=1") >= 2)
     check("影像與 SVG 分別請求，影像失敗時仍顯示標註",
           "allSettled" in js and "okImg" in js)
+
+    print("\n── 8 關閉鈕不可依賴 closest ──")
+    # 疊圖的關閉鈕曾經沒反應，而「看標註」的可以。差別：後者清面板、前者用
+    # `this.closest('.banner').remove()`。把一大段 <svg> 用 innerHTML 塞進去時，
+    # HTML 解析器處理 foreign content 可能重新安排節點，按鈕不一定還在那個
+    # .banner 底下——closest 回 null → TypeError → **整個 onclick 靜默失效**。
+    check("showOverlay 的關閉用面板 id 清空，不用 closest",
+          "document.getElementById('${pid}').innerHTML=''" in js)
+    # 註解裡會引用那個壞寫法當反例，所以剝完註解再數——
+    # 「檢查器分不出程式碼與談論程式碼的文字」已經踩過三次了。
+    js_code = _re.sub(r"//[^\n]*", "", _re.sub(r"/\*(?:.|\n)*?\*/", "", js))
+    check("疊圖區塊沒有殘留 closest('.banner')（含失敗分支）",
+          "closest('.banner').remove()" not in js_code,
+          "還有 %d 處" % js_code.count("closest('.banner').remove()"))
+    # 滑桿要看得到目前數值，否則「有沒有真的到 100」只能用猜的。
+    check("滑桿旁顯示目前百分比", "textContent=this.value+'%'" in js)
+    check("滑桿範圍 0–100", 'min="0" max="100"' in js)
 
     print("\n%d 項檢查，%d 項失敗" % (TOTAL[0], len(FAILED)))
     if FAILED:

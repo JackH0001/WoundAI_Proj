@@ -518,27 +518,41 @@ async function showOverlay(box, imgUrl, svgUrl, legendHtml, note){
   const [imgRes, svgRes] = await Promise.allSettled([fetchAuth(imgUrl), fetchAuth(svgUrl)]);
   if(svgRes.status !== "fulfilled"){
     box.innerHTML = `<div class="banner"><p class="bad">無法檢視：${esc(svgRes.reason.message)}</p>
-      <button onclick="this.closest('.banner').remove()">關閉</button></div>`;
+      <button onclick="document.getElementById('${box.id}').innerHTML=''">關閉</button></div>`;
     return;
   }
   const svg = await svgRes.value.text();
   const okImg = imgRes.status === "fulfilled";
   const u = okImg ? URL.createObjectURL(await imgRes.value.blob()) : "";
   const id = "ov" + Math.random().toString(36).slice(2, 8);
+  // ⚠ 關閉按鈕**不要用 `this.closest('.banner').remove()`**。
+  //
+  // 2026-08-20 實測：疊圖的關閉鈕沒反應，而「看標註」的可以——差別在後者用的是
+  // `$('r_panel').innerHTML=''`。原因是這裡把一大段 SVG 用 innerHTML 塞進去，
+  // HTML 解析器處理 foreign content（<svg>）時可能重新安排節點，
+  // 按鈕就不一定還在那個 .banner 底下；`closest` 回 null → TypeError →
+  // **整個 onclick 靜默失效**，而畫面上完全看不出發生過錯誤。
+  //
+  // 直接清掉呼叫端指定的面板：那個 id 是我們自己給的，不依賴解析結果。
+  const pid = box.id;
+  const closeJs = (okImg ? `URL.revokeObjectURL('${u}');` : "")
+                + `document.getElementById('${pid}').innerHTML=''`;
   box.innerHTML = `<div class="banner">
     <div style="position:relative;max-width:520px;line-height:0">
       ${okImg ? `<img src="${u}" style="width:100%;display:block">` : ""}
-      <div id="${id}" style="${okImg ? "position:absolute;inset:0;" : ""}opacity:.55">${svg}</div>
+      <div id="${id}" style="${okImg ? "position:absolute;inset:0;" : ""}opacity:.5">${svg}</div>
     </div>
-    ${okImg ? `<label style="font-size:12px">遮罩透明度
-      <input type="range" min="0" max="100" value="55" style="vertical-align:middle"
-        oninput="document.getElementById('${id}').style.opacity=this.value/100"></label>` : ""}
+    ${okImg ? `<label style="font-size:12px">遮罩不透明度
+      <input type="range" min="0" max="100" value="50" style="vertical-align:middle;width:180px"
+        oninput="document.getElementById('${id}').style.opacity=this.value/100;
+                 document.getElementById('${id}v').textContent=this.value+'%'">
+      <b id="${id}v">50%</b></label>` : ""}
     ${legendHtml || ""}
     <p class="note">${okImg
-      ? "遮罩疊在去識別影像上；拉到 0 只看照片、拉到 100 只看遮罩。此次影像檢視已寫入稽核軌跡。"
+      ? "遮罩疊在去識別影像上：0% 只看照片、100% 只看遮罩。此次影像檢視已寫入稽核軌跡。"
       : "⚠ 影像無法載入（權限不足、已依撤回隔離、或已逾保存期限），以下僅為標註示意，<b>不是</b>傷口照片。"}
       ${esc(note || "")}</p>
-    <button onclick="${okImg ? `URL.revokeObjectURL('${u}');` : ""}this.closest('.banner').remove()">關閉</button>
+    <button onclick="${closeJs}">關閉</button>
   </div>`;
 }
 async function showImage(iid){

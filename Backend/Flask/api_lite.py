@@ -597,16 +597,26 @@ def lite_record_preview(anon_id, image_id):
     lay = (lab[-1].get("polygons") if lab else []) or []
     iou = lab[-1].get("iou_vs_ai") if lab else None
 
+    overlay = request.args.get("overlay") == "1"
+
     def _poly(pts, color, dash=""):
         p = " ".join("%s,%s" % (pt[0], pt[1]) for pt in pts)
-        return ('<polygon points="%s" fill="%s22" stroke="%s" stroke-width="%d"%s/>'
-                % (p, color, color, max(2, w // 300), dash))
+        # ⚠ **overlay 模式下 SVG 內不設任何 alpha。**
+        #
+        # 第一版填色寫死 `%s22`（alpha 0x22 ≈ 13%）。疊圖時外層 div 還有一層
+        # opacity，兩者**相乘**——滑桿拉到 100% 實際只有 13%，
+        # 使用者的回報是「拉到最高還是不明顯」，而且他無從知道為什麼。
+        #
+        # 一個東西只由一個地方控制：透明度完全交給滑桿，SVG 只負責形狀與顏色。
+        # 非 overlay（中性背景）時仍用淡填色，那裡沒有第二層 opacity。
+        fill = color if overlay else (color + "22")
+        return ('<polygon points="%s" fill="%s" stroke="%s" stroke-width="%d"%s/>'
+                % (p, fill, color, max(2, w // 300), dash))
     parts = [_poly(p, "#00e5ff") for p in ai]
     parts += [_poly(p, "#ff9f1c", ' stroke-dasharray="12,6"') for p in lay]
     # overlay 模式：拿掉背景與圖例，讓主控台把它疊在真實照片上。
     # 圖例由主控台在圖外畫——疊圖時寫在圖上會蓋到傷口，而且照片是彩色的，
     # 文字不論什麼顏色都可能看不清。
-    overlay = request.args.get("overlay") == "1"
     bg = "" if overlay else ('<rect width="%d" height="%d" fill="#1c1f24"/>' % (w, h))
     legend = ""
     if not overlay:
