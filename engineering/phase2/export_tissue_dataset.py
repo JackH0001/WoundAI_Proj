@@ -234,6 +234,10 @@ def main():
     ap.add_argument("--kind", default="tissue")
     ap.add_argument("--source", default=None, help="clinical / sample / phantom")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--verify", action="store_true",
+                    help="另外輸出 <out>/verify/ 疊圖供目視核對。"
+                         "合成測試證明的是**程式碼**對，這個證明的是**這批資料**對——"
+                         "兩者是不同的主張，而幾何錯誤在數字上看不出來。")
     ap.add_argument("--allow-unedited", action="store_true",
                     help="⚠ 收未經醫師修正的遮罩。那些是啟發式的原樣輸出——"
                          "拿它訓練＝用模型自己的輸出訓練自己")
@@ -327,6 +331,23 @@ def main():
             "actor": it.get("actor"), "source": it.get("source"),
             "quality": it.get("quality"), "received_at": it.get("received_at"),
         })
+        if not a.dry_run and a.verify:
+            # 半透明疊圖，與主控台「看疊圖」同一種讀法。
+            # 幾何錯了在這裡是**一眼可見**的（色塊跑到傷口外、或整片偏移），
+            # 而在任何數字上都看不出來——loss 照樣會下降。
+            vdir = os.path.join(a.out, "verify")
+            os.makedirs(vdir, exist_ok=True)
+            palette = {1: (80, 220, 120), 2: (60, 220, 250), 3: (60, 60, 60),
+                       4: (240, 180, 120), 5: (200, 120, 220)}   # BGR
+            ov = cimg.copy()
+            col = np.zeros_like(cimg)
+            for c, bgr in palette.items():
+                col[cmask == c] = bgr
+            hit = cmask > 0
+            ov[hit] = (0.45 * cimg[hit] + 0.55 * col[hit]).astype(np.uint8)
+            cv2.imwrite(os.path.join(vdir, name + "_overlay.jpg"), ov,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+
         if not a.dry_run:
             cv2.imwrite(os.path.join(img_dir, name + ".jpg"), cimg,
                         [int(cv2.IMWRITE_JPEG_QUALITY), 95])
@@ -426,6 +447,10 @@ def main():
     with open(os.path.join(a.out, "manifest_snapshot.json"), "w", encoding="utf-8") as f:
         json.dump(man, f, ensure_ascii=False, indent=2)
     print("\n報告：%s" % os.path.join(a.out, "dataset_report.json"))
+    if a.verify:
+        print("疊圖：%s —— **請實際打開幾張看**。" % os.path.join(a.out, "verify"))
+        print("  色塊落在傷口上＝幾何正確；跑到傷口外或整片偏移＝裁切錯了，")
+        print("  而那在任何數字上都看不出來（loss 照樣會下降）。")
     print("接著：python train_tissue_seg.py --data %s --dry-run" % a.out)
     return 0
 
