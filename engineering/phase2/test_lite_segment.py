@@ -357,6 +357,26 @@ def main():
     check("排除數有明講（internal_excluded）", j2.get("internal_excluded", 0) >= 2,
           j2.get("internal_excluded"))
 
+    print("\n── 12 檢視端點（影像與 AI/lay 對照圖）──")
+    img_u = "/api/v1/lite/record/dev-corr/%s/image.jpg" % iid_c
+    check("工程師看得到民眾版影像",
+          cli.get(img_u, headers=H_ENG).status_code == 200)
+    check("醫師看不到（民眾版非臨床業務）",
+          cli.get(img_u, headers=H_DR).status_code == 403)
+    check("匿名看不到（檢視端點是本模組唯二要登入的）",
+          cli.get(img_u).status_code == 401)
+    svg = cli.get("/api/v1/lite/record/dev-corr/%s/preview.svg" % iid_c,
+                  headers=H_ENG)
+    body = svg.data.decode()
+    check("對照圖回 SVG", svg.status_code == 200 and body.startswith("<svg"))
+    check("畫出 AI 輪廓（青）", '#00e5ff' in body)
+    check("畫出民眾修正輪廓（橘，虛線）", '#ff9f1c' in body and "dasharray" in body)
+    check("圖上標出 IoU", "IoU" in body)
+    check("不含影像像素（與臨床 preview 同原則）", "image/" not in body and "base64" not in body)
+    check("路徑穿越被擋",
+          cli.get("/api/v1/lite/record/..%2fx/abc/image.jpg",
+                  headers=H_ENG).status_code in (400, 404))
+
     print("\n%d 項檢查，%d 項失敗" % (TOTAL[0], len(FAILED)))
     if FAILED:
         print("失敗：")

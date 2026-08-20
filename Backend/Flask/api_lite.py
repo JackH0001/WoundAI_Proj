@@ -531,6 +531,90 @@ def lite_delete(anon_id):
                     "labels_withdrawn": n_lab}), 200
 
 
+def _lite_reviewer_ok():
+    """民眾版檢視端點共用的守門：登入＋audit.read。回 (ok, 錯誤回應)。"""
+    from flask_jwt_extended import get_jwt, verify_jwt_in_request
+    try:
+        verify_jwt_in_request()
+    except Exception:
+        return False, (jsonify({"error": "需要登入"}), 401)
+    role = (get_jwt() or {}).get("role")
+    try:
+        import auth_users
+        if auth_users.can(role, "audit.read"):
+            return True, None
+    except Exception:
+        pass                     # fail-closed
+    return False, (jsonify({"error": "權限不足",
+                            "issues": ["民眾版資料僅工程師／管理者可檢視。"]}), 403)
+
+
+@lite_bp.route("/api/v1/lite/record/<anon_id>/<image_id>/image.jpg", methods=["GET"])
+def lite_record_image(anon_id, image_id):
+    """民眾版影像檢視。**要登入＋audit.read**——與 records 同一道門。
+
+    這個模組其餘端點都是匿名的；這兩個檢視端點是唯二例外，
+    所以守門寫在函式最前面而不是依賴「反正呼叫端是 console」。
+    """
+    ok, err = _lite_reviewer_ok()
+    if not ok:
+        return err
+    anon_id, image_id = (anon_id or "").strip(), (image_id or "").strip()
+    if "/" in anon_id or ".." in anon_id or not image_id.isalnum():
+        return jsonify({"error": "格式不合"}), 400
+    raw = _fw._store().get_blob(_fw._key(os.path.join(
+        _dir(), "lite/%s/%s.jpg" % (anon_id, image_id))))
+    if raw is None:
+        return jsonify({"error": "影像不存在（可能已撤回刪除）"}), 404
+    from flask import Response as _Resp
+    return _Resp(raw, content_type="image/jpeg",
+                 headers={"Cache-Control": "private, no-store"})
+
+
+@lite_bp.route("/api/v1/lite/record/<anon_id>/<image_id>/preview.svg", methods=["GET"])
+def lite_record_preview(anon_id, image_id):
+    """AI 輪廓 vs 民眾修正輪廓的**對照圖**。要登入＋audit.read。
+
+    畫在中性背景上、不含影像像素（與臨床 preview 同一原則）；
+    要看照片另有 image.jpg。兩色對照：青＝AI、橘＝民眾修正——
+    lay 修正率那個數字說「改了多少」，這張圖回答「改在哪裡」。
+    """
+    ok, err = _lite_reviewer_ok()
+    if not ok:
+        return err
+    anon_id, image_id = (anon_id or "").strip(), (image_id or "").strip()
+    if "/" in anon_id or ".." in anon_id or not image_id.isalnum():
+        return jsonify({"error": "格式不合"}), 400
+    mraw = _fw._store().get_blob(_fw._key(os.path.join(
+        _dir(), "lite/%s/%s.json" % (anon_id, image_id))))
+    if mraw is None:
+        return jsonify({"error": "查無此筆"}), 404
+    meta = json.loads(mraw.decode("utf-8"))
+    w, h = int(meta.get("image_w") or 640), int(meta.get("image_h") or 480)
+    ai = meta.get("ai_polygons") or []
+    lab = [e for e in _fw.read_jsonl(os.path.join(_dir(), "lite_labels.jsonl"))
+           if e.get("image_id") == image_id and e.get("action") != "deleted"]
+    lay = (lab[-1].get("polygons") if lab else []) or []
+    iou = lab[-1].get("iou_vs_ai") if lab else None
+
+    def _poly(pts, color, dash=""):
+        p = " ".join("%s,%s" % (pt[0], pt[1]) for pt in pts)
+        return ('<polygon points="%s" fill="%s22" stroke="%s" stroke-width="%d"%s/>'
+                % (p, color, color, max(2, w // 300), dash))
+    parts = [_poly(p, "#00e5ff") for p in ai]
+    parts += [_poly(p, "#ff9f1c", ' stroke-dasharray="12,6"') for p in lay]
+    fs = max(14, w // 40)
+    legend = ('<text x="12" y="%d" font-size="%d" fill="#00e5ff">— AI（%d）</text>'
+              '<text x="12" y="%d" font-size="%d" fill="#ff9f1c">-- 民眾修正（%d）%s</text>'
+              % (fs + 8, fs, len(ai), 2 * fs + 14, fs, len(lay),
+                 ("　IoU %.3f" % iou) if iou is not None else ""))
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d">'
+           '<rect width="%d" height="%d" fill="#1c1f24"/>%s%s</svg>'
+           % (w, h, w, h, "".join(parts), legend))
+    from flask import Response as _Resp
+    return _Resp(svg, content_type="image/svg+xml")
+
+
 @lite_bp.route("/api/v1/lite/records", methods=["GET"])
 def lite_records():
     """民眾版資料盤點（主控台用）。**要登入，而且只給工程師／管理者。**

@@ -213,6 +213,7 @@ code{font-family:ui-monospace,monospace;font-size:12.5px;word-break:break-all}
   <p class="sub">匿名研究資料的盤點。與臨床樣本完全分開——這裡的數字不計入收案進度，
   民眾自畫的輪廓（lay）也<b>不會</b>進入醫師 GT 訓練佇列（結構隔離，見 lite_labels.jsonl）。</p>
   <div id="lite_stats" class="row"></div>
+  <div id="lite_panel"></div>
   <div id="lite"></div>
 </section>
 
@@ -411,7 +412,9 @@ async function loadRecs(){
       <td class="nowrap">${esc((r.received_at||"").replace("T"," ").replace("Z",""))}</td>
       <td class="nowrap"><code>${esc(r.code)}</code>${r.has_preview
         ? `<br><a href="#" onclick="showPreview('${esc(r.image_id)}');return false"
-             style="font-size:11px">看標註</a>` : ""}</td>
+             style="font-size:11px">看標註</a>` : ""}
+        <br><a href="#" onclick="showImage('${esc(r.image_id)}');return false"
+             style="font-size:11px">看影像</a></td>
       <td>${esc(r.source)}<br><span style="font-size:11px;color:var(--dim)">${esc(r.route||"")}</span></td>
       <td class="nowrap">${r.area_cm2==null?"—":esc(r.area_cm2)+" cm²"}</td>
       <td class="nowrap">${tissueCell(r)}</td>
@@ -484,6 +487,43 @@ async function showPreview(iid){
       <button onclick="$('r_panel').innerHTML=''">關閉</button></div>`;
   }catch(e){ box.innerHTML = `<div class="banner"><p class="bad">預覽失敗：${esc(e.message)}</p>
     <button onclick="$('r_panel').innerHTML=''">關閉</button></div>`; }
+}
+/* 影像檢視。<a href> 直連不行——JWT 在 header 裡，瀏覽器點連結不會帶。
+   一律 fetch 帶 token → blob URL。權限在後端：自己送的可以看，
+   他人的要稽核權限；被拒時把後端的理由原文顯示出來，不要換成「載入失敗」。 */
+async function showImage(iid, url){
+  const box = $("r_panel") || $("lite_panel");
+  box.innerHTML = `<div class="banner">載入影像…</div>`;
+  try{
+    const res = await fetch(url || ("/api/v1/flywheel/record/" + encodeURIComponent(iid) + "/image.jpg"),
+                            {headers:{Authorization:"Bearer "+tok}});
+    if(!res.ok){
+      let why = "HTTP " + res.status;
+      try{ const j = await res.json(); why = j.error + (j.issues ? "：" + j.issues.join("；") : ""); }catch(_){}
+      throw new Error(why);
+    }
+    const u = URL.createObjectURL(await res.blob());
+    box.innerHTML = `<div class="banner">
+      <img src="${u}" style="max-width:480px;max-height:480px;display:block">
+      <p class="note">去識別影像（內容雜湊命名，無任何個資欄位）。此次檢視已寫入稽核軌跡。</p>
+      <button onclick="URL.revokeObjectURL('${u}');this.closest('.banner').remove()">關閉</button></div>`;
+  }catch(e){ box.innerHTML = `<div class="banner"><p class="bad">無法檢視：${esc(e.message)}</p>
+    <button onclick="this.closest('.banner').remove()">關閉</button></div>`; }
+}
+async function liteShow(anon, iid, kind){
+  const base = "/api/v1/lite/record/" + encodeURIComponent(anon) + "/" + encodeURIComponent(iid);
+  if(kind === "img"){ showImage(null, base + "/image.jpg"); return; }
+  const box = $("lite_panel");
+  box.innerHTML = `<div class="banner">載入對照圖…</div>`;
+  try{
+    const res = await fetch(base + "/preview.svg", {headers:{Authorization:"Bearer "+tok}});
+    if(!res.ok) throw new Error("HTTP " + res.status);
+    box.innerHTML = `<div class="banner"><div style="max-width:480px">${await res.text()}</div>
+      <p class="note">青＝AI 輪廓、橘（虛線）＝民眾修正。不含影像像素；
+      對照實際照片請用「看影像」。</p>
+      <button onclick="this.closest('.banner').remove()">關閉</button></div>`;
+  }catch(e){ box.innerHTML = `<div class="banner"><p class="bad">失敗：${esc(e.message)}</p>
+    <button onclick="this.closest('.banner').remove()">關閉</button></div>`; }
 }
 function askRetract(i){
   const r = recsData[i];
@@ -682,7 +722,7 @@ async function loadLite(){
          (j.lay_corrected_pct ?? 0) >= 50 ? "bad" : "");
   const rows = j.records || [];
   $("lite").innerHTML = "<table><tr><th>時間 (UTC)</th><th>anon_id</th><th>route</th>" +
-    "<th>AI 輪廓</th><th>lay 輪廓</th><th>IoU</th><th>深度</th><th>同意版本</th></tr>" +
+    "<th>AI 輪廓</th><th>lay 輪廓</th><th>IoU</th><th>深度</th><th>同意版本</th><th></th></tr>" +
     rows.map(r => `<tr class="${r.internal ? 'off' : ''}">
       <td class="nowrap">${esc((r.received_at||"").replace("T"," ").replace("Z",""))}</td>
       <td class="nowrap"><code>${esc((r.anon_id||"").slice(0,10))}</code>${r.internal?" <span style='font-size:10px'>內測</span>":""}</td>
@@ -691,7 +731,9 @@ async function loadLite(){
       <td>${r.lay_polygons == null ? "—" : r.lay_polygons}</td>
       <td class="${r.corrected ? 'warn' : ''}">${r.iou_vs_ai == null ? "—" : r.iou_vs_ai}${r.corrected ? " 已修正" : ""}</td>
       <td class="nowrap">${esc(r.depth||"—")}</td>
-      <td class="nowrap">${esc(r.consent_version||"—")}</td></tr>`).join("") + "</table>" +
+      <td class="nowrap">${esc(r.consent_version||"—")}</td>
+      <td class="nowrap"><a href="#" onclick="liteShow('${esc(r.anon_id)}','${esc(r.image_id)}','img');return false" style="font-size:11px">看影像</a>
+        ${(r.polygons||r.lay_polygons)?`<br><a href="#" onclick="liteShow('${esc(r.anon_id)}','${esc(r.image_id)}','svg');return false" style="font-size:11px">看對照</a>`:""}</td></tr>`).join("") + "</table>" +
     (rows.length ? "" : "<p class='note'>還沒有民眾版資料。</p>") +
     `<p class="note">lay 輪廓與 IoU：民眾修改後回傳的輪廓與 AI 輪廓的重疊度；
      IoU&lt;0.8 標為「已修正」＝模型有輸出但畫錯了邊——這是比空手桶更早、更大量的

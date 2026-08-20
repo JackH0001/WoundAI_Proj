@@ -149,6 +149,43 @@ def main():
     check("nurse 送 scope=all 仍看不到醫師的紀錄",
           len(j.get("records", [])) == 0, len(j.get("records", [])))
 
+    print("\n── 5b 影像檢視：自己的可以看，他人的要稽核權限 ──")
+    # preview.svg 不含像素（看標註形狀），image.jpg 是真照片（看標註對不對得上傷口）。
+    # 審閱需要兩者對照；影像開放範圍照最小需要：本人＋audit.read。
+    img_url = "/api/v1/flywheel/record/%s/image.jpg" % iid
+    r = cli.get(img_url, headers=H["physician"])
+    check("送件醫師看得到自己的影像", r.status_code == 200
+          and r.content_type.startswith("image/jpeg"),
+          "%s %s" % (r.status_code, r.content_type))
+    check("回應帶 no-store（影像不可被中間層快取）",
+          "no-store" in (r.headers.get("Cache-Control") or ""))
+    check("admin 看得到（audit.read）",
+          cli.get(img_url, headers=H["admin"]).status_code == 200)
+    with app.app_context():
+        H_DR2 = {"Authorization": "Bearer " + create_access_token(
+            identity="default:dr02",
+            additional_claims={"role": "physician", "org": "default", "user": "dr02"})}
+    check("**另一位醫師**看不到（非本人送件且無稽核權限）",
+          cli.get(img_url, headers=H_DR2).status_code == 403)
+    check("nurse 看不到（她有 flywheel.stats 但不是送件人）",
+          cli.get(img_url, headers=H["nurse"]).status_code == 403)
+    check("查無此件回 404",
+          cli.get("/api/v1/flywheel/record/%s/image.jpg" % ("0" * 16),
+                  headers=H["admin"]).status_code == 404)
+    acts = [a.get("action") for a in fw.read_jsonl(fw.AUDIT)]
+    check("成功檢視有留 image_viewed（影像被誰看過是 IRB 會問的事）",
+          "image_viewed" in acts)
+    check("被拒也有留 image_view_denied", "image_view_denied" in acts)
+
+    # 撤回後：理由必須是「撤回」，不是「查無影像」——稽核要記真正的原因
+    rw = cli.post("/api/v1/consent/withdraw", headers=H["physician"],
+                  json={"code": "WD-SCOPE1"})
+    check("前置：撤回成功", rw.status_code == 200, rw.status_code)
+    r = cli.get(img_url, headers=H["admin"])
+    check("撤回後回 410 且理由明講撤回", r.status_code == 410
+          and "撤回" in ((r.get_json() or {}).get("error") or ""),
+          "%s %s" % (r.status_code, r.get_json()))
+
     print("\n── 6 前端必須明確送出 scope ──")
     # 後端把「沒有 scope 參數」解讀為「伺服器替你決定」。前端若把它當成 mine，
     # 取消勾選「看全部人的」→ 不送參數 → 後端回 all → 勾選框又被畫回勾起來，

@@ -1425,6 +1425,61 @@ try:
         return Response(svg, content_type="image/svg+xml; charset=utf-8")
 
 
+    @flywheel_bp.route("/api/v1/flywheel/record/<image_id>/image.jpg", methods=["GET"])
+    @jwt_required()
+    def get_record_image(image_id):
+        """送件的**原始影像**。與 preview.svg 是刻意分開的兩個東西：
+
+        preview 只畫輪廓與組織分區、不含影像像素——確認「標註形狀合不合理」。
+        這裡回真正的照片——回答「這個標註對不對得上實際的傷口」。
+        審閱需要兩者對照，只有其中一個都審不完整。
+
+        ## 權限：比照 records 的範圍規則
+
+        **自己送的可以看**（照片是他拍的），其餘要 `audit.read`（工程師／管理者）。
+        比 preview 嚴一級（preview 開到 flywheel.stats）：輪廓示意圖不含像素，
+        影像本身則是最敏感的那一層——即使已去識別，開放範圍仍照最小需要給。
+
+        ## 每一次讀取都進稽核
+
+        影像被誰看過，本身就是 IRB 會問的事。preview 已有 record_preview 前例，
+        這裡同理。**撤回同意的影像回 410 且理由明講**——與 annotation 的原則一致：
+        拒絕理由要是真正的原因，「查無影像」會讓稽核軌跡記下錯誤的事實。
+        """
+        actor, role, org = _who()
+        if not _can(role, "flywheel.stats"):
+            return jsonify({"error": "權限不足"}), 403
+        image_id = str(image_id or "").strip()
+        if not re.fullmatch(r"[0-9a-f]{8,40}", image_id):
+            return jsonify({"error": "image_id 格式不合"}), 400
+
+        recs = [r for r in read_jsonl(QUEUE) if r.get("image_id") == image_id]
+        if not recs:
+            return jsonify({"error": "查無此送件"}), 404
+        rec = recs[-1]
+        if rec.get("actor") != actor and not _can(role, "audit.read"):
+            audit(actor, "image_view_denied", rec.get("code", "?"),
+                  f"image_id={image_id}（非本人送件且無稽核權限）", role, org)
+            return jsonify({"error": "權限不足",
+                            "issues": ["只能檢視自己送出的影像；他人送件需稽核權限。"]}), 403
+
+        wd_codes, wd_imgs = withdrawn_keys()
+        if image_id in wd_imgs or rec.get("code") in wd_codes or is_quarantined(image_id):
+            audit(actor, "image_view_denied", rec.get("code", "?"),
+                  f"image_id={image_id} 已撤回訓練同意", role, org)
+            return jsonify({"error": "影像已依撤回同意隔離，不提供檢視"}), 410
+
+        raw = _store().get_blob(_key(os.path.join(IMAGES_DIR, image_id + ".jpg")))
+        if raw is None:
+            return jsonify({"error": "影像檔不存在（可能已依保存期限清除）"}), 404
+        audit(actor, "image_viewed", rec.get("code", "?"),
+              f"image_id={image_id}（{len(raw)} bytes）", role, org)
+        from flask import Response as _Resp
+        return _Resp(raw, content_type="image/jpeg",
+                     headers={"Cache-Control": "private, no-store",
+                              "Content-Disposition": "inline"})
+
+
     @flywheel_bp.route("/api/v1/dataset/manifest", methods=["GET"])
     @jwt_required()
     def get_dataset_manifest():
