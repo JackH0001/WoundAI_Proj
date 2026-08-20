@@ -72,6 +72,30 @@ def make_tissue_png(w=200, h=150):
     return buf.getvalue()
 
 
+def _check_footer_fits(check, svg, w, h):
+    """底部文字必須全部落在 viewBox 內。
+
+    字級是 `max(11, w/55)`——**隨影像寬度成長**，而底部留白原本寫死 48px。
+    1536px 寬時字級 27.9，四行需要約 116px，於是後幾行被 viewBox 切掉。
+    影像越大切得越多，而**小圖測試時完全正常**——這種 bug 只在真實資料上出現，
+    所以這裡刻意用大尺寸驗。
+    """
+    import re
+    m = re.search(r'viewBox="0 0 (\d+) (\d+)"', svg)
+    if not m:
+        check("preview 有 viewBox", False)
+        return
+    vb_h = int(m.group(2))
+    ys = [float(y) for y in re.findall(r'<text x="[\d.]+" y="([\d.]+)"', svg)]
+    check("底部有文字行", len(ys) >= 2, len(ys))
+    if ys:
+        # baseline 之下還要容得下字身，抓 0.3 個字級的餘裕
+        fs = max(11.0, w / 55.0)
+        check("最後一行文字完全落在 viewBox 內（%d 寬）" % w,
+              max(ys) + fs * 0.3 <= vb_h,
+              "最後 baseline %.1f + 字身 vs viewBox 高 %d" % (max(ys), vb_h))
+
+
 def main():
     try:
         from PIL import Image  # noqa: F401
@@ -285,6 +309,34 @@ def main():
     check("工程師看得到（audit.read）", r.status_code == 200, r.status_code)
 
     shutil.rmtree(tmp, ignore_errors=True)
+    # ── 底部文字不可被 viewBox 切掉（大尺寸才會現形）───────────────
+    print("\n── 底部文字的版面 ──")
+    # ⚠ 用**新建的**紀錄，不要沿用上面那些——前面的區段對它們做過撤回／排除，
+    # preview 會回錯誤 JSON 而不是 SVG，於是這裡會以「找不到 viewBox」報紅，
+    # 而那與版面完全無關。第一版就這樣誤報了一次。
+    for (bw, bh, code) in ((1200, 900, "WD-FOOT1"), (1536, 2048, "WD-FOOT2")):
+        j = make_jpeg(bw, bh)
+        i3 = hashlib.sha1(j).hexdigest()[:16]
+        # 前面的區段會把影像搬進 quarantine（撤回測試），目錄可能已不在原狀
+        os.makedirs(os.path.join(tmp, "images"), exist_ok=True)
+        with open(os.path.join(tmp, "images", i3 + ".jpg"), "wb") as fh:
+            fh.write(j)
+        b3 = dict(body, code=code, image_id=i3, image_w=bw, image_h=bh,
+                  gt_polygon=[[bw // 8, bh // 8], [bw * 3 // 4, bh // 8],
+                              [bw * 3 // 4, bh * 3 // 4], [bw // 8, bh * 3 // 4]])
+        rr = cli.post("/api/v1/annotation", headers=H, json=b3)
+        check("前置：%d×%d 送件成功" % (bw, bh), rr.status_code == 200,
+              "%s %s" % (rr.status_code, (rr.get_json() or {}).get("issues")))
+        s = cli.get("/api/v1/flywheel/record/%s/preview.svg" % i3,
+                    headers=H).data.decode()
+        _check_footer_fits(check, s, bw, bh)
+
+    # 預覽是 64 格馬賽克，容易讓人以為存下來的遮罩就那麼粗。
+    # 把真實解析度寫在圖上，這個誤會就不必每次用問的。
+    check("清單帶出組織遮罩的實際解析度欄位",
+          "tissue_mask_dim" in (cli.get("/api/v1/flywheel/records", headers=H)
+                                .get_json() or {}).get("records", [{}])[0])
+
     print("\n%d 項檢查，%d 項失敗" % (TOTAL[0], len(FAILED)))
     if FAILED:
         print("失敗：")

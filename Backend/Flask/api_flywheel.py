@@ -747,8 +747,14 @@ def _raster_rect(rec, w, h):
     tr = rec.get("tissue_raster") or {}
     try:
         mw = int(tr["mw"]); mh = int(tr["mh"])
-        ms = float(tr.get("m_scale") or 1.0)
-        x0 = float(tr.get("rx0") or 0.0); y0 = float(tr.get("ry0") or 0.0)
+        # ⚠ 不可以寫 `tr.get("m_scale") or 1.0`：`0 or 1.0` 在 Python 是 1.0，
+        # 於是一筆損毀的 `m_scale: 0` 會**靜默變成 1.0**，ROI 尺度整個錯掉，
+        # 而下面的 `ms <= 0` 守衛永遠等不到那個 0。
+        # 損毀的資料要被擋下來，不是被猜一個預設值。
+        _ms = tr.get("m_scale")
+        ms = float(_ms) if _ms is not None else 1.0
+        x0 = float(tr["rx0"] if tr.get("rx0") is not None else 0.0)
+        y0 = float(tr["ry0"] if tr.get("ry0") is not None else 0.0)
         if mw <= 0 or mh <= 0 or ms <= 0:
             return None
         return x0, y0, mw / ms, mh / ms
@@ -776,9 +782,17 @@ def _render_preview_svg(w, h, poly, cells, gw, gh, rec, tissue_note, rect=None,
     # 背景也要拿掉，否則蓋住照片。合成在**瀏覽器端**做：
     # 影像走 image.jpg（嚴格權限）、輪廓走本端點（較寬），
     # 拿不到影像的人自然退回中性背景版——權限不必在這裡再判一次。
-    pad = 0 if overlay else 48
-    parts = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" '
-             'width="100%%" font-family="sans-serif">' % (w, h + pad)]
+    # ⚠ 底部留白必須**跟著字級算**，不可以寫死。
+    #
+    # 字級是 `max(11, w/55)`——隨影像寬度成長，而 pad 原本寫死 48。
+    # 1536px 寬的影像字級是 27.9，三行需要約 88px，於是第二、三行被 viewBox
+    # 切掉（2026-08-20 實測截圖：組織與品質那兩行只看得到上半截）。
+    # 影像越大切得越多，而小圖測試時完全正常——**這種 bug 只在真實資料上出現**。
+    # 表頭最後才組（見函式尾端）：viewBox 的高度要由**實際行數**算出來，
+    # 而行數要等文字都準備好才知道。第一版寫死 4 行、餘裕 0.4 個字級，
+    # 結果差 0.05 個字級被切——猜一個常數就是會這樣。
+    _fs = max(11.0, w / 55.0)
+    parts = []
     if not overlay:
         # 中性背景。**不是**傷口照片——這一點要在圖上寫明，否則複核者可能以為
         # 影像載入失敗，或更糟：以為傷口真的長這樣。
@@ -825,14 +839,31 @@ def _render_preview_svg(w, h, poly, cells, gw, gh, rec, tissue_note, rect=None,
               "epithelial": "上皮", "other": "其他"}
     fr = "・".join("%s%.0f%%" % (key_zh.get(k, k), 100.0 * float(v))
                    for k, v in frac.items() if isinstance(v, (int, float)) and v > 0)
+    # 組織遮罩的**實際解析度**。放進來是因為預覽是 64 格的馬賽克
+    # （見 `_tissue_cells`：逐像素輸出 SVG 會是幾 MB 且瀏覽器會卡），
+    # 而那個馬賽克讓人以為存下來的遮罩就是那麼粗——
+    # 2026-08-20 實際被問到「這解析度夠訓練嗎」。把真實數字寫在圖上，
+    # 這個誤會就不必每次用問的。
+    tr = rec.get("tissue_raster") or {}
+    mask_note = ""
+    try:
+        _mw, _mh = int(tr.get("mw") or 0), int(tr.get("mh") or 0)
+        if _mw > 0 and _mh > 0:
+            _sc = float(tr.get("m_scale") or 1.0)
+            mask_note = ("遮罩 %d×%d px（ROI 內，相對原圖 ×%.2f）・預覽為 64 格馬賽克，非原始解析度"
+                         % (_mw, _mh, _sc))
+    except (TypeError, ValueError):
+        mask_note = ""
     lines = [
         "%s ・ %s ・ %d×%d ・ 深度 %s"
         % (rec.get("code") or "-",
            ("%d 個傷口輪廓" % len(all_polys)) if len(all_polys) > 1 else ("%d 點" % len(poly)),
            w, h, rec.get("depth_source") or "none"),
         tissue_note + (("　" + fr) if fr else ""),
+        mask_note,
         "此圖為標註示意，不含任何原始影像像素",
     ]
+    lines = [t for t in lines if t]
     # overlay 模式沒有底部空間可寫字（viewBox 就是影像大小），
     # 這些資訊由主控台在圖外顯示——寫在圖上會蓋到傷口。
     if not overlay:
@@ -841,7 +872,14 @@ def _render_preview_svg(w, h, poly, cells, gw, gh, rec, tissue_note, rect=None,
                          % (h + fs * (i + 1.15), fs,
                             "#c62828" if t.startswith("⚠") else "#444", esc(t)))
     parts.append("</svg>")
-    return "".join(parts)
+
+    # 底部留白＝行數 × 字級 ＋ 字身餘裕。最後一行 baseline 在 `fs*(n-1+1.15)`，
+    # 底下還要容得下字身（約 0.3 個字級），所以 `n + 0.45` 是下界，取 0.8 留餘裕。
+    # **由實際行數算**——寫死常數在字級隨寬度成長時必然被切，而小圖測試看不出來。
+    pad = 0 if overlay else int(fs * (len(lines) + 0.8))
+    header = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" '
+              'width="100%%" font-family="sans-serif">' % (w, h + pad))
+    return header + "".join(parts)
 
 
 def quarantine_image(image_id, images_dir=None, quarantine_dir=None):
@@ -1339,6 +1377,12 @@ try:
                 "tissue_mask": bool(r.get("tissue_mask_key")),
                 "tissue_edited": bool(r.get("tissue_edited")),
                 "tissue_edit_px": r.get("tissue_edit_px"),
+                # 遮罩的**實際**解析度。預覽是 64 格馬賽克，容易讓人以為
+                # 存下來的就是那麼粗——訓練集夠不夠用要看這個數字，不是看預覽。
+                "tissue_mask_dim": (
+                    "%dx%d" % (int((r.get("tissue_raster") or {}).get("mw") or 0),
+                               int((r.get("tissue_raster") or {}).get("mh") or 0))
+                    if (r.get("tissue_raster") or {}).get("mw") else None),
                 "tissue_frac": r.get("tissue_frac"),
                 # 深度。**明確顯示 none 比欄位缺席重要**——日後回頭看
                 # 「這批為什麼沒有 3D」時，要分得出「沒拍」「拍了沒傳」「傳了被拒」。
@@ -1501,6 +1545,46 @@ try:
         return _Resp(raw, content_type="image/jpeg",
                      headers={"Cache-Control": "private, no-store",
                               "Content-Disposition": "inline"})
+
+
+    @flywheel_bp.route("/api/v1/flywheel/record/<image_id>/tissue_mask.png", methods=["GET"])
+    @jwt_required()
+    def get_record_tissue_mask(image_id):
+        """組織標註遮罩的原始 PNG（值＝組織碼 0..5，在 R 通道）。匯出訓練集用。
+
+        ## 為什麼不做一個通用的 `?key=` blob 端點
+
+        那會開出「任意鍵讀取」的攻擊面——一個參數之差就能讀到 `audit.jsonl`
+        或 `users.jsonl`。具名端點沒有那個參數可以被操縱，
+        而代價只是多寫幾行路由。**能不接受任意路徑就不要接受。**
+
+        權限比照 `image.jpg`：本人送件可看，其餘要 `audit.read`。
+        撤回同意的一律 410——遮罩與影像同進退，否則撤回只撤了一半。
+        """
+        actor, role, org = _who()
+        if not _can(role, "flywheel.stats"):
+            return jsonify({"error": "權限不足"}), 403
+        image_id = str(image_id or "").strip()
+        if not re.fullmatch(r"[0-9a-f]{8,40}", image_id):
+            return jsonify({"error": "image_id 格式不合"}), 400
+        recs = [r for r in read_jsonl(QUEUE) if r.get("image_id") == image_id]
+        if not recs:
+            return jsonify({"error": "查無此送件"}), 404
+        rec = recs[-1]
+        if rec.get("actor") != actor and not _can(role, "audit.read"):
+            return jsonify({"error": "權限不足"}), 403
+        wd_codes, wd_imgs = withdrawn_keys()
+        if image_id in wd_imgs or rec.get("code") in wd_codes or is_quarantined(image_id):
+            audit(actor, "tissue_mask_view_denied", rec.get("code", "?"),
+                  f"image_id={image_id} 已撤回訓練同意", role, org)
+            return jsonify({"error": "已依撤回同意隔離，不提供"}), 410
+        key = rec.get("tissue_mask_key")
+        raw = _store().get_blob(_key(os.path.join(FLYWHEEL_DIR, key))) if key else None
+        if raw is None:
+            return jsonify({"error": "此筆沒有組織遮罩"}), 404
+        from flask import Response as _Resp
+        return _Resp(raw, content_type="image/png",
+                     headers={"Cache-Control": "private, no-store"})
 
 
     @flywheel_bp.route("/api/v1/dataset/manifest", methods=["GET"])
