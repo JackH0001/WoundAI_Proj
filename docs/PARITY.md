@@ -28,7 +28,22 @@
 # 格式：<檢查項>: <識別子>  # 理由
 allow:
   annotation_field_missing_android: [depth_map_png, depth_conf_png, depth_format, depth_scale, camera_intrinsics]
+  endpoint_missing_android: [/api/v1/depth, /api/v1/lite/segment, /api/v1/lite/annotation]
 ```
+
+### iOS-only 端點（2026-08-21 宣告）
+
+三個 iOS 有、Android 無的端點。**兩者的「無」是不同性質的**，分開說：
+
+| 端點 | Android 為何沒有 | 消除計畫 |
+|---|---|---|
+| `/api/v1/depth` | 原始 LiDAR 深度補傳；Android 機型無 LiDAR | 隨上方深度欄位的 ARCore 決策一起定 |
+| `/api/v1/lite/segment` | WoundLite 是 **iOS 專屬產品**，Android 沒有民眾版 | **不打算消除**——這是產品邊界，不是實作落後 |
+| `/api/v1/lite/annotation` | 同上 | 同上 |
+
+⚠ 後兩者屬「永久宣告」。過期的宣告比沒有宣告危險，但**產品邊界造成的差異
+若不宣告，每次跑 parity 都會紅**，紅燈久了就沒人看——那才是真正的風險。
+若日後推出 Android 民眾版，這兩行要立刻刪掉。
 
 ### annotation 深度欄位（iOS 有、Android 無，2026-08-18 宣告）
 
@@ -91,7 +106,7 @@ Android 已在 `BackendClient.health()`、`BackendWarmup.degradedBanner()` 補�
 
 | 功能 | Android | iOS | 備註 |
 |---|---|---|---|
-| 個案結案 | ✅ | ⚠ repo 有方法，UI 無入口 | iOS 待補按鈕 |
+| 個案結案 | ✅ | ✅ | iOS：個案清單長按 →「結案」（2026-08-21 核對，此列先前過時） |
 | 個案刪除（限空個案） | ✅ | ❌ | iOS 待補 |
 | 時間軸單筆刪除 | ❌ | ❌ | 兩端都待補（規則已在 repo 層） |
 | ArUco 貼紙誤認排除 | ✅ | ✅ | iOS：≥70% 落在貼紙外擴 15% 框內的輪廓自動剔除＋提示 |

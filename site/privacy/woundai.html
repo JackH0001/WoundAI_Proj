@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WoundAI（臨床版）隱私權政策 / Privacy Policy</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { max-width: 44rem; margin: 0 auto; padding: 2rem 1.25rem 5rem;
+         font: 16px/1.75 -apple-system, "Segoe UI", "Noto Sans TC", sans-serif; }
+  h1 { font-size: 1.6rem; margin-bottom: .25rem; }
+  h2 { font-size: 1.15rem; margin-top: 2.25rem; border-bottom: 1px solid #8884; padding-bottom: .3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  .sub { color: #888; margin-top: 0; }
+  .key { background: #0a84ff14; border-left: 3px solid #0a84ff; padding: .75rem 1rem; margin: 1rem 0; }
+  .warn { background: #ff950014; border-left: 3px solid #ff9500; padding: .75rem 1rem; margin: 1rem 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .93rem; }
+  th, td { border: 1px solid #8884; padding: .5rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #8881; }
+  code { background: #8882; padding: .1rem .3rem; border-radius: 3px; font-size: .9em; }
+  .en { border-top: 2px solid #8884; margin-top: 3rem; padding-top: 1rem; }
+  footer { margin-top: 3rem; color: #888; font-size: .9rem; }
+  a { color: #0a84ff; }
+</style>
+</head>
+<body>
+
+<h1>WoundAI（臨床版）隱私權政策</h1>
+<p class="sub">最後更新：2026-08-21</p>
+
+<div class="warn">
+<strong>使用對象限制：</strong>本 App 供醫療機構之醫師、護理師與臨床助理使用，
+帳號由機構管理者開通，<strong>App 內不提供註冊</strong>。一般民眾請改用 WoundLite。
+</div>
+
+<div class="key">
+<strong>核心設計：</strong>病患的姓名與病歷號<strong>永遠不離開手機</strong>——
+它們以 AES-256-GCM 加密儲存於裝置本機。上傳到雲端的是去識別代碼
+（<code>WD-</code> 開頭）、傷口影像與量測值。
+</div>
+
+<h2>1. 這個 App 做什麼</h2>
+<p>以校正貼紙與（支援機型的）LiDAR 深度量測傷口面積、判讀組織比例、計算 PUSH 分數，
+並將結果存入該個案的時間軸。所有輸出為<strong>臨床輔助資訊，非診斷</strong>，須由醫師確認。</p>
+
+<h2>2. 資料分層：什麼留在本機、什麼上雲</h2>
+<table>
+<tr><th>資料</th><th>本機</th><th>上傳雲端</th></tr>
+<tr><td>病患姓名、病歷號、同意書簽名</td><td>✅ AES-256-GCM 加密</td><td><strong>❌ 永不上傳</strong></td></tr>
+<tr><td>去識別代碼（<code>WD-xxxxxxxx</code>）</td><td>✅</td><td>✅</td></tr>
+<tr><td>傷口影像</td><td>✅ 加密</td><td>✅（須②訓練同意）</td></tr>
+<tr><td>面積／組織比例／PUSH／滲液</td><td>✅</td><td>✅（須②訓練同意）</td></tr>
+<tr><td>LiDAR 深度圖與相機參數</td><td>✅ 加密</td><td>✅（須②訓練同意）</td></tr>
+<tr><td>醫師修邊後的傷口輪廓（GT）</td><td>✅</td><td>✅（須②訓練同意）</td></tr>
+<tr><td>臨床帳號與操作稽核軌跡</td><td>—</td><td>✅</td></tr>
+</table>
+
+<h2>3. 兩層同意</h2>
+<p>本 App 將同意拆成兩項獨立勾選，病患可只同意其一：</p>
+<ul>
+<li><strong>① 臨床照護同意</strong>——同意以本工具進行量測並記錄於病歷。</li>
+<li><strong>② 訓練同意</strong>——<strong>額外</strong>同意將去識別的影像、輪廓、
+組織遮罩與深度幾何資料上傳，供 AI 模型訓練與量測精度研究。</li>
+</ul>
+<p>未取得②時，量測照常可用、可存入病歷，但<strong>任何資料都不會進入訓練佇列</strong>。
+撤回②之後，該病患的既有樣本會由伺服器標記為撤回並排除於後續訓練與資料集匯出。</p>
+
+<h2>4. 稽核軌跡</h2>
+<p>為符合臨床可追溯性要求，伺服器保存操作稽核紀錄（誰、以什麼角色、在何時、
+對哪一個去識別代碼、做了什麼、結果為何），並以雜湊鏈與唯寫（WORM）儲存保護，
+使既有紀錄無法被事後竄改。稽核紀錄<strong>不含病患可識別資訊</strong>。</p>
+
+<h2>5. 影像保存期限</h2>
+<p>個案<strong>結案後滿 90 天</strong>，該個案的本機影像與其加密深度側檔由 App 自動清除。
+時間軸上的量測數值與趨勢不受影響（它們是病歷內容，須留痕）。</p>
+<p><strong>照護中（未結案）的個案不會自動清除影像</strong>——傷口追蹤需要前後對照，
+自動刪掉進行中的病程影像會讓比較失去依據。結案由臨床人員在個案清單上執行。</p>
+<p>雲端訓練樣本的保存依研究倫理審查核定之計畫書辦理。</p>
+
+<h2>6. 安全措施</h2>
+<ul>
+<li>本機敏感欄位與影像：AES-256-GCM；金鑰存於 Keychain 並標記
+<code>ThisDeviceOnly</code>（不隨 iCloud Keychain 同步到其他裝置）。</li>
+<li>傳輸：一律 HTTPS（App Transport Security 強制，不允許任意明文連線）。</li>
+<li>存取控制：角色權限矩陣（醫師／護理師／助理／工程師／管理者）；
+「醫師確認」這類具臨床效力的動作由伺服器再次驗證角色，不採信客戶端宣告。</li>
+</ul>
+
+<h2>7. 病患權利</h2>
+<p>病患可透過其照護團隊要求查詢、更正或撤回訓練同意。
+撤回後既有樣本停止用於後續訓練；已完成訓練之模型參數在技術上無法回溯移除個別樣本的影響，
+此點在同意書中亦已載明。</p>
+
+<h2>8. 聯絡方式</h2>
+<p><a href="mailto:jack.hou@gmail.com">jack.hou@gmail.com</a></p>
+
+<!-- ============ ENGLISH ============ -->
+<div class="en">
+<h1>WoundAI (Clinical) Privacy Policy</h1>
+<p class="sub">Last updated: 2026-08-21</p>
+
+<div class="warn">
+<strong>Intended users:</strong> physicians, nurses and clinical assistants at healthcare
+institutions. Accounts are provisioned by an institutional administrator;
+<strong>no in-app registration is offered</strong>. Members of the public should use WoundLite.
+</div>
+
+<div class="key">
+<strong>Core design:</strong> patient names and medical record numbers <strong>never leave the
+device</strong> — they are stored locally with AES-256-GCM encryption. What is uploaded is a
+de-identified code (prefix <code>WD-</code>), wound images and measurements.
+</div>
+
+<h2>1. What this app does</h2>
+<p>Measures wound area using a calibration sticker and (on supported devices) LiDAR depth,
+estimates tissue composition, computes PUSH scores, and records results on the case timeline.
+All output is <strong>clinical decision support, not diagnosis</strong>, and requires clinician confirmation.</p>
+
+<h2>2. Data tiers</h2>
+<table>
+<tr><th>Data</th><th>On device</th><th>Uploaded</th></tr>
+<tr><td>Patient name, record number, consent signature</td><td>✅ AES-256-GCM</td><td><strong>❌ Never</strong></td></tr>
+<tr><td>De-identified code (<code>WD-xxxxxxxx</code>)</td><td>✅</td><td>✅</td></tr>
+<tr><td>Wound images</td><td>✅ encrypted</td><td>✅ (requires training consent)</td></tr>
+<tr><td>Area / tissue / PUSH / exudate</td><td>✅</td><td>✅ (requires training consent)</td></tr>
+<tr><td>LiDAR depth and camera intrinsics</td><td>✅ encrypted</td><td>✅ (requires training consent)</td></tr>
+<tr><td>Clinician-corrected outline (ground truth)</td><td>✅</td><td>✅ (requires training consent)</td></tr>
+<tr><td>Clinical account and audit trail</td><td>—</td><td>✅</td></tr>
+</table>
+
+<h2>3. Two-tier consent</h2>
+<p>Consent is split into two independent items; a patient may grant only the first:</p>
+<ul>
+<li><strong>① Clinical care consent</strong> — to be measured with this tool and recorded.</li>
+<li><strong>② Training consent</strong> — <strong>additionally</strong> to have de-identified
+images, outlines, tissue masks and depth geometry uploaded for AI model training and
+measurement accuracy research.</li>
+</ul>
+<p>Without ②, measurement and record-keeping work normally but <strong>nothing enters the
+training queue</strong>. On withdrawal, existing samples are marked withdrawn on the server and
+excluded from subsequent training and dataset exports.</p>
+
+<h2>4. Audit trail</h2>
+<p>For clinical traceability the server retains an audit log (who, in what role, when, on which
+de-identified code, what action, what result), protected by a hash chain and write-once (WORM)
+storage so existing entries cannot be altered retroactively. Audit entries contain
+<strong>no patient-identifying information</strong>.</p>
+
+<h2>5. Image retention</h2>
+<p>Local images and their encrypted depth sidecars are purged automatically
+<strong>90 days after the case is closed</strong>. Measurement values and trends on the timeline
+are unaffected (they are part of the medical record and must be retained).</p>
+<p><strong>Images of active (unclosed) cases are not auto-purged</strong> — wound tracking depends
+on before/after comparison, and deleting images from an ongoing course of care would remove the
+basis for that comparison. Closure is performed by clinical staff from the case list.</p>
+<p>Cloud training samples are retained per the approved research ethics protocol.</p>
+
+<h2>6. Security</h2>
+<ul>
+<li>Local sensitive fields and images: AES-256-GCM; keys held in Keychain with
+<code>ThisDeviceOnly</code> (not synced to other devices via iCloud Keychain).</li>
+<li>Transport: HTTPS enforced by App Transport Security; arbitrary cleartext loads disabled.</li>
+<li>Access control: role permission matrix; clinically meaningful actions such as
+"clinician verified" are re-checked server-side and never trusted from the client.</li>
+</ul>
+
+<h2>7. Patient rights</h2>
+<p>Patients may request access, correction, or withdrawal of training consent through their care
+team. After withdrawal, existing samples cease to be used for further training. Note that the
+influence of an individual sample on an already-trained model cannot be technically reversed;
+this is stated in the consent form.</p>
+
+<h2>8. Contact</h2>
+<p><a href="mailto:jack.hou@gmail.com">jack.hou@gmail.com</a></p>
+</div>
+
+<footer>
+<p><a href="./">← 返回 / Back</a></p>
+</footer>
+</body>
+</html>
