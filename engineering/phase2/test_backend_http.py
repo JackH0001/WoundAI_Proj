@@ -25,14 +25,31 @@ def main():
     # 1 登入
     r = requests.post(f"{U}/api/auth/login", json={"username": a.user, "password": a.pw}, timeout=10)
     if r.status_code != 200:
-        print("登入失敗", r.status_code, r.text[:120]); return
+        print("登入失敗", r.status_code, r.text[:120]); return 1
+    tok = r.json().get("access_token"); admin_h = {"Authorization": f"Bearer {tok}"}
+    print("管理者登入 OK")
+
+    # RBAC 上線後 admin 刻意不能替醫師背書 GT。HTTP 整合測試先用管理者建立
+    # 一個隔離環境用醫師帳號，再以醫師 token 跑臨床資料鏈；否則測到的是
+    # 「管理者越權被正確擋下」，不是 annotation/consent 的端到端行為。
+    clinical_user, clinical_pw = "http-test-physician", "http-test-physician-1234"
+    r = requests.post(f"{U}/api/v1/users", headers=admin_h,
+                      json={"user": clinical_user, "role": "physician",
+                            "password": clinical_pw, "display_name": "HTTP integration test"},
+                      timeout=10)
+    if r.status_code != 200:
+        print("建立測試醫師失敗", r.status_code, r.text[:160]); return 1
+    r = requests.post(f"{U}/api/auth/login",
+                      json={"username": clinical_user, "password": clinical_pw}, timeout=10)
+    if r.status_code != 200:
+        print("測試醫師登入失敗", r.status_code, r.text[:160]); return 1
     tok = r.json().get("access_token"); H = {"Authorization": f"Bearer {tok}"}
-    print("登入 OK")
+    print("測試醫師登入 OK")
 
     if not a.img:
         print("(未提供 --img:跳過 classify 與飛輪資料鏈測試——新契約需 image_id,無影像測不了)")
         print("\n總結: 略過 ⚠")
-        return
+        return 0
 
     # 2 classify:schema + 影像綁定欄位
     # ⚠ 每輪必須用「內容不同」的影像:image_id 是內容雜湊,而本測試結尾會撤回同意;
@@ -45,14 +62,14 @@ def main():
     r = requests.post(f"{U}/api/v1/classify", headers=H,
                       files={"image": ("wound.jpg", payload, "image/jpeg")}, timeout=120)
     if r.status_code != 200:
-        print("classify HTTP", r.status_code, r.text[:160]); print("\n總結: 有 FAIL ✗"); return
+        print("classify HTTP", r.status_code, r.text[:160]); print("\n總結: 有 FAIL ✗"); return 1
     j = r.json()
     good, iss = validate(j); print("classify schema:", "PASS" if good else f"FAIL {iss}"); ok &= good
     iid, iw, ih = j.get("image_id"), j.get("image_w"), j.get("image_h")
     bind = bool(iid) and (iw or 0) > 0 and (ih or 0) > 0
     print(f"classify 影像綁定: {'PASS' if bind else 'FAIL'} (image_id={iid}, {iw}x{ih})"); ok &= bind
     if not bind:
-        print("\n總結: 有 FAIL ✗(後端未重啟?image_id/image_w/image_h 是本輪新增)"); return
+        print("\n總結: 有 FAIL ✗(後端未重啟?image_id/image_w/image_h 是本輪新增)"); return 1
 
     # 2b 模擬圖模式:確認執行中的後端**真的**是含 seg=color 的版本。
     # 這一項專治「改了 app.py 但忘記重啟」——Flask debug=False 不熱載,舊進程會默默忽略 seg 參數,
@@ -128,6 +145,7 @@ def main():
 
     print("\n總結:", "全部 PASS ✓" if ok else "有 FAIL ✗")
     print("提示:本腳本會寫入產線 flywheel/。要完全隔離,啟動後端時設 WOUNDAI_FLYWHEEL_DIR=<暫存目錄>。")
+    return 0 if ok else 1
 
 
-if __name__ == "__main__": main()
+if __name__ == "__main__": sys.exit(main())

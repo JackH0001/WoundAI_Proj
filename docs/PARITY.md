@@ -45,6 +45,12 @@ allow:
 若不宣告，每次跑 parity 都會紅**，紅燈久了就沒人看——那才是真正的風險。
 若日後推出 Android 民眾版，這兩行要立刻刪掉。
 
+補充（來自 `codex/windows-preclinical-readiness-20260821` 的宣告，合併時刻意保留）：
+
+- `/api/v1/depth`：在 ARCore 決策定案之前，**不可只為了讓 parity 變綠而加一個沒有資料來源的空呼叫**。
+- `/api/v1/lite/*`：若日後建立 Android Lite variant，要做的不只是刪掉這兩行宣告，還必須接上
+  完整的身分、同意與資料隔離流程——**不可把 Lite 權限混入醫療端 App**。
+
 ### annotation 深度欄位（iOS 有、Android 無，2026-08-18 宣告）
 
 iOS 隨標註上傳 LiDAR 深度圖（`depth_map_png` png16_mm）＋置信度＋內參＋尺度，

@@ -11,6 +11,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from distill_pseudo_gen import gate_metrics, GATE  # noqa: E402
+from imio import imwrite_any  # noqa: E402
 
 
 def disc(cx=128, cy=128, r=40, p_in=0.95, size=256, blur=0.0):
@@ -90,7 +91,8 @@ def test_來源展開_glob指到目錄也算數_且stem不碰撞(tmp_path):
                  ("AZH/image", 2), ("deep/sub/image", 1)]:
         (root / d).mkdir(parents=True)
         for i in range(n):
-            cv2.imwrite(str(root / d / f"w{i}.png"), np.full((40, 50, 3), 100, np.uint8))
+            assert imwrite_any(str(root / d / f"w{i}.png"),
+                               np.full((40, 50, 3), 100, np.uint8))
 
     got = collect([str(root / "**" / "image")])
     assert len(got) == 6, [p for _, p in got]              # glob 命中目錄要展開
@@ -119,9 +121,12 @@ def test_已標註集不進偽標籤_內容重複只留一份(tmp_path, monkeypa
     for d in ("a/image", "a/labels", "b/image", "c/image"):
         (tmp_path / d).mkdir(parents=True)
     for i in range(3):
-        cv2.imwrite(str(tmp_path / "a/image" / f"w{i}.png"), np.full((60, 80, 3), 50 + i * 30, np.uint8))
-        cv2.imwrite(str(tmp_path / "a/labels" / f"w{i}.png"), np.zeros((60, 80), np.uint8))
-    cv2.imwrite(str(tmp_path / "b/image/u0.png"), np.full((60, 80, 3), 200, np.uint8))
+        assert imwrite_any(str(tmp_path / "a/image" / f"w{i}.png"),
+                           np.full((60, 80, 3), 50 + i * 30, np.uint8))
+        assert imwrite_any(str(tmp_path / "a/labels" / f"w{i}.png"),
+                           np.zeros((60, 80), np.uint8))
+    assert imwrite_any(str(tmp_path / "b/image/u0.png"),
+                       np.full((60, 80, 3), 200, np.uint8))
     import shutil; shutil.copy(tmp_path / "a/image/w0.png", tmp_path / "c/image/dup.png")
 
     assert G.sibling_gt(str(tmp_path / "a/image/w0.png")) is not None
@@ -152,7 +157,8 @@ def test_產生器全流程_只留通過者(monkeypatch, tmp_path):
     src = tmp_path / "image"; src.mkdir()
     # 三張內容必須不同,否則會被「內容重複」去重(那也是正確行為,見 test_內容重複只留一份)
     for k, n in enumerate(("good", "bad_empty", "bad_flip")):
-        cv2.imwrite(str(src / f"{n}.png"), np.full((300, 400, 3), 60 + k * 40, np.uint8))
+        assert imwrite_any(str(src / f"{n}.png"),
+                           np.full((300, 400, 3), 60 + k * 40, np.uint8))
     onnx = tmp_path / "onnx"; onnx.mkdir()
     for f in ("a_unet.onnx", "unetpp.onnx"): (onnx / f).write_bytes(b"stub")
 
