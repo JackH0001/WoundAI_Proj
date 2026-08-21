@@ -66,15 +66,7 @@ struct LiteHistoryView: View {
 
     private func row(_ r: LiteRecord) -> some View {
         HStack(spacing: 10) {
-            if let t = store.images.loadThumbnail(r.imageName) {
-                Image(uiImage: t)
-                    .resizable().scaledToFill()
-                    .frame(width: 46, height: 46).clipped().cornerRadius(6)
-            } else {
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.secondary.opacity(0.15))
-                    .frame(width: 46, height: 46)
-            }
+            LiteThumb(name: r.imageName, store: store)
             VStack(alignment: .leading, spacing: 2) {
                 Text(String(format: "%.2f cm²", r.surfaceCm2)).font(.headline)
                 Text(Self.pretty(r.dateISO) + (r.source == "cloud" ? "・雲端辨識" : "・手動圈選"))
@@ -106,6 +98,49 @@ struct LiteHistoryView: View {
         let f = DateFormatter()
         f.dateFormat = "M/d HH:mm"
         return f.string(from: d)
+    }
+}
+
+/**
+ 列表縮圖。**這不是最佳化，是修 bug。**
+
+ 2026-08-19 實機出現 `Terminated due to memory issue (code 9)`（jetsam）。
+ 主嫌就是這裡的前一版：直接在 SwiftUI 的 `body` 裡同步呼叫 `loadThumbnail`
+ ——而 body 會被反覆求值（捲動、@Published 更新、sheet 開關各一次），
+ 於是每個可見列每次重繪都做一輪「AES-GCM 解密整張 JPEG → 建 CGImageSource
+ → 解碼縮圖」。CPU 與**暫態記憶體**同時爆，捲幾列就被系統收掉。
+
+ 醫療版 `TimelineCharts` 早就是對的做法（`.task(id:)`＋背景緒＋@State），
+ 該處註解甚至寫著「清單捲幾列就 OOM」。這裡把 Lite 拉回同一套：
+
+ · `.task(id:)` → 每列只在出現／換資料時載一次，不隨重繪重跑
+ · `Task.detached` → 解密與解碼不佔主執行緒
+ · `maxPixel: 160` → 46pt @3x ≈ 138px，載 256px 是白白多 4 倍像素
+ */
+private struct LiteThumb: View {
+    let name: String
+    let store: LiteStore
+    @State private var img: UIImage?
+
+    var body: some View {
+        Group {
+            if let img {
+                Image(uiImage: img).resizable().scaledToFill()
+            } else {
+                RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.15))
+            }
+        }
+        .frame(width: 46, height: 46)
+        .clipped()
+        .cornerRadius(6)
+        .task(id: name) {
+            guard !name.isEmpty, img == nil else { return }
+            let s = store.images
+            let n = name
+            img = await Task.detached(priority: .utility) {
+                s.loadThumbnail(n, maxPixel: 160)
+            }.value
+        }
     }
 }
 
@@ -165,7 +200,7 @@ struct LiteRecordDetailView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("關閉") { dismiss() } }
             }
         }
-        .onAppear(perform: load)
+        .task { await load() }
         .fullScreenCover(isPresented: $editing) {
             if let img = image {
                 WoundEditView(image: img, initialPolygons: polys, originalArea: nil,
@@ -202,13 +237,17 @@ struct LiteRecordDetailView: View {
         .cornerRadius(10)
     }
 
-    private func load() {
+    /// 詳情頁載圖。**必須非同步**：`loadFull` 是「解密整張 JPEG ＋ 全解析度解碼」，
+    /// 在 `onAppear` 同步做會卡住開場動畫，且與縮圖同屬 jetsam 的記憶體來源。
+    private func load() async {
         guard let r = record else { return }
-        image = store.images.loadFull(r.imageName)
         if let j = r.polysJson, let d = j.data(using: .utf8),
            let ps = try? JSONDecoder().decode([[[Int]]].self, from: d) {
             polys = ps
         }
+        let s = store.images
+        let n = r.imageName
+        image = await Task.detached(priority: .userInitiated) { s.loadFull(n) }.value
     }
 
     /// 重新圈選完成：讀回深度側檔 → 背景重算 → 品質過閘才覆寫紀錄。

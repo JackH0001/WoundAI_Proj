@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  民眾版隱私宣告（App Store 自 2024-05 起強制）。
+
+	  與醫療版最重要的差別：**Linked = false**。民眾版沒有帳號、沒有註冊、
+	  沒有登入；資料以裝置端隨機生成的 `anon_id` 歸檔（`LitePrefs.anonId`），
+	  它是限流鍵與撤回鍵，不指向任何自然人。
+
+	  ⚠ 這裡宣告的是「同意研究上傳時**可能**蒐集什麼」。使用者若選擇不同意，
+	  App 走完全離線的手動圈選路徑，什麼都不上傳（後端 `research_consent=false`
+	  分支亦不落地，見 docs/lite_backend_contract.md）。隱私宣告描述能力邊界，
+	  同意流程描述實際發生——兩者都要說得出口。
+	-->
+
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array>
+		<!-- 去識別的傷口影像（僅在使用者同意研究上傳時） -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypePhotosorVideos</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+				<string>NSPrivacyCollectedDataTypePurposeOther</string>
+			</array>
+		</dict>
+
+		<!--
+		  LiDAR 深度圖、相機內參、量測數值、使用者圈選的輪廓。
+		  歸在 OtherDiagnosticData：它們是幾何與量測資料，不是可辨識個人的內容。
+		-->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeOtherDiagnosticData</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+				<string>NSPrivacyCollectedDataTypePurposeOther</string>
+			</array>
+		</dict>
+	</array>
+
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<!--
+		  UserDefaults：研究同意選擇、裝置匿名代碼、同意文案版本
+		  （`WoundLite/LiteApp.swift` 的 LitePrefs）。只供本 App 使用 → CA92.1。
+		-->
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

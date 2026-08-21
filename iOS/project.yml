@@ -68,6 +68,10 @@ targets:
       # 使用手冊：與 Android assets/manual.html 同一份檔（兩端共用，內容才不會分岔）。
       - path: WoundMeasurementApp/Resources/manual.html
         buildPhase: resources
+      # 隱私宣告（2024-05 起 App Store 強制）。**必須進 resources**——
+      # 放進 build 卻沒被打包，上傳時才會收到 ITMS-91053 而那時已經在等審查了。
+      - path: WoundMeasurementApp/PrivacyInfo.xcprivacy
+        buildPhase: resources
       - path: WoundMeasurementApp/Info.plist
         buildPhase: none
     settings:
@@ -103,16 +107,31 @@ targets:
       # （boundaryOnly 模式＝民眾版圈選；雙指縮放平移/undo/亮青邊界線同一套）。
       - path: WoundMeasurementApp/UI/CameraCaptureView.swift
       - path: WoundMeasurementApp/UI/WoundEditView.swift
+      # ⚠ 目錄掃描要排除下面被「明確列出」的項目，否則同一個檔案進兩次
+      #   build phase → "Multiple commands produce ..." 而錯誤訊息指向產物路徑，
+      #   看不出是設定重複。
       - path: WoundLite
+        excludes:
+          - "Assets.xcassets"
+          - "Assets.xcassets/**"
+          - "Models"
+          - "Models/**"
+          - "Info.plist"
+          - "PrivacyInfo.xcprivacy"
       # 地端分割模型保留槽：WoundSegLite.mlmodel 丟進 WoundLite/Models/ 後
       # 重跑 xcodegen 即編進 bundle、LiteLocalSeg.available 轉真（規格見 MODEL_SPEC.md）。
       - path: WoundLite/Models
         optional: true
         excludes:
           - "*.md"
-      # v1 先共用醫療版的資產目錄（AppIcon 之後再分家）。
-      - path: WoundMeasurementApp/Assets.xcassets
+      # 2026-08-21 分家：Lite 有自己的資產目錄。**兩個 App 的圖示必須不同**
+      # ——同帳號下外觀相近的 App 可能被以 Guideline 4.3（重複）質疑，
+      # 而真正的風險是醫護人員兩個都裝、點錯進民眾版還以為數字能寫病歷。
+      # 圖示由 tools/make_app_icons.py 產生（該腳本是圖示的 SSOT）。
+      - path: WoundLite/Assets.xcassets
         type: folder.assetcatalog
+        buildPhase: resources
+      - path: WoundLite/PrivacyInfo.xcprivacy
         buildPhase: resources
       - path: WoundLite/Info.plist
         buildPhase: none
