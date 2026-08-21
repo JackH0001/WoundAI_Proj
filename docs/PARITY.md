@@ -28,7 +28,16 @@
 # 格式：<檢查項>: <識別子>  # 理由
 allow:
   annotation_field_missing_android: [depth_map_png, depth_conf_png, depth_format, depth_scale, camera_intrinsics]
+  endpoint_missing_android: [/api/v1/depth, /api/v1/lite/annotation, /api/v1/lite/segment]
 ```
+
+### iOS 專屬端點（2026-08-21 宣告）
+
+- `/api/v1/depth`：目前資料來源是 iOS LiDAR。Android 是否實作 ARCore Depth，需等同一套
+  phantom protocol 完成後依誤差決策；在此之前不可只為 parity 加一個沒有資料來源的空呼叫。
+- `/api/v1/lite/annotation`、`/api/v1/lite/segment`：目前 WoundLite 是獨立的 iOS 民眾版產品面，
+  Android repo 內是醫療端 App。若未來建立 Android Lite variant，應移除這兩項宣告並接上完整
+  身分、同意與資料隔離流程，而不是把 Lite 權限混入醫療端。
 
 ### annotation 深度欄位（iOS 有、Android 無，2026-08-18 宣告）
 
