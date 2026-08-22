@@ -1761,7 +1761,14 @@ try:
         受試者日後再次同意也補不回來,而端點只會回一句「已撤回」。
         寫入 action:"restore" 紀錄(不刪除原撤回紀錄,稽核軌跡保持完整),並把影像搬回 images/。"""
         d = request.get_json(silent=True) or {}
-        code = d.get("code"); actor = get_jwt_identity() or "unknown"
+        code = d.get("code")
+        actor, role, org = _who()
+        # restore 是 withdraw 的**反向操作**：它把病人已撤回的同意復原，並把隔離中的
+        # 影像搬回訓練區。權限要求必須與 withdraw 完全相同——先前這裡只有
+        # @jwt_required()，任何已登入角色（含 assistant／lite）都能撤銷病人的撤回。
+        if not _can(role, "patient.manage"):
+            return jsonify({"error": "權限不足",
+                            "issues": [f"角色 {role} 不得恢復同意（僅醫師/護理師）。"]}), 403
         if not code:
             return jsonify({"error": "缺 code"}), 400
         _, wd_imgs = withdrawn_keys()
