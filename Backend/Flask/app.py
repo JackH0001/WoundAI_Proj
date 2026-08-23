@@ -788,51 +788,29 @@ def batch_analyze():
 @app.route('/api/train', methods=['POST'])
 @jwt_required()
 def contribute_training_data():
-    """接收用戶標註的訓練數據，用於模型改進"""
-    try:
-        session_id = request.headers.get('Session-ID', 'anonymous')
-        
-        image_file = request.files.get('image')
-        ground_truth_mask = request.files.get('mask')  # 用戶標註的遮罩
-        metadata = request.form.get('metadata')  # JSON格式的元數據
-        
-        if not image_file:
-            return jsonify({'error': '缺少圖像文件'}), 400
-        
-        # 處理圖像和遮罩
-        image_array = process_uploaded_image(image_file)
-        image_hash = calculate_image_hash(image_array)
-        
-        # 保存訓練數據
-        image_path = save_training_image(image_array, image_hash)
-        
-        mask_path = None
-        if ground_truth_mask:
-            mask_array = process_uploaded_image(ground_truth_mask)
-            mask_path = save_training_mask(mask_array, image_hash)
-        
-        # 解析元數據
-        meta_info = json.loads(metadata) if metadata else {}
-        
-        # 存儲到訓練數據庫
-        save_training_data_record(
-            image_hash, image_path, mask_path, meta_info, session_id
-        )
-        
-        logger.info(f"收到訓練數據: Hash={image_hash[:8]}, Session={session_id}")
-        
-        return jsonify({
-            'success': True,
-            'message': '訓練數據已接收，將用於模型改進',
-            'data_id': image_hash,
-            'session_id': session_id
-        })
-        
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+    """**已退役**（2026-08-21）。舊實作已完整刪除，不是註解掉、也不是改名保留。
+
+    這是飛輪之前的舊訓練資料入口。它只要求登入，沒有醫師資格、沒有
+    annotation.submit、沒有去識別化驗證、沒有 consent_train、沒有 image_id
+    綁定——/api/v1/annotation 上每一道守門，這條路徑都繞過。
+    全 repo 零呼叫端（2026-08-21 實查）。
+
+    **為什麼不把舊實作改名留著**：留一個可呼叫的繞過路徑在 production source
+    裡，只要有人把 handler 改成 `return _legacy()` 就整條復活，而靜態測試若只看
+    handler 直接呼叫了什麼就抓不到。稽核需求由 git history 負責，那才是稽核紀錄
+    該待的地方。
+
+    保留路由回 410（而非刪掉路由）是為了讓殘存呼叫端收到明確訊息，
+    而不是一個看起來像部署出錯的 404。
+    """
+    return jsonify({
+        'error': 'endpoint retired',
+        'message': '/api/train 已退役。請改用 POST /api/v1/annotation（需醫師角色、'
+                   'image_id 綁定、去識別化與訓練同意驗證）。',
+        'replacement': '/api/v1/annotation',
+        'retired_at': '2026-08-21',
+    }), 410
+
 
 @app.route('/api/model/retrain', methods=['POST'])
 @jwt_required()
