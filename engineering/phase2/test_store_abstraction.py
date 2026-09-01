@@ -36,7 +36,10 @@ def check(name, ok, detail=""):
         FAILED.append(name)
 
 
-class FakeObjectStore:
+from store import Store
+
+
+class FakeObjectStore(Store):
     """模擬物件儲存：不可變物件、無 append、無 rename、無目錄。"""
 
     def __init__(self):
@@ -97,6 +100,9 @@ def main():
 
     # 影像先進儲存（模擬 classify）
     fake.put_blob("images/%s.jpg" % IID, b"\xff\xd8fake-jpeg\xff\xd9")
+    fake.put_blob("receipts/legacy_ratification.json", json.dumps({
+        "schema": "woundai.legacy-ratification/1", "image_ids": [IID],
+        "approved_by": "SYNTHETIC TEST FIXTURE - NOT AN OWNER APPROVAL"}).encode())
 
     # 1 附加與讀回
     fw.append_jsonl(fw.QUEUE, {**BASE, "received_at": "2026-08-03T10:00:00Z"})

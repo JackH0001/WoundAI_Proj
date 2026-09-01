@@ -340,6 +340,15 @@ fun MeasureValidationEntry(
                 exudate = exudate, onExudate = { exudate = it },
                 // 臨床模式 source 已鎖定 → 傳 onSource=null 讓選擇器整組隱藏（少一次必選、也少一次選錯）
                 source = source, onSource = if (clinicalMode) null else ({ s: String -> source = s }),
+                careCodeProvider = {
+                    val chosen = case
+                    if (clinicalMode) {
+                        val current = chosen?.let { repo.activeConsent(it.patientId) }
+                        chosen?.wdCode?.takeIf { current?.consentCare == true && current.withdrawnAt == null }
+                    } else if (source == "sample" || source == "phantom") {
+                        com.woundmeasurement.app.data.entity.WoundCaseEntity.newWdCode()
+                    } else null
+                },
                 allowClinicalSource = clinicalMode,   // 快速量測不得產生臨床樣本(沒有個案就是孤兒紀錄)
                 // ⚠ 同意閘門放在「真的會產生資料的那一步」,不是只放在入口——
                 // 只擋入口的話,任何新入口(例如最近就診)都可能繞過去。
@@ -436,9 +445,12 @@ private fun DoctorFlywheelSubmit(
             onClick = {
                 // 臨床樣本用個案的**穩定** wdCode(回診沿用同一組);範例/模擬圖沒有個案才另發,
                 // 但同樣不可用 timestamp 尾碼(27.8 小時就循環、跨日必碰撞)。
-                val code = case?.wdCode
-                    ?: com.woundmeasurement.app.data.entity.WoundCaseEntity.newWdCode()
+                val code = vm.lastCareCode
                 scope.launch {
+                    if (code == null || (isClinical && case?.wdCode != code)) {
+                        vm.reportSubmitBlocked("⚠️ 缺照護收據綁定或個案已切換，請重新量測")
+                        return@launch
+                    }
                     // ⚠ 送出當下**重新讀取**同意真值,不用畫面上的快照:
                     // 醫師可能剛在個案管理頁撤回訓練同意,而快照仍是舊的 true——
                     // 那就等於又回到「宣稱已同意但其實沒有」的原始缺陷,只是換了個形式。

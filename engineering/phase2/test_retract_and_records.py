@@ -100,6 +100,9 @@ def main():
             f.write(jpg)
         ids[tag] = iid
 
+    from _synthetic_receipts import ratify_synthetic
+    ratify_synthetic(tmp, ids.values())
+
     def anno(iid, code, poly=None):
         return {"code": code, "gt_polygon": poly or [[100, 100], [500, 100], [500, 400], [100, 400]],
                 "exudate": 1, "doctor_verified": True, "deidentified": True, "consent_train": True,

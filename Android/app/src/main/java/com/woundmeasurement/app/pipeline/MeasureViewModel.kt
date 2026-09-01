@@ -90,6 +90,8 @@ class MeasureViewModel(
     // 缺這些,送出的標註就是無影像的孤兒 GT,永遠訓練不了(2026-07-28 稽核發現舊佇列 8/8 皆如此)。
     @Volatile var lastImageId: String? = null
         private set
+    @Volatile var lastCareCode: String? = null
+        private set
     @Volatile var lastImageW: Int = 0
         private set
     @Volatile var lastImageH: Int = 0
@@ -132,6 +134,7 @@ class MeasureViewModel(
      * 端上路徑(analyze)沒有後端影像綁定,故 imageId 一律為 null,送標註時會被守門擋下。
      */
     private fun clearBackendBinding(alsoBitmap: Boolean = false) {
+        lastCareCode = null
         lastPolygon = emptyList(); lastPolygons = emptyList()
         lastCorrectionIou = null
         lastMmPerPx = null; lastMarkerQuad = null; lastCalibMethod = null; lastWbGains = null
@@ -218,7 +221,8 @@ class MeasureViewModel(
         backend: BackendClient,
         exudate: Int? = null,
         cmPerPixel: Double? = null,
-        seg: String? = null            // "color"=印刷模擬圖走色彩分割(不碰模型);null=AI
+        seg: String? = null,           // "color"=印刷模擬圖走色彩分割(不碰模型);null=AI
+        careCodeProvider: (suspend () -> String?)? = null
     ) {
         _state.value = _state.value.copy(loading = true, error = null)
         clearBackendBinding()   // 先清舊綁定:失敗時不可留著上一張的 image_id 讓醫師誤送
@@ -245,9 +249,13 @@ class MeasureViewModel(
                 var routeCap: String? = null; var modelCap: String? = null
                 var hintCap = false; var reusedCap = false
                 var qualCap: Map<String, Double> = emptyMap()
+                val careCode = careCodeProvider?.invoke()  // re-read consent at upload, never reuse a UI snapshot
                 val r = withContext(Dispatchers.IO) {
                     val jpeg = work.toJpeg()
-                    val c = backend.classify(jpeg, cppWork, seg)
+                    val receipt = careCode?.let { runCatching { backend.attestCare(it) }.getOrNull() }
+                    val c = backend.classify(jpeg, cppWork, seg, receipt)
+                    check(c.imageW == work.width && c.imageH == work.height) { "後端影像座標空間不一致" }
+                    lastCareCode = if (receipt != null && c.persisted) careCode else null
                     polyCap = c.woundPolygon
                     polysCap = c.woundPolygons
                     mmCap = c.mmPerPx
@@ -441,6 +449,10 @@ class MeasureViewModel(
         imageStore: com.woundmeasurement.app.data.store.LocalImageStore? = null
     ) {
         val r = _state.value.result ?: return
+        if (case != null && lastCareCode != null && case.wdCode != lastCareCode) {
+            reportSubmitBlocked("⚠️ 量測後個案已切換，不得把舊影像存入另一個案；請重新量測")
+            return
+        }
         _state.value = _state.value.copy(submitStatus = "存入時間軸中…")
         viewModelScope.launch {
             try {
@@ -469,7 +481,7 @@ class MeasureViewModel(
                             // 否則刪病患的 CASCADE 帶不走這筆,會留下孤兒紀錄
                             patientId = case?.patientId ?: exist.patientId,
                             isPatientIdentified = (case?.patientId ?: exist.patientId) != null,
-                            caseId = case?.id ?: exist.caseId, wdCode = case?.wdCode ?: exist.wdCode,
+                            caseId = case?.id ?: exist.caseId, wdCode = lastCareCode ?: case?.wdCode ?: exist.wdCode,
                             imageId = lastImageId ?: exist.imageId, mmPerPx = lastMmPerPx ?: exist.mmPerPx,
                             route = lastRoute ?: exist.route, source = source ?: exist.source,
                             // 修邊後再存 → 輪廓要更新(這正是補送標註要用的 GT)
@@ -530,7 +542,7 @@ class MeasureViewModel(
                             dataPath = "",
                             notes = notes,
                             // 綁定個案與雲端影像:本機病歷與飛輪樣本靠 wdCode/imageId 對得起來
-                            caseId = case?.id, wdCode = case?.wdCode,
+                            caseId = case?.id, wdCode = lastCareCode ?: case?.wdCode,
                             imageId = lastImageId, mmPerPx = lastMmPerPx,
                             route = lastRoute, source = source,
                             gtPolygon = polyJson,

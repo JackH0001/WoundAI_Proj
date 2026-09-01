@@ -85,6 +85,17 @@ def main():
         print("找不到 flywheel 目錄：%s" % fw)
         return 2
 
+    staging = os.path.join(fw, "staging")
+    pending = sorted(os.path.relpath(os.path.join(root, name), fw)
+                     for root, _, names in os.walk(staging) for name in names)
+    if pending:
+        print(json.dumps({"error": "staging_not_empty", "paths": pending}, ensure_ascii=False))
+        print("Archive stopped. Review staging with the separate list-only sweep/repair tool.")
+        return 2
+    if os.environ.get("WOUNDAI_STORE", "local").lower() != "local":
+        print("This archive tool is local-only; refusing to inspect a local path for a GCS dataset.")
+        return 2
+
     label = a.label or ("reset_" + time.strftime("%Y%m%d_%H%M"))
     dst = os.path.join(fw, "archive", label)
 

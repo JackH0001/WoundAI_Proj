@@ -182,6 +182,8 @@ def main():
     jpg = buf.getvalue()
     iid = hashlib.sha1(jpg).hexdigest()[:16]
     open(os.path.join(tmp0, "images", iid + ".jpg"), "wb").write(jpg)
+    from _synthetic_receipts import ratify_synthetic
+    ratify_synthetic(tmp0, [iid])
 
     mbuf = _io.BytesIO()
     m_rgb = np.zeros((mh, mw, 3), np.uint8)

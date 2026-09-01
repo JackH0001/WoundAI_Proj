@@ -625,9 +625,14 @@ def health_check():
     try:
         import api_flywheel as _fw
         status['store'] = _fw._store().describe()
+        status['audit_retention'] = _fw._store().retention_info()
     except Exception as _e:
         status['store'] = 'unavailable: %s' % _e
 
+    from image_canonical import CANONICALIZATION_VERSION
+    from consent_staging import care_key_status
+    status['canonicalization_version'] = CANONICALIZATION_VERSION
+    status['care_receipt'] = care_key_status()
     return jsonify(status)
 
 @app.route('/api/analyze', methods=['POST'])
@@ -1696,6 +1701,8 @@ def _load_seg_red():
 def classify_wound():
     """分割→(ArUco/手動)校正面積→組織v2→PUSH 嚴重度。回傳標準階段結果。
     body(multipart): image=<jpg/png>; 選配 cm_per_pixel=<float>(無 ArUco 時手動校正)。"""
+    from image_canonical import canonicalize, InvalidImage, CANONICALIZATION_VERSION
+    from consent_staging import ConsentError
     mods = _load_classify_mods()
     if mods is None:
         return jsonify({'error': '分類模組不可用(engineering 模組缺)', 'stage': 'init'}), 503
@@ -1703,44 +1710,21 @@ def classify_wound():
     if 'image' not in request.files:
         return jsonify({'error': '缺少 image'}), 400
     try:
-        data = np.frombuffer(request.files['image'].read(), np.uint8)
-        bgr = cv2.imdecode(data, cv2.IMREAD_COLOR)
-        if bgr is None: return jsonify({'error': '影像解碼失敗'}), 400
-        # 訓練集影像關聯:內容雜湊存檔(去重),回傳 image_id 供標註綁定(無像素的 GT 無法訓練)
-        import hashlib as _hl
-        image_id = _hl.sha1(data.tobytes()).hexdigest()[:16]
-        # 這批**完全相同的位元組**先前是否已上傳過。
-        #
-        # 為什麼要回報:真實回診照片不可能與上次一模一樣(光線、角度、時間戳都會變),
-        # 所以「同一個 image_id 再次出現」幾乎必然是**重複量測同一張示範/範例圖**。
-        # 這是唯一能從後端可靠偵測「範例圖被當成臨床樣本送進來」的訊號——實測就發生過:
-        # 醫師在臨床個案裡選了一張先前用過的範例圖,結果那筆以 source=clinical 進了訓練佇列,
-        # 同時把該傷口的癒合曲線變成「兩張不同的傷口相比」而顯示假的 ↓38%。
-        # 後端不擋(它無從得知臨床上是否真有正當理由),只誠實回報,由 App 在臨床模式下警示。
-        image_reused = False
+        canonical = canonicalize(request.files['image'].read())
+        bgr = canonical.pixels  # exactly decode(stored canonical), including orientation
+        persistence = {'persisted': False, 'persistence_reason': 'care_receipt_required', 'image_id': None}
         try:
             import api_flywheel as _fw
-            # 已撤回同意的影像不可因為「再上傳一次」就復活寫回 images/(那等於繞過撤回);
-            # 此時不給 image_id,量測照常回傳,但不得再送訓練標註。
-            if _fw.is_consent_blocked(image_id):
-                logger.info(f"影像 {image_id} 已撤回訓練同意:不存檔、不發 image_id")
-                image_id = None
-            else:
-                # 經儲存抽象層寫入(本機檔案或雲端物件儲存)。Cloud Run 的容器檔案系統是
-                # 暫時的,直接寫檔的話實例一回收影像就消失,而標註端只會回「後端查無影像」。
-                _key = 'images/%s.jpg' % image_id
-                _st = _fw._store()
-                image_reused = _st.exists(_key)
-                if not image_reused:
-                    _st.put_blob(_key, data.tobytes())
-                if not _st.exists(_key):
-                    raise IOError("寫入後物件不存在")
-                if image_reused:
-                    logger.info(f"影像 {image_id} 先前已上傳過(重複量測同一張圖)")
-        except Exception as _ie:
-            # 存檔失敗卻照發 image_id → 客戶端拿到幽靈 ID,送標註時被擋且訊息誤導
-            logger.warning(f"影像存檔失敗,不發 image_id: {_ie}")
-            image_id = None
+            actor, role, org = _fw._who()
+            persistence = _fw.promotion_service(actor, role, org).stage(
+                canonical, request.form.get('care_receipt'), actor, role, org)
+        except ConsentError as exc:
+            persistence['persistence_reason'] = exc.code
+        except Exception:
+            logger.warning("staging unavailable; analysis only, no image id")
+            persistence['persistence_reason'] = 'staging_unavailable'
+        image_id = persistence['image_id']
+        image_reused = persistence.get('image_reused', False)
         img = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         H, W = img.shape[:2]
         # seg=color:印刷模擬圖走決定性色彩分割,**完全不碰模型**
@@ -1924,6 +1908,9 @@ def classify_wound():
             # 飛輪資料鏈:image_id 綁後端已存影像;image_w/h = wound_polygon 與醫師修邊 GT 的座標空間
             # (缺尺寸則 polygon 無法柵格化成遮罩 → 樣本不可訓練,見 api_flywheel 稽核註記)
             'image_id': image_id, 'image_w': int(W), 'image_h': int(H),
+            'persisted': persistence['persisted'],
+            'persistence_reason': persistence['persistence_reason'],
+            'canonicalization_version': CANONICALIZATION_VERSION,
             # 同一批位元組先前已上傳過 → 幾乎必然是重複量測同一張範例/示範圖。
             # App 在臨床模式看到 true 要警示:那多半不是這次回診拍的照片。
             'image_reused': bool(image_reused),
@@ -1966,6 +1953,8 @@ def classify_wound():
                            if phantom else
                            '輔助用途、非診斷、需醫師確認;滲液量無法由單張影像判定,需醫師輸入')
         }), 200
+    except InvalidImage as e:
+        return jsonify({'error': str(e), 'stage': 'canonicalization'}), 400
     except Exception as e:
         logger.error(f"classify 失敗: {e}")
         return jsonify({'error': str(e), 'stage': 'inference'}), 500

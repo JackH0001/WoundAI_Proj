@@ -60,43 +60,11 @@ def imwrite_unicode(path, arr):
 
 
 def normalize_image(raw):
-    """回 (bgr_or_rgb_array, out_bytes, w, h)。
-
-    EXIF 方向陷阱:cv2.imdecode 會套用 EXIF 旋轉,PIL.open().size 不會 →
-    兩種環境算出的尺寸不同,而遮罩是依 cv2 座標畫的 → image/mask 錯位。
-    對策:有 EXIF 方向就解碼後重新編碼(剝掉 EXIF,像素即最終方向);
-    沒有(Android Bitmap.compress 的常態)就原封複製,不做無謂的重壓縮。"""
-    # 偵測 EXIF 需要 PIL;opencv-python 並不相依 Pillow,所以「有 cv2 無 PIL」是真實環境。
-    # 那種環境下無法判斷方向 → 一律重新編碼(像素即最終方向),寧可多壓一次也不要 image/mask 錯位。
-    oriented = True
-    try:
-        from PIL import Image
-        ex = Image.open(io.BytesIO(raw)).getexif()
-        oriented = int(ex.get(274, 1) or 1) != 1 if ex else False
-    except ImportError:
-        oriented = True
-    except Exception:
-        oriented = True
-
-    if cv2 is not None:
-        arr = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
-        if arr is None: raise IOError("影像解碼失敗")
-        h, w = arr.shape[:2]
-    else:
-        from PIL import Image, ImageOps
-        im = ImageOps.exif_transpose(Image.open(io.BytesIO(raw)).convert("RGB"))
-        arr = np.array(im); h, w = arr.shape[:2]
-
-    if oriented:
-        if cv2 is not None:
-            ok, buf = cv2.imencode(".jpg", arr, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
-            out = buf.tobytes() if ok else raw
-        else:
-            from PIL import Image
-            b = io.BytesIO(); Image.fromarray(arr).save(b, "JPEG", quality=95); out = b.getvalue()
-    else:
-        out = raw
-    return arr, out, w, h
+    """Share classify's canonical bytes/pixel frame; never silently use PIL policy."""
+    from image_canonical import canonicalize
+    canonical = canonicalize(raw)
+    h, w = canonical.pixels.shape[:2]
+    return canonical.pixels, canonical.data, w, h
 
 
 def rasterize(poly, w, h):

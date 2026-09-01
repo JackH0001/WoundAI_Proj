@@ -51,6 +51,7 @@ import io
 import json
 import os
 import shutil
+import tempfile
 import time
 import uuid
 
@@ -61,7 +62,8 @@ class Store:
 
     # 稽核鍵清單。**定義在基底類別**，理由同下面的 `_is_audit`：
     # 「稽核不可刪」不該取決於今天跑在哪一種儲存後端。
-    AUDIT_KEYS = ("audit.jsonl",)
+    PROTECTED_KEYS = ("audit.jsonl", "receipts")
+    AUDIT_KEYS = PROTECTED_KEYS  # compatibility for existing callers
 
     # ⚠ 這個判斷放在基底類別，不放在某一個實作裡。
     #
@@ -71,7 +73,38 @@ class Store:
     # 稽核不可刪這條規則不該取決於今天跑在哪一種儲存後端。
     def _is_audit(self, key: str) -> bool:
         k = (key or "").strip("/")
-        return any(k == a or k.startswith(a + "/") for a in self.AUDIT_KEYS)
+        return any(k == a.strip("/") or k.startswith(a.strip("/") + "/")
+                   for a in self.PROTECTED_KEYS)
+
+    def get_json(self, key: str):
+        data = self.get_blob(key)
+        return None if data is None else json.loads(data.decode("utf-8"))
+
+    def put_blob_immutable(self, key: str, data: bytes,
+                           content_type: str = "image/jpeg") -> bool:
+        """Create only; return False only for an identical existing object."""
+        raise NotImplementedError
+
+    def put_json_immutable(self, key: str, value: dict) -> bool:
+        data = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"), allow_nan=False).encode("utf-8")
+        created = self.put_blob_immutable(key, data, "application/json")
+        if self.get_json(key) != value:
+            raise IOError("immutable JSON readback mismatch: " + key)
+        return created
+
+    def copy_immutable(self, src: str, dst: str) -> bool:
+        """Never delete source, and arbitrate a destination conflict by bytes."""
+        data = self.get_blob(src)
+        if data is None:
+            raise FileNotFoundError(src)
+        return self.put_blob_immutable(dst, data)
+
+    def append_record_once(self, key: str, receipt_id: str, record: dict) -> bool:
+        raise NotImplementedError
+
+    def retention_info(self) -> dict:
+        return {"verified": False, "locked": False, "reason": "local storage is not WORM"}
 
     def append_line(self, key: str, line: str) -> None: raise NotImplementedError
     def read_lines(self, key: str): raise NotImplementedError
@@ -93,11 +126,27 @@ def _record_name() -> str:
     return "%020d_%s.jsonl" % (time.time_ns(), uuid.uuid4().hex[:8])
 
 
+class ImmutableConflict(ValueError):
+    """The key exists with different content; callers must not overwrite it."""
+
+
+# Fail at startup if protected-prefix dispatch is accidentally weakened.
+assert all(k and k == k.strip("/") for k in Store.PROTECTED_KEYS)
+assert Store()._is_audit("receipts/promotion/test.json")
+assert not Store()._is_audit("receiptsX/test.json")
+
+
 class LocalStore(Store):
     """本機檔案。維持與抽象化之前**完全相同**的磁碟版面，既有資料不需要遷移。"""
 
     def __init__(self, root: str):
-        self.root = root
+        self.root = os.path.abspath(root)
+
+    def _is_audit(self, key: str) -> bool:
+        # Absolute aliases inside root must not bypass the protected-key guard.
+        p = os.path.abspath(self._p(key))
+        rel = os.path.relpath(p, self.root).replace(os.sep, "/")
+        return super()._is_audit(rel)
 
     def _p(self, key: str) -> str:
         # 絕對路徑原樣使用：測試與匯出腳本會直接指定暫存目錄，
@@ -107,6 +156,8 @@ class LocalStore(Store):
         return os.path.join(self.root, *key.split("/"))
 
     def append_line(self, key: str, line: str) -> None:
+        if self._is_audit(key) and os.path.abspath(self._p(key)) != os.path.join(self.root, "audit.jsonl"):
+            raise PermissionError("receipts require immutable writes")
         p = self._p(key)
         d = os.path.dirname(p)
         if d:
@@ -122,10 +173,70 @@ class LocalStore(Store):
             return [ln.rstrip("\n") for ln in f]
 
     def put_blob(self, key: str, data: bytes) -> None:
+        if self._is_audit(key):
+            raise PermissionError("protected objects require immutable writes")
         p = self._p(key)
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "wb") as f:
             f.write(data)
+
+    def put_blob_immutable(self, key: str, data: bytes,
+                           content_type: str = "image/jpeg") -> bool:
+        p = self._p(key)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        # Publish a fully flushed file with an exclusive hard link. No reader
+        # can observe a partially written receipt, and a racing writer cannot
+        # replace the winner (works on NTFS and the Linux deployment filesystem).
+        fd, tmp = tempfile.mkstemp(prefix=".immutable-", dir=os.path.dirname(p))
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                os.link(tmp, p)
+            except FileExistsError:
+                if self.get_blob(key) != data:
+                    raise ImmutableConflict(key)
+                return False
+            return True
+        finally:
+            os.unlink(tmp)
+
+    def append_record_once(self, key: str, receipt_id: str, record: dict) -> bool:
+        if record.get("annotation_receipt_id") != receipt_id:
+            raise ValueError("queue receipt mismatch")
+        p = self._p(key)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        # The lock file is separate so existing JSONL readers see only records.
+        with open(p + ".lock", "a+b") as lock:
+            lock.seek(0, os.SEEK_END)
+            if lock.tell() == 0:
+                lock.write(b"0")
+                lock.flush()
+            lock.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                for line in self.read_lines(key):
+                    row = json.loads(line)
+                    if row.get("annotation_receipt_id") == receipt_id:
+                        return False
+                with open(p, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                return True
+            finally:
+                lock.seek(0)
+                if os.name == "nt":
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(lock, fcntl.LOCK_UN)
 
     def get_blob(self, key: str):
         p = self._p(key)
@@ -147,6 +258,8 @@ class LocalStore(Store):
         return True
 
     def move(self, src: str, dst: str) -> bool:
+        if self._is_audit(src) or self._is_audit(dst):
+            raise PermissionError("protected objects cannot be moved")
         s, d = self._p(src), self._p(dst)
         if not os.path.exists(s):
             return False
@@ -202,7 +315,9 @@ class GcsStore(Store):
 
     def _target(self, key: str):
         """(bucket 物件, bucket 名稱)。稽核鍵在有設定稽核桶時走那一個。"""
-        if self._audit_bucket is not None and self._is_audit(key):
+        if self._is_audit(key):
+            if self._audit_bucket is None:
+                raise RuntimeError("protected storage requires WOUNDAI_AUDIT_BUCKET")
             return self._audit_bucket, self._audit_bucket_name
         return self._bucket, self._bucket_name
 
@@ -212,6 +327,8 @@ class GcsStore(Store):
     def append_line(self, key: str, line: str) -> None:
         # 一筆一個物件。不做 read-modify-write：那會在多實例下靜默吃掉紀錄，
         # 而這條路徑同時承載稽核軌跡，遺失是不可接受的。
+        if self._is_audit(key) and key.strip("/") != "audit.jsonl":
+            raise PermissionError("receipts require immutable writes")
         bucket, _ = self._target(key)
         name = "%s/%s" % (self._k(key), _record_name())
         bucket.blob(name).upload_from_string(
@@ -245,7 +362,7 @@ class GcsStore(Store):
                 # 讀不到就整份放棄快取：快取裡少一筆會讓之後每次都算在對的位置上，
                 # 而稽核鏈對「少一筆」的表現是後面全部 broken_link —— 假警報比慢更糟。
                 self._line_cache.pop(ck, None)
-                continue
+                raise IOError("cannot read complete append-only log: " + key)
             out.extend([ln for ln in text.split("\n") if ln.strip()])
 
         if len(out) <= self._CACHE_MAX_LINES:
@@ -255,12 +372,62 @@ class GcsStore(Store):
         return out
 
     def put_blob(self, key: str, data: bytes) -> None:
+        if self._is_audit(key):
+            raise PermissionError("protected objects require immutable writes")
         bucket, _ = self._target(key)
         # content_type 依副檔名決定。寫死 image/jpeg 的話，組織遮罩 PNG 在 GCS 上
         # 會被標成 JPEG——`gcloud storage cp` 下載沒問題，但瀏覽器預覽與任何依
         # metadata 分派的工具都會解錯，而檔案本身是好的，症狀會很難歸因。
         ct = "image/png" if self._k(key).lower().endswith(".png") else "image/jpeg"
         bucket.blob(self._k(key)).upload_from_file(io.BytesIO(data), content_type=ct)
+
+    def put_blob_immutable(self, key: str, data: bytes,
+                           content_type: str = "image/jpeg") -> bool:
+        from google.api_core.exceptions import PreconditionFailed
+        bucket, _ = self._target(key)
+        blob = bucket.blob(self._k(key))
+        try:
+            blob.upload_from_string(data, content_type=content_type,
+                                    if_generation_match=0)
+        except PreconditionFailed:
+            if self.get_blob(key) != data:
+                raise ImmutableConflict(key)
+            return False
+        if self.get_blob(key) != data:
+            raise IOError("immutable blob readback mismatch: " + key)
+        return True
+
+    def append_record_once(self, key: str, receipt_id: str, record: dict) -> bool:
+        import re
+        from google.api_core.exceptions import PreconditionFailed
+        if not re.fullmatch(r"[0-9a-f]{16}", receipt_id):
+            raise ValueError("invalid annotation receipt id")
+        if record.get("annotation_receipt_id") != receipt_id:
+            raise ValueError("queue receipt mismatch")
+        bucket, _ = self._target(key)
+        blob = bucket.blob(self._k(key) + "/receipt_" + receipt_id + ".jsonl")
+        data = json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n"
+        try:
+            blob.upload_from_string(data, content_type="application/json",
+                                    if_generation_match=0)
+            return True
+        except PreconditionFailed:
+            old = json.loads(blob.download_as_bytes())
+            if old.get("annotation_receipt_id") != receipt_id:
+                raise ImmutableConflict(key)
+            return False
+
+    def retention_info(self) -> dict:
+        if self._audit_bucket is None:
+            return {"verified": False, "locked": False, "reason": "audit bucket missing"}
+        try:
+            self._audit_bucket.reload()
+            policy = self._audit_bucket._properties.get("retentionPolicy", {})
+            return {"verified": True, "bucket": self._audit_bucket_name,
+                    "retention_seconds": int(policy.get("retentionPeriod", 0)),
+                    "locked": policy.get("isLocked") is True}
+        except Exception:
+            return {"verified": False, "locked": False, "reason": "readback failed"}
 
     def get_blob(self, key: str):
         bucket, _ = self._target(key)
@@ -306,7 +473,7 @@ class GcsStore(Store):
     def describe(self) -> str:
         d = "gcs://%s/%s" % (self._bucket_name, self.prefix)
         if self._audit_bucket_name:
-            d += " (稽核→gcs://%s，WORM)" % self._audit_bucket_name
+            d += " (稽核→gcs://%s; retention must be read back)" % self._audit_bucket_name
         return d
 
 

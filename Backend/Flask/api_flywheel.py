@@ -130,15 +130,17 @@ def validate_annotation(d: dict, require_image: bool = True):
     for k in need:
         if k not in d or d.get(k) is None:
             issues.append(f"缺 {k}")
-    if not d.get("doctor_verified"): issues.append("未經醫師驗證(doctor_verified=false)")
-    if not d.get("deidentified"): issues.append("未去識別化(deidentified=false)")
-    if not d.get("consent_train"): issues.append("未取得訓練同意(consent_train=false)")
+    if d.get("doctor_verified") is not True: issues.append("未經醫師驗證(doctor_verified=false)")
+    if d.get("deidentified") is not True: issues.append("未去識別化(deidentified=false)")
+    if d.get("consent_train") is not True: issues.append("未取得訓練同意(consent_train=false)")
     if d.get("code") is not None and not CODE_RE.match(str(d.get("code"))):
         issues.append("code 格式不合(應為 WD- 加英數/底線/連字號,1-32 字)")
     if require_image and d.get("image_id") is not None and not ID_RE.match(str(d.get("image_id"))):
         issues.append("image_id 格式不合(應為 16 位小寫十六進位;防路徑穿越)")
 
     src = d.get("source")
+    if require_image and src is None:
+        issues.append("缺 source（clinical/sample/phantom/external）")
     if src is not None and str(src) not in SOURCES:
         issues.append(f"source 須為 {'/'.join(SOURCES)}(預設 {DEFAULT_SOURCE})")
 
@@ -581,6 +583,8 @@ def classify_queue(recs, images_dir=None, wd_codes=None, wd_imgs=None,
             st = "image_file_missing"
         elif keep is not None and rec_source(r) not in keep:
             st = "other_source"
+        elif not trainable_image_receipt(r, images_dir):
+            st = "legacy_unratified"
         else:
             st = "candidate"
         prelim.append(st)
@@ -624,6 +628,7 @@ def classify_queue(recs, images_dir=None, wd_codes=None, wd_imgs=None,
 
 
 RECORD_STATUS = {
+    "legacy_unratified": "缺有效 promotion receipt 或舊資料核准（禁止所有訓練匯出）",
     "trainable":       "可訓練",
     "superseded":      "被同一人較新的修訂版取代",
     # 不是被取代，是另一位標註者對同一張影像的獨立判斷。
@@ -891,6 +896,34 @@ def quarantine_image(image_id, images_dir=None, quarantine_dir=None):
     return _store().move(_key(src), _key(dst))
 
 
+def trainable_image_receipt(rec, images_dir=None):
+    from consent_staging import image_is_ratified
+    from store import LocalStore
+    st = _store()
+    # Offline exporters may select a different local dataset. Never consult
+    # receipts belonging to the server's default flywheel root for that dataset.
+    if isinstance(st, LocalStore) and images_dir:
+        st = LocalStore(os.path.dirname(os.path.abspath(images_dir)))
+    try:
+        return image_is_ratified(st, rec["image_id"], rec.get("code"), rec.get("org"))
+    except Exception:
+        logger.warning("receipt unavailable; excluding image from dataset")
+        return False
+
+
+def promotion_service(actor, role, org):
+    from consent_staging import Promotion
+
+    def blocked(code, image_id):
+        codes, images = withdrawn_keys()
+        return code in codes or image_id in images or is_quarantined(image_id)
+
+    def event(action, code, detail):
+        audit(actor, action, code, json.dumps(detail, ensure_ascii=False, sort_keys=True), role, org)
+
+    return Promotion(_store(), event, blocked, lambda: read_jsonl(QUEUE))
+
+
 # ---- Flask Blueprint(import flask 失敗時不影響純函式測試) ----
 try:
     from flask import Blueprint, request, jsonify, Response
@@ -910,6 +943,23 @@ try:
             # 權限模組載不進來時 **fail-closed**。放行才是危險的那一邊——
             # 一個載不到權限表的服務不該假設「大家都可以」。
             return False
+
+    @flywheel_bp.route("/api/v1/consent/care/attest", methods=["POST"])
+    @jwt_required()
+    def attest_care():
+        from consent_staging import CareKeys, ConsentError, issue_care
+        actor, role, org = _who()
+        if not _can(role, "measure.clinical"):
+            return jsonify({"error": "權限不足"}), 403
+        d = request.get_json(silent=True) or {}
+        if not isinstance(d, dict):
+            return jsonify({"error": "invalid_care_identity"}), 400
+        try:
+            svc = promotion_service(actor, role, org)
+            token, expires = issue_care(_store(), CareKeys(), d.get("code"), actor, role, org, svc.audit)
+            return jsonify({"care_receipt": token, "expires_at": expires}), 200
+        except ConsentError as exc:
+            return jsonify({"error": exc.code}), exc.status
 
     @flywheel_bp.route("/api/v1/annotation", methods=["POST"])
     @jwt_required()
@@ -963,20 +1013,29 @@ try:
             audit(actor, "annotation_rejected", d.get("code", "?"), msg, role, org)
             return jsonify({"error": "標註不符上傳規範", "issues": [msg]}), 400
 
-        # 影像必須真的在後端(classify 時已存);沒有像素的 GT 不可訓練 → 直接擋
-        if not _store().exists(_key(os.path.join(IMAGES_DIR, image_id + ".jpg"))):
-            msg = (f"後端查無影像 {image_id}。可能是:(a) 未先呼叫 /api/v1/classify、"
-                   f"(b) 後端曾清空 flywheel/images、(c) 這是舊版 App 產生的紀錄。"
-                   f"請重新以後端模式量測一次再送出")
-            audit(actor, "annotation_rejected", d.get("code", "?"), msg, role, org)
-            return jsonify({"error": "標註不符上傳規範", "issues": [msg]}), 400
-
         # 組織遮罩也是身分的一部分——只改組織不改邊界時，沒有它就會被誤判為重複
         # 而把醫師的標註丟掉（見 sample_key 的說明）。
         t_sig = tissue_sig(d.get("tissue_mask_png"))
+        from consent_staging import ConsentError, annotation_receipt
+        rid = annotation_receipt(d["code"], actor, image_id, poly_sig(d.get("gt_polygon")), t_sig)
+        svc = promotion_service(actor, role, org)
+        try:
+            promotion_fields = svc.prepare(d, actor, role, org, rid)
+        except ConsentError as exc:
+            audit(actor, "annotation_rejected", d["code"], exc.code, role, org)
+            return jsonify({"error": exc.code}), exc.status
         exact, same_img = find_duplicate(QUEUE, image_id, d.get("gt_polygon"), t_sig)
+        # Same contour by a different actor is a parallel annotation, not a dup.
+        exact = next((r for r in reversed(same_img)
+                      if r.get("actor") == actor
+                      and sample_key(image_id, r.get("gt_polygon"), r.get("tissue_sig"))
+                      == sample_key(image_id, d.get("gt_polygon"), t_sig)), None)
         # 已撤回的舊紀錄不算重複(否則重新取得同意後永遠補不回來)
         if exact is not None and exact.get("code") not in wd_codes:
+            try:
+                svc.finish(image_id, rid)
+            except Exception:
+                logger.warning("staging cleanup deferred to retry/TTL")
             audit(actor, "annotation_duplicate", d.get("code", "?"),
                   f"同影像、同輪廓、同組織遮罩已在佇列({exact.get('code')})", role, org)
             return jsonify({"status": "duplicate_skipped", "code": d.get("code"),
@@ -984,6 +1043,7 @@ try:
                                     "已自動略過（避免重複樣本）。若您剛才有修改，請確認是否按下了「完成修邊」。"}), 200
 
         rec = {k: d.get(k) for k in REQUIRED}
+        rec.update(promotion_fields)
         for k in PROVENANCE:
             if d.get(k) is not None: rec[k] = d.get(k)
         rec["source"] = str(d.get("source") or DEFAULT_SOURCE)   # 顯式落盤,免得日後靠預設值猜
@@ -991,7 +1051,7 @@ try:
         # 落盤，否則下一次的去重比對拿不到它，同樣的漏洞會再出現一次。
         if t_sig:
             rec["tissue_sig"] = t_sig
-        rec["supersedes"] = [r.get("code") for r in same_img] or None
+        rec["supersedes"] = [r.get("code") for r in same_img if r.get("actor") == actor] or None
         rec["actor"] = actor
         rec["role"] = role
         rec["org"] = org        # 現在只有一個值也要寫:事後補欄位=舊紀錄全是 null
@@ -1069,7 +1129,17 @@ try:
                 rec.pop("depth_conf_key", None)
 
         rec["received_at"] = utc_now()
-        append_jsonl(QUEUE, rec)
+        try:
+            svc._guard(d["code"], image_id)
+            inserted = _store().append_record_once(_key(QUEUE), rid, rec)
+        except ConsentError as exc:
+            return jsonify({"error": exc.code}), exc.status
+        try:
+            svc.finish(image_id, rid)
+        except Exception:
+            logger.warning("staging cleanup deferred to retry/TTL")
+        if not inserted:
+            return jsonify({"status": "duplicate_skipped", "code": rec["code"]}), 200
         note = None
         if same_img:
             # ⚠ 措辭要正確，而且**兩件事可能同時成立**：
