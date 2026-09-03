@@ -56,16 +56,36 @@ def main(argv=None):
                 row.update(promoted=p is not None, legacy=p is None and prefix == "images",
                            canonicalization_version=(p or bind or {}).get("canonicalization_version"))
             elif args.operation == "sweep":
-                row["eligible"] = svc.sweep(iid, apply=args.apply)
+                # First calculate eligibility without mutation.  The durable
+                # operator authorization intent must precede the second,
+                # state-changing call; a post-delete note cannot prove the
+                # delete was authorized when the audit service is unavailable.
+                row["eligible"] = svc.sweep(iid, apply=False)
+                if args.apply and row["eligible"]:
+                    fw.audit_intent(args.operator, "staging_tool_sweep", "-",
+                                    "maintenance", "maintenance",
+                                    {"operation": args.operation, "image_id": iid,
+                                     "reference_supplied_by_operator": args.authorization_ref,
+                                     "verifiable_by_this_script": False})
+                    row["applied"] = svc.sweep(iid, apply=True)
+                    if row["applied"]:
+                        fw.audit(args.operator, "staging_tool_sweep_applied", "-",
+                                 "authorization reference accepted", "maintenance", "maintenance")
             else:
                 row["eligible"] = svc.repair(iid, args.operator or "list-only",
-                                              args.grace_seconds, apply=args.apply)
-            if args.apply and row.get("eligible"):
-                svc.audit("staging_tool_authorization_reference", "-",
-                           {"operation": args.operation, "image_id": iid,
-                            "reference_supplied_by_operator": args.authorization_ref,
-                            "verifiable_by_this_script": False})
-        except (ConsentError, OSError, ValueError) as exc:
+                                              args.grace_seconds, apply=False)
+                if args.apply and row["eligible"]:
+                    fw.audit_intent(args.operator, "staging_tool_repair", "-",
+                                    "maintenance", "maintenance",
+                                    {"operation": args.operation, "image_id": iid,
+                                     "reference_supplied_by_operator": args.authorization_ref,
+                                     "verifiable_by_this_script": False})
+                    row["applied"] = svc.repair(iid, args.operator,
+                                                 args.grace_seconds, apply=True)
+                    if row["applied"]:
+                        fw.audit(args.operator, "staging_tool_repair_applied", "-",
+                                 "authorization reference accepted", "maintenance", "maintenance")
+        except (ConsentError, fw.AuditUnavailable, OSError, ValueError) as exc:
             row["error"] = str(exc)
             failures += 1
         result.append(row)

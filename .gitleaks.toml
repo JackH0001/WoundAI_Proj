@@ -15,6 +15,16 @@ description = "Hardcoded Flask SECRET_KEY default fallback"
 regex = '''(?i)secret[_-]?key['"]?\s*[,=]\s*['"][\w\-]{8,}['"]'''
 tags = ["secret","flask"]
 
+  # 誤報豁免：phase2 合成測試以自我描述的假金鑰簽 in-process Flask test client
+  # （非任何真實系統憑證、不進映像、不部署）。condition=AND：必須同時命中
+  # 「檔名為 engineering/phase2/test_*.py」與「字面含 synthetic-test-only」才豁免；
+  # 其他祕密在同一檔案內仍會被攔截。
+  [rules.allowlist]
+  description = "phase2 synthetic test JWT key (self-describing, non-credential)"
+  condition = "AND"
+  paths = ['''^engineering/phase2/test_[^/]+\.py$''']
+  regexes = ['''synthetic-test-only''']
+
 [[rules]]
 id = "woundai-generic-pw-assign"
 description = "Generic hardcoded password assignment"

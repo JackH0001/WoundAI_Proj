@@ -52,6 +52,8 @@ import json
 import os
 import shutil
 import tempfile
+import re
+import threading
 import time
 import uuid
 
@@ -103,11 +105,35 @@ class Store:
     def append_record_once(self, key: str, receipt_id: str, record: dict) -> bool:
         raise NotImplementedError
 
+    # ── 稽核鏈的序列化寫入 ──────────────────────────────────────────────
+    #
+    # 為什麼需要:`audit()` 原本是「讀尾端 → 算 seq+1 與 prev → append」,讀與寫之間
+    # 沒有原子性。多個寫入者讀到同一個尾端,就各自寫出同 prev 的紀錄——雜湊鏈上的 fork。
+    # 正式稽核桶 675 筆裡有 26 處(2026-09-01 實查);8 執行緒 tight loop 可重現 81 處。
+    #
+    # 機制:把「鏈上第 seq 格」本身當成一個只能建立一次的物件。兩個寫入者搶同一格,
+    # 只有一個能建立;另一個拿到衝突後重讀尾端、改搶下一格。這與 put_blob_immutable /
+    # append_record_once 是同一套 if_generation_match=0 慣用法,不是新機制。
+    #
+    # 契約(兩個後端都必須滿足):**同一個 seq 至多被寫入一次**。
+    def chain_tail(self, key: str):
+        """回 (seq, 尾端紀錄 dict);空鏈回 (-1, None)。GCS 後端只 GET 尾端那一個物件。"""
+        raise NotImplementedError
+
+    def append_chained(self, key: str, seq: int, line: str) -> bool:
+        """把 line 寫成鏈上第 seq 格,且只在該格尚不存在時。
+        True=本次建立;False=該格已存在且位元組相同(自己先前「回應遺失」的重試);
+        位元組不同 → ChainConflict(別的寫入者搶到了這一格)。"""
+        raise NotImplementedError
+
     def retention_info(self) -> dict:
         return {"verified": False, "locked": False, "reason": "local storage is not WORM"}
 
     def append_line(self, key: str, line: str) -> None: raise NotImplementedError
     def read_lines(self, key: str): raise NotImplementedError
+    def read_lines_fresh(self, key: str):
+        """Read a complete current log, bypassing any backend cache if needed."""
+        return self.read_lines(key)
     def put_blob(self, key: str, data: bytes) -> None: raise NotImplementedError
     def get_blob(self, key: str): raise NotImplementedError
     def exists(self, key: str) -> bool: raise NotImplementedError
@@ -130,10 +156,71 @@ class ImmutableConflict(ValueError):
     """The key exists with different content; callers must not overwrite it."""
 
 
+class ChainConflict(ValueError):
+    """鏈上這一格已被別的寫入者建立(內容不同)。呼叫端應重讀尾端後改搶下一格。"""
+
+
+# 鏈格物件名:20 位零填充的 seq。字典序 = 數值序,且**不含底線**——
+# 舊的時間戳命名 `<ns>_<rand>.jsonl` 含底線,兩者藉此區分。
+_CHAIN_NAME_RE = re.compile(r"^(\d{20})\.jsonl$")
+
+
+def _chain_name(seq: int) -> str:
+    if not isinstance(seq, int) or seq < 0:
+        raise ValueError("chain seq must be a non-negative int")
+    return "%020d.jsonl" % seq
+
+
+# LocalStore 的鏈鎖:以絕對路徑為鍵、行程內共用。本機模式只承諾**同一行程內**的序列化
+# (開發伺服器與測試都是單行程多執行緒);跨行程的本機寫入不是支援情境,正式路徑是 GCS。
+_CHAIN_LOCKS = {}
+_CHAIN_LOCKS_GUARD = threading.Lock()
+
+
+def _chain_lock_for(path: str):
+    with _CHAIN_LOCKS_GUARD:
+        # chain_tail() also takes this lock.  RLock lets append_chained() re-read
+        # the tail while holding the same per-file lock, so readers never see a
+        # partially appended JSON line.
+        return _CHAIN_LOCKS.setdefault(path, threading.RLock())
+
+
+def _chain_record_bytes(seq: int, line: str):
+    """Validate one immutable chain-slot record before it can be created.
+
+    A bad slot cannot be repaired after Bucket Lock.  Validate the slot/content
+    identity and basic link/hash shape *before* the conditional create, instead
+    of discovering the poison object on the next write.
+    """
+    _chain_name(seq)  # validates type and range
+    if not isinstance(line, str):
+        raise TypeError("chain record must be text")
+    text = line[:-1] if line.endswith("\n") else line
+    if "\n" in text or "\r" in text:
+        raise ValueError("chain slot must contain exactly one JSON record")
+    try:
+        rec = json.loads(text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("chain slot must contain valid JSON") from exc
+    if not isinstance(rec, dict):
+        raise ValueError("chain slot record must be an object")
+    if type(rec.get("seq")) is not int or rec["seq"] != seq:
+        raise ValueError("chain slot name/content seq mismatch")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(rec.get("hash", ""))):
+        raise ValueError("chain slot record must carry a SHA-256 hash")
+    prev = rec.get("prev")
+    if prev != "GENESIS" and not re.fullmatch(r"[0-9a-f]{64}", str(prev or "")):
+        raise ValueError("chain slot record must carry a valid prev link")
+    return rec, (text + "\n").encode("utf-8")
+
+
 # Fail at startup if protected-prefix dispatch is accidentally weakened.
-assert all(k and k == k.strip("/") for k in Store.PROTECTED_KEYS)
-assert Store()._is_audit("receipts/promotion/test.json")
-assert not Store()._is_audit("receiptsX/test.json")
+if not all(k and k == k.strip("/") for k in Store.PROTECTED_KEYS):
+    raise RuntimeError("protected key names must be non-empty and slash-normalized")
+if not Store()._is_audit("receipts/promotion/test.json"):
+    raise RuntimeError("protected receipts prefix self-check failed")
+if Store()._is_audit("receiptsX/test.json"):
+    raise RuntimeError("protected receipts prefix boundary self-check failed")
 
 
 class LocalStore(Store):
@@ -171,6 +258,30 @@ class LocalStore(Store):
             return []
         with open(p, encoding="utf-8") as f:
             return [ln.rstrip("\n") for ln in f]
+
+    def chain_tail(self, key: str):
+        p = os.path.abspath(self._p(key))
+        with _chain_lock_for(p):
+            lines = [ln for ln in self.read_lines(key) if ln.strip()]
+            if not lines:
+                return (-1, None)
+            rec = json.loads(lines[-1])
+            if not isinstance(rec, dict):
+                raise IOError("audit tail must be a JSON object")
+            # 舊紀錄可能沒有 seq(雜湊鏈導入前);退回以行序為 seq,與舊 audit() 一致。
+            return (int(rec.get("seq", len(lines) - 1)), rec)
+
+    def append_chained(self, key: str, seq: int, line: str) -> bool:
+        # 單一檔案、行程內鎖。鎖內重讀尾端並要求 seq 恰為 tail+1——這就是本機版的
+        # 「只在該格不存在時建立」:別的執行緒先寫了這一格,tail 已推進,本次拋衝突。
+        p = os.path.abspath(self._p(key))
+        _, data = _chain_record_bytes(seq, line)
+        with _chain_lock_for(p):
+            tail_seq, _ = self.chain_tail(key)
+            if seq != tail_seq + 1:
+                raise ChainConflict("%s: slot %d is not next (tail=%d)" % (key, seq, tail_seq))
+            self.append_line(key, data.decode("utf-8"))
+            return True
 
     def put_blob(self, key: str, data: bytes) -> None:
         if self._is_audit(key):
@@ -371,6 +482,18 @@ class GcsStore(Store):
             self._line_cache.pop(ck, None)
         return out
 
+    def read_lines_fresh(self, key: str):
+        """Force a new list and download pass before an audit write.
+
+        The normal incremental cache is safe only under an already-locked WORM
+        epoch.  Audit admission must not use it: before Lock, a changed old
+        object's name can remain a cache prefix while its bytes no longer match.
+        """
+        _, bname = self._target(key)
+        base = self._k(key) + "/"
+        self._line_cache.pop((bname, base), None)
+        return self.read_lines(key)
+
     def put_blob(self, key: str, data: bytes) -> None:
         if self._is_audit(key):
             raise PermissionError("protected objects require immutable writes")
@@ -416,6 +539,91 @@ class GcsStore(Store):
             if old.get("annotation_receipt_id") != receipt_id:
                 raise ImmutableConflict(key)
             return False
+
+    def chain_tail(self, key: str):
+        if self._is_audit(key) and key.strip("/") != "audit.jsonl":
+            raise PermissionError("receipts require immutable writes")
+        bucket, bname = self._target(key)
+        base = self._k(key) + "/"
+        slots = {}
+        count = 0
+        max_seq = -1
+        for b in self._client.list_blobs(bname, prefix=base):
+            leaf = b.name[len(base):]
+            m = _CHAIN_NAME_RE.fullmatch(leaf)
+            if not m:
+                raise RuntimeError(
+                    "audit prefix gs://%s/%s holds a legacy or non-slot object (%s); "
+                    "point WOUNDAI_AUDIT_BUCKET at a clean bucket" % (bname, base, leaf))
+            slot = int(m.group(1))
+            count += 1
+            if slot in slots:
+                raise IOError("duplicate audit chain slot: %d" % slot)
+            slots[slot] = b
+            if slot > max_seq:
+                max_seq = slot
+        if not slots:
+            return (-1, None)
+        if count != max_seq + 1:
+            raise IOError("audit chain slots are not contiguous: count=%d max_seq=%d" %
+                          (count, max_seq))
+        # A valid final record alone is not enough: `seq=1, prev=GENESIS`
+        # has a self-consistent hash yet is a broken chain after a valid slot 0.
+        # Validate every adjacent immutable link before offering a tail to a new
+        # writer.  The audit layer also verifies the versioned self-hash; this
+        # store-level pass establishes the object/slot/link invariant without a
+        # circular dependency on api_flywheel's version resolver.
+        previous = None
+        tail = None
+        for slot in range(max_seq + 1):
+            blob = slots[slot]
+            try:
+                rec, _ = _chain_record_bytes(slot, blob.download_as_bytes().decode("utf-8"))
+            except (TypeError, ValueError, UnicodeDecodeError) as exc:
+                raise IOError("invalid audit chain slot %s: %s" % (blob.name, exc)) from exc
+            expected_prev = "GENESIS" if previous is None else previous["hash"]
+            if rec["prev"] != expected_prev:
+                raise IOError("audit chain broken link at seq %d" % slot)
+            previous = rec
+            tail = rec
+        return (max_seq, tail)
+
+    def append_chained(self, key: str, seq: int, line: str) -> bool:
+        from google.api_core.exceptions import (
+            DeadlineExceeded, InternalServerError, NotFound, PreconditionFailed,
+            ServiceUnavailable, TooManyRequests,
+        )
+        if self._is_audit(key) and key.strip("/") != "audit.jsonl":
+            raise PermissionError("receipts require immutable writes")
+        bucket, _ = self._target(key)
+        name = self._k(key) + "/" + _chain_name(seq)
+        _, data = _chain_record_bytes(seq, line)
+        blob = bucket.blob(name)
+        try:
+            blob.upload_from_string(data, content_type="application/json",
+                                    if_generation_match=0)
+        except PreconditionFailed:
+            # 這一格已存在。位元組相同 ⇒ 是我們自己先前被接受、但回應遺失的那次寫入;
+            # 不同 ⇒ 別人搶到了,交回呼叫端重讀尾端。
+            if bucket.blob(name).download_as_bytes() == data:
+                return False
+            raise ChainConflict(name)
+        except (DeadlineExceeded, InternalServerError, ServiceUnavailable, TooManyRequests):
+            # The service may have committed the conditional create while the
+            # response was lost.  Read the exact slot before letting the caller
+            # retry: equal bytes mean the event is already durable; different
+            # bytes mean another writer won; a missing object is a real
+            # transport failure and remains fail-closed.
+            try:
+                existing = bucket.blob(name).download_as_bytes()
+            except NotFound:
+                raise
+            if existing == data:
+                return False
+            raise ChainConflict(name)
+        if bucket.blob(name).download_as_bytes() != data:
+            raise IOError("chain slot readback mismatch: " + name)
+        return True
 
     def retention_info(self) -> dict:
         if self._audit_bucket is None:

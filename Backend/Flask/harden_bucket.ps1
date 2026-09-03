@@ -1,170 +1,322 @@
-﻿# 收案前的儲存桶強化 —— 在放入真實病人影像之前執行。
-#
-# 用法：
-#   .\harden_bucket.ps1 -ProjectId woundai-jackh001 -Bucket woundai-flywheel-jackh001
-#   .\harden_bucket.ps1 -ProjectId woundai-jackh001 -Bucket woundai-flywheel-jackh001 -Audit
-#
-# -Audit 會另外建立一個**獨立的稽核桶**並設定保留政策（見 §4，有不可逆的選項，預設不鎖）。
-#
-# ⚠ 本檔必須以 UTF-8 with BOM 儲存（Windows PowerShell 5.1 否則會以 Big5 解讀而語法全爛）。
-
+﻿# P0-4 Cloud Storage hardening. Default invocation is read-only.
+# Windows PowerShell 5.1 compatible; keep UTF-8 BOM + CRLF on disk.
+[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$ProjectId,
     [Parameter(Mandatory = $true)][string]$Bucket,
+    # 預設沿用 "<主桶>-audit"。指定別的桶,是為了讓「鎖定紀元」從一條乾淨的
+    # 稽核鏈(GENESIS 起算)開始,而不必把開發期既有的鏈一起凍進 7 年保留。
+    [string]$AuditBucket = "$Bucket-audit",
     [string]$Region = "asia-east1",
     [int]$QuarantineDays = 30,
+    [int]$StagingDays = 30,
+    [int]$StagingMetaExtraDays = 7,
+    [int]$NoncurrentDays = 30,
+    [int]$SoftDeleteDays = 7,
     [switch]$Audit,
-    [switch]$LockRetention
+    [switch]$Apply,
+    [switch]$LockRetention,
+    [string]$LockAuthorisationRef
 )
 
-$ErrorActionPreference = "Continue"
+$ErrorActionPreference = "Stop"
 $script:GCLOUD = if (Get-Command gcloud.cmd -ErrorAction SilentlyContinue) { "gcloud.cmd" } else { "gcloud" }
-function Say($m) { Write-Host "`n▶ $m" -ForegroundColor Cyan }
-function Warn($m) { Write-Host "⚠ $m" -ForegroundColor Yellow }
-function Invoke-GCloud { & $script:GCLOUD @args }
+$script:AUDIT_RETENTION_SECONDS = 220903200L
 
-& $script:GCLOUD config set project $ProjectId | Out-Null
-
-# ── 1. 封鎖公開存取 ─────────────────────────────────────────────────
-# 「不小心把桶設成公開」是雲端資料外洩最常見的單一原因。
-# publicAccessPrevention=enforced 是組織層級的硬性阻擋：即使有人之後手滑
-# 授予 allUsers，那個 IAM 綁定也會被拒絕，不是「生效但沒人發現」。
-Say "封鎖公開存取"
-Invoke-GCloud storage buckets update "gs://$Bucket" --public-access-prevention
-if ($LASTEXITCODE -eq 0) { Write-Host "  ✓ publicAccessPrevention = enforced" } else { Warn "設定失敗" }
-
-# 統一存取控管：關掉物件層級 ACL。混用 ACL 與 IAM 兩套權限模型，
-# 是「以為關了其實還開著」最常見的來源——你查 IAM 看起來乾淨，實際權限在 ACL 上。
-Invoke-GCloud storage buckets update "gs://$Bucket" --uniform-bucket-level-access | Out-Null
-Write-Host "  ✓ uniformBucketLevelAccess = true"
-
-# ── 2. 物件版本控制 ─────────────────────────────────────────────────
-# 誤刪的保險。但它同時也意味著「刪掉的物件其實還在」——
-# 所以下面的生命週期規則必須連舊版本一起清，否則撤回同意的影像會以舊版本形式留存，
-# 那等於承諾了下架卻沒有真的下架。
-Say "開啟物件版本控制"
-Invoke-GCloud storage buckets update "gs://$Bucket" --versioning
-if ($LASTEXITCODE -eq 0) { Write-Host "  ✓ versioning = enabled" } else { Warn "設定失敗" }
-
-# ── 3. 生命週期規則 ─────────────────────────────────────────────────
-Say "設定生命週期規則"
-# ⚠ **刻意不對 images/ 設定「N 天後刪除」的規則。**
-#
-# IRB 承諾的是「結案逾 90 天銷毀」，而「結案」是臨床事件，雲端不知道。
-# 用單純的年齡規則會刪掉仍在追蹤中的傷口影像——那是病歷滅失，比留著更嚴重。
-# 影像的刪除由 App 端（`CaseRepository.purgeExpiredImages`）與撤回同意流程驅動。
-#
-# 這裡只設兩條**確定安全**的規則：
-#   a) quarantine/ 的物件逾期刪除 —— 那是已撤回同意的影像，保留只為短期稽核，
-#      逾期不刪就違背了「撤回即下架/銷毀」的承諾。
-#   b) 非最新版本逾期刪除 —— 否則版本控制會讓「已刪除」的物件實際上永遠留著。
-$lc = @"
-{
-  "lifecycle": {
-    "rule": [
-      {
-        "action": {"type": "Delete"},
-        "condition": {
-          "age": $QuarantineDays,
-          "matchesPrefix": ["flywheel/quarantine/"]
-        }
-      },
-      {
-        "action": {"type": "Delete"},
-        "condition": {"daysSinceNoncurrentTime": $QuarantineDays, "isLive": false}
-      }
-    ]
-  }
+function Say([string]$Message) { Write-Host "`n=== $Message ===" -ForegroundColor Cyan }
+function Die([string]$Message) { throw "[DIE] $Message" }
+function Invoke-GCloudScoped([string[]]$Arguments) {
+    # ProjectId is a safety boundary, not a label for the transcript.  Every
+    # gcloud request in this script is explicitly scoped so an unrelated active
+    # gcloud configuration cannot create, update, or lock a bucket elsewhere.
+    & $script:GCLOUD @Arguments "--project=$ProjectId"
 }
-"@
-$lcFile = [IO.Path]::GetTempFileName()
-try {
-    [IO.File]::WriteAllText($lcFile, $lc, (New-Object Text.UTF8Encoding $false))
-    Invoke-GCloud storage buckets update "gs://$Bucket" --lifecycle-file=$lcFile
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "  ✓ quarantine/ 逾 $QuarantineDays 天自動銷毀（撤回同意的影像）"
-        Write-Host "  ✓ 非最新版本逾 $QuarantineDays 天清除（避免版本控制讓刪除失效）"
-        Write-Host "  ℹ images/ **未**設年齡規則 —— 刪除由臨床事件驅動，不由日曆驅動"
-    } else { Warn "生命週期設定失敗" }
-} finally { Remove-Item $lcFile -Force -ErrorAction SilentlyContinue }
-
-# ── 4. 稽核桶（WORM）────────────────────────────────────────────────
-if ($Audit) {
-    $auditBucket = "$Bucket-audit"
-    Say "建立稽核專用桶 gs://$auditBucket"
-    # 為什麼要**獨立的桶**：GCS 的保留政策是桶層級，不能只套在某個前綴上。
-    # 把保留政策套在主桶會連影像一起鎖住 —— 而影像必須刪得掉（撤回同意、保存期限）。
-    # 稽核軌跡則相反：它必須刪不掉。兩種需求相反，所以要分桶。
-    Invoke-GCloud storage buckets create "gs://$auditBucket" --location=$Region --uniform-bucket-level-access 2>$null
-    Invoke-GCloud storage buckets update "gs://$auditBucket" --public-access-prevention | Out-Null
-
-    # 保留 7 年：醫療紀錄常見的法定保存年限。**未鎖定時可調降或移除**。
-    Invoke-GCloud storage buckets update "gs://$auditBucket" --retention-period=7y
-    if ($LASTEXITCODE -eq 0) { Write-Host "  ✓ 保留政策 7 年（尚未鎖定，可調整）" } else { Warn "保留政策設定失敗" }
-
-    if ($LockRetention) {
-        Warn "═══════════════════════════════════════════════════════"
-        Warn " 即將**鎖定**保留政策。這個動作不可逆："
-        Warn "   · 保留期內任何人都無法刪除物件——包含專案擁有者與 Google"
-        Warn "   · 桶本身在保留期滿之前也無法刪除"
-        Warn "   · 保留期只能延長，不能縮短"
-        Warn " 誤寫進去的東西會在裡面待滿 7 年。**先在測試桶演練過再對正式桶執行。**"
-        Warn "═══════════════════════════════════════════════════════"
-        $c = Read-Host "確定要鎖定嗎？輸入 LOCK 以繼續"
-        if ($c -ceq "LOCK") {
-            Invoke-GCloud storage buckets update "gs://$auditBucket" --lock-retention-period
-            if ($LASTEXITCODE -eq 0) { Write-Host "  ✓ 保留政策已鎖定（不可逆）" }
-        } else { Write-Host "  已取消鎖定。" }
-    } else {
-        Write-Host "  ℹ 未鎖定。試營運期間建議先不鎖，正式收案前再評估 -LockRetention。"
-    }
+function Invoke-GCloudChecked([string]$What, [string[]]$Arguments) {
+    Invoke-GCloudScoped $Arguments
+    if ($LASTEXITCODE -ne 0) { Die "$What failed (gcloud exit $LASTEXITCODE)" }
 }
-
-# ── 5. 現況檢核 ─────────────────────────────────────────────────────
-Say "現況檢核"
-$cfg = Invoke-GCloud storage buckets describe "gs://$Bucket" --format=json | ConvertFrom-Json
-
-# ⚠ 欄位名稱有**兩種形態**，取決於你用哪個工具問：
-#   `gcloud storage buckets describe --format=json` → snake_case
-#       public_access_prevention / uniform_bucket_level_access / versioning_enabled / lifecycle_config
-#   REST API 與舊的 gsutil            → camelCase 且多一層巢狀
-#       iamConfiguration.publicAccessPrevention / versioning.enabled / lifecycle
-# 只寫其中一種的話，設定明明成功卻整排顯示 ✗——**檢核比它要檢查的東西更容易出錯**，
-# 而一個會誤報失敗的檢核，下一次就會被當成雜訊忽略掉。兩種都試。
-function Get-Field($obj, [string[]]$paths) {
-    foreach ($p in $paths) {
-        $cur = $obj
-        foreach ($seg in $p.Split('.')) {
-            if ($null -eq $cur) { break }
-            $cur = $cur.PSObject.Properties[$seg].Value
+function Get-GCloudJson([string]$What, [string[]]$Arguments) {
+    $raw = Invoke-GCloudScoped $Arguments
+    if ($LASTEXITCODE -ne 0 -or -not $raw) { Die "$What failed" }
+    try { return ($raw | ConvertFrom-Json) } catch { Die "$What returned invalid JSON: $_" }
+}
+function Get-Field($Object, [string[]]$Paths) {
+    foreach ($path in $Paths) {
+        $current = $Object
+        foreach ($segment in $path.Split('.')) {
+            if ($null -eq $current) { break }
+            $property = $current.PSObject.Properties[$segment]
+            if ($null -eq $property) { $current = $null; break }
+            $current = $property.Value
         }
-        if ($null -ne $cur) { return $cur }
+        if ($null -ne $current) { return $current }
     }
     return $null
 }
-function Write-CheckLine($name, $ok, $actual) {
-    $mark = if ($ok) { "✓" } else { "✗" }
-    $color = if ($ok) { "Gray" } else { "Yellow" }
-    $shown = if ($null -eq $actual -or "$actual" -eq "") { "(讀不到)" } else { $actual }
-    Write-Host ("  {0} {1,-28} {2}" -f $mark, $name, $shown) -ForegroundColor $color
+function Test-AuthorisationRef([string]$Value) {
+    if ([string]::IsNullOrWhiteSpace($Value) -or $Value -match '[\r\n<>（）]' -or
+            $Value -match '輸入|填入|placeholder|範本') {
+        Die "-LockAuthorisationRef must be operator-supplied text without placeholders or line breaks"
+    }
+}
+function Assert-ProjectTarget {
+    $project = Get-GCloudJson "describe project $ProjectId" @(
+        'projects','describe',$ProjectId,'--format=json')
+    if ([string](Get-Field $project @('projectId')) -cne $ProjectId) {
+        Die "gcloud project identity mismatch: expected $ProjectId"
+    }
+    $number = [string](Get-Field $project @('projectNumber'))
+    if ([string]::IsNullOrWhiteSpace($number)) {
+        Die "project $ProjectId did not return a projectNumber"
+    }
+    $script:PROJECT_NUMBER = $number
+}
+function Assert-BucketProject($Configuration, [string]$Name) {
+    $number = [string](Get-Field $Configuration @('projectNumber'))
+    if ([string]::IsNullOrWhiteSpace($number) -or $number -cne $script:PROJECT_NUMBER) {
+        Die "gs://$Name belongs to project number [$number], not $ProjectId"
+    }
+}
+function Assert-BucketLocation($Configuration, [string]$Name) {
+    if ($Configuration.location -ne $Region.ToUpperInvariant()) {
+        Die "gs://$Name location [$($Configuration.location)] does not match $Region"
+    }
+}
+function Get-Bucket([string]$Name) {
+    return Get-GCloudJson "describe gs://$Name" @(
+        'storage','buckets','describe',"gs://$Name",'--format=json')
+}
+function Assert-NoPublicIam([string]$Name) {
+    $iam = Get-GCloudJson "IAM gs://$Name" @(
+        'storage','buckets','get-iam-policy',"gs://$Name",'--format=json')
+    $public = @($iam.bindings | Where-Object {
+        $_.members -contains 'allUsers' -or $_.members -contains 'allAuthenticatedUsers'
+    })
+    if ($public.Count -ne 0) { Die "gs://$Name has public IAM bindings" }
+}
+function Get-LifecycleKeys($Configuration) {
+    $rules = @(Get-Field $Configuration @('lifecycle_config.rule','lifecycle.rule'))
+    $keys = @()
+    foreach ($rule in $rules) {
+        if ($rule.action.type -ne 'Delete') { Die "unexpected non-Delete lifecycle action" }
+        $condition = $rule.condition
+        $prefixes = @($condition.matchesPrefix | Where-Object { $null -ne $_ })
+        if ($null -ne $condition.daysSinceNoncurrentTime) {
+            if ($condition.isLive -ne $false -or $prefixes.Count -ne 0) {
+                Die "invalid noncurrent lifecycle rule"
+            }
+            $keys += "noncurrent|$($condition.daysSinceNoncurrentTime)"
+        } elseif ($null -ne $condition.age -and $prefixes.Count -eq 1) {
+            $keys += "age|$($condition.age)|$($prefixes[0])"
+        } else { Die "unrecognized lifecycle rule" }
+    }
+    return @($keys | Sort-Object)
+}
+function Get-ExpectedLifecycleKeys {
+    return @(
+        "age|$QuarantineDays|flywheel/quarantine/",
+        "age|$StagingDays|flywheel/staging/",
+        "age|$($StagingDays + $StagingMetaExtraDays)|flywheel/staging_meta/",
+        "noncurrent|$NoncurrentDays"
+    ) | Sort-Object
+}
+function Assert-MainLifecycleCompatible($Configuration) {
+    # --lifecycle-file replaces the complete lifecycle configuration.  Before
+    # mutation, reject any rule outside this approved policy instead of silently
+    # deleting a separately managed retention rule.
+    $expected = @(Get-ExpectedLifecycleKeys)
+    $unexpected = @((Get-LifecycleKeys $Configuration) | Where-Object { $_ -notin $expected })
+    if ($unexpected.Count -ne 0) {
+        Die "main bucket has lifecycle rules outside the approved policy: [$($unexpected -join '; ')]"
+    }
+}
+function Assert-MainBucket($Configuration) {
+    $expected = @(Get-ExpectedLifecycleKeys)
+    $actual = @(Get-LifecycleKeys $Configuration)
+    if (($actual -join "`n") -cne ($expected -join "`n")) {
+        Die "lifecycle mismatch; actual=[$($actual -join '; ')] expected=[$($expected -join '; ')]"
+    }
+    if ($Configuration.location -ne $Region.ToUpperInvariant()) { Die "main bucket location mismatch" }
+    if ((Get-Field $Configuration @('public_access_prevention','iamConfiguration.publicAccessPrevention')) -ne 'enforced') { Die "public access prevention not enforced" }
+    if ((Get-Field $Configuration @('uniform_bucket_level_access','iamConfiguration.uniformBucketLevelAccess.enabled')) -ne $true) { Die "UBLA not enabled" }
+    if ((Get-Field $Configuration @('versioning_enabled','versioning.enabled')) -ne $true) { Die "versioning not enabled" }
+    $soft = [int64](Get-Field $Configuration @('soft_delete_policy.retentionDurationSeconds','softDeletePolicy.retentionDurationSeconds'))
+    if ($soft -ne ($SoftDeleteDays * 86400L)) { Die "soft delete duration mismatch: $soft" }
+}
+function Assert-AuditBucket($Configuration, [bool]$RequireLocked) {
+    if ($Configuration.location -ne $Region.ToUpperInvariant()) { Die "audit bucket location mismatch" }
+    if ((Get-Field $Configuration @('public_access_prevention','iamConfiguration.publicAccessPrevention')) -ne 'enforced') { Die "audit public access prevention not enforced" }
+    if ((Get-Field $Configuration @('uniform_bucket_level_access','iamConfiguration.uniformBucketLevelAccess.enabled')) -ne $true) { Die "audit UBLA not enabled" }
+    $retention = [int64](Get-Field $Configuration @('retention_policy.retentionPeriod','retentionPolicy.retentionPeriod'))
+    if ($retention -ne $script:AUDIT_RETENTION_SECONDS) { Die "audit retention mismatch: $retention" }
+    $locked = (Get-Field $Configuration @('retention_policy.isLocked','retentionPolicy.isLocked')) -eq $true
+    if ($RequireLocked -and -not $locked) { Die "audit retention is not locked" }
+    return $locked
+}
+function Get-AuditObjectNames([string]$Name) {
+    # `storage ls gs://.../**` returns a non-zero exit for an empty bucket on
+    # some gcloud versions.  Use the object-list API instead: exit status must
+    # be zero even when it returns an empty JSON list.  A list failure is never
+    # evidence that a bucket is empty, especially before an irreversible lock.
+    $raw = Invoke-GCloudScoped @(
+        'storage','objects','list',"gs://$Name/**",'--format=json(name)')
+    if ($LASTEXITCODE -ne 0) { Die "cannot list audit bucket objects" }
+    if (-not $raw) { return @() }
+    try { $objects = @($raw | ConvertFrom-Json) }
+    catch { Die "audit object listing returned invalid JSON: $_" }
+    $names = @()
+    foreach ($obj in $objects) {
+        $objectName = [string](Get-Field $obj @('name'))
+        if ([string]::IsNullOrWhiteSpace($objectName)) {
+            Die "audit object listing returned an object without name"
+        }
+        $urlPrefix = "gs://$Name/"
+        if ($objectName.StartsWith($urlPrefix, [StringComparison]::Ordinal)) {
+            $objectName = $objectName.Substring($urlPrefix.Length)
+        } elseif ($objectName.StartsWith("$Name/", [StringComparison]::Ordinal)) {
+            $objectName = $objectName.Substring($Name.Length + 1)
+        }
+        $names += $objectName.TrimStart('/')
+    }
+    return @($names)
+}
+function Assert-AuditObjectsExpected([string]$Name, [switch]$RequireEmpty) {
+    $items = @(Get-AuditObjectNames $Name)
+    $unexpected = @($items | Where-Object {
+        $_ -notmatch '^flywheel/(?:audit\.jsonl/[0-9]{20}\.jsonl|receipts/(?:[A-Za-z0-9][A-Za-z0-9._-]*/)*[A-Za-z0-9][A-Za-z0-9._-]*\.json)$'
+    })
+    if ($unexpected.Count -ne 0) {
+        Die "audit bucket contains unexpected, legacy, or non-slot object paths (count=$($unexpected.Count))"
+    }
+    if ($RequireEmpty -and $items.Count -ne 0) {
+        Die "refuse to lock a non-empty audit bucket (objects=$($items.Count))"
+    }
+    if ($items.Count -eq 0) { Write-Host "  audit bucket is empty (clean locked-era bucket)" }
+    else { Write-Host "  expected numeric audit slots/receipts: $($items.Count)" }
 }
 
-$pap = Get-Field $cfg @("public_access_prevention", "iamConfiguration.publicAccessPrevention")
-$ubla = Get-Field $cfg @("uniform_bucket_level_access", "iamConfiguration.uniformBucketLevelAccess.enabled")
-$ver = Get-Field $cfg @("versioning_enabled", "versioning.enabled")
-$lcRules = Get-Field $cfg @("lifecycle_config.rule", "lifecycle.rule")
+if ($LockRetention) {
+    if (-not $Audit -or -not $Apply) { Die "-LockRetention requires -Audit -Apply" }
+    Test-AuthorisationRef $LockAuthorisationRef
+    if (-not $PSBoundParameters.ContainsKey('AuditBucket')) {
+        Die "-LockRetention requires an explicit fresh -AuditBucket; the default <main>-audit is forbidden"
+    }
+    if ($AuditBucket -ceq "$Bucket-audit") {
+        Die "-LockRetention refuses the legacy default audit bucket gs://$AuditBucket"
+    }
+    if ($AuditBucket -notmatch 'audit') {
+        Die "-LockRetention requires an audit-specific -AuditBucket name"
+    }
+}
+foreach ($durationDays in @($QuarantineDays,$StagingDays,$StagingMetaExtraDays,$NoncurrentDays,$SoftDeleteDays)) {
+    if ($durationDays -lt 1) { Die "retention durations must be positive" }
+}
+if ([string]::IsNullOrWhiteSpace($AuditBucket)) { Die "-AuditBucket must not be empty" }
+if ($AuditBucket -eq $Bucket) { Die "-AuditBucket must differ from -Bucket" }
+foreach ($bucketCandidate in @($Bucket,$AuditBucket)) {
+    if ($bucketCandidate -notmatch '^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$') {
+        Die "invalid bucket name: [$bucketCandidate]"
+    }
+}
 
-Write-CheckLine "位置（須為境內）" ($cfg.location -eq $Region.ToUpper()) $cfg.location
-Write-CheckLine "公開存取封鎖" ($pap -eq "enforced") $pap
-Write-CheckLine "統一存取控管" ($ubla -eq $true) $ubla
-Write-CheckLine "版本控制" ($ver -eq $true) $ver
-Write-CheckLine "生命週期規則" ($null -ne $lcRules -and @($lcRules).Count -gt 0) ("$(@($lcRules).Count) 條")
-Write-CheckLine "預設加密" $true "Google 管理金鑰（CMEK 見文件 §6）"
+$lifecycle = @"
+{"lifecycle":{"rule":[
+{"action":{"type":"Delete"},"condition":{"age":$QuarantineDays,"matchesPrefix":["flywheel/quarantine/"]}},
+{"action":{"type":"Delete"},"condition":{"age":$StagingDays,"matchesPrefix":["flywheel/staging/"]}},
+{"action":{"type":"Delete"},"condition":{"age":$($StagingDays + $StagingMetaExtraDays),"matchesPrefix":["flywheel/staging_meta/"]}},
+{"action":{"type":"Delete"},"condition":{"daysSinceNoncurrentTime":$NoncurrentDays,"isLive":false}}
+]}}
+"@
 
-Say "是否有公開授權（allUsers / allAuthenticatedUsers）"
-$iam = Invoke-GCloud storage buckets get-iam-policy "gs://$Bucket" --format=json | ConvertFrom-Json
-$pub = @($iam.bindings | Where-Object { $_.members -contains "allUsers" -or $_.members -contains "allAuthenticatedUsers" })
-if ($pub.Count -gt 0) { Warn "❌ 發現公開授權：$($pub.role -join ', ')" }
-else { Write-Host "  ✓ 沒有公開授權" }
+Say "plan"
+$mode = if ($Apply) { 'APPLY' } else { 'READ-ONLY' }
+Write-Host "  mode: $mode"
+Write-Host "  main: gs://$Bucket; staging=$StagingDays; staging_meta=$($StagingDays + $StagingMetaExtraDays); noncurrent=$NoncurrentDays; soft-delete=$SoftDeleteDays days"
+if ($Audit) { Write-Host "  audit: gs://$AuditBucket; retention=7y; lock=$([bool]$LockRetention)" }
 
-Write-Host "`n完成。仍需人工處理的項目見 docs/pre_collection_checklist.md。" -ForegroundColor Green
+Say "project and main-bucket preflight"
+Assert-ProjectTarget
+$mainPreflight = Get-Bucket $Bucket
+Assert-BucketProject $mainPreflight $Bucket
+Assert-BucketLocation $mainPreflight $Bucket
+Assert-MainLifecycleCompatible $mainPreflight
+Write-Host "  project: $ProjectId ($script:PROJECT_NUMBER); main target: gs://$Bucket"
+
+if ($Apply) {
+    Say "apply main-bucket controls"
+    Invoke-GCloudChecked "main bucket controls" @(
+        'storage','buckets','update',"gs://$Bucket",'--public-access-prevention',
+        '--uniform-bucket-level-access','--versioning',"--soft-delete-duration=$($SoftDeleteDays)d",'--quiet')
+    $temp = [IO.Path]::GetTempFileName()
+    try {
+        [IO.File]::WriteAllText($temp, $lifecycle, (New-Object Text.UTF8Encoding $false))
+        Invoke-GCloudChecked "main lifecycle" @(
+            'storage','buckets','update',"gs://$Bucket","--lifecycle-file=$temp",'--quiet')
+    } finally { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
+
+    if ($Audit) {
+        # A failed describe is followed by an explicit create of this *scoped*
+        # name.  Any other failure (for example permission on an existing
+        # foreign bucket) still fails on create/readback; it is never treated as
+        # evidence that the target belongs to this project.
+        Invoke-GCloudScoped @('storage','buckets','describe',"gs://$AuditBucket",'--format=json') | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Invoke-GCloudChecked "create audit bucket" @(
+                'storage','buckets','create',"gs://$AuditBucket","--location=$Region",
+                '--uniform-bucket-level-access','--public-access-prevention','--quiet')
+        }
+
+        # Do not set a retention policy, much less lock it, until the named
+        # bucket has been re-described, tied to ProjectId, and completely
+        # enumerated.  A valid-looking name or a failed listing is not enough.
+        $auditBeforeRetention = Get-Bucket $AuditBucket
+        Assert-BucketProject $auditBeforeRetention $AuditBucket
+        Assert-BucketLocation $auditBeforeRetention $AuditBucket
+        Assert-NoPublicIam $AuditBucket
+        Assert-AuditObjectsExpected $AuditBucket -RequireEmpty:$LockRetention
+
+        Invoke-GCloudChecked "audit bucket access controls" @(
+            'storage','buckets','update',"gs://$AuditBucket",'--public-access-prevention',
+            '--uniform-bucket-level-access','--quiet')
+        $auditAfterAccess = Get-Bucket $AuditBucket
+        Assert-BucketProject $auditAfterAccess $AuditBucket
+        Assert-BucketLocation $auditAfterAccess $AuditBucket
+        Assert-NoPublicIam $AuditBucket
+        Assert-AuditObjectsExpected $AuditBucket -RequireEmpty:$LockRetention
+
+        Invoke-GCloudChecked "audit retention policy" @(
+            'storage','buckets','update',"gs://$AuditBucket",'--retention-period=7y','--quiet')
+        $preLock = Get-Bucket $AuditBucket
+        Assert-BucketProject $preLock $AuditBucket
+        [void](Assert-AuditBucket $preLock $false)
+        # Re-list immediately before the irreversible operation.  A concurrent
+        # unexpected write must stop the lock rather than become seven-year
+        # evidence by accident.
+        Assert-AuditObjectsExpected $AuditBucket -RequireEmpty:$LockRetention
+        if ($LockRetention) {
+            $alreadyLocked = (Get-Field $preLock @('retention_policy.isLocked','retentionPolicy.isLocked')) -eq $true
+            if (-not $alreadyLocked) {
+                Say "IRREVERSIBLE: lock audit retention"
+                Invoke-GCloudChecked "lock audit retention" @(
+                    'storage','buckets','update',"gs://$AuditBucket",'--lock-retention-period','--quiet')
+            }
+        }
+    }
+}
+
+Say "fail-closed readback"
+$main = Get-Bucket $Bucket
+Assert-BucketProject $main $Bucket
+Assert-MainBucket $main
+Assert-NoPublicIam $Bucket
+Write-Host "  main bucket: verified"
+if ($Audit) {
+    $auditConfig = Get-Bucket $AuditBucket
+    Assert-BucketProject $auditConfig $AuditBucket
+    $locked = Assert-AuditBucket $auditConfig ([bool]$LockRetention)
+    Assert-NoPublicIam $AuditBucket
+    Assert-AuditObjectsExpected $AuditBucket -RequireEmpty:$LockRetention
+    Write-Host "  audit bucket: verified; locked=$locked"
+}
+
+Write-Host "`nPASS: bucket configuration matches the P0-4 Phase A policy." -ForegroundColor Green

@@ -110,7 +110,7 @@ def _identity(code, actor, org):
         raise ConsentError("invalid_care_identity")
 
 
-def issue_care(store, keys, code, actor, role, org, audit, now=None):
+def issue_care(store, keys, code, actor, role, org, audit, now=None, intent=None):
     if not can(role, "measure.clinical"):
         raise ConsentError("care_permission_denied", 403)
     _identity(code, actor, org)
@@ -120,6 +120,11 @@ def issue_care(store, keys, code, actor, role, org, audit, now=None):
                "iat": now, "exp": now + CARE_TTL_SECONDS}
     raw = _json(payload)
     token = _b64(raw) + "." + _b64(keys.mac(keys.active, raw))
+    # A care receipt grants the only persistence path for classify.  Record the
+    # durable intent before creating the immutable receipt so an unavailable
+    # audit chain cannot leave a valid persistence credential without evidence.
+    (intent or audit)("care_receipt_issue", code, {"actor": actor, "role": role,
+                                                     "org": org, "jti": payload["jti"]})
     # Protected issuance identity is not copied into the short-lived bind.
     store.put_json_immutable("receipts/care/" + payload["jti"] + ".json",
                              {"schema": CARE_SCHEMA, **payload})
@@ -203,10 +208,14 @@ def image_is_ratified(store, image_id, code=None, org=None):
 
 
 class Promotion:
-    def __init__(self, store, audit, blocked, rows, keys=None, now=None):
+    def __init__(self, store, audit, blocked, rows, keys=None, now=None, intent=None):
         self.store, self.audit, self.blocked, self.rows = store, audit, blocked, rows
         self.keys = keys
         self.now = time.time if now is None else now
+        # `audit` records outcomes; `intent` is the pre-state durable receipt.
+        # Test callers may pass only audit, in which case the same sink remains
+        # sufficient to preserve ordering semantics.
+        self.intent = intent or audit
 
     def _guard(self, code, image_id):
         if self.blocked(code, image_id):
@@ -256,6 +265,9 @@ class Promotion:
                 self._bytes("images/" + iid + ".jpg", iid, p)
                 return {"persisted": True, "persistence_reason": "already_promoted",
                         "image_id": iid, "image_reused": True}
+        self.intent("care_receipt_consume", care["code"],
+                    {"actor": actor, "role": role, "org": org,
+                     "jti": care["jti"], "image_id": iid})
         key = "staging_meta/bind/" + iid + ".json"
         old = self.store.get_json(key)
         bind = {"schema": BIND_SCHEMA, "image_id": iid, "ts": int(self.now()),
@@ -275,11 +287,21 @@ class Promotion:
                 self.store.put_json_immutable(key, bind)
             except ImmutableConflict:
                 self._binding(iid, care["code"], org)  # racing bind must match subject
+            except Exception as exc:
+                # The request may have committed but lost its response.  The
+                # caller must not report analysis-only success in that state.
+                raise ConsentError("persistence_state_unknown", 503) from exc
         self._guard(care["code"], iid)
-        created = self.store.put_blob_immutable("staging/" + iid + ".jpg", image.data)
-        self.audit("care_receipt_consumed", care["code"],
-                   {"actor": actor, "attested_by": care["attested_by"], "role": role,
-                    "org": org, "jti": care["jti"], "image_id": iid, "created": created})
+        try:
+            created = self.store.put_blob_immutable("staging/" + iid + ".jpg", image.data)
+            self.audit("care_receipt_consumed", care["code"],
+                       {"actor": actor, "attested_by": care["attested_by"], "role": role,
+                        "org": org, "jti": care["jti"], "image_id": iid, "created": created})
+        except Exception as exc:
+            # Bind and/or staging bytes can now already exist.  Surface an
+            # explicit unknown state rather than allowing the classify route to
+            # downgrade it to an innocent analysis-only response.
+            raise ConsentError("persistence_state_unknown", 503) from exc
         return {"persisted": True, "persistence_reason": "staged", "image_id": iid,
                 "image_reused": not created}
 
@@ -302,6 +324,12 @@ class Promotion:
         if not can(role, "annotation.submit") or not all(d.get(k) is True for k in
                 ("consent_train", "doctor_verified", "deidentified")):
             raise ConsentError("training_consent_required", 403)
+        # This must precede both the immutable promotion receipt (p1) and the
+        # image copy (p2).  If it fails, neither training eligibility nor image
+        # placement changes.
+        self.intent("promotion_prepare", code,
+                    {"actor": actor, "role": role, "org": org,
+                     "image_id": iid, "annotation_receipt_id": rid})
         p = self._p(iid)
         if p is not None:
             self._identity_gate(p, code, org, iid)
@@ -331,6 +359,8 @@ class Promotion:
             except ImmutableConflict:
                 p = self._p(iid)  # another actor won p1; dispatch using that receipt
                 self._identity_gate(p, code, org, iid)
+            except Exception as exc:
+                raise ConsentError("persistence_state_unknown", 503) from exc
         if (d["image_w"], d["image_h"]) != (p.get("width"), p.get("height")):
             raise ConsentError("image_dimensions_mismatch")
         trigger = p["triggering_annotation_receipt_id"] == rid
@@ -343,10 +373,16 @@ class Promotion:
             if not image and not stage:
                 raise ConsentError("promotion_lost_with_queue" if queued else "promotion_lost", 409)
             if not image:
-                self._copy(p)
+                try:
+                    self._copy(p)
+                except Exception as exc:
+                    raise ConsentError("persistence_state_unknown", 503) from exc
             if not queued:
-                self.audit("staging_swept_early" if image and not stage else "image_promoted",
-                           code, {"image_id": iid, "annotation_receipt_id": rid})
+                try:
+                    self.audit("staging_swept_early" if image and not stage else "image_promoted",
+                               code, {"image_id": iid, "annotation_receipt_id": rid})
+                except Exception as exc:
+                    raise ConsentError("persistence_state_unknown", 503) from exc
         self._bytes("images/" + iid + ".jpg", iid, p)
         self._guard(code, iid)
         return {"legacy_image": False, "annotation_receipt_id": rid,
@@ -371,7 +407,26 @@ class Promotion:
             return False
         if apply:
             self._guard(p["code"], image_id)
-            self.store.delete("staging/" + image_id + ".jpg")
+            # Deleting staging is a persistent transition too.  `finish()`
+            # calls this method after the queue receipt is visible, while the
+            # maintenance CLI can call it directly; putting the intent here
+            # covers both paths rather than relying on a caller to remember it.
+            self.intent("staging_sweep", p["code"], {
+                "image_id": image_id,
+                "annotation_receipt_id": p["triggering_annotation_receipt_id"],
+            })
+            try:
+                deleted = self.store.delete("staging/" + image_id + ".jpg")
+                if deleted:
+                    self.audit("staging_swept", p["code"], {
+                        "image_id": image_id,
+                        "annotation_receipt_id": p["triggering_annotation_receipt_id"],
+                    })
+            except Exception as exc:
+                # Do not report a completed sweep if its outcome audit was
+                # unavailable after deletion.  The preceding intent remains
+                # evidence for operator reconciliation.
+                raise ConsentError("persistence_state_unknown", 503) from exc
         return True
 
     def repair(self, image_id, operator, grace_seconds=86400, apply=False):
@@ -390,9 +445,15 @@ class Promotion:
         self._bytes("staging/" + image_id + ".jpg", image_id, p)
         self._guard(p["code"], image_id)
         if apply:
-            self._copy(p)
-            self.audit("promotion_completed_by_repair", p["code"],
-                       {"operator": operator, "image_id": image_id,
-                        "annotation_receipt_id": p["triggering_annotation_receipt_id"],
-                        "grace_seconds": grace_seconds})
+            self.intent("promotion_repair", p["code"],
+                        {"operator": operator, "image_id": image_id,
+                         "annotation_receipt_id": p["triggering_annotation_receipt_id"]})
+            try:
+                self._copy(p)
+                self.audit("promotion_completed_by_repair", p["code"],
+                           {"operator": operator, "image_id": image_id,
+                            "annotation_receipt_id": p["triggering_annotation_receipt_id"],
+                            "grace_seconds": grace_seconds})
+            except Exception as exc:
+                raise ConsentError("persistence_state_unknown", 503) from exc
         return True

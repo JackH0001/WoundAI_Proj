@@ -1,5 +1,6 @@
 # ── Stage 1: 依賴安裝 ─────────────────────────────────────────────────────
-FROM python:3.11-slim AS builder
+ARG PYTHON_IMAGE=python:3.11.16-slim-bookworm@sha256:528257d48c1da0dcecc2e725d1ae34498d60c965f1241e39cd6a85a8859bdf84
+FROM ${PYTHON_IMAGE} AS builder
 
 WORKDIR /build
 
@@ -8,11 +9,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libglib2.0-0 libsm6 libxext6 libxrender-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+COPY requirements.txt requirements.lock ./
+RUN pip install --no-cache-dir --prefix=/install --require-hashes -r requirements.lock
 
 # ── Stage 2: 執行映像 ─────────────────────────────────────────────────────
-FROM python:3.11-slim
+FROM ${PYTHON_IMAGE}
 
 WORKDIR /app
 
@@ -25,6 +26,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # 複製應用程式碼
 COPY . .
+
+# Build-time canonical-byte gate.  A cv2/Pillow/base-image change must update
+# runtime_golden.py in the same reviewed PR; otherwise the image does not exist.
+RUN python runtime_golden.py --verify
 
 # 非 root 使用者（安全最佳實務）
 RUN useradd -m -u 1000 woundai \

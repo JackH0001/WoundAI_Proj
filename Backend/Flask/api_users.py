@@ -61,6 +61,18 @@ def upsert_user():
     if d.get("generate_password"):
         generated = _gen_password()
         d["password"] = generated
+    # Account state is durable clinical-system security state.  Do not create
+    # or alter it unless an immutable audit intent has already landed.  Never
+    # put the password (generated or supplied) in the intent detail.
+    try:
+        fw.audit_intent(actor, "user_upsert",
+                        "%s:%s" % (d.get("org") or auth_users.DEFAULT_ORG,
+                                     d.get("user") or "?"),
+                        role, org,
+                        {"role": d.get("role"), "disabled": d.get("disabled"),
+                         "generated_password": bool(d.get("generate_password"))})
+    except fw.AuditUnavailable:
+        return jsonify({"error": "audit_unavailable"}), 503
     try:
         rec = auth_users.upsert_user(
             org=(d.get("org") or auth_users.DEFAULT_ORG).strip(),

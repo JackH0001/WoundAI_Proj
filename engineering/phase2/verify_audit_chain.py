@@ -23,8 +23,10 @@
     # 本機
     python engineering/phase2/verify_audit_chain.py
 
-    # 雲端（Cloud Run 的 GCS 儲存）
+    # 雲端（Cloud Run 的 GCS 儲存）。稽核鍵走獨立稽核桶,缺 WOUNDAI_AUDIT_BUCKET 會
+    # 明確報錯(store._target 拒絕),不會靜默讀到錯的地方。
     $env:WOUNDAI_STORE="gcs"; $env:WOUNDAI_GCS_BUCKET="woundai-flywheel-jackh001"
+    $env:WOUNDAI_AUDIT_BUCKET="woundai-flywheel-jackh001-audit"
     python engineering/phase2/verify_audit_chain.py
 
     # 記下鏈頭（建議每次稽核後抄到程式碰不到的地方）
@@ -87,18 +89,27 @@ def main():
         "broken_link": "前一筆被刪除或順序被調換",
         "fork": "兩筆指向同一個前驅（並行寫入或被補塞）",
         "legacy_no_hash": "雜湊鏈導入前的舊紀錄（無法驗證，非異常）",
+        "legacy_formula": "以已被取代的欄位組驗證通過（公式變更的痕跡，非竄改）",
     }
-    real = [i for i in issues if i["kind"] != "legacy_no_hash"]
+    INFORMATIONAL = ("legacy_no_hash", "legacy_formula")
+    real = [i for i in issues if i["kind"] not in INFORMATIONAL]
     legacy = len(issues) - len(real)
 
     if not real:
-        print("✅ 鏈結完整（另有 %d 筆為雜湊鏈導入前的舊紀錄，無法回溯驗證）。" % legacy)
-        print("   那些紀錄的可信度僅止於「當時的程式只做 append」這個承諾。")
+        n_nohash = sum(1 for i in issues if i["kind"] == "legacy_no_hash")
+        n_formula = sum(1 for i in issues if i["kind"] == "legacy_formula")
+        print("✅ 鏈結完整（另有 %d 筆屬資訊性標記，非異常）。" % legacy)
+        if n_nohash:
+            print("   %d 筆為雜湊鏈導入前的舊紀錄，無法回溯驗證——" % n_nohash)
+            print("   可信度僅止於「當時的程式只做 append」這個承諾。")
+        if n_formula:
+            print("   %d 筆以**已被取代的欄位組**驗證通過。紀錄本身沒有被動過，" % n_formula)
+            print("   是後來改過 AUDIT_CHAIN_FIELDS；竄改無法恰好符合一個作廢的公式。")
         return 0
 
     print("❌ 發現 %d 處異常：" % len(real))
     for k, n in stats["kinds"].items():
-        if k == "legacy_no_hash":
+        if k in INFORMATIONAL:
             continue
         print("   %-16s %d 筆  — %s" % (k, n, KIND_ZH.get(k, k)))
     print()
@@ -107,7 +118,7 @@ def main():
         print("   #%-5d %s  [%s]" % (i["index"], i.get("ts") or "?", i["kind"]))
         print("          %s" % i["detail"])
     if legacy:
-        print("\n   （另有 %d 筆導入前的舊紀錄未計入）" % legacy)
+        print("\n   （另有 %d 筆資訊性標記未計入：導入前舊紀錄，或已被取代的公式）" % legacy)
     print()
     print("下一步：這不是可以自行「修好」的東西。稽核軌跡出現斷點本身就是要通報的事件，")
     print("        請保留現況、記錄發現時間，並依 SOP 通報。")

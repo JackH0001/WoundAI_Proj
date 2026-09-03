@@ -80,6 +80,35 @@ class FakeObjectStore(Store):
     def describe(self):
         return "fake-object-store"
 
+    # 稽核鏈序列化原語。假物件儲存要忠實模擬 GCS 的「只在物件不存在時建立」語意——
+    # 這正是序列化依賴的那條性質,所以不能用 append_line 的舊路徑退回去。
+    def chain_tail(self, key):
+        from store import _CHAIN_NAME_RE
+        base = key + "/"
+        names = sorted(k for k in self.objects if k.startswith(base))
+        if not names:
+            return (-1, None)
+        leaf = names[-1][len(base):]
+        m = _CHAIN_NAME_RE.match(leaf)
+        if not m:
+            raise RuntimeError("legacy time-named records in " + base)
+        rec = json.loads(self.objects[names[-1]].decode())
+        return (int(m.group(1)), rec)
+
+    def append_chained(self, key, seq, line):
+        from store import ChainConflict, _chain_name
+        import threading
+        lock = self.__dict__.setdefault("_chain_lock", threading.Lock())
+        name = key + "/" + _chain_name(seq)
+        data = (line.rstrip("\n") + "\n").encode()
+        with lock:                                  # 模擬伺服器端的原子條件建立
+            if name in self.objects:
+                if self.objects[name] == data:
+                    return False
+                raise ChainConflict(name)
+            self.objects[name] = data
+            return True
+
 
 def main():
     import store as st

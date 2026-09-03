@@ -105,9 +105,12 @@ class StagingTests(unittest.TestCase):
         self.events, self.queue, self.withdrawn = [], [], set()
         self.clock = 1000000
         self.keys = CareKeys(key_config(), now=self.clock)
+        def intent(action, code, detail):
+            self.events.append((action + "_intent", code, detail))
         self.svc = Promotion(self.st, lambda *a: self.events.append(a),
                              lambda c, i: c in self.withdrawn or i in self.withdrawn,
-                             lambda: self.queue, self.keys, now=lambda: self.clock)
+                             lambda: self.queue, self.keys, now=lambda: self.clock,
+                             intent=intent)
         self.image = canonicalize(jpeg())
         self.iid = self.image.image_id
         self.actor, self.org, self.code = "default:doctor", "default", "WD-synthetic"
@@ -118,7 +121,7 @@ class StagingTests(unittest.TestCase):
 
     def token(self, role="nurse", org="default", code=None):
         return issue_care(self.st, self.keys, code or self.code, org + ":nurse", role,
-                          org, self.svc.audit, self.clock)[0]
+                          org, self.svc.audit, self.clock, intent=self.svc.intent)[0]
 
     def stage(self):
         return self.svc.stage(self.image, self.token(), self.actor, "physician", self.org)
@@ -129,6 +132,22 @@ class StagingTests(unittest.TestCase):
     def test_no_receipt_means_zero_writes(self):
         self.assertFalse(self.svc.stage(self.image, None, self.actor, "physician", self.org)["persisted"])
         self.assertEqual(list(Path(self.tmp.name).rglob("*")), [])
+
+    def test_intent_precedes_state_and_failed_intent_writes_nothing(self):
+        token = self.token()
+        self.assertEqual([e[0] for e in self.events[:2]],
+                         ["care_receipt_issue_intent", "care_receipt_issued"])
+        before = sorted(str(p.relative_to(self.tmp.name))
+                        for p in Path(self.tmp.name).rglob("*") if p.is_file())
+        failing = Promotion(self.st, lambda *a: None,
+                            lambda c, i: False, lambda: [], self.keys,
+                            now=lambda: self.clock,
+                            intent=lambda *a: (_ for _ in ()).throw(RuntimeError("audit down")))
+        with self.assertRaisesRegex(RuntimeError, "audit down"):
+            failing.stage(self.image, token, self.actor, "physician", self.org)
+        after = sorted(str(p.relative_to(self.tmp.name))
+                       for p in Path(self.tmp.name).rglob("*") if p.is_file())
+        self.assertEqual(after, before)
 
     def test_role_org_signature_expiry_rejected(self):
         token = self.token()
@@ -227,7 +246,8 @@ class StagingTests(unittest.TestCase):
     def test_repair_before_after_ttl_and_sweep_no_trigger_queue(self):
         self.stage()
         with patch.object(self.st, "copy_immutable", side_effect=IOError("synthetic crash")):
-            with self.assertRaises(IOError): self.prepare()
+            with self.assertRaises(ConsentError) as err: self.prepare()
+        self.assertEqual(err.exception.code, "persistence_state_unknown")
         self.clock += 86401
         self.assertTrue(self.svc.repair(self.iid, "synthetic-operator"))
         self.assertFalse(self.st.exists("images/" + self.iid + ".jpg"))
@@ -240,10 +260,30 @@ class StagingTests(unittest.TestCase):
         self.st.delete("staging/" + self.iid + ".jpg")  # simulate TTL, not repair
         self.prepare(rid="f" * 16, actor="default:second")  # T-C7b: I & !S
 
+    def test_sweep_writes_intent_before_delete_and_surfaces_intent_failure(self):
+        self.stage()
+        self.prepare()
+        self.queue.append({"annotation_receipt_id": self.rid})
+        self.events.clear()
+        self.assertTrue(self.svc.sweep(self.iid, apply=True))
+        self.assertFalse(self.st.exists("staging/" + self.iid + ".jpg"))
+        self.assertEqual([e[0] for e in self.events],
+                         ["staging_sweep_intent", "staging_swept"])
+
+        # Recreate the eligible state and prove an unavailable pre-state audit
+        # cannot delete staging.  This is the safety property shared by the
+        # normal `finish()` path and the maintenance CLI.
+        self.st.put_blob_immutable("staging/" + self.iid + ".jpg", self.image.data)
+        self.svc.intent = lambda *a: (_ for _ in ()).throw(RuntimeError("audit down"))
+        with self.assertRaisesRegex(RuntimeError, "audit down"):
+            self.svc.sweep(self.iid, apply=True)
+        self.assertTrue(self.st.exists("staging/" + self.iid + ".jpg"))
+
     def test_withdrawal_rechecked_before_copy_repair_sweep(self):
         self.stage()
         with patch.object(self.st, "copy_immutable", side_effect=IOError("synthetic crash")):
-            with self.assertRaises(IOError): self.prepare()
+            with self.assertRaises(ConsentError) as err: self.prepare()
+        self.assertEqual(err.exception.code, "persistence_state_unknown")
         self.withdrawn.add(self.code)
         self.clock += 86401
         with self.assertRaisesRegex(ConsentError, "withdrawn"): self.prepare()
@@ -315,7 +355,8 @@ class StagingTests(unittest.TestCase):
     def test_repair_validation_failures_do_not_copy_or_enqueue(self):
         self.stage()
         with patch.object(self.st, "copy_immutable", side_effect=IOError("synthetic crash")):
-            with self.assertRaises(IOError): self.prepare()
+            with self.assertRaises(ConsentError) as err: self.prepare()
+        self.assertEqual(err.exception.code, "persistence_state_unknown")
         self.clock += 86401
         bind_key = "staging_meta/bind/" + self.iid + ".json"
         original = self.st.get_blob(bind_key)
