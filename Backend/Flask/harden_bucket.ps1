@@ -83,8 +83,11 @@ function Assert-BucketLocation($Configuration, [string]$Name) {
     }
 }
 function Get-Bucket([string]$Name) {
+    # Normalized `gcloud storage buckets describe` output in SDK 578 omits
+    # projectNumber.  The raw Storage API response retains it, which is the
+    # ownership proof required before this script can mutate or lock a bucket.
     return Get-GCloudJson "describe gs://$Name" @(
-        'storage','buckets','describe',"gs://$Name",'--format=json')
+        'storage','buckets','describe',"gs://$Name",'--raw','--format=json')
 }
 function Assert-NoPublicIam([string]$Name) {
     $iam = Get-GCloudJson "IAM gs://$Name" @(
@@ -155,18 +158,18 @@ function Assert-AuditBucket($Configuration, [bool]$RequireLocked) {
 }
 function Get-AuditObjectNames([string]$Name) {
     # `storage ls gs://.../**` returns a non-zero exit for an empty bucket on
-    # some gcloud versions.  Use the object-list API instead: exit status must
-    # be zero even when it returns an empty JSON list.  A list failure is never
-    # evidence that a bucket is empty, especially before an irreversible lock.
+    # some gcloud versions.  Use the object-list API instead.  Parse its
+    # explicit one-name-per-line format rather than the CLI's normalized JSON:
+    # SDK 578 changed the latter's object representation during script runs.
+    # A list failure is never evidence that a bucket is empty, especially before
+    # an irreversible lock.
     $raw = Invoke-GCloudScoped @(
-        'storage','objects','list',"gs://$Name/**",'--format=json(name)')
+        'storage','objects','list',"gs://$Name/**",'--format=value(name)')
     if ($LASTEXITCODE -ne 0) { Die "cannot list audit bucket objects" }
     if (-not $raw) { return @() }
-    try { $objects = @($raw | ConvertFrom-Json) }
-    catch { Die "audit object listing returned invalid JSON: $_" }
     $names = @()
-    foreach ($obj in $objects) {
-        $objectName = [string](Get-Field $obj @('name'))
+    foreach ($line in @($raw)) {
+        $objectName = [string]$line
         if ([string]::IsNullOrWhiteSpace($objectName)) {
             Die "audit object listing returned an object without name"
         }
