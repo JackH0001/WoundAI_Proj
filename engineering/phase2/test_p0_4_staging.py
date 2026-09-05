@@ -311,17 +311,43 @@ class StagingTests(unittest.TestCase):
         with self.assertRaises(ConsentError): CareKeys(cfg, now=self.clock + 1)
 
     def test_protected_prefix_immutable_content_and_absolute_aliases(self):
-        for key in ("receipts/promotion/x.json", "receipts/legacy_ratification.json", "audit.jsonl"):
+        # Receipt objects are immutable blobs.  The audit-chain root is more
+        # restrictive: only append_chained() may write it, so raw JSONL and
+        # generic immutable helpers cannot bypass seq/prev/hash validation.
+        for key in ("receipts/promotion/x.json", "receipts/legacy_ratification.json"):
             self.assertTrue(Store()._is_audit(key))
             self.st.put_json_immutable(key, {"synthetic": True})
             self.assertFalse(self.st.put_json_immutable(key, {"synthetic": True}))
             with self.assertRaises(ImmutableConflict): self.st.put_json_immutable(key, {"synthetic": False})
-            for alias in (key, str(Path(self.tmp.name) / key)):
+            upper_key = key.upper()
+            for alias in (key, str(Path(self.tmp.name) / key), upper_key,
+                          str(Path(self.tmp.name) / upper_key)):
+                self.assertTrue(self.st._is_audit(alias))
                 with self.assertRaises(PermissionError): self.st.delete(alias)
                 with self.assertRaises(PermissionError): self.st.move(alias, "elsewhere")
                 with self.assertRaises(PermissionError): self.st.put_blob(alias, b"overwrite")
-                if key.startswith("receipts/"):
-                    with self.assertRaises(PermissionError): self.st.append_line(alias, "overwrite")
+                with self.assertRaises(PermissionError): self.st.copy_immutable("source.bin", alias)
+                with self.assertRaises(PermissionError): self.st.append_line(alias, "overwrite")
+                with self.assertRaises(PermissionError): self.st.append_record_once(
+                    alias, "a" * 16, {"annotation_receipt_id": "a" * 16})
+
+        key = "audit.jsonl"
+        self.assertTrue(Store()._is_audit(key))
+        self.st.put_blob("source.bin", b"source")
+        for alias in (key, key + "/evil.json", str(Path(self.tmp.name) / key),
+                      str(Path(self.tmp.name) / key / "evil.json"),
+                      key.upper(), key.upper() + "/EVIL.JSON",
+                      str(Path(self.tmp.name) / key.upper()),
+                      str(Path(self.tmp.name) / key.upper() / "EVIL.JSON")):
+            self.assertTrue(self.st._is_audit_chain(alias))
+            with self.assertRaises(PermissionError): self.st.delete(alias)
+            with self.assertRaises(PermissionError): self.st.move(alias, "elsewhere")
+            with self.assertRaises(PermissionError): self.st.put_blob(alias, b"overwrite")
+            with self.assertRaises(PermissionError): self.st.put_json_immutable(alias, {"synthetic": True})
+            with self.assertRaises(PermissionError): self.st.copy_immutable("source.bin", alias)
+            with self.assertRaises(PermissionError): self.st.append_line(alias, "overwrite")
+            with self.assertRaises(PermissionError): self.st.append_record_once(
+                alias, "a" * 16, {"annotation_receipt_id": "a" * 16})
         self.assertFalse(Store()._is_audit("receiptsX/evil.json"))
         self.assertFalse(self.st.retention_info()["locked"])
 
@@ -377,6 +403,8 @@ class StagingTests(unittest.TestCase):
         st.prefix = "flywheel"
         st._bucket_name, st._audit_bucket_name = "synthetic-main", "synthetic-audit"
         st._bucket, st._audit_bucket = Mock(), Mock()
+        st._audit_bucket._properties = {"retentionPolicy": {
+            "retentionPeriod": "220903200", "isLocked": True}}
         for k in ("receipts/promotion/x.json", "receipts/legacy_ratification.json", "audit.jsonl"):
             self.assertIs(st._target(k)[0], st._audit_bucket)
             with self.assertRaises(PermissionError): st.delete(k)
@@ -392,9 +420,15 @@ class StagingTests(unittest.TestCase):
         self.assertFalse(st.put_json_immutable("receipts/test.json", {"synthetic": True}))
         with self.assertRaises(ImmutableConflict):
             st.put_json_immutable("receipts/test.json", {"synthetic": False})
+        with self.assertRaises(PermissionError): st.put_json_immutable("audit.jsonl", {"synthetic": True})
+        with self.assertRaises(PermissionError): st.append_line("audit.jsonl", "overwrite")
+        with self.assertRaises(PermissionError): st.append_record_once(
+            "audit.jsonl", "a" * 16, {"annotation_receipt_id": "a" * 16})
+        with self.assertRaises(PermissionError): st.copy_immutable("receipts/test.json", "images/leak.jpg")
         st._audit_bucket._properties = {"retentionPolicy": {"retentionPeriod": "220752000", "isLocked": False}}
         self.assertFalse(st.retention_info()["locked"])
         self.assertEqual(st.retention_info()["retention_seconds"], 220752000)
+        with self.assertRaises(PermissionError): st.put_json_immutable("receipts/after-unlock.json", {"synthetic": True})
         self.assertNotIn("WORM", st.describe())
         st._audit_bucket = None
         with self.assertRaises(RuntimeError): st._target("receipts/test.json")

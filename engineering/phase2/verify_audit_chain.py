@@ -29,12 +29,16 @@
     $env:WOUNDAI_AUDIT_BUCKET="woundai-flywheel-jackh001-audit"
     python engineering/phase2/verify_audit_chain.py
 
+    # 要把結果當成 WORM 證據時，必須明確要求並讀回雲端保留政策
+    python engineering/phase2/verify_audit_chain.py --require-worm
+
     # 記下鏈頭（建議每次稽核後抄到程式碰不到的地方）
     python engineering/phase2/verify_audit_chain.py --head-only
 
 退出碼 0＝完整，1＝發現問題，2＝無法讀取。
 """
 import argparse
+import json
 import os
 import sys
 
@@ -43,12 +47,54 @@ BACKEND = os.path.abspath(os.path.join(HERE, "..", "..", "Backend", "Flask"))
 sys.path.insert(0, BACKEND)
 
 
+def worm_evidence(store):
+    """Return `(passes, evidence)` from a live store retention readback.
+
+    This deliberately accepts a store object rather than environment strings:
+    a configured bucket name is not proof that the bucket is locked.  The GCS
+    implementation reloads bucket metadata inside `retention_info()`.
+    """
+    from store import AUDIT_RETENTION_SECONDS, GcsStore
+
+    if not isinstance(store, GcsStore):
+        return False, {
+            "backend": type(store).__name__,
+            "required_retention_seconds": AUDIT_RETENTION_SECONDS,
+            "reason": "--require-worm is valid only for a live GCS audit bucket",
+        }
+    try:
+        info = store.retention_info()
+    except Exception as exc:
+        info = {"verified": False, "locked": False,
+                "reason": "retention_info raised: %s" % exc}
+    if not isinstance(info, dict):
+        info = {"verified": False, "locked": False,
+                "reason": "retention_info returned a non-object"}
+    try:
+        retention = int(info.get("retention_seconds") or 0)
+    except (TypeError, ValueError):
+        retention = -1
+    passed = (info.get("verified") is True and info.get("locked") is True
+              and retention == AUDIT_RETENTION_SECONDS)
+    return passed, {
+        "backend": "GcsStore",
+        "required_retention_seconds": AUDIT_RETENTION_SECONDS,
+        "retention_info": info,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--audit-path", default=None, help="自訂稽核檔路徑（預設用飛輪目錄）")
     ap.add_argument("--head-only", action="store_true", help="只印鏈頭雜湊（供抄寫存證）")
     ap.add_argument("--show", type=int, default=10, help="最多列出幾筆問題")
+    ap.add_argument("--require-worm", action="store_true",
+                    help="要求即時讀回的 GCS 稽核桶為已鎖定、精確 7 年保留")
     a = ap.parse_args()
+
+    if a.require_worm and a.audit_path is not None:
+        print("拒絕：--require-worm 不得與 --audit-path 併用；保留證據必須綁定預設 GCS 稽核鍵")
+        return 2
 
     try:
         import api_flywheel as fw
@@ -62,12 +108,25 @@ def main():
         print("讀取稽核軌跡失敗：%s" % e)
         return 2
 
+    try:
+        active_store = fw._store()
+    except Exception as exc:
+        print("無法載入儲存後端：%s" % exc)
+        return 2
+
+    worm_ok, worm = True, None
+    if a.require_worm:
+        worm_ok, worm = worm_evidence(active_store)
+
     if a.head_only:
         print(stats["head"])
-        return 0 if ok else 1
+        if a.require_worm:
+            print("WORM retention_info: %s" %
+                  json.dumps(worm, ensure_ascii=False, sort_keys=True), file=sys.stderr)
+        return 0 if ok and worm_ok else 1
 
     try:
-        store_desc = fw._store().describe()
+        store_desc = active_store.describe()
     except Exception:
         store_desc = "?"
 
@@ -75,10 +134,16 @@ def main():
     print("  儲存後端 : %s" % store_desc)
     print("  紀錄筆數 : %d" % stats["total"])
     print("  鏈頭雜湊 : %s" % stats["head"])
+    if a.require_worm:
+        print("  WORM 要求 : %s" % ("PASS" if worm_ok else "FAIL"))
+        print("  retention_info : %s" % json.dumps(worm, ensure_ascii=False, sort_keys=True))
     print()
 
     if ok:
-        print("✅ 鏈結完整：沒有發現竄改、刪除或順序異動的跡象。")
+        print("✅ 鏈結計算完整：沒有發現竄改、刪除或順序異動的跡象。")
+        if not worm_ok:
+            print("❌ WORM 要求未成立：本次結果不能宣稱為已鎖定的不可變更證據。")
+            return 1
         print()
         print("   建議把上面的鏈頭雜湊抄到程式碰不到的地方（紙本值班紀錄或另一個帳號），")
         print("   下次驗證時比對——即使整條鏈被重算，也對不上先前抄下的鏈頭。")
@@ -88,8 +153,13 @@ def main():
         "hash_mismatch": "內容被改過",
         "broken_link": "前一筆被刪除或順序被調換",
         "fork": "兩筆指向同一個前驅（並行寫入或被補塞）",
+        "invalid_record": "JSON 無法唯一、標準地解析",
+        "schema_invalid": "v4 紀錄不符合不可變 slot 合約",
         "legacy_no_hash": "雜湊鏈導入前的舊紀錄（無法驗證，非異常）",
-        "legacy_formula": "以已被取代的欄位組驗證通過（公式變更的痕跡，非竄改）",
+        "legacy_formula": "以歷史欄位組重算吻合（不足以單獨證明未被竄改）",
+        "seq_discontinuity": "hashed 紀錄的 seq 不連續或不符合軌跡位置",
+        "legacy_after_hashed": "無 hash 紀錄出現在 hashed 軌跡之後",
+        "version_regression": "chain_v 沿軌跡倒退",
     }
     INFORMATIONAL = ("legacy_no_hash", "legacy_formula")
     real = [i for i in issues if i["kind"] not in INFORMATIONAL]
@@ -98,13 +168,16 @@ def main():
     if not real:
         n_nohash = sum(1 for i in issues if i["kind"] == "legacy_no_hash")
         n_formula = sum(1 for i in issues if i["kind"] == "legacy_formula")
-        print("✅ 鏈結完整（另有 %d 筆屬資訊性標記，非異常）。" % legacy)
+        print("✅ 鏈結計算未見結構性異常（另有 %d 筆歷史證據限制）。" % legacy)
         if n_nohash:
             print("   %d 筆為雜湊鏈導入前的舊紀錄，無法回溯驗證——" % n_nohash)
             print("   可信度僅止於「當時的程式只做 append」這個承諾。")
         if n_formula:
-            print("   %d 筆以**已被取代的欄位組**驗證通過。紀錄本身沒有被動過，" % n_formula)
-            print("   是後來改過 AUDIT_CHAIN_FIELDS；竄改無法恰好符合一個作廢的公式。")
+            print("   %d 筆以歷史欄位組重算吻合，這只能辨識使用過的公式。" % n_formula)
+            print("   它不能單獨證明紀錄未被竄改；須再對照當時外部抄寫的鏈頭或 WORM 證據。")
+        if not worm_ok:
+            print("❌ WORM 要求未成立：本次結果不能宣稱為已鎖定的不可變更證據。")
+            return 1
         return 0
 
     print("❌ 發現 %d 處異常：" % len(real))

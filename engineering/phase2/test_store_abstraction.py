@@ -178,7 +178,7 @@ def main():
           "WD-UT9001" not in codes_r and IID not in imgs_r)
 
     # 8 稽核軌跡
-    fw.audit("tester", "unit_test", "WD-UT9001", "ok")
+    fw.audit("test:tester", "unit_test", "WD-UT9001", "ok", "test", "test")
     ad = fw.read_jsonl(fw.AUDIT)
     check("8  稽核軌跡寫得進、讀得出", len(ad) == 1 and ad[0]["action"] == "unit_test")
 

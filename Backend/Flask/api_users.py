@@ -61,13 +61,28 @@ def upsert_user():
     if d.get("generate_password"):
         generated = _gen_password()
         d["password"] = generated
+    raw_org = d.get("org") or auth_users.DEFAULT_ORG
+    raw_user = d.get("user") or ""
+    raw_role = d.get("role") or ""
+    # 不在 .strip() 前假設 JSON 欄位一定是字串；陣列／數字是 400，不是 500。
+    target_org = raw_org.strip() if isinstance(raw_org, str) else raw_org
+    target_user = raw_user.strip() if isinstance(raw_user, str) else raw_user
+    target_role = raw_role.strip() if isinstance(raw_role, str) else raw_role
+    # 先做與真正寫入路徑共用的純驗證。格式錯誤不是一個已接受的帳號異動，
+    # 不應先污染不可變 audit intent；更不能在鏈已受損時把原本應為 400 的請求變成 503。
+    try:
+        auth_users.validate_upsert_user(
+            org=target_org, user=target_user, role=target_role,
+            password=d.get("password"),
+        )
+    except ValueError as e:
+        return jsonify({"error": "參數不合", "issues": [str(e)]}), 400
     # Account state is durable clinical-system security state.  Do not create
     # or alter it unless an immutable audit intent has already landed.  Never
     # put the password (generated or supplied) in the intent detail.
     try:
         fw.audit_intent(actor, "user_upsert",
-                        "%s:%s" % (d.get("org") or auth_users.DEFAULT_ORG,
-                                     d.get("user") or "?"),
+                        "%s:%s" % (target_org, target_user),
                         role, org,
                         {"role": d.get("role"), "disabled": d.get("disabled"),
                          "generated_password": bool(d.get("generate_password"))})
@@ -75,9 +90,9 @@ def upsert_user():
         return jsonify({"error": "audit_unavailable"}), 503
     try:
         rec = auth_users.upsert_user(
-            org=(d.get("org") or auth_users.DEFAULT_ORG).strip(),
-            user=(d.get("user") or "").strip(),
-            role=(d.get("role") or "").strip(),
+            org=target_org,
+            user=target_user,
+            role=target_role,
             password=d.get("password"),
             display_name=d.get("display_name"),
             disabled=d.get("disabled"),
@@ -150,7 +165,14 @@ def read_audit():
     want_csv = (request.args.get("format") or "").lower() == "csv"
     want_verify = request.args.get("verify") in ("1", "true", "yes")
 
-    recs = fw.read_jsonl(fw.AUDIT)
+    verification = None
+    if want_verify and not want_csv:
+        # The rows shown to the operator and the proof beside them must come
+        # from one strict snapshot.  Two independent GCS reads can straddle a
+        # concurrent append and silently bind the UI to the wrong proof.
+        recs, verification = fw.read_verified_audit_snapshot()
+    else:
+        recs = fw.read_jsonl(fw.AUDIT)
 
     # 選單用的可選值：從**全量**算，不受目前篩選影響——
     # 若跟著篩選變動，使用者一旦選了某個動作就再也看不到其他動作可選，等於把自己鎖住。
@@ -210,7 +232,10 @@ def read_audit():
     }
     out.update(facets)
     if want_verify:
-        ok, issues, stats = fw.verify_audit_chain(recs=recs)
+        # 不把通用 read_jsonl 的結果當成驗證輸入。GCS 的嚴格讀取器還會檢查
+        # 一個 slot 是否恰好一筆、slot 名與 seq 是否相符；繞過它會讓畸形物件假綠。
+        # `verification` 與上面呈現的 recs 來自同一份 strict snapshot。
+        ok, issues, stats = verification
         out["verified"] = {
             "ok": ok,
             "head": stats.get("head"),
@@ -221,8 +246,13 @@ def read_audit():
             "verified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "verified_by": actor,
         }
-        fw.audit(actor, "audit_verify", "-",
-                 "鏈驗證 %s（%d 筆，%d 處異常）" % ("通過" if ok else "失敗",
-                                                stats.get("total", 0), len(issues)),
-                 role, org)
+        if ok:
+            fw.audit(actor, "audit_verify", "-",
+                     "鏈驗證通過（%d 筆，%d 處異常）"
+                     % (stats.get("total", 0), len(issues)), role, org)
+            out["verified"]["verification_event_recorded"] = True
+        else:
+            # 損壞鏈不可再延伸；回傳失敗證據比用 500 蓋掉它更重要。
+            out["verified"]["verification_event_recorded"] = False
+            out["verified"]["recording_reason"] = "chain_integrity_failure"
     return jsonify(out), 200

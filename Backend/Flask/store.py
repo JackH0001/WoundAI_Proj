@@ -48,6 +48,7 @@
                                    # （該桶應設保留政策/WORM，見 harden_bucket.ps1）
 """
 import io
+import hashlib
 import json
 import os
 import shutil
@@ -56,6 +57,16 @@ import re
 import threading
 import time
 import uuid
+from dataclasses import dataclass
+
+from audit_chain_contract import AUDIT_CHAIN_FIELDS, CHAIN_FIELD_VERSIONS, CHAIN_V, \
+    UNVERSIONED_CHAIN_VERSIONS, audit_hash, loads_json_object_strict, validate_current_record
+
+
+# The final GCS audit epoch is deliberately a single, exact retention period.
+# Keeping this policy with the low-level chained-write guard means callers
+# cannot bypass api_flywheel.audit() and write a shorter locked chain directly.
+AUDIT_RETENTION_SECONDS = 220903200
 
 
 class Store:
@@ -78,6 +89,15 @@ class Store:
         return any(k == a.strip("/") or k.startswith(a.strip("/") + "/")
                    for a in self.PROTECTED_KEYS)
 
+    def _is_audit_chain(self, key: str) -> bool:
+        """True for the audit chain root and every object below its prefix."""
+        k = (key or "").strip("/")
+        return k == "audit.jsonl" or k.startswith("audit.jsonl/")
+
+    def _is_audit_chain_root(self, key: str) -> bool:
+        """Only this exact key may enter the dedicated chained writer."""
+        return (key or "").strip("/") == "audit.jsonl"
+
     def get_json(self, key: str):
         data = self.get_blob(key)
         return None if data is None else json.loads(data.decode("utf-8"))
@@ -97,6 +117,10 @@ class Store:
 
     def copy_immutable(self, src: str, dst: str) -> bool:
         """Never delete source, and arbitrate a destination conflict by bytes."""
+        # Receipt/audit data must never be copied out of the protected bucket,
+        # nor may a generic copy create an unvalidated object under it.
+        if self._is_audit(src) or self._is_audit(dst):
+            raise PermissionError("protected objects cannot be copied")
         data = self.get_blob(src)
         if data is None:
             raise FileNotFoundError(src)
@@ -119,6 +143,18 @@ class Store:
     def chain_tail(self, key: str):
         """回 (seq, 尾端紀錄 dict);空鏈回 (-1, None)。GCS 後端只 GET 尾端那一個物件。"""
         raise NotImplementedError
+
+    def audit_snapshot_fresh(self, key: str):
+        """Return one fresh `(tail_seq, tail, lines)` audit snapshot.
+
+        Backends that can enumerate immutable chain slots should override this
+        so validation and tail selection use the same snapshot.  The generic
+        fallback preserves local-development behavior; the production GCS
+        implementation below is the safety boundary for the locked epoch.
+        """
+        lines = self.read_lines_fresh(key)
+        tail_seq, tail = self.chain_tail(key)
+        return tail_seq, tail, lines
 
     def append_chained(self, key: str, seq: int, line: str) -> bool:
         """把 line 寫成鏈上第 seq 格,且只在該格尚不存在時。
@@ -160,14 +196,28 @@ class ChainConflict(ValueError):
     """鏈上這一格已被別的寫入者建立(內容不同)。呼叫端應重讀尾端後改搶下一格。"""
 
 
+@dataclass(frozen=True)
+class _VerifiedAuditPrefix:
+    """Process-local proof that an immutable GCS prefix was fully verified."""
+    bucket: str
+    base: str
+    count: int
+    head_hash: str
+    manifest_sha256: str
+
+
 # 鏈格物件名:20 位零填充的 seq。字典序 = 數值序,且**不含底線**——
 # 舊的時間戳命名 `<ns>_<rand>.jsonl` 含底線,兩者藉此區分。
 _CHAIN_NAME_RE = re.compile(r"^(\d{20})\.jsonl$")
 
 
 def _chain_name(seq: int) -> str:
-    if not isinstance(seq, int) or seq < 0:
-        raise ValueError("chain seq must be a non-negative int")
+    # `_CHAIN_NAME_RE` admits exactly 20 decimal digits.  Letting a direct
+    # caller create a 21-digit slot would permanently poison a locked prefix:
+    # subsequent readers correctly reject it as noncanonical.  bool is also
+    # excluded even though it subclasses int in Python.
+    if type(seq) is not int or not 0 <= seq < 10 ** 20:
+        raise ValueError("chain seq must be an int in [0, 10**20)")
     return "%020d.jsonl" % seq
 
 
@@ -199,19 +249,18 @@ def _chain_record_bytes(seq: int, line: str):
     if "\n" in text or "\r" in text:
         raise ValueError("chain slot must contain exactly one JSON record")
     try:
-        rec = json.loads(text)
+        rec = loads_json_object_strict(text)
     except (TypeError, ValueError) as exc:
         raise ValueError("chain slot must contain valid JSON") from exc
-    if not isinstance(rec, dict):
-        raise ValueError("chain slot record must be an object")
-    if type(rec.get("seq")) is not int or rec["seq"] != seq:
-        raise ValueError("chain slot name/content seq mismatch")
-    if not re.fullmatch(r"[0-9a-f]{64}", str(rec.get("hash", ""))):
-        raise ValueError("chain slot record must carry a SHA-256 hash")
-    prev = rec.get("prev")
-    if prev != "GENESIS" and not re.fullmatch(r"[0-9a-f]{64}", str(prev or "")):
-        raise ValueError("chain slot record must carry a valid prev link")
+    validate_current_record(rec, seq)
     return rec, (text + "\n").encode("utf-8")
+
+
+def _expected_chain_prev(tail):
+    """Return the only predecessor hash a newly admitted slot may reference."""
+    if isinstance(tail, dict) and isinstance(tail.get("hash"), str):
+        return tail["hash"]
+    return "GENESIS"
 
 
 # Fail at startup if protected-prefix dispatch is accidentally weakened.
@@ -229,11 +278,27 @@ class LocalStore(Store):
     def __init__(self, root: str):
         self.root = os.path.abspath(root)
 
+    def _protected_identity(self, key: str) -> str:
+        """Canonical LocalStore key for protection checks.
+
+        Windows and common macOS volumes are case-insensitive.  The storage
+        guard must therefore treat ``AUDIT.JSONL`` and ``audit.jsonl`` as the
+        same destination even when tests happen to run on a case-sensitive
+        filesystem.  GCS deliberately remains case-sensitive.
+        """
+        p = os.path.normcase(os.path.abspath(self._p(key)))
+        root = os.path.normcase(self.root)
+        return os.path.relpath(p, root).replace(os.sep, "/").casefold()
+
     def _is_audit(self, key: str) -> bool:
         # Absolute aliases inside root must not bypass the protected-key guard.
-        p = os.path.abspath(self._p(key))
-        rel = os.path.relpath(p, self.root).replace(os.sep, "/")
-        return super()._is_audit(rel)
+        return super()._is_audit(self._protected_identity(key))
+
+    def _is_audit_chain(self, key: str) -> bool:
+        return super()._is_audit_chain(self._protected_identity(key))
+
+    def _is_audit_chain_root(self, key: str) -> bool:
+        return super()._is_audit_chain_root(self._protected_identity(key))
 
     def _p(self, key: str) -> str:
         # 絕對路徑原樣使用：測試與匯出腳本會直接指定暫存目錄，
@@ -243,8 +308,10 @@ class LocalStore(Store):
         return os.path.join(self.root, *key.split("/"))
 
     def append_line(self, key: str, line: str) -> None:
-        if self._is_audit(key) and os.path.abspath(self._p(key)) != os.path.join(self.root, "audit.jsonl"):
-            raise PermissionError("receipts require immutable writes")
+        # The audit chain has one writer: append_chained().  Letting the public
+        # JSONL helper append a raw line bypasses seq/prev/hash validation.
+        if self._is_audit(key):
+            raise PermissionError("protected keys require their dedicated immutable writer")
         p = self._p(key)
         d = os.path.dirname(p)
         if d:
@@ -271,16 +338,56 @@ class LocalStore(Store):
             # 舊紀錄可能沒有 seq(雜湊鏈導入前);退回以行序為 seq,與舊 audit() 一致。
             return (int(rec.get("seq", len(lines) - 1)), rec)
 
+    def _current_chain_snapshot(self, key: str):
+        """Return a fully validated local current-v4 chain under its file lock.
+
+        The public primitive is used by development tools as well as API code.
+        Checking only the last record would let a direct caller extend a
+        self-hash-corrupt earlier history.  Local audit admission therefore uses
+        the same strict v4 record and predecessor rules as the final GCS epoch.
+        Historical local logs are deliberately not extended through this public
+        primitive; the API verifier already fails closed for unauthenticated
+        legacy records and a migration must be explicit.
+        """
+        previous = None
+        records, data_by_seq = [], {}
+        for seq, raw_line in enumerate(line for line in self.read_lines(key) if line.strip()):
+            try:
+                record, data = _chain_record_bytes(seq, raw_line)
+            except (TypeError, ValueError, UnicodeDecodeError) as exc:
+                raise IOError("invalid local audit chain slot %d: %s" % (seq, exc)) from exc
+            if record["prev"] != _expected_chain_prev(previous):
+                raise IOError("local audit chain broken link at seq %d" % seq)
+            records.append(record)
+            data_by_seq[seq] = data
+            previous = record
+        return (len(records) - 1, previous, data_by_seq)
+
     def append_chained(self, key: str, seq: int, line: str) -> bool:
-        # 單一檔案、行程內鎖。鎖內重讀尾端並要求 seq 恰為 tail+1——這就是本機版的
-        # 「只在該格不存在時建立」:別的執行緒先寫了這一格,tail 已推進,本次拋衝突。
+        # 單一檔案、行程內鎖。鎖內完整驗證既有 current-v4 鏈，再要求 seq 恰為
+        # tail+1——這就是本機版的「只在該格不存在時建立」:別的執行緒先寫了這一格,
+        # tail 已推進,本次拋衝突。直接 primitive 不可在損壞歷史後繼續寫入。
+        if not self._is_audit_chain_root(key):
+            raise PermissionError("append_chained is reserved for audit.jsonl")
         p = os.path.abspath(self._p(key))
-        _, data = _chain_record_bytes(seq, line)
+        rec, data = _chain_record_bytes(seq, line)
         with _chain_lock_for(p):
-            tail_seq, _ = self.chain_tail(key)
+            tail_seq, tail, old_data_by_seq = self._current_chain_snapshot(key)
+            if seq <= tail_seq:
+                # A caller retrying an accepted write must be idempotent, but it
+                # may never turn an old slot into a different event.
+                if old_data_by_seq.get(seq) == data:
+                    return False
+                raise ChainConflict("%s: slot %d already differs" % (key, seq))
             if seq != tail_seq + 1:
                 raise ChainConflict("%s: slot %d is not next (tail=%d)" % (key, seq, tail_seq))
-            self.append_line(key, data.decode("utf-8"))
+            if rec["prev"] != _expected_chain_prev(tail):
+                raise ChainConflict("%s: slot %d has wrong predecessor" % (key, seq))
+            # Do not route this private chain write back through append_line():
+            # append_line intentionally rejects every protected key.
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(data.decode("utf-8"))
             return True
 
     def put_blob(self, key: str, data: bytes) -> None:
@@ -293,6 +400,8 @@ class LocalStore(Store):
 
     def put_blob_immutable(self, key: str, data: bytes,
                            content_type: str = "image/jpeg") -> bool:
+        if self._is_audit_chain(key):
+            raise PermissionError("audit.jsonl must be written through append_chained")
         p = self._p(key)
         os.makedirs(os.path.dirname(p), exist_ok=True)
         # Publish a fully flushed file with an exclusive hard link. No reader
@@ -315,6 +424,8 @@ class LocalStore(Store):
             os.unlink(tmp)
 
     def append_record_once(self, key: str, receipt_id: str, record: dict) -> bool:
+        if self._is_audit(key):
+            raise PermissionError("protected keys cannot use queue receipt append")
         if record.get("annotation_receipt_id") != receipt_id:
             raise ValueError("queue receipt mismatch")
         p = self._p(key)
@@ -423,6 +534,13 @@ class GcsStore(Store):
         # 所以其他實例寫入的新紀錄一定看得到（正確性不依賴快取）。
         self._line_cache = {}
         self._CACHE_MAX_LINES = 200_000
+        # Audit admission cache is separate from the generic line cache.  It is
+        # populated only after an exact-v4 full verification in a locked
+        # seven-year epoch.  Each later append still lists every slot name and
+        # generation, but downloads only the suffix not yet verified by this
+        # process.  Offline verification never uses this cache.
+        self._audit_prefix_cache = {}
+        self._audit_append_lock = threading.RLock()
 
     def _target(self, key: str):
         """(bucket 物件, bucket 名稱)。稽核鍵在有設定稽核桶時走那一個。"""
@@ -438,8 +556,8 @@ class GcsStore(Store):
     def append_line(self, key: str, line: str) -> None:
         # 一筆一個物件。不做 read-modify-write：那會在多實例下靜默吃掉紀錄，
         # 而這條路徑同時承載稽核軌跡，遺失是不可接受的。
-        if self._is_audit(key) and key.strip("/") != "audit.jsonl":
-            raise PermissionError("receipts require immutable writes")
+        if self._is_audit(key):
+            raise PermissionError("protected keys require their dedicated immutable writer")
         bucket, _ = self._target(key)
         name = "%s/%s" % (self._k(key), _record_name())
         bucket.blob(name).upload_from_string(
@@ -494,6 +612,207 @@ class GcsStore(Store):
         self._line_cache.pop((bname, base), None)
         return self.read_lines(key)
 
+    def audit_snapshot_fresh(self, key: str):
+        """Read and validate all immutable audit slots from one GCS snapshot.
+
+        `audit()` validates each record's versioned hash using the returned
+        lines, then derives its next slot from the *same* list/download pass.
+        That avoids a second, independently observed tail between verification
+        and conditional creation.  Production admission separately requires a
+        locked retention epoch, so a prior slot cannot change after this read.
+        """
+        if self._is_audit(key) and key.strip("/") != "audit.jsonl":
+            raise PermissionError("receipts require immutable writes")
+        bucket, bname = self._target(key)
+        base = self._k(key) + "/"
+        slots = {}
+        for blob in self._client.list_blobs(bname, prefix=base):
+            leaf = blob.name[len(base):]
+            match = _CHAIN_NAME_RE.fullmatch(leaf)
+            if not match:
+                raise RuntimeError(
+                    "audit prefix gs://%s/%s holds a legacy or non-slot object (%s); "
+                    "point WOUNDAI_AUDIT_BUCKET at a clean bucket" % (bname, base, leaf))
+            slot = int(match.group(1))
+            if slot in slots:
+                raise IOError("duplicate audit chain slot: %d" % slot)
+            slots[slot] = blob
+
+        if not slots:
+            return (-1, None, [])
+        max_seq = max(slots)
+        if len(slots) != max_seq + 1:
+            raise IOError("audit chain slots are not contiguous: count=%d max_seq=%d" %
+                          (len(slots), max_seq))
+
+        previous = None
+        tail = None
+        lines = []
+        for slot in range(max_seq + 1):
+            blob = slots[slot]
+            try:
+                record, data = _chain_record_bytes(slot, blob.download_as_bytes().decode("utf-8"))
+            except (TypeError, ValueError, UnicodeDecodeError) as exc:
+                raise IOError("invalid audit chain slot %s: %s" % (blob.name, exc)) from exc
+            expected_prev = "GENESIS" if previous is None else previous["hash"]
+            if record["prev"] != expected_prev:
+                raise IOError("audit chain broken link at seq %d" % slot)
+            lines.append(data.decode("utf-8").rstrip("\n"))
+            previous = record
+            tail = record
+        return (max_seq, tail, lines)
+
+    @staticmethod
+    def _audit_manifest_sha256(blobs) -> str:
+        digest = hashlib.sha256()
+        for blob in blobs:
+            generation = getattr(blob, "generation", None)
+            if generation is None or str(generation) == "":
+                raise IOError("audit slot listing omitted object generation: " + blob.name)
+            digest.update(blob.name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(str(generation).encode("ascii"))
+            digest.update(b"\n")
+        return digest.hexdigest()
+
+    def _list_audit_slots_for_admission(self, key: str):
+        """List the complete canonical slot manifest for one locked epoch."""
+        if not self._is_audit_chain_root(key):
+            raise PermissionError("audit admission is reserved for audit.jsonl")
+        self.require_locked_audit_epoch()
+        bucket, bname = self._target(key)
+        base = self._k(key) + "/"
+        # Materialise the iterator: a pagination/network failure must raise,
+        # never look like a valid short prefix.
+        blobs = sorted(list(self._client.list_blobs(bname, prefix=base)),
+                       key=lambda blob: blob.name)
+        for seq, blob in enumerate(blobs):
+            expected = base + _chain_name(seq)
+            if blob.name != expected:
+                raise IOError("noncanonical or noncontiguous audit slot: expected %s got %s" %
+                              (expected, blob.name))
+        # Require generations even for an empty suffix comparison.  A locked
+        # prefix changing generation is an integrity event, not a cache miss.
+        self._audit_manifest_sha256(blobs)
+        return bucket, bname, base, blobs
+
+    def _verified_audit_prefix(self, key: str) -> _VerifiedAuditPrefix:
+        """Cold-verify all slots; thereafter verify immutable manifest + suffix.
+
+        A cached-prefix mismatch is never healed by silently doing a fresh full
+        scan in the same call.  Existing generations cannot change in a locked
+        WORM epoch; observing that change is itself a fail-closed event.
+        """
+        with self._audit_append_lock:
+            cache_key = None
+            try:
+                # Establish the key before the network listing so *listing*
+                # failures (pagination, malformed names, missing generations)
+                # evict an earlier proof too.  Keeping it would let a later
+                # transiently successful call reuse evidence across an
+                # unobserved integrity event.
+                _, expected_bname = self._target(key)
+                expected_base = self._k(key) + "/"
+                cache_key = (expected_bname, expected_base)
+                bucket, bname, base, blobs = self._list_audit_slots_for_admission(key)
+                if (bname, base) != cache_key:
+                    raise IOError("audit target changed during admission")
+                cached = self._audit_prefix_cache.get(cache_key)
+                if cached is not None:
+                    if len(blobs) < cached.count:
+                        raise IOError("locked audit prefix shrank after verification")
+                    observed_prefix = self._audit_manifest_sha256(blobs[:cached.count])
+                    if observed_prefix != cached.manifest_sha256:
+                        raise IOError("locked audit prefix generation/name manifest changed")
+                    start = cached.count
+                    previous_hash = cached.head_hash
+                else:
+                    start = 0
+                    previous_hash = "GENESIS"
+
+                for seq in range(start, len(blobs)):
+                    blob = blobs[seq]
+                    try:
+                        raw = blob.download_as_bytes().decode("utf-8")
+                        record, _ = _chain_record_bytes(seq, raw)
+                    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+                        raise IOError("invalid audit chain slot %s: %s" %
+                                      (blob.name, exc)) from exc
+                    if record["prev"] != previous_hash:
+                        raise IOError("audit chain broken link at seq %d" % seq)
+                    previous_hash = record["hash"]
+
+                state = _VerifiedAuditPrefix(
+                    bucket=bname,
+                    base=base,
+                    count=len(blobs),
+                    head_hash=previous_hash,
+                    manifest_sha256=self._audit_manifest_sha256(blobs),
+                )
+                self._audit_prefix_cache[cache_key] = state
+                return state
+            except Exception:
+                if cache_key is not None:
+                    self._audit_prefix_cache.pop(cache_key, None)
+                raise
+
+    def _create_chained_slot(self, key: str, seq: int, line: str) -> bool:
+        """Conditional-create one already-admitted slot; never list the chain."""
+        from google.api_core.exceptions import (
+            BadGateway, DeadlineExceeded, GatewayTimeout, InternalServerError,
+            NotFound, PreconditionFailed, RetryError, ServiceUnavailable,
+            TooManyRequests,
+        )
+        from requests.exceptions import ConnectionError as RequestsConnectionError
+        from requests.exceptions import Timeout as RequestsTimeout
+        response_may_be_lost = (
+            BadGateway, DeadlineExceeded, GatewayTimeout, InternalServerError,
+            RetryError, ServiceUnavailable, TooManyRequests,
+            RequestsConnectionError, RequestsTimeout,
+        )
+        bucket, _ = self._target(key)
+        name = self._k(key) + "/" + _chain_name(seq)
+        _, data = _chain_record_bytes(seq, line)
+        blob = bucket.blob(name)
+        try:
+            blob.upload_from_string(data, content_type="application/json",
+                                    if_generation_match=0)
+        except PreconditionFailed:
+            if bucket.blob(name).download_as_bytes() == data:
+                return False
+            raise ChainConflict(name)
+        except response_may_be_lost as upload_error:
+            # The create may be durable even when its response was lost.
+            try:
+                existing = bucket.blob(name).download_as_bytes()
+            except NotFound:
+                # No durable object exists to arbitrate.  Preserve the original
+                # transport/API failure rather than misreporting a readback 404.
+                raise upload_error
+            if existing == data:
+                return False
+            raise ChainConflict(name)
+        if bucket.blob(name).download_as_bytes() != data:
+            raise IOError("chain slot readback mismatch: " + name)
+        return True
+
+    def append_next_chained(self, key: str, record_builder):
+        """Build and append the one record following a verified GCS prefix."""
+        with self._audit_append_lock:
+            state = self._verified_audit_prefix(key)
+            record = record_builder(state.count, state.head_hash)
+            if not isinstance(record, dict):
+                raise TypeError("audit record builder must return an object")
+            line = json.dumps(record, ensure_ascii=False, allow_nan=False)
+            admitted, _ = _chain_record_bytes(state.count, line)
+            if admitted["prev"] != state.head_hash:
+                raise ChainConflict("new audit record has wrong predecessor")
+            self._create_chained_slot(key, state.count, line)
+            # Do not advance the cache optimistically: the next admission must
+            # observe the service-returned generation and verify this slot as a
+            # suffix.  This keeps response-lost and external-writer paths equal.
+            return record
+
     def put_blob(self, key: str, data: bytes) -> None:
         if self._is_audit(key):
             raise PermissionError("protected objects require immutable writes")
@@ -507,6 +826,13 @@ class GcsStore(Store):
     def put_blob_immutable(self, key: str, data: bytes,
                            content_type: str = "image/jpeg") -> bool:
         from google.api_core.exceptions import PreconditionFailed
+        if self._is_audit_chain(key):
+            raise PermissionError("audit.jsonl must be written through append_chained")
+        if self._is_audit(key):
+            # Promotion/care receipts are audit evidence too.  They must not
+            # be admitted into an unlocked bucket merely because they are not
+            # chain slots.
+            self.require_locked_audit_epoch()
         bucket, _ = self._target(key)
         blob = bucket.blob(self._k(key))
         try:
@@ -523,6 +849,8 @@ class GcsStore(Store):
     def append_record_once(self, key: str, receipt_id: str, record: dict) -> bool:
         import re
         from google.api_core.exceptions import PreconditionFailed
+        if self._is_audit(key):
+            raise PermissionError("protected keys cannot use queue receipt append")
         if not re.fullmatch(r"[0-9a-f]{16}", receipt_id):
             raise ValueError("invalid annotation receipt id")
         if record.get("annotation_receipt_id") != receipt_id:
@@ -541,89 +869,33 @@ class GcsStore(Store):
             return False
 
     def chain_tail(self, key: str):
-        if self._is_audit(key) and key.strip("/") != "audit.jsonl":
-            raise PermissionError("receipts require immutable writes")
-        bucket, bname = self._target(key)
-        base = self._k(key) + "/"
-        slots = {}
-        count = 0
-        max_seq = -1
-        for b in self._client.list_blobs(bname, prefix=base):
-            leaf = b.name[len(base):]
-            m = _CHAIN_NAME_RE.fullmatch(leaf)
-            if not m:
-                raise RuntimeError(
-                    "audit prefix gs://%s/%s holds a legacy or non-slot object (%s); "
-                    "point WOUNDAI_AUDIT_BUCKET at a clean bucket" % (bname, base, leaf))
-            slot = int(m.group(1))
-            count += 1
-            if slot in slots:
-                raise IOError("duplicate audit chain slot: %d" % slot)
-            slots[slot] = b
-            if slot > max_seq:
-                max_seq = slot
-        if not slots:
-            return (-1, None)
-        if count != max_seq + 1:
-            raise IOError("audit chain slots are not contiguous: count=%d max_seq=%d" %
-                          (count, max_seq))
-        # A valid final record alone is not enough: `seq=1, prev=GENESIS`
-        # has a self-consistent hash yet is a broken chain after a valid slot 0.
-        # Validate every adjacent immutable link before offering a tail to a new
-        # writer.  The audit layer also verifies the versioned self-hash; this
-        # store-level pass establishes the object/slot/link invariant without a
-        # circular dependency on api_flywheel's version resolver.
-        previous = None
-        tail = None
-        for slot in range(max_seq + 1):
-            blob = slots[slot]
-            try:
-                rec, _ = _chain_record_bytes(slot, blob.download_as_bytes().decode("utf-8"))
-            except (TypeError, ValueError, UnicodeDecodeError) as exc:
-                raise IOError("invalid audit chain slot %s: %s" % (blob.name, exc)) from exc
-            expected_prev = "GENESIS" if previous is None else previous["hash"]
-            if rec["prev"] != expected_prev:
-                raise IOError("audit chain broken link at seq %d" % slot)
-            previous = rec
-            tail = rec
-        return (max_seq, tail)
+        tail_seq, tail, _ = self.audit_snapshot_fresh(key)
+        return (tail_seq, tail)
 
     def append_chained(self, key: str, seq: int, line: str) -> bool:
-        from google.api_core.exceptions import (
-            DeadlineExceeded, InternalServerError, NotFound, PreconditionFailed,
-            ServiceUnavailable, TooManyRequests,
-        )
-        if self._is_audit(key) and key.strip("/") != "audit.jsonl":
-            raise PermissionError("receipts require immutable writes")
-        bucket, _ = self._target(key)
-        name = self._k(key) + "/" + _chain_name(seq)
-        _, data = _chain_record_bytes(seq, line)
-        blob = bucket.blob(name)
-        try:
-            blob.upload_from_string(data, content_type="application/json",
-                                    if_generation_match=0)
-        except PreconditionFailed:
-            # 這一格已存在。位元組相同 ⇒ 是我們自己先前被接受、但回應遺失的那次寫入;
-            # 不同 ⇒ 別人搶到了,交回呼叫端重讀尾端。
-            if bucket.blob(name).download_as_bytes() == data:
-                return False
-            raise ChainConflict(name)
-        except (DeadlineExceeded, InternalServerError, ServiceUnavailable, TooManyRequests):
-            # The service may have committed the conditional create while the
-            # response was lost.  Read the exact slot before letting the caller
-            # retry: equal bytes mean the event is already durable; different
-            # bytes mean another writer won; a missing object is a real
-            # transport failure and remains fail-closed.
-            try:
-                existing = bucket.blob(name).download_as_bytes()
-            except NotFound:
-                raise
-            if existing == data:
-                return False
-            raise ChainConflict(name)
-        if bucket.blob(name).download_as_bytes() != data:
-            raise IOError("chain slot readback mismatch: " + name)
-        return True
+        """Public direct admission; one verified-prefix pass, never caller tail."""
+        from google.api_core.exceptions import NotFound
+        if not self._is_audit_chain_root(key):
+            raise PermissionError("append_chained is reserved for audit.jsonl")
+        with self._audit_append_lock:
+            state = self._verified_audit_prefix(key)
+            rec, data = _chain_record_bytes(seq, line)
+            name = self._k(key) + "/" + _chain_name(seq)
+            bucket, _ = self._target(key)
+            if seq < state.count:
+                try:
+                    existing = bucket.blob(name).download_as_bytes()
+                except NotFound:
+                    raise ChainConflict("%s: verified prefix lacks slot %d" % (key, seq))
+                if existing == data:
+                    return False
+                raise ChainConflict(name)
+            if seq != state.count:
+                raise ChainConflict("%s: slot %d is not next (count=%d)" %
+                                    (key, seq, state.count))
+            if rec["prev"] != state.head_hash:
+                raise ChainConflict("%s: slot %d has wrong predecessor" % (key, seq))
+            return self._create_chained_slot(key, seq, line)
 
     def retention_info(self) -> dict:
         if self._audit_bucket is None:
@@ -636,6 +908,16 @@ class GcsStore(Store):
                     "locked": policy.get("isLocked") is True}
         except Exception:
             return {"verified": False, "locked": False, "reason": "readback failed"}
+
+    def require_locked_audit_epoch(self) -> None:
+        """Fail closed for every direct GCS audit-chain append path."""
+        info = self.retention_info()
+        retention = int(info.get("retention_seconds") or 0)
+        if (info.get("verified") is True and info.get("locked") is True
+                and retention == AUDIT_RETENTION_SECONDS):
+            return
+        raise PermissionError(
+            "GCS audit writes require a verified, locked 7-year retention epoch")
 
     def get_blob(self, key: str):
         bucket, _ = self._target(key)

@@ -7,7 +7,8 @@
 
 這組測試要同時釘住兩件事,少了任何一件這次修補就沒有意義:
 
-  1. 舊公式蓋章的紀錄**不再**被誤報為竄改(改標 `legacy_formula`,資訊性);
+  1. 舊公式蓋章的紀錄改標 `legacy_formula`(公式辨識的資訊性結果，
+     本身不足以證明未被竄改);
   2. **真正的竄改仍然被抓到**——包含「把 chain_v 改小以換一組公式」的降級手法。
 
     python engineering/phase2/test_audit_chain_versioning.py
@@ -16,6 +17,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -94,7 +96,8 @@ def main():
     r2["hash"] = fw._audit_hash(r2)             # v3(自帶標記)
     save([r0, r1, r2])
     ok, iss, stats = fw.verify_audit_chain()
-    check("2  v1 舊公式紀錄 → legacy_formula(非竄改)", kinds_at(iss, 0) == ["legacy_formula"],
+    check("2  v1 舊公式紀錄 → legacy_formula(不單獨定性竄改與否)",
+          kinds_at(iss, 0) == ["legacy_formula"],
           kinds_at(iss, 0))
     check("2b v2 舊公式紀錄 → 完全無標記", kinds_at(iss, 1) == [], kinds_at(iss, 1))
     check("2c v3 紀錄 → 完全無標記", kinds_at(iss, 2) == [], kinds_at(iss, 2))
@@ -102,6 +105,17 @@ def main():
           stats["real_issues"] == 0 and stats["informational"] == 1,
           (stats["real_issues"], stats["informational"]))
     check("2e ok 維持嚴格語意(有標記即 False),向後相容", ok is False)
+    # Historical records are preserved for evidence, but the v4 admission
+    # primitive must not silently extend a mixed log or leak an IOError as a
+    # server 500.  A reviewed new epoch is the explicit migration route.
+    before_historical_append = open(P, encoding="utf-8").read()
+    try:
+        fw.audit("default:admin", "record_preview", "WD-HISTORICAL-APPEND", "ok",
+                 "admin", "default")
+        check("2f 歷史鏈 append → AuditChainCorrupt（要求新 v4 epoch）", False, "沒有拋例外")
+    except fw.AuditChainCorrupt:
+        check("2f 歷史鏈 append → AuditChainCorrupt（要求新 v4 epoch）", True)
+    check("2g 歷史鏈被拒後內容不變", open(P, encoding="utf-8").read() == before_historical_append)
 
     # ── 3. 真竄改仍被抓到,沒有被舊公式漂白 ─────────────────────────────
     bad = dict(r0, result="ok(已竄改)")          # v1 紀錄,改內容不改 hash
@@ -128,6 +142,19 @@ def main():
     ok, iss, _ = fw.verify_audit_chain()
     check("4b 直接拔掉 chain_v → hash_mismatch(不會退回試算而放行)",
           "hash_mismatch" in kinds_at(iss, 2), kinds_at(iss, 2))
+
+    # Version identifiers are exact protocol integers, not Python numeric
+    # aliases.  Without this check True/1.0 could index the historical version
+    # dictionary as 1 and be reported as a valid old formula.
+    float_alias = dict(r2, chain_v=3.0)
+    float_alias["hash"] = fw._audit_hash(float_alias, 3)
+    bool_alias = dict(r0, chain_v=True)
+    bool_alias["hash"] = fw._audit_hash(bool_alias, 1)
+    save([float_alias, bool_alias])
+    ok, iss, _ = fw.verify_audit_chain()
+    check("4c float/bool chain_v alias → hash_mismatch",
+          all("hash_mismatch" in kinds_at(iss, i) for i in (0, 1)),
+          (kinds_at(iss, 0), kinds_at(iss, 1)))
 
     # ── 5. 未知版本要明確失敗,不能拋例外把整支驗證打斷 ──────────────────
     future = dict(r2, chain_v=99)
@@ -175,13 +202,49 @@ def main():
           and fw.CHAIN_FIELD_VERSIONS[3] == ("chain_v", "seq", "ts", "actor", "role", "org",
                                              "action", "code", "result", "prev"))
 
+    # 正確的 self-hash/prev 不足以讓版本倒退合法。版本是鏈層協定，
+    # 一旦出現新版，其後回到舊公式必須被當作 real issue。
+    v4_first = base(0, "GENESIS", chain_v=4, nonce="d" * 32)
+    v4_first["hash"] = fw._audit_hash(v4_first)
+    v3_after = base(1, v4_first["hash"], chain_v=3)
+    v3_after["hash"] = fw._audit_hash(v3_after)
+    save([v4_first, v3_after])
+    ok, iss, stats = fw.verify_audit_chain()
+    check("8  chain_v 4→3 即使 hash/prev 皆正確仍拒絕倒退",
+          not ok and stats["real_issues"] >= 1
+          and "version_regression" in kinds_at(iss, 1), kinds_at(iss, 1))
+
+    # v4 is the first role/org-bearing locked-epoch format.  Missing identity
+    # facts cannot be represented as an otherwise valid immutable slot.
+    for field, value in (("role", ""), ("org", None)):
+        bad_identity = dict(v4_first, **{field: value})
+        bad_identity["hash"] = fw._audit_hash(bad_identity)
+        save([bad_identity])
+        ok, iss, _ = fw.verify_audit_chain()
+        check("9  v4 %s 非空字串守門" % field,
+              not ok and "schema_invalid" in kinds_at(iss, 0), kinds_at(iss, 0))
+
+    # Matching a historical formula identifies a formula; it does not prove
+    # that bytes were never rewritten and re-stamped.  Pin the CLI wording so a
+    # future edit cannot turn an informational classification into overclaim.
+    save([r0])
+    cli = subprocess.run([sys.executable, os.path.join(HERE, "verify_audit_chain.py")],
+                         cwd=os.path.join(HERE, "..", ".."), env=os.environ.copy(),
+                         capture_output=True, text=True, encoding="utf-8")
+    overclaims = ("紀錄本身沒有被動過", "非竄改",
+                  "竄改無法恰好符合")
+    check("10 CLI legacy_formula 只說明公式吻合，不宣稱未竄改",
+          cli.returncode == 0 and "不能單獨證明" in cli.stdout
+          and not any(text in cli.stdout for text in overclaims),
+          {"returncode": cli.returncode, "stdout": cli.stdout[-600:]})
+
     st.reset_store(None)
     shutil.rmtree(tmp, ignore_errors=True)
     print()
     if FAILED:
         print("FAILED %d 項：%s" % (len(FAILED), "; ".join(FAILED)))
         return 1
-    print("全部通過：舊公式紀錄不再被誤報為竄改，而真竄改與降級手法仍然被抓到。")
+    print("全部通過：歷史公式辨識不超額宣稱，真竄改與降級手法仍然被抓到。")
     return 0
 
 

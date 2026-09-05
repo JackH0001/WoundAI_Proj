@@ -433,7 +433,7 @@ def login():
         # 真正的原因記在稽核裡，供事後分析與偵測暴力嘗試。
         try:
             import api_flywheel as _fw
-            _fw.audit(ident, 'login_failed', '-', why)
+            _fw.audit(ident, 'login_failed', '-', why, 'unauthenticated', org)
         except Exception:
             pass
         logger.warning(f"登入失敗 {ident}: {why}")
@@ -446,7 +446,7 @@ def login():
     )
     try:
         import api_flywheel as _fw
-        _fw.audit(ident, 'login', '-', f"role={rec['role']}")
+        _fw.audit(ident, 'login', '-', f"role={rec['role']}", rec['role'], org)
     except Exception:
         pass
     return jsonify({

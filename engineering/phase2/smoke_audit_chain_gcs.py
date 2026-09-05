@@ -19,6 +19,7 @@ import json
 import os
 import sys
 import threading
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BACKEND = os.path.abspath(os.path.join(HERE, "..", "..", "Backend", "Flask"))
@@ -31,6 +32,30 @@ def check(name, ok, detail=""):
     print(("PASS  " if ok else "FAIL  ") + name + (("   " + str(detail)) if detail else ""))
     if not ok:
         FAILED.append(name)
+
+
+def positive_int_env(name, default, maximum):
+    """Read a bounded positive test-size override without silently coercing it."""
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("%s must be an integer, got %r" % (name, raw)) from exc
+    if not 1 <= value <= maximum:
+        raise ValueError("%s must be in 1..%d, got %d" % (name, maximum, value))
+    return value
+
+
+def nonnegative_seconds_env(name):
+    """Return 0 for no timing gate; reject malformed acceptance limits."""
+    raw = os.environ.get(name, "0")
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError("%s must be seconds, got %r" % (name, raw)) from exc
+    if value < 0:
+        raise ValueError("%s must not be negative" % name)
+    return value
 
 
 def main():
@@ -62,6 +87,15 @@ def main():
     if not info.get("verified") or info.get("locked") or int(info.get("retention_seconds") or 0) != 0:
         print("拒跑:煙霧桶必須可讀、未鎖且無 retention policy（目前=%s）" % info)
         return 2
+    existing_objects = [blob.name for blob in g._client.list_blobs(audit_bucket)]
+    if existing_objects:
+        print("拒跑:煙霧桶整桶必須為空（前 5 筆=%s）" % existing_objects[:5])
+        return 2
+
+    # The production admission gate has no environment-variable bypass.  This
+    # short-lived test process replaces the method only on the exact GcsStore
+    # instance whose disposable, empty, unlocked bucket was verified above.
+    g.require_locked_audit_epoch = lambda: None
 
     key = "audit.jsonl"
     tail_seq, _ = g.chain_tail(key)
@@ -79,18 +113,34 @@ def main():
     ok, issues, stats = fw.verify_audit_chain()
     check("2c verify_audit_chain real_issues=0", stats["real_issues"] == 0, stats["kinds"])
 
-    # 3. 真 412:對已存在的格寫不同位元組 → ChainConflict(證明 PreconditionFailed 真的會來)
+    # 3. 真 412:直接以 GCS create-if-absent 對已存在 slot 條件建立，證明雲端
+    # 語意本身。這個 transport-level probe 只存在於 disposable smoke 工具，
+    # 不會替 production admission 增加可設定的 bypass。
     taken = recs[0]["seq"]
     line = json.dumps(recs[0], ensure_ascii=False)
+    evil = dict(recs[0], code="SMOKE-EVIL")
+    evil["hash"] = fw._audit_hash(evil)
     try:
-        g.append_chained(key, taken, line.replace("SMOKE-0", "SMOKE-EVIL"))
-        check("3  已存在格 + 不同位元組 → ChainConflict(真 412)", False, "沒有拋例外")
-    except st.ChainConflict:
-        check("3  已存在格 + 不同位元組 → ChainConflict(真 412)", True)
+        from google.api_core.exceptions import PreconditionFailed
+        slot_name = g._k(key) + "/%020d.jsonl" % taken
+        g._audit_bucket.blob(slot_name).upload_from_string(
+            json.dumps(evil, ensure_ascii=False), content_type="application/json",
+            if_generation_match=0)
+        check("3  已存在格 + create-if-absent → PreconditionFailed(真 412)", False, "沒有拋例外")
+    except PreconditionFailed:
+        check("3  已存在格 + create-if-absent → PreconditionFailed(真 412)", True)
     except Exception as e:
-        check("3  已存在格 + 不同位元組 → ChainConflict(真 412)", False, repr(e))
+        check("3  已存在格 + create-if-absent → PreconditionFailed(真 412)", False, repr(e))
 
-    # 4. 真 412 + 相同位元組 → False(自己的重試)
+    try:
+        g.append_chained(key, taken, json.dumps(evil, ensure_ascii=False))
+        check("3b public direct 不同位元組 → ChainConflict", False, "沒有拋例外")
+    except st.ChainConflict:
+        check("3b public direct 不同位元組 → ChainConflict", True)
+    except Exception as e:
+        check("3b public direct 不同位元組 → ChainConflict", False, repr(e))
+
+    # 4. Public exact-byte replay → False(自己的重試)
     try:
         r = g.append_chained(key, taken, line)
         check("4  已存在格 + 相同位元組 → False", r is False, r)
@@ -99,23 +149,53 @@ def main():
     _, tail_after = g.chain_tail(key)
     check("4b 3/4 兩步都沒有改動鏈(尾端仍是第三筆)", tail_after["hash"] == recs[2]["hash"])
 
-    # 5. 真並行:8 執行緒 × 10,對真 GCS 搶格
-    N_T, N_E = 8, 10
+    # A direct store caller may not supply a self-hash-valid record with an old
+    # predecessor.  The public primitive must refresh and reject it before any
+    # new immutable slot reaches the smoke bucket.
+    wrong_prev = dict(recs[0], seq=3, nonce="f" * 32,
+                      code="SMOKE-DIRECT-WRONG-PREV", prev=recs[0]["hash"])
+    wrong_prev["hash"] = fw._audit_hash(wrong_prev)
+    try:
+        g.append_chained(key, 3, json.dumps(wrong_prev, ensure_ascii=False))
+        check("4c direct wrong-prev 被拒且不寫入", False, "沒有拋例外")
+    except st.ChainConflict:
+        check("4c direct wrong-prev 被拒且不寫入", True)
+    _, tail_after_direct = g.chain_tail(key)
+    check("4d direct wrong-prev 後尾端不變", tail_after_direct["hash"] == recs[2]["hash"])
+
+    # 5. 真並行。預設保留 8×10 壓力測試；部署前可設 12×1，對應
+    # Cloud Run 的 max-instances=3 × concurrency=4。若設定 timing gate，
+    # 它是整個同步 burst 的 wall-clock 上限，因此也是每一筆的上限。
+    try:
+        N_T = positive_int_env("WOUNDAI_AUDIT_SMOKE_THREADS", 8, 32)
+        N_E = positive_int_env("WOUNDAI_AUDIT_SMOKE_EVENTS_PER_THREAD", 10, 100)
+        max_seconds = nonnegative_seconds_env("WOUNDAI_AUDIT_SMOKE_MAX_SECONDS")
+    except ValueError as exc:
+        print("拒跑:無效的併發驗收參數: %s" % exc)
+        return 2
     barrier = threading.Barrier(N_T)
     errors = []
+    durations = []
+    durations_lock = threading.Lock()
 
     def worker(t):
         try:
             barrier.wait()
             for i in range(N_E):
+                started = time.monotonic()
                 fw.audit("smoke:t%d" % t, "smoke_concurrent", "SMOKE-C%d-%d" % (t, i), "ok",
                          "engineer", "smoke")
+                with durations_lock:
+                    durations.append(time.monotonic() - started)
         except Exception as e:
-            errors.append(repr(e))
+            with durations_lock:
+                errors.append(repr(e))
 
     ths = [threading.Thread(target=worker, args=(t,)) for t in range(N_T)]
+    burst_started = time.monotonic()
     [x.start() for x in ths]
     [x.join() for x in ths]
+    burst_seconds = time.monotonic() - burst_started
     check("5  並行寫入無例外", not errors, errors[:3])
     all_recs = fw.read_jsonl(fw.AUDIT)
     seqs = [r["seq"] for r in all_recs]
@@ -125,6 +205,15 @@ def main():
     check("5d 真 GCS 並行後 fork=0 broken_link=0",
           stats["kinds"].get("fork", 0) == 0 and stats["kinds"].get("broken_link", 0) == 0, stats["kinds"])
     check("5e 整條鏈 real_issues=0", stats["real_issues"] == 0)
+    max_latency = max(durations) if durations else 0.0
+    check("5f 每筆都有延遲樣本", len(durations) == N_T * N_E,
+          {"expected": N_T * N_E, "observed": len(durations)})
+    print("   timing: %d×%d, burst=%.3fs, max_request=%.3fs" %
+          (N_T, N_E, burst_seconds, max_latency))
+    if max_seconds:
+        check("5g 同步 burst 在 %.3fs 驗收上限內" % max_seconds,
+              burst_seconds <= max_seconds,
+              {"burst_seconds": burst_seconds, "max_request_seconds": max_latency})
 
     print()
     if FAILED:

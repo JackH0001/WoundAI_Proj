@@ -18,6 +18,9 @@ app.py 註冊:from api_flywheel import flywheel_bp; app.register_blueprint(flywh
 驗證邏輯抽出為純函式(validate_annotation/effective_queue/...)供契約與單元測試。"""
 import os, json, re, time, hashlib, shutil, base64, logging, random, secrets
 
+from audit_chain_contract import AUDIT_CHAIN_FIELDS, CHAIN_FIELD_VERSIONS, CHAIN_V, \
+    UNVERSIONED_CHAIN_VERSIONS, audit_hash, loads_json_object_strict, validate_current_record
+
 # ⚠ 這個模組原本沒有 logger，而 except 區塊裡卻呼叫了 logger.warning——
 # 於是**錯誤處理本身會拋 NameError**，把一個「遮罩存不進去」的小問題
 # 升級成整筆標註 500，連傷口分割的 GT 也一起丟掉。
@@ -249,26 +252,8 @@ def read_jsonl(path: str, with_bad: bool = False):
 # 是驗證用的公式換了。這種缺陷在鎖定(Bucket Lock)之後無法補救,因為紀錄不可改寫。
 #
 # 所以規則是:**只新增版本,永遠不要就地修改既有版本的欄位組**。
-CHAIN_FIELD_VERSIONS = {
-    # v1 — 91ea736 導入雜湊鏈(2026-08-03T18:17Z)
-    1: ("seq", "ts", "actor", "action", "code", "result", "prev"),
-    # v2 — 2d5cb74 RBAC S1 加入 role/org(2026-08-04T06:32Z)。此版仍不自帶版本標記。
-    2: ("seq", "ts", "actor", "role", "org", "action", "code", "result", "prev"),
-    # v3 — 紀錄自帶 `chain_v`。版本本身也進雜湊,所以沒辦法把 v3 改標成 v2 來換公式。
-    3: ("chain_v", "seq", "ts", "actor", "role", "org", "action", "code", "result", "prev"),
-    # v4 — 加 `nonce`(16 bytes 隨機)。寫入序列化用位元組仲裁判斷「這一格是不是我自己
-    # 先前的重試」;沒有 nonce,兩個**不同**寫入者在同一秒、同 actor/action/code、同 seq
-    # 會產出完全相同的位元組,仲裁就會把第二個真實事件當成重複而丟掉。
-    4: ("chain_v", "nonce", "seq", "ts", "actor", "role", "org", "action", "code", "result", "prev"),
-}
-CHAIN_V = 4
 # 驗證結果中屬「資訊性」而非異常的類別。
 INFORMATIONAL_KINDS = ("legacy_no_hash", "legacy_formula")
-# v1/v2 的紀錄沒有 chain_v 可查,只能試算。新到舊,避免舊公式意外先命中。
-UNVERSIONED_CHAIN_VERSIONS = (2, 1)
-
-# 舊名保留:外部呼叫端(測試、匯出腳本)還在用。指向現行版本的欄位組。
-AUDIT_CHAIN_FIELDS = CHAIN_FIELD_VERSIONS[CHAIN_V]
 
 
 def _audit_hash(rec: dict, version: int = None) -> str:
@@ -277,13 +262,7 @@ def _audit_hash(rec: dict, version: int = None) -> str:
     `version` 沒給時,以紀錄自身宣告的 `chain_v` 為準;連那個都沒有(v1/v2 舊紀錄)
     才退回現行版本——驗證路徑不依賴這個退路,它會明確逐一試算已知的歷史公式。
     """
-    v = version if version is not None else rec.get("chain_v", CHAIN_V)
-    fields = CHAIN_FIELD_VERSIONS.get(v)
-    if fields is None:
-        raise ValueError("unknown chain_v: %r" % (v,))
-    payload = json.dumps({k: rec.get(k) for k in fields},
-                         ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return audit_hash(rec, version)
 
 
 def _audit_hash_resolve(rec: dict):
@@ -294,6 +273,12 @@ def _audit_hash_resolve(rec: dict):
     """
     declared = rec.get("chain_v")
     if declared is not None:
+        # Python treats True == 1 and 1.0 == 1 when indexing a dict.  Audit
+        # version declarations are protocol identifiers, not numeric values;
+        # accepting either alias would let a noncanonical record appear to use
+        # a historical formula.
+        if type(declared) is not int:
+            return (False, declared, False)
         try:
             return (_audit_hash(rec, declared) == rec.get("hash"), declared, False)
         except ValueError:
@@ -312,8 +297,6 @@ def _audit_hash_resolve(rec: dict):
 AUDIT_MAX_RETRY = 16
 AUDIT_BACKOFF_BASE = 0.05
 AUDIT_BACKOFF_CAP = 2.0
-
-
 class AuditWriteConflict(RuntimeError):
     """稽核鏈持續搶格失敗。呼叫端必須讓當前操作失敗——寫不了稽核就不繼續。"""
 
@@ -331,25 +314,57 @@ def audit(actor: str, action: str, code: str, result: str,
     """寫一筆稽核紀錄到雜湊鏈上,**序列化**:同一個 seq 全桶只能被建立一次。
 
     舊版是「讀全部 → 算 seq+1 → append」,讀寫之間沒有原子性,並行寫入會產生
-    同 prev 的 fork(正式桶 675 筆裡有 26 處)。現在改成:讀尾端 → 組紀錄 →
-    以「只在該格不存在時建立」寫入;被搶走就重讀尾端、改搶下一格。
-    見 store.chain_tail / store.append_chained。
+    同 prev 的 fork(正式桶 675 筆裡有 26 處)。GCS 現在由 Store 在單一 admission
+    中驗完整名稱 manifest 與尚未驗過的 suffix，再以條件建立搶下一格；LocalStore
+    則在行程鎖內驗完整鏈。離線 verifier 永遠另做全量讀取，不採 admission 快取。
     """
     from store import ChainConflict, GcsStore
     # actor 是 `<org>:<user>`;org 沒另外傳就從中拆出來,讓舊呼叫端不必全部改。
     if org is None and isinstance(actor, str) and ":" in actor:
         org = actor.split(":", 1)[0]
+    for field, value in (("actor", actor), ("role", role), ("org", org),
+                         ("action", action), ("code", code), ("result", result)):
+        if not isinstance(value, str) or not value:
+            raise ValueError("audit requires explicit non-empty %s" % field)
     st = _store()
     key = _key(AUDIT)
+
+    def build_record(seq, prev):
+        rec = {
+            "chain_v": CHAIN_V,
+            "nonce": secrets.token_hex(16),
+            "seq": seq,
+            "ts": utc_now(), "actor": actor, "role": role, "org": org,
+            "action": action, "code": code, "result": result,
+            "prev": prev,
+        }
+        rec["hash"] = _audit_hash(rec)
+        return rec
+
+    if isinstance(st, GcsStore):
+        for attempt in range(AUDIT_MAX_RETRY):
+            try:
+                return st.append_next_chained(key, build_record)
+            except ChainConflict:
+                if attempt + 1 < AUDIT_MAX_RETRY:
+                    delay = min(AUDIT_BACKOFF_CAP, AUDIT_BACKOFF_BASE * (2 ** attempt))
+                    time.sleep(delay * random.uniform(0.5, 1.5))
+            except Exception as exc:
+                raise AuditChainCorrupt("audit chain admission unavailable") from exc
+        raise AuditWriteConflict(
+            "audit chain slot contention persisted for %d attempts" % AUDIT_MAX_RETRY)
+
     for attempt in range(AUDIT_MAX_RETRY):
         # A valid tail is not proof that every immutable slot before it is
         # intact: an attacker could alter a middle payload while preserving its
-        # old hash/prev fields.  Admission therefore verifies a fresh complete
-        # record set before extending the chain.  GCS deliberately bypasses its
-        # incremental cache here; the normal cache is only an optimization for
-        # readers after a WORM epoch has been established.
+        # old hash/prev fields.  For GCS, obtain the fully verified records and
+        # tail from one fresh slot snapshot.  The locked WORM gate above makes
+        # that snapshot stable until conditional creation; without it, no
+        # application-level pair of reads can close the external TOCTOU window.
         try:
-            recs = [json.loads(line) for line in st.read_lines_fresh(key)]
+            lines = st.read_lines_fresh(key)
+            tail_seq, tail = st.chain_tail(key)
+            recs = [json.loads(line) for line in lines]
             _, issues, stats = verify_audit_chain(recs=recs)
         except Exception as exc:
             raise AuditChainCorrupt("audit chain full verification unavailable") from exc
@@ -358,34 +373,23 @@ def audit(actor: str, action: str, code: str, result: str,
             raise AuditChainCorrupt(
                 "audit chain full verification failed: %s" %
                 ",".join(sorted(kinds)) if issues else "audit chain invalid")
-        # A final GCS audit bucket is a clean, locked v4 epoch.  Never extend
-        # an old formula/format merely because it happens to verify under an
-        # historical rule; migration requires a separate reviewed epoch.
-        if isinstance(st, GcsStore) and any(r.get("chain_v") != CHAIN_V for r in recs):
-            raise AuditChainCorrupt("GCS audit epoch contains non-v4 record")
-        tail_seq, tail = st.chain_tail(key)
-        if tail is not None:
-            valid_tail, _, _ = _audit_hash_resolve(tail)
-            if not valid_tail:
-                raise AuditChainCorrupt(
-                    "audit chain tail hash is invalid at seq %d" % tail_seq)
-        rec = {
-            # 版本標記與 nonce 必須在雜湊計算之前就位——兩者都是 v4 雜湊輸入的一部分。
-            "chain_v": CHAIN_V,
-            "nonce": secrets.token_hex(16),
-            "seq": tail_seq + 1,
-            "ts": utc_now(), "actor": actor, "role": role, "org": org,
-            "action": action, "code": code, "result": result,
-            # 鏈首用固定字串,讓「第一筆」與「前面被刪光了」可以區分開來
-            "prev": (tail or {}).get("hash") or "GENESIS",
-        }
-        rec["hash"] = _audit_hash(rec)
+        # Admission is current-v4-only on every backend.  Historical v1/v2/v3
+        # records remain readable and verifiable for evidence, but extending a
+        # mixed local log through a strict v4 primitive used to surface as an
+        # unwrapped IOError/500.  Reject it here with an actionable, fail-closed
+        # migration boundary instead.  Final GCS epochs must likewise start
+        # clean; never extend an old formula merely because it still verifies.
+        if any(r.get("chain_v") != CHAIN_V for r in recs):
+            raise AuditChainCorrupt(
+                "audit chain contains a historical version; start a reviewed v4 epoch before writing")
+        rec = build_record(tail_seq + 1, (tail or {}).get("hash") or "GENESIS")
         try:
             st.append_chained(key, rec["seq"], json.dumps(rec, ensure_ascii=False))
             return rec
         except ChainConflict:
-            delay = min(AUDIT_BACKOFF_CAP, AUDIT_BACKOFF_BASE * (2 ** attempt))
-            time.sleep(delay * random.uniform(0.5, 1.5))
+            if attempt + 1 < AUDIT_MAX_RETRY:
+                delay = min(AUDIT_BACKOFF_CAP, AUDIT_BACKOFF_BASE * (2 ** attempt))
+                time.sleep(delay * random.uniform(0.5, 1.5))
     raise AuditWriteConflict(
         "audit chain slot contention persisted for %d attempts" % AUDIT_MAX_RETRY)
 
@@ -417,29 +421,109 @@ def audit_intent(actor: str, action: str, code: str,
         raise AuditUnavailable("audit intent unavailable for " + action) from exc
 
 
-def verify_audit_chain(audit_path=None, recs=None):
+def _read_audit_records_strict(audit_path):
+    """Read raw audit lines without losing duplicate-key or malformed evidence."""
+    records, parse_issues = [], []
+    st = _store()
+    key = _key(audit_path)
+    # GCS audit objects are immutable *slots*, not a generic text log.  The
+    # normal read_lines() helper splits every blob by newline and would make a
+    # two-line slot look like two legitimate records.  The slot-aware snapshot
+    # validates object names, contiguity, one-record-per-slot, v4 schema, hash,
+    # and predecessor links before the offline verifier sees any line.
+    try:
+        from store import GcsStore
+        is_gcs_audit = isinstance(st, GcsStore) and st._is_audit_chain_root(key)
+    except Exception:
+        is_gcs_audit = False
+    if is_gcs_audit:
+        _, _, lines = st.audit_snapshot_fresh(key)
+    else:
+        lines = st.read_lines(key)
+    for source_index, line in enumerate(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(loads_json_object_strict(line))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            parse_issues.append({
+                "index": source_index,
+                "kind": "invalid_record",
+                "detail": "稽核 JSON 無法以唯一、標準形式解析: %s" % exc,
+                "ts": None,
+            })
+    return records, parse_issues
+
+
+def verify_audit_chain(audit_path=None, recs=None, parse_issues=None):
     """驗證稽核軌跡的完整性。回 (ok, 問題清單, 統計)。
 
     `recs` 可傳入已讀好的紀錄以避免重複讀取——GCS 後端下每次 read 都要列舉
     整個前綴的物件，主控台同時要「列表」與「驗鏈」時讀兩遍會明顯變慢。
 
-    分開回報三種異常,因為處置完全不同:
+    分開回報各種異常,因為處置完全不同:
       - `hash_mismatch`  紀錄內容被改過
       - `broken_link`    前一筆被刪除或順序被調換
       - `fork`           兩筆指向同一個前驅(多實例並行寫入,或有人補塞紀錄)
+      - `seq_discontinuity` hashed 紀錄的 seq 不等於其完整軌跡位置
+      - `legacy_after_hashed` 無 hash 紀錄出現在雜湊鏈已開始之後
+      - `version_regression` 鏈版本比早先已出現的版本更舊
     """
-    recs = read_jsonl(audit_path or AUDIT) if recs is None else recs
-    issues, seen_prev = [], {}
+    if recs is None:
+        if parse_issues is not None:
+            raise ValueError("parse_issues requires an explicit record snapshot")
+        recs, parse_issues = _read_audit_records_strict(audit_path or AUDIT)
+    else:
+        # Callers that already took a strict snapshot must be able to carry its
+        # parse evidence into the verifier.  Dropping those issues would turn a
+        # malformed line into a shorter, apparently valid chain.
+        parse_issues = list(parse_issues or [])
+    issues, seen_prev = list(parse_issues), {}
     prev_hash = "GENESIS"
+    seen_hashed = False
+    max_chain_version = None
     for i, r in enumerate(recs):
         # 舊格式(雜湊鏈導入前)的紀錄沒有 hash 欄位,跳過但要計數——
         # 靜默忽略會讓「整條鏈其實沒在驗」看起來像通過
         if "hash" not in r:
+            if seen_hashed:
+                issues.append({"index": i, "kind": "legacy_after_hashed",
+                               "detail": "無 hash 的歷史紀錄只能位於 hashed 軌跡之前",
+                               "ts": r.get("ts")})
             issues.append({"index": i, "kind": "legacy_no_hash",
                            "detail": "雜湊鏈導入前的舊紀錄,無法驗證", "ts": r.get("ts")})
             prev_hash = "GENESIS"   # 舊紀錄之後重新起鏈
             continue
+        seen_hashed = True
+        if type(r.get("seq")) is not int or r.get("seq") != i:
+            issues.append({"index": i, "kind": "seq_discontinuity",
+                           "detail": "hashed 紀錄 seq=%r,但其完整軌跡位置應為 %d"
+                                     % (r.get("seq"), i),
+                           "ts": r.get("ts")})
+        # A final v4 record must meet the same exact schema and type contract as
+        # the immutable-store admission path.  Earlier historical versions stay
+        # backward-compatible; only records presenting themselves as v4 are held
+        # to the current slot definition.
+        if r.get("chain_v") == CHAIN_V:
+            try:
+                validate_current_record(r, r.get("seq"))
+            except (TypeError, ValueError) as exc:
+                issues.append({"index": i, "kind": "schema_invalid",
+                               "detail": "v4 稽核紀錄不符合不可變 slot 合約: %s" % exc,
+                               "ts": r.get("ts")})
         valid, matched_v, superseded = _audit_hash_resolve(r)
+        declared_v = r.get("chain_v")
+        observed_v = matched_v if valid else (
+            declared_v if type(declared_v) is int and declared_v in CHAIN_FIELD_VERSIONS else None)
+        if observed_v is not None:
+            if max_chain_version is not None and observed_v < max_chain_version:
+                issues.append({"index": i, "kind": "version_regression",
+                               "detail": "chain_v=%d 不得倒退到早先已出現的 chain_v=%d 之前"
+                                         % (observed_v, max_chain_version),
+                               "ts": r.get("ts")})
+            max_chain_version = observed_v if max_chain_version is None else max(
+                max_chain_version, observed_v)
         if not valid:
             declared = r.get("chain_v")
             detail = ("紀錄內容與其雜湊不符(內容被改過)" if declared is None
@@ -447,10 +531,10 @@ def verify_audit_chain(audit_path=None, recs=None):
             issues.append({"index": i, "kind": "hash_mismatch",
                            "detail": detail, "ts": r.get("ts")})
         elif superseded:
-            # 驗得過,只是蓋章時用的是已被取代的欄位組。這不是竄改,
-            # 是本檔頂端記載的那次公式變更留下的痕跡。
+            # 驗得過,只表示目前位元組能用已被取代的欄位組重算。
+            # 這是公式辨識結果,不是「未曾被竄改」的充分證明;還需外部鏈頭或 WORM 證據。
             issues.append({"index": i, "kind": "legacy_formula",
-                           "detail": "以 chain_v=%d 的舊欄位組驗證通過(公式已被取代,非竄改)" % matched_v,
+                           "detail": "以 chain_v=%d 的歷史欄位組重算吻合(不足以單獨證明未被竄改)" % matched_v,
                            "ts": r.get("ts")})
         if r.get("prev") != prev_hash:
             issues.append({"index": i, "kind": "broken_link",
@@ -464,18 +548,30 @@ def verify_audit_chain(audit_path=None, recs=None):
                            "ts": r.get("ts")})
         seen_prev[p] = i
         prev_hash = r.get("hash")
-    # `legacy_no_hash` 與 `legacy_formula` 是資訊性標記,不是異常:前者是雜湊鏈導入前
-    # 的紀錄,後者是公式變更留下的痕跡。兩者都無法「修好」,也都不代表內容被動過。
+    # `legacy_no_hash` 與 `legacy_formula` 是資訊性標記:前者是雜湊鏈導入前
+    # 的紀錄,後者是公式辨識結果。它們不單獨列為鏈結異常,但也不能單獨證明未被竄改。
     # `ok` 維持原語意(任何標記都讓它為 False)以免打壞既有呼叫端;要區分「真異常」
     # 請用 stats["real_issues"] ——呼叫端不必自己硬寫類別清單。
     informational = sum(1 for x in issues if x["kind"] in INFORMATIONAL_KINDS)
-    stats = {"total": len(recs), "issues": len(issues),
+    stats = {"total": len(recs) + len(parse_issues), "issues": len(issues),
              "informational": informational,
              "real_issues": len(issues) - informational,
              "head": prev_hash if recs else "GENESIS",
              "kinds": {k: sum(1 for x in issues if x["kind"] == k)
                        for k in {x["kind"] for x in issues}}}
     return (len(issues) == 0, issues, stats)
+
+
+def read_verified_audit_snapshot(audit_path=None):
+    """Read and verify one strict audit snapshot.
+
+    The returned records and verification tuple are derived from the same
+    storage read.  This matters on GCS: reading the table first and verifying a
+    second snapshot can pair page contents from epoch N with a proof for epoch
+    N+1 when another instance appends between the two reads.
+    """
+    recs, parse_issues = _read_audit_records_strict(audit_path or AUDIT)
+    return recs, verify_audit_chain(recs=recs, parse_issues=parse_issues)
 
 
 def poly_sig(poly):
@@ -1101,7 +1197,17 @@ try:
     def _who():
         """(identity, role, org)。JWT 裡沒有 role 的舊 token 一律視為無權限。"""
         c = get_jwt() or {}
-        return (get_jwt_identity() or "unknown", c.get("role"), c.get("org"))
+        actor = get_jwt_identity() or "unknown"
+        role = c.get("role")
+        org = c.get("org")
+        # 缺 claim 的舊／畸形 token 仍會走拒絕事件稽核。新 v4 epoch 不允許
+        # role/org=null，因此以明確 sentinel 留痕；sentinel 不在任何權限集合，
+        # 授權結果仍嚴格 fail-closed。
+        if not isinstance(role, str) or not role:
+            role = "unauthorised"
+        if not isinstance(org, str) or not org:
+            org = actor.split(":", 1)[0] if isinstance(actor, str) and ":" in actor else "unknown"
+        return (actor, role, org)
 
     def _can(role, perm):
         try:
@@ -2019,7 +2125,7 @@ try:
                                  "image_ids": sorted(imgs), "withdrawn_at": utc_now(), "actor": actor})
         moved = [i for i in sorted(imgs) if quarantine_image(i)]
         audit(actor, "consent_withdraw", code,
-              f"排除訓練;影像隔離 {len(moved)}/{len(imgs)}")
+              f"排除訓練;影像隔離 {len(moved)}/{len(imgs)}", role, org)
         return jsonify({"status": "withdrawn", "code": code, "image_ids": sorted(imgs),
                         "quarantined": moved,
                         "effect": "已撤回:該影像的所有標註(含修訂版)一律排除於訓練集與統計,"
@@ -2064,7 +2170,8 @@ try:
         append_jsonl(WITHDRAWN, {"code": code, "action": "restore", "image_ids": sorted(imgs),
                                  "restored_at": utc_now(), "actor": actor,
                                  "note": d.get("note")})
-        audit(actor, "consent_restore", code, f"重新同意;影像回復 {len(restored)}/{len(imgs)}")
+        audit(actor, "consent_restore", code,
+              f"重新同意;影像回復 {len(restored)}/{len(imgs)}", role, org)
         return jsonify({"status": "restored", "code": code, "image_ids": sorted(imgs),
                         "restored": restored,
                         "effect": "已重新納入:該 code/影像不再被排除,可重新上傳標註。"
