@@ -16,7 +16,8 @@ param(
     [switch]$Audit,
     [switch]$Apply,
     [switch]$LockRetention,
-    [string]$LockAuthorisationRef
+    [string]$LockAuthorisationRef,
+    [string]$LockRecordPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -86,8 +87,76 @@ function Get-Bucket([string]$Name) {
     # Normalized `gcloud storage buckets describe` output in SDK 578 omits
     # projectNumber.  The raw Storage API response retains it, which is the
     # ownership proof required before this script can mutate or lock a bucket.
-    return Get-GCloudJson "describe gs://$Name" @(
-        'storage','buckets','describe',"gs://$Name",'--raw','--format=json')
+    $raw = Get-BucketRawJson $Name
+    try { return ($raw | ConvertFrom-Json) }
+    catch { Die "describe gs://$Name returned invalid raw JSON: $_" }
+}
+function Get-BucketRawJson([string]$Name) {
+    $lines = @(Invoke-GCloudScoped @(
+        'storage','buckets','describe',"gs://$Name",'--raw','--format=json'))
+    if ($LASTEXITCODE -ne 0 -or $lines.Count -eq 0) { Die "describe gs://$Name failed" }
+    return ($lines -join "`n")
+}
+function Get-ActiveOperator {
+    $account = (& $script:GCLOUD config get-value account 2>$null)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$account)) {
+        Die "cannot establish the active gcloud operator before Bucket Lock"
+    }
+    return ([string]$account).Trim()
+}
+function Write-LockRecord([string]$BeforeRaw, [string]$AfterRaw, [bool]$PerformedThisRun) {
+    if ([string]::IsNullOrWhiteSpace($LockRecordPath) -or
+            -not [IO.Path]::IsPathRooted($LockRecordPath) -or
+            [IO.Path]::GetExtension($LockRecordPath) -cne '.json') {
+        Die "-LockRecordPath must be an explicit absolute .json path"
+    }
+    if (Test-Path -LiteralPath $LockRecordPath) {
+        Die "refuse to overwrite existing Bucket Lock record: $LockRecordPath"
+    }
+    $parent = Split-Path -Parent $LockRecordPath
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+        Die "Bucket Lock record directory does not exist: $parent"
+    }
+    $operator = $script:LOCK_OPERATOR
+    if ([string]::IsNullOrWhiteSpace($operator)) { Die "Bucket Lock operator was not captured before locking" }
+    $record = [ordered]@{
+        schema = 'woundai.bucket-lock-record/1'
+        generator = 'harden_bucket.ps1'
+        observed_at_utc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        project_id = $ProjectId
+        project_number = $script:PROJECT_NUMBER
+        bucket = $AuditBucket
+        operator = $operator
+        authorisation_reference = $LockAuthorisationRef
+        authorisation_reference_verifiable_by_script = $false
+        retention_seconds = $script:AUDIT_RETENTION_SECONDS
+        lock_performed_this_run = $PerformedThisRun
+        before_raw_sha256 = Get-Sha256Text $BeforeRaw
+        after_raw_sha256 = Get-Sha256Text $AfterRaw
+        hash_basis = 'UTF-8 text from --raw --format=json with output lines joined by LF'
+        locked = $true
+        scope = 'audit bucket retention lock only; no deployment or clinical-release assertion'
+    }
+    $json = $record | ConvertTo-Json -Depth 8
+    [IO.File]::WriteAllText($LockRecordPath, $json + "`r`n", (New-Object Text.UTF8Encoding $false))
+    try { $readback = Get-Content -LiteralPath $LockRecordPath -Raw | ConvertFrom-Json }
+    catch { Die "Bucket Lock record readback failed: $_" }
+    if ($readback.schema -cne $record.schema -or $readback.bucket -cne $AuditBucket -or
+            $readback.operator -cne $operator -or $readback.authorisation_reference -cne $LockAuthorisationRef -or
+            $readback.locked -ne $true -or [int64]$readback.retention_seconds -ne $script:AUDIT_RETENTION_SECONDS -or
+            $readback.before_raw_sha256 -cne $record.before_raw_sha256 -or
+            $readback.after_raw_sha256 -cne $record.after_raw_sha256) {
+        Die "Bucket Lock record field readback mismatch"
+    }
+    Write-Host "  lock record: $LockRecordPath"
+    Write-Host "  lock record sha256: $((Get-FileHash -LiteralPath $LockRecordPath -Algorithm SHA256).Hash.ToLowerInvariant())"
+}
+function Get-Sha256Text([string]$Text) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = (New-Object Text.UTF8Encoding $false).GetBytes($Text)
+        return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()
+    } finally { $sha.Dispose() }
 }
 function Assert-NoPublicIam([string]$Name) {
     $iam = Get-GCloudJson "IAM gs://$Name" @(
@@ -210,6 +279,22 @@ if ($LockRetention) {
     if ($AuditBucket -notmatch 'audit') {
         Die "-LockRetention requires an audit-specific -AuditBucket name"
     }
+    if ($AuditBucket -match '(?i)(smoke|test|tmp|temp|dev|sandbox)') {
+        Die "-LockRetention refuses a disposable-environment bucket name: gs://$AuditBucket"
+    }
+    if ([string]::IsNullOrWhiteSpace($LockRecordPath) -or
+            -not [IO.Path]::IsPathRooted($LockRecordPath) -or
+            [IO.Path]::GetExtension($LockRecordPath) -cne '.json') {
+        Die "-LockRetention requires an explicit absolute .json -LockRecordPath"
+    }
+    if (Test-Path -LiteralPath $LockRecordPath) {
+        Die "refuse to overwrite existing Bucket Lock record: $LockRecordPath"
+    }
+    $lockRecordParent = Split-Path -Parent $LockRecordPath
+    if (-not (Test-Path -LiteralPath $lockRecordParent -PathType Container)) {
+        Die "Bucket Lock record directory does not exist: $lockRecordParent"
+    }
+    $script:LOCK_OPERATOR = Get-ActiveOperator
 }
 foreach ($durationDays in @($QuarantineDays,$StagingDays,$StagingMetaExtraDays,$NoncurrentDays,$SoftDeleteDays)) {
     if ($durationDays -lt 1) { Die "retention durations must be positive" }
@@ -289,7 +374,9 @@ if ($Apply) {
 
         Invoke-GCloudChecked "audit retention policy" @(
             'storage','buckets','update',"gs://$AuditBucket",'--retention-period=7y','--quiet')
-        $preLock = Get-Bucket $AuditBucket
+        $preLockRaw = Get-BucketRawJson $AuditBucket
+        try { $preLock = $preLockRaw | ConvertFrom-Json }
+        catch { Die "pre-lock audit bucket response was invalid JSON: $_" }
         Assert-BucketProject $preLock $AuditBucket
         [void](Assert-AuditBucket $preLock $false)
         # Re-list immediately before the irreversible operation.  A concurrent
@@ -298,11 +385,14 @@ if ($Apply) {
         Assert-AuditObjectsExpected $AuditBucket -RequireEmpty:$LockRetention
         if ($LockRetention) {
             $alreadyLocked = (Get-Field $preLock @('retention_policy.isLocked','retentionPolicy.isLocked')) -eq $true
+            $script:LOCK_PERFORMED_THIS_RUN = $false
             if (-not $alreadyLocked) {
                 Say "IRREVERSIBLE: lock audit retention"
                 Invoke-GCloudChecked "lock audit retention" @(
                     'storage','buckets','update',"gs://$AuditBucket",'--lock-retention-period','--quiet')
+                $script:LOCK_PERFORMED_THIS_RUN = $true
             }
+            $script:LOCK_BEFORE_RAW = $preLockRaw
         }
     }
 }
@@ -314,12 +404,17 @@ Assert-MainBucket $main
 Assert-NoPublicIam $Bucket
 Write-Host "  main bucket: verified"
 if ($Audit) {
-    $auditConfig = Get-Bucket $AuditBucket
+    $auditAfterRaw = Get-BucketRawJson $AuditBucket
+    try { $auditConfig = $auditAfterRaw | ConvertFrom-Json }
+    catch { Die "audit bucket readback returned invalid JSON: $_" }
     Assert-BucketProject $auditConfig $AuditBucket
     $locked = Assert-AuditBucket $auditConfig ([bool]$LockRetention)
     Assert-NoPublicIam $AuditBucket
     Assert-AuditObjectsExpected $AuditBucket -RequireEmpty:$LockRetention
     Write-Host "  audit bucket: verified; locked=$locked"
+    if ($LockRetention) {
+        Write-LockRecord $script:LOCK_BEFORE_RAW $auditAfterRaw ([bool]$script:LOCK_PERFORMED_THIS_RUN)
+    }
 }
 
 Write-Host "`nPASS: bucket configuration matches the P0-4 Phase A policy." -ForegroundColor Green
