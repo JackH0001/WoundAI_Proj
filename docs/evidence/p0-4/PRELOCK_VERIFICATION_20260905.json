@@ -1,0 +1,86 @@
+{
+  "schema": "woundai.p0-4-prelock-verification/1",
+  "observed_at_utc": "2026-09-05T11:02:03Z",
+  "repository": {
+    "url": "https://github.com/JackH0001/WoundAI_Proj.git",
+    "branch": "codex/p0-4-staging-promotion",
+    "head": "193ec93675a7ee19c429ef4291289f71b03cd896",
+    "base_main": "505ff2e69f68a3b263f16adca8608a4036d5953f",
+    "pull_request": 4,
+    "pull_request_state": "OPEN_DRAFT",
+    "merge_state": "CLEAN"
+  },
+  "validation": {
+    "windows_python_runner": {
+      "passed_files": 56,
+      "failed_files": 0,
+      "elapsed_seconds": 72.435,
+      "source_snapshot_same_after": true
+    },
+    "github_checks": {
+      "executed_success": [
+        "android-client / assemble + unit tests",
+        "endpoint-guards / endpoint-guards",
+        "gitleaks / scan (push)",
+        "gitleaks / scan (pull_request)",
+        "integrity-gate / integrity (push)",
+        "integrity-gate / integrity (pull_request)",
+        "ios-client / xcodebuild (newest on runner)",
+        "p0-4-audit / audit-contract",
+        "p0-4-audit / backend-image"
+      ],
+      "skipped_not_counted_as_pass": [
+        "android-client / androidTest (emulator)"
+      ]
+    },
+    "gcs_smoke": {
+      "bucket": "woundai-jackh001-audit-smoke-20260905-193ec93",
+      "disposable": true,
+      "retention_locked": false,
+      "threads": 12,
+      "events_per_thread": 84,
+      "total_records": 1011,
+      "unique_sequences": 1011,
+      "fork": 0,
+      "broken_link": 0,
+      "real_issues": 0,
+      "burst_seconds": 200.827,
+      "max_request_seconds": 27.810,
+      "crossed_single_page_1000_object_boundary": true
+    }
+  },
+  "formal_audit_epoch_prelock": {
+    "bucket": "woundai-flywheel-jackh001-audit-epoch-20260905",
+    "project_number": "421209514056",
+    "location": "ASIA-EAST1",
+    "public_access_prevention": "enforced",
+    "uniform_bucket_level_access": true,
+    "retention_seconds": 220903200,
+    "locked": false,
+    "object_count": 0,
+    "raw_describe_sha256": "d48e976e4b1cb64067bacb4e976be64e791df1516cbf64b8675f166c7728e7f3",
+    "hash_basis": "UTF-8 text from gcloud storage buckets describe --raw --format=json with output lines joined by LF"
+  },
+  "legacy_audit_epoch": {
+    "bucket": "woundai-flywheel-jackh001-audit",
+    "locked": false,
+    "must_not_be_locked": true
+  },
+  "action_status": {
+    "reversible_bucket_hardening_completed": true,
+    "bucket_lock_completed": false,
+    "bucket_lock_blocked_reason": "Exact authorization must identify the new bucket, the seven-year duration, and the irreversible inability to shorten or remove retention.",
+    "runtime_identity_provisioned": false,
+    "merged": false,
+    "deployed": false,
+    "clinical_restriction_released": false
+  },
+  "does_not_establish": [
+    "formal Bucket Lock",
+    "production deployment",
+    "Mac device or App end-to-end validation",
+    "P0-2 JWT revocation closure",
+    "P0-5 Android offline ordering closure",
+    "clinical readiness"
+  ]
+}

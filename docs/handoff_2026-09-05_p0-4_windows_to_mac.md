@@ -41,7 +41,9 @@ Windows 隔離 runner 結果：**56/56 測試檔通過、0 失敗**，且 `sourc
   - `provision_runtime_identity.ps1`：2049 tokens／73 variables。
 - `git diff --check`：PASS。
 - gitleaks 8.28.0：修補後實掃 4 筆 commit 為 0 finding；另以 4 個新命中作負向控制，4/4 仍被攔截。`.gitleaksignore` 只列 `e0e6761` 的兩個完整 fingerprint，不按檔案或規則做寬泛豁免。
-- Docker Desktop engine 在本輪未能啟動，因此本機沒有建立部署映像；`.github/workflows/p0-4-audit.yml` 的 `backend-image` 必須在 GitHub CI 成功，才能補上這項證據。
+- Docker Desktop engine 在本輪未能啟動，因此本機沒有建立部署映像；PR head `193ec93675a7ee19c429ef4291289f71b03cd896` 的 GitHub `backend-image` 已 PASS，補上容器建置證據。
+- 同一 head 的 Android assemble/unit、iOS xcodebuild、endpoint-guards、audit-contract、兩組 integrity 與兩組 gitleaks 均 PASS；Android emulator `androidTest` 為 workflow SKIPPED，不列為通過。
+- final code 已在 disposable GCS bucket 以 12 路併發寫入 1,011 筆：seq 1,011/1,011 唯一、fork=0、broken_link=0、real_issues=0，且跨過單頁 1,000 物件邊界。完整 pre-lock 摘要見 `docs/evidence/p0-4/PRELOCK_VERIFICATION_20260905.json`。
 
 ## 3. Mac 取得與 commit 完整性檢查
 
@@ -113,8 +115,9 @@ E2E 應對準另行提供的 candidate URL，不得直接拿 production live URL
 - [ ] PR #4 的新 head 上 `audit-contract` 與 `backend-image` 等 checks 全綠。
 - [ ] 獨立覆核與 Mac iOS build／test、App E2E 完成。
 - [ ] 新的 dedicated runtime service account 與三個精確 secret IAM 完成；不得再使用預設 Compute service account 的廣泛權限。
-- [ ] 以拋棄式 smoke bucket 驗證 final code 的真 GCS atomic append、pagination／大量物件與嚴格 verifier。
-- [ ] 建立全新的正式 audit epoch bucket，驗證空桶、區域、PAP、UBLA、7 年 retention 與精確 IAM。
+- [x] 以拋棄式 smoke bucket 驗證 final code 的真 GCS atomic append、1,000+ pagination／大量物件與嚴格 verifier（1,011 筆、0 real issue）。
+- [x] 建立全新的正式 audit epoch bucket並驗證空桶、區域、PAP、UBLA 與 7 年 retention；目前仍為 `locked=false`、0 物件。
+- [ ] 完成 dedicated runtime identity 後，驗證正式 audit epoch bucket 的精確 IAM。
 - [ ] 只對新 audit epoch bucket 執行 Bucket Lock，且先保存 before/after 與授權記錄。
 - [ ] PR 合併至 remote `main` 後，才可由 `deploy_cloudrun.ps1` 建立 no-traffic candidate；candidate 全探針通過才切流量，失敗須回滾。
 - [ ] 列舉並移除舊預設 Compute service account 的過度權限，完成切換後覆核。
