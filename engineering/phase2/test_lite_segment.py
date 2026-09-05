@@ -251,6 +251,28 @@ def main():
           any(e.get("action") == "deleted" and e.get("anon_id") == "dev-yes" for e in idx))
     check("路徑穿越被擋", cli.delete("/api/v1/lite/data/..%2f..").status_code in (400, 404))
 
+    # 「回 200」不是 deletion evidence.  Inject a real storage failure and
+    # require the endpoint to surface the incomplete request rather than claim
+    # that a still-present image has been forgotten.
+    r = post(anon="dev-delete-fail", consent="true", ip="203.0.113.61", salt=b"df")
+    iid_fail = (r.get_json() or {}).get("image_id")
+    st = lite._fw._store()
+    original_delete = st.delete
+    def fail_image_delete(key):
+        if str(key).endswith(".jpg"):
+            raise OSError("synthetic delete failure")
+        return original_delete(key)
+    st.delete = fail_image_delete
+    try:
+        r = cli.delete("/api/v1/lite/data/dev-delete-fail")
+    finally:
+        st.delete = original_delete
+    check("撤回刪除失敗必須回 503，不可假稱 deleted", r.status_code == 503, r.status_code)
+    check("失敗影像仍在且索引明確標記 incomplete",
+          os.path.isfile(os.path.join(tmp, "lite", "dev-delete-fail", (iid_fail or "") + ".jpg"))
+          and any(e.get("action") == "delete_incomplete" and e.get("anon_id") == "dev-delete-fail"
+                  for e in fw.read_jsonl(os.path.join(tmp, "lite_index.jsonl"))))
+
     print("\n── 8 稽核不可刪 ──")
     import store as _st
     s = _st.get_store(tmp)
@@ -269,6 +291,8 @@ def main():
     # 印刷翻拍正是 student 最弱的 domain shift，也正是集成救得回來的難例。
     # 兩邊的程式碼各自都沒有 bug，缺的是接線；這一節就是盯那條線。
     app_src = open(os.path.join(FLASK_DIR, "app.py"), encoding="utf-8").read()
+    check("production 預設不註冊匿名 Lite 持久化端點",
+          'WOUNDAI_ENABLE_LITE_API' in app_src and 'if LITE_API_ENABLED:' in app_src)
     check("注入的是含升級鏈的 segment_for_lite，不是裸的 student",
           "init_lite(segment_for_lite)" in app_src and
           "init_lite(segment_wound_ai)" not in app_src)

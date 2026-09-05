@@ -12,12 +12,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BACKEND = os.path.abspath(os.path.join(HERE, "..", "..", "Backend", "Flask"))
 sys.path.insert(0, BACKEND)
 import api_flywheel as fw  # noqa: E402
+from _synthetic_receipts import ratify_synthetic
 
 POLY = [[10, 10], [200, 10], [200, 200], [10, 200]]
 IID = "aaaabbbbccccdddd"
 BASE = {"code": "WD-UT0001", "gt_polygon": POLY, "exudate": 2,
         "doctor_verified": True, "deidentified": True, "consent_train": True,
-        "image_id": IID, "image_w": 640, "image_h": 480}
+        "image_id": IID, "image_w": 640, "image_h": 480, "source": "clinical"}
 
 
 # ---------- 守門 ----------
@@ -77,6 +78,7 @@ def test_同影像同遮罩算重複_不同遮罩算修訂():
 
 # ---------- 有效佇列 ----------
 def _imgs(tmp, ids):
+    ratify_synthetic(tmp, ids)
     d = os.path.join(tmp, "images"); os.makedirs(d, exist_ok=True)
     for i in ids: open(os.path.join(d, i + ".jpg"), "wb").write(b"x")
     return d
@@ -193,6 +195,7 @@ def test_撤回影像會被隔離():
 
 # ---------- 匯出端到端 ----------
 def _synth_image(path, w=640, h=480):
+    ratify_synthetic(os.path.dirname(os.path.dirname(path)), [os.path.splitext(os.path.basename(path))[0]])
     import numpy as np, cv2
     cv2.imwrite(path, np.full((h, w, 3), 128, np.uint8))
 

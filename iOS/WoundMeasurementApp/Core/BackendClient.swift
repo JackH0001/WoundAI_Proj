@@ -120,6 +120,8 @@ struct ClassifyResult {
      出現 true 幾乎必然是**重複量測同一張範例／示範圖**——會讓癒合曲線出現假的下降。
      */
     var imageReused: Bool = false
+    var persisted: Bool = false
+    var persistenceReason: String? = nil
 
     /// 模擬圖模式實際走了哪一段：`strict` / `gray_world_wb`。
     var phantomPass: String?
@@ -421,12 +423,23 @@ actor BackendClient {
      ⚠ **一律上傳原始影像，不要先自行套白平衡。** 後端會在收到的影像上再做一次
      gray-world；兩層白平衡疊起來的結果沒有人推得出來，而且它不會報錯。
      */
+    /// Only after fresh care consent, or explicit sample/phantom selection.
+    func attestCare(code: String) async throws -> String? {
+        var r = try request("POST", "/api/v1/consent/care/attest")
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.httpBody = try JSONSerialization.data(withJSONObject: ["code": code])
+        let (status, data) = try await send(r)
+        guard status == 200 else { return nil }
+        return JSONAny(data: data)?["care_receipt"].nonBlankString
+    }
+
     func classify(jpeg: Data, cmPerPixel: Double? = nil, seg: String? = nil,
-                  escalate: Bool = true) async throws -> ClassifyResult {
+                  escalate: Bool = true, careReceipt: String? = nil) async throws -> ClassifyResult {
         var fields: [String: String] = [:]
         if let c = cmPerPixel { fields["cm_per_pixel"] = String(c) }
         if let s = seg { fields["seg"] = s }
         if !escalate { fields["escalate"] = "off" }
+        if let receipt = careReceipt { fields["care_receipt"] = receipt }
 
         var r = try request("POST", "/api/v1/classify")
         let boundary = "----WoundAI\(UUID().uuidString)"
@@ -696,12 +709,14 @@ actor BackendClient {
             calibMethod:  s3["method"].string,
             wbGains:      gains,
             colorCalNote: ccNote,
-            imageId:      j["image_id"].string,        // JSON null → nil（＝不得送訓練標註）
+            imageId:      j["persisted"].bool(false) ? j["image_id"].string : nil,
             imageW:       j["image_w"].int(0),
             imageH:       j["image_h"].int(0),
             segModel:     s2["model"].string,
             phantomHint:  j["phantom_hint"].bool(false),
             imageReused:  j["image_reused"].bool(false),
+            persisted:    j["persisted"].bool(false),
+            persistenceReason: j["persistence_reason"].nonBlankString,
             phantomPass:  j["phantom_pass"].string,
             quality:      quality,
             tissueMethod: s4["method"].string

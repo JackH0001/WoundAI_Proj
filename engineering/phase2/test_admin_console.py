@@ -193,6 +193,32 @@ def main():
           any(e["action"] == "audit_verify" for e in a2["entries"]),
           [e["action"] for e in a2["entries"]])
 
+    # verify=1 必須只讀一次 strict snapshot。若先用 read_jsonl 畫表、再另讀一次驗鏈，
+    # 兩次讀取中間的併發 append 會讓畫面與證明分屬不同鏈頭。
+    original_snapshot = fw.read_verified_audit_snapshot
+    original_read_jsonl = fw.read_jsonl
+    snapshot_calls = {"strict": 0, "generic": 0}
+
+    def counted_snapshot(*args, **kwargs):
+        snapshot_calls["strict"] += 1
+        return original_snapshot(*args, **kwargs)
+
+    def counted_read_jsonl(*args, **kwargs):
+        snapshot_calls["generic"] += 1
+        return original_read_jsonl(*args, **kwargs)
+
+    fw.read_verified_audit_snapshot = counted_snapshot
+    fw.read_jsonl = counted_read_jsonl
+    try:
+        s_same, same = get("/api/v1/audit?verify=1&limit=3", "admin")
+    finally:
+        fw.read_verified_audit_snapshot = original_snapshot
+        fw.read_jsonl = original_read_jsonl
+    check("7f verify 列表與證明共用一次 strict snapshot（不混入 generic read）",
+          s_same == 200 and snapshot_calls == {"strict": 1, "generic": 0}
+          and same.get("verified", {}).get("ok") is True,
+          snapshot_calls)
+
     # ── 8 分頁與篩選 ──────────────────────────────────────────────
     _, p1 = get("/api/v1/audit?limit=2&offset=0", "admin")
     _, p2 = get("/api/v1/audit?limit=2&offset=2", "admin")
@@ -248,11 +274,19 @@ def main():
     d = json.loads(lines[1]); d["result"] = "被竄改的內容"
     lines[1] = json.dumps(d, ensure_ascii=False)
     open(p, "w", encoding="utf-8").write("\n".join(lines) + "\n")
-    _, t = get("/api/v1/audit?verify=1", "admin")
+    status_t, t = get("/api/v1/audit?verify=1", "admin")
     tv = t.get("verified") or {}
     check("10 竄改任一筆內容 → 驗證轉 False 並指出位置",
-          tv.get("ok") is False and any(i["kind"] == "hash_mismatch" for i in tv["issues"]),
+          status_t == 200 and tv.get("ok") is False
+          and any(i["kind"] == "hash_mismatch" for i in tv["issues"]),
           tv.get("issues"))
+    after_failed_verify = open(p, encoding="utf-8").read().splitlines()
+    check("10b 損壞鏈只回報證據、不嘗試追加 audit_verify",
+          len(after_failed_verify) == len(lines)
+          and tv.get("verification_event_recorded") is False
+          and tv.get("recording_reason") == "chain_integrity_failure",
+          {"before": len(lines), "after": len(after_failed_verify),
+           "recorded": tv.get("verification_event_recorded")})
 
     # ── 11 主控台頁面本身不含資料 ────────────────────────────────
     page = cli.get("/console")
@@ -288,6 +322,7 @@ def main():
         ({"user": "ns10", "role": "nurse", "password": "short"}, "密碼過短"),
         ({"user": "../etc", "role": "nurse", "password": "x" * 12}, "路徑穿越字元"),
         ({"role": "nurse", "password": "x" * 12}, "缺帳號"),
+        ({"user": ["ns10"], "role": "nurse", "password": "x" * 12}, "帳號型別非字串"),
     ]
     got = {}
     for body, why2 in bad:

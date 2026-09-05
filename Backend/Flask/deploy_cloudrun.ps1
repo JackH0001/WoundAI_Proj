@@ -7,24 +7,25 @@
 # 部署 WoundAI 後端到 GCP Cloud Run（彰化 asia-east1）
 #
 # 用法：
-#   .\deploy_cloudrun.ps1 -ProjectId my-proj -Bucket woundai-flywheel-abc
-#   .\deploy_cloudrun.ps1 -ProjectId my-proj -Bucket woundai-flywheel-abc -Setup
+#   .\deploy_cloudrun.ps1 -ProjectId my-proj -Bucket woundai-flywheel-abc `
+#       -AuditBucket woundai-flywheel-abc-audit-epoch-20260905 `
+#       -RuntimeServiceAccount woundai-runtime@my-proj.iam.gserviceaccount.com
 #
-# -Setup 只在**第一次**用：開啟 API、建儲存桶、產生並存入密碼。
-# 之後每次改程式只要跑不帶 -Setup 的版本。
+# -Setup 已退役：正式 P0-4 發布必須先分別執行 harden_bucket.ps1 與
+# provision_runtime_identity.ps1，讓不可逆儲存與 IAM 變更有各自可覆核的證據。
 #
 # 詳細說明與排錯見 docs/deploy_cloudrun.md。
 
 param(
     [Parameter(Mandatory = $true)][string]$ProjectId,
     [Parameter(Mandatory = $true)][string]$Bucket,
+    [Parameter(Mandatory = $true)][string]$AuditBucket,
+    [Parameter(Mandatory = $true)][string]$RuntimeServiceAccount,
     [string]$Region = "asia-east1",
     [string]$Service = "woundai-backend",
-    # 稽核專用桶（WORM）。預設沿用 harden_bucket.ps1 -Audit 的命名慣例。
-    # ⚠ 一定要當成部署參數帶進來：`--set-env-vars` 是**整組覆蓋**，
-    # 用 `run services update --update-env-vars` 另外設的值會在下次部署時被洗掉，
-    # 而症狀是「稽核紀錄悄悄寫回刪得掉的主桶」——沒有錯誤、沒有警告。
-    [string]$AuditBucket = "$Bucket-audit",
+    [string]$CareReceiptSecret = "woundai-care-receipt-secret",
+    [string]$RuntimeMainRoleId = "woundaiRuntimeMainObjects",
+    [string]$RuntimeAuditRoleId = "woundaiRuntimeAuditAppend",
     # 記憶體上限。2Gi 足夠一般路由（只載 student），但**難例升級路由會再載入
     # a_unet 與 unetpp**，三個 ONNX session 同時在記憶體裡加上 OpenCV 與影像緩衝
     # 就可能超過 2Gi。Cloud Run 的 OOM 會直接殺掉容器 → 客戶端看到 503，
@@ -101,6 +102,304 @@ function Get-HttpResult {
 function Assert-GCloudOk($what) {
     if ($LASTEXITCODE -ne 0) { throw "$what 失敗（gcloud 退出碼 $LASTEXITCODE）。上面的訊息是原因。" }
 }
+function Assert-GCloudProjectTarget {
+    # ProjectId must constrain the active gcloud context before any bucket,
+    # secret, build, or Cloud Run mutation.  Do not merely print it in a plan.
+    $active = (& $script:GCLOUD config get-value project 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $active -or $active.Trim() -cne $ProjectId) {
+        throw "gcloud active project mismatch: expected [$ProjectId], got [$active]"
+    }
+    $confirmed = (& $script:GCLOUD projects describe $ProjectId --format='value(projectId)' 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $confirmed -or $confirmed.Trim() -cne $ProjectId) {
+        throw "cannot verify gcloud target project [$ProjectId]"
+    }
+}
+function Get-ObjectField($Object, [string[]]$Paths) {
+    foreach ($path in $Paths) {
+        $current = $Object
+        foreach ($segment in $path.Split('.')) {
+            if ($null -eq $current) { break }
+            $property = $current.PSObject.Properties[$segment]
+            if ($null -eq $property) { $current = $null; break }
+            $current = $property.Value
+        }
+        if ($null -ne $current) { return $current }
+    }
+    return $null
+}
+function Test-ExactSet([string[]]$Actual, [string[]]$Expected) {
+    $a = @($Actual | Sort-Object -Unique)
+    $e = @($Expected | Sort-Object -Unique)
+    return (($a -join "`n") -ceq ($e -join "`n"))
+}
+function Assert-DeploymentInputs {
+    if ($Setup) {
+        throw "-Setup is retired for P0-4; run reviewed hardening and identity provisioning separately"
+    }
+    if ($AuditBucket -ceq "$Bucket-audit") {
+        throw "AuditBucket must be an explicit fresh locked epoch, not the legacy default [$AuditBucket]"
+    }
+    if ($AuditBucket -match '(?i)(smoke|test|tmp|temp|dev|sandbox)') {
+        throw "AuditBucket name identifies a disposable environment and cannot be deployed: [$AuditBucket]"
+    }
+    if ($AuditBucket -eq $Bucket) { throw "AuditBucket must differ from the main Bucket" }
+    foreach ($candidate in @($Bucket, $AuditBucket)) {
+        if ($candidate -notmatch '^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$') {
+            throw "invalid bucket name: [$candidate]"
+        }
+    }
+    $expectedSuffix = "@$ProjectId.iam.gserviceaccount.com"
+    if ($RuntimeServiceAccount -notmatch '^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$' `
+            -or -not $RuntimeServiceAccount.EndsWith($expectedSuffix, [StringComparison]::Ordinal)) {
+        throw "RuntimeServiceAccount must be a dedicated service account in project [$ProjectId]"
+    }
+    if ($RuntimeServiceAccount -match '^\d+-compute@developer\.gserviceaccount\.com$' `
+            -or $RuntimeServiceAccount -match '@appspot\.gserviceaccount\.com$') {
+        throw "default Compute/App Engine service accounts are forbidden for the clinical runtime"
+    }
+}
+function Get-GCloudJson([string]$What, [string[]]$Arguments) {
+    $raw = (& $script:GCLOUD @Arguments)
+    if ($LASTEXITCODE -ne 0 -or -not $raw) { throw "$What failed" }
+    try { return ($raw | ConvertFrom-Json) }
+    catch { throw "$What returned invalid JSON: $_" }
+}
+function Assert-PolicyMemberExactRoles($Policy, [string]$Member, [string[]]$ExpectedRoles,
+                                       [string]$What) {
+    $roles = @($Policy.bindings | Where-Object { @($_.members) -contains $Member } |
+        ForEach-Object { [string]$_.role })
+    if (-not (Test-ExactSet $roles $ExpectedRoles)) {
+        throw "$What roles for [$Member] mismatch; actual=[$($roles -join '; ')] expected=[$($ExpectedRoles -join '; ')]"
+    }
+}
+function Assert-CustomRole([string]$RoleId, [string[]]$Permissions) {
+    $role = Get-GCloudJson "custom role $RoleId" @(
+        'iam','roles','describe',$RoleId,"--project=$ProjectId",'--format=json')
+    if ($role.deleted -eq $true -or $role.stage -eq 'DISABLED') {
+        throw "custom role $RoleId is deleted or disabled"
+    }
+    if (-not (Test-ExactSet @($role.includedPermissions) $Permissions)) {
+        throw "custom role $RoleId permissions do not match the reviewed runtime contract"
+    }
+}
+function Assert-SecretEnabledVersion([string]$Name) {
+    $versions = @(& $script:GCLOUD secrets versions list $Name `
+        "--project=$ProjectId" --filter='state:ENABLED' --limit=1 --format='value(name)' 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $versions.Count -ne 1 `
+            -or [string]::IsNullOrWhiteSpace([string]$versions[0])) {
+        throw "secret $Name has no readable ENABLED version"
+    }
+}
+function Assert-DeploymentAuditBucket([string]$ExpectedProjectNumber) {
+    # Do this before `run deploy`, not only through the post-deploy health
+    # endpoint.  A deployment may otherwise replace a good revision with one
+    # that is guaranteed to fail closed on its first audit write.
+    $raw = (& $script:GCLOUD storage buckets describe "gs://$AuditBucket" `
+        "--project=$ProjectId" --raw --format=json 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $raw) {
+        throw "audit bucket gs://$AuditBucket cannot be described before deployment"
+    }
+    try { $audit = $raw | ConvertFrom-Json }
+    catch { throw "audit bucket gs://$AuditBucket returned invalid JSON: $_" }
+    $actualProjectNumber = [string](Get-ObjectField $audit @('projectNumber'))
+    if ([string]::IsNullOrWhiteSpace($actualProjectNumber) -or $actualProjectNumber -cne $ExpectedProjectNumber) {
+        throw "audit bucket gs://$AuditBucket belongs to project number [$actualProjectNumber], not $ProjectId"
+    }
+    $retention = [int64](Get-ObjectField $audit @('retention_policy.retentionPeriod','retentionPolicy.retentionPeriod'))
+    $locked = (Get-ObjectField $audit @('retention_policy.isLocked','retentionPolicy.isLocked')) -eq $true
+    if ($retention -ne 220903200 -or -not $locked) {
+        throw "audit bucket gs://$AuditBucket must have an already-locked 7-year retention policy before deployment"
+    }
+    if ([string](Get-ObjectField $audit @('location')) -cne $Region.ToUpperInvariant()) {
+        throw "audit bucket gs://$AuditBucket location mismatch"
+    }
+    if ((Get-ObjectField $audit @('iamConfiguration.publicAccessPrevention','public_access_prevention')) -cne 'enforced' `
+            -or (Get-ObjectField $audit @('iamConfiguration.uniformBucketLevelAccess.enabled','uniform_bucket_level_access')) -ne $true) {
+        throw "audit bucket gs://$AuditBucket is not PAP+UBLA hardened"
+    }
+}
+function Assert-RuntimeProvisioning([string]$ExpectedProjectNumber) {
+    $member = "serviceAccount:$RuntimeServiceAccount"
+    $sa = Get-GCloudJson "runtime service account" @(
+        'iam','service-accounts','describe',$RuntimeServiceAccount,"--project=$ProjectId",'--format=json')
+    if ($sa.disabled -eq $true -or [string]$sa.projectId -cne $ProjectId) {
+        throw "runtime service account is disabled or belongs to another project"
+    }
+
+    $mainPermissions = @('storage.objects.create','storage.objects.delete',
+                         'storage.objects.get','storage.objects.list')
+    $auditPermissions = @('storage.buckets.get','storage.objects.create',
+                          'storage.objects.get','storage.objects.list')
+    Assert-CustomRole $RuntimeMainRoleId $mainPermissions
+    Assert-CustomRole $RuntimeAuditRoleId $auditPermissions
+
+    $projectPolicy = Get-GCloudJson "project IAM" @(
+        'projects','get-iam-policy',$ProjectId,'--format=json')
+    Assert-PolicyMemberExactRoles $projectPolicy $member @() "project IAM"
+
+    $mainPolicy = Get-GCloudJson "main bucket IAM" @(
+        'storage','buckets','get-iam-policy',"gs://$Bucket","--project=$ProjectId",'--format=json')
+    Assert-PolicyMemberExactRoles $mainPolicy $member @("projects/$ProjectId/roles/$RuntimeMainRoleId") "main bucket IAM"
+
+    $auditPolicy = Get-GCloudJson "audit bucket IAM" @(
+        'storage','buckets','get-iam-policy',"gs://$AuditBucket","--project=$ProjectId",'--format=json')
+    Assert-PolicyMemberExactRoles $auditPolicy $member @("projects/$ProjectId/roles/$RuntimeAuditRoleId") "audit bucket IAM"
+
+    foreach ($secret in @('woundai-admin-password','woundai-jwt-secret',$CareReceiptSecret)) {
+        Assert-SecretEnabledVersion $secret
+        $secretPolicy = Get-GCloudJson "secret IAM $secret" @(
+            'secrets','get-iam-policy',$secret,"--project=$ProjectId",'--format=json')
+        Assert-PolicyMemberExactRoles $secretPolicy $member @('roles/secretmanager.secretAccessor') "secret IAM $secret"
+    }
+    Write-Host "  ✓ dedicated runtime identity and least-privilege bindings verified"
+}
+function Invoke-DeploymentPreflight {
+    $projectNumber = (& $script:GCLOUD projects describe $ProjectId `
+        "--project=$ProjectId" --format='value(projectNumber)' 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $projectNumber) {
+        throw "cannot resolve project number for deployment preflight"
+    }
+    $projectNumber = ([string]$projectNumber).Trim()
+    # Reuse the bucket policy verifier in read-only mode.  This establishes the
+    # main bucket's exact lifecycle/versioning/soft-delete controls and the
+    # audit bucket's ownership, PAP, UBLA, retention and object-path policy.
+    & (Join-Path $PSScriptRoot 'harden_bucket.ps1') -ProjectId $ProjectId `
+        -Bucket $Bucket -AuditBucket $AuditBucket -Region $Region -Audit
+    if (-not $?) { throw "read-only bucket policy preflight failed" }
+    Assert-DeploymentAuditBucket $projectNumber
+    Assert-RuntimeProvisioning $projectNumber
+}
+function Get-CleanGitCommit {
+    $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+    $safeRepoRoot = $repoRoot.Replace('\','/')
+    # Trust only the repository that physically contains this reviewed script;
+    # this also makes the gate work in isolated Windows test accounts whose SID
+    # differs from the checkout owner.
+    $full = (& git -c "safe.directory=$safeRepoRoot" -C $repoRoot rev-parse HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$full) `
+            -or ([string]$full).Trim() -notmatch '^[0-9a-f]{40}$') {
+        throw "cannot establish a full git commit for deployment"
+    }
+    $changes = @(& git -c "safe.directory=$safeRepoRoot" -C $repoRoot `
+        status --porcelain --untracked-files=all 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw "cannot verify git worktree state" }
+    if ($changes.Count -ne 0) {
+        throw "refuse to deploy a dirty worktree; commit and review every source artifact first"
+    }
+    $branch = (& git -c "safe.directory=$safeRepoRoot" -C $repoRoot `
+        symbolic-ref --quiet --short HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0 -or ([string]$branch).Trim() -cne 'main') {
+        throw "deployment source must be the checked-out main branch"
+    }
+    $origin = (& git -c "safe.directory=$safeRepoRoot" -C $repoRoot `
+        remote get-url origin 2>$null)
+    if ($LASTEXITCODE -ne 0 -or ([string]$origin).Trim() -cne `
+            'https://github.com/JackH0001/WoundAI_Proj.git') {
+        throw "deployment origin is not the reviewed WoundAI_Proj repository"
+    }
+    $remote = @(& git -c "safe.directory=$safeRepoRoot" -C $repoRoot `
+        ls-remote --heads origin refs/heads/main 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $remote.Count -ne 1 -or
+            [string]$remote[0] -notmatch '^([0-9a-f]{40})\s+refs/heads/main$') {
+        throw "cannot establish the current remote main commit"
+    }
+    if ($Matches[1] -cne ([string]$full).Trim()) {
+        throw "local main is not the current reviewed origin/main commit"
+    }
+    return ([string]$full).Trim()
+}
+function Assert-CloudRunRevisionConfiguration([switch]$RequireExclusiveTraffic,
+                                               [string]$CandidateTag) {
+    $serviceState = Get-GCloudJson "Cloud Run service $Service" @(
+        'run','services','describe',$Service,"--project=$ProjectId","--region=$Region",'--format=json')
+    $created = [string]$serviceState.status.latestCreatedRevisionName
+    $ready = [string]$serviceState.status.latestReadyRevisionName
+    if ([string]::IsNullOrWhiteSpace($created) -or $created -cne $ready) {
+        throw "Cloud Run latest created revision [$created] is not the latest ready revision [$ready]"
+    }
+    if ([string]$serviceState.spec.template.spec.serviceAccountName -cne $RuntimeServiceAccount) {
+        throw "Cloud Run service template is not pinned to [$RuntimeServiceAccount]"
+    }
+    $traffic = @($serviceState.status.traffic)
+    $taggedUrl = $null
+    if ($RequireExclusiveTraffic) {
+        $percentage = @($traffic | Where-Object { $null -ne $_.percent })
+        if ($percentage.Count -ne 1 -or [int]$percentage[0].percent -ne 100 `
+                -or [string]$percentage[0].revisionName -cne $ready) {
+            throw "Cloud Run traffic is not exclusively pinned to ready revision [$ready]"
+        }
+    } else {
+        if ([string]::IsNullOrWhiteSpace($CandidateTag)) {
+            throw "candidate verification requires an explicit traffic tag"
+        }
+        $tagged = @($traffic | Where-Object { [string]$_.tag -ceq $CandidateTag })
+        if ($tagged.Count -ne 1 -or [string]$tagged[0].revisionName -cne $ready `
+                -or [string]::IsNullOrWhiteSpace([string]$tagged[0].url)) {
+            throw "candidate tag [$CandidateTag] is not bound to ready revision [$ready]"
+        }
+        $taggedUrl = [string]$tagged[0].url
+    }
+
+    $revision = Get-GCloudJson "Cloud Run revision $ready" @(
+        'run','revisions','describe',$ready,"--project=$ProjectId","--region=$Region",'--format=json')
+    if ([string]$revision.spec.serviceAccountName -cne $RuntimeServiceAccount) {
+        throw "ready revision [$ready] runs as an unexpected service account"
+    }
+    $readyCondition = @($revision.status.conditions | Where-Object {
+        $_.type -eq 'Ready' -and [string]$_.status -eq 'True'
+    })
+    if ($readyCondition.Count -ne 1) { throw "ready revision [$ready] lacks one positive Ready condition" }
+    if (@($revision.spec.containers).Count -ne 1) {
+        throw "ready revision [$ready] must contain exactly one reviewed application container"
+    }
+
+    $envByName = @{}
+    foreach ($entry in @($revision.spec.containers[0].env)) {
+        if ($envByName.ContainsKey([string]$entry.name)) {
+            throw "ready revision has duplicate environment key [$($entry.name)]"
+        }
+        $envByName[[string]$entry.name] = $entry
+    }
+    $plainExpected = @{
+        WOUNDAI_STORE = 'gcs'; WOUNDAI_GCS_BUCKET = $Bucket;
+        WOUNDAI_GCS_PREFIX = 'flywheel'; WOUNDAI_AUDIT_BUCKET = $AuditBucket;
+        WOUNDAI_ENABLE_LITE_API = '0'; GIT_COMMIT = $GitCommit
+    }
+    foreach ($name in $plainExpected.Keys) {
+        if (-not $envByName.ContainsKey($name) `
+                -or [string]$envByName[$name].value -cne [string]$plainExpected[$name]) {
+            throw "ready revision environment [$name] does not match the deployment contract"
+        }
+    }
+    # These are Secret Manager resource names, never secret values.  Keep the
+    # environment key and resource name in distinct fields so scanners (and
+    # reviewers) cannot mistake this deployment contract for a credential.
+    $secretExpected = @(
+        [pscustomobject]@{ EnvironmentName = 'ADMIN_PASSWORD'; SecretName = 'woundai-admin-password' },
+        [pscustomobject]@{ EnvironmentName = 'JWT_SECRET_KEY'; SecretName = 'woundai-jwt-secret' },
+        [pscustomobject]@{ EnvironmentName = 'CARE_RECEIPT_SECRET'; SecretName = $CareReceiptSecret }
+    )
+    foreach ($expectedSecret in $secretExpected) {
+        $name = [string]$expectedSecret.EnvironmentName
+        $ref = $envByName[$name].valueFrom.secretKeyRef
+        if ($null -eq $ref -or [string]$ref.name -cne [string]$expectedSecret.SecretName `
+                -or [string]$ref.key -cne 'latest') {
+            throw "ready revision secret reference [$name] does not match the deployment contract"
+        }
+    }
+    $script:EXPECTED_REVISION = $ready
+    $trafficMode = if ($RequireExclusiveTraffic) { '100% live' } else { "tag=$CandidateTag; no live traffic" }
+    Write-Host "  ✓ revision ${ready}: identity, $trafficMode, environment and secret refs verified"
+    return [pscustomobject]@{ revision=$ready; tagged_url=$taggedUrl; service=$serviceState }
+}
+
+Assert-DeploymentInputs
+$GitCommit = Get-CleanGitCommit
+$DeployedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+$CandidateTag = 'p0-4-candidate'
+$RevisionSuffix = 'p04-' + $GitCommit.Substring(0, 8) + '-' + `
+    (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss')
+$PreviousRevision = $null
 
 # -VerifyOnly 時整段建置流程跳過。這裡不是「加速」——是讓驗證能獨立重跑，
 # 因為一個要等五分鐘才能重試的檢查，實務上等於沒有檢查。
@@ -118,29 +417,14 @@ if (-not $VerifyOnly) {
     }
     Write-Host "  ✓ flywheel/ 與 *.db 已排除"
 
-    # ── 部署身分：把「這一版是哪一版」帶進容器 ───────────────────────────
-    #
-    # 沒有這個的話，主控台只能顯示 Cloud Run 的 revision 序號，而序號回答不了
-    # 「跑的是不是我剛推的那份程式碼」。這個專案已經被「看起來成功的部署」
-    # 咬過兩次，兩次都是因為部署動作與執行中的程式碼之間沒有可比對的標識。
-    $GitCommit = (& git rev-parse --short HEAD 2>$null)
-    if ($LASTEXITCODE -ne 0 -or -not $GitCommit) {
-        $GitCommit = "unknown"
-        Warn "取不到 git commit（不在 repo 內？）——主控台會顯示「未帶入」"
-    } else {
-        # 有未提交的變更時要標出來：部署的是工作目錄，不是那個 commit。
-        # 不標的話主控台會顯示一個**看似精確而實際不對**的 SHA。
-        & git diff --quiet HEAD 2>$null
-        if ($LASTEXITCODE -ne 0) {
-            $GitCommit = "$GitCommit-dirty"
-            Warn "工作目錄有未提交的變更——部署的內容與 $GitCommit 不完全相同"
-        }
-    }
-    $DeployedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    # Git identity was established before entering this branch.  A dirty or
+    # untracked source tree is a hard stop, never a suffix on a plausible SHA.
     Write-Host "  ✓ 部署身分 $GitCommit @ $DeployedAt"
 
     Say "確認專案與帳單"
     Invoke-GCloud config set project $ProjectId | Out-Null
+    Assert-GCloudOk "設定 gcloud project $ProjectId"
+    Assert-GCloudProjectTarget
     # 帳單沒綁的話 Cloud Run 會以權限錯誤失敗，而訊息完全不會提到「帳單」——
     # 那是這條流程最常卡住也最難自行歸因的一步，所以先檢查再說。
     $billing = Invoke-GCloud billing projects describe $ProjectId --format "value(billingEnabled)" 2>$null
@@ -218,51 +502,36 @@ if (-not $VerifyOnly) {
                 Assert-GCloudOk "建立 JWT secret"
             } finally { Remove-Item $tmp2 -Force -ErrorAction SilentlyContinue }
         }
+
+        Invoke-GCloud secrets describe $CareReceiptSecret 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            $careKeyBytes = New-Object byte[] 32
+            $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+            try { $rng.GetBytes($careKeyBytes) } finally { $rng.Dispose() }
+            $careB64 = [Convert]::ToBase64String($careKeyBytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+            $careJson = @{ active_kid = 'phase-a-20260901'; keys = @{
+                'phase-a-20260901' = @{ secret_b64 = $careB64 }
+            }} | ConvertTo-Json -Depth 6 -Compress
+            $tmp3 = [IO.Path]::GetTempFileName()
+            try {
+                [IO.File]::WriteAllText($tmp3, $careJson, (New-Object Text.UTF8Encoding $false))
+                & $script:GCLOUD secrets create $CareReceiptSecret --data-file=$tmp3 --replication-policy=automatic
+                Assert-GCloudOk "建立 care receipt secret"
+            } finally {
+                [Array]::Clear($careKeyBytes, 0, $careKeyBytes.Length)
+                Remove-Item $tmp3 -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 
-    # ── 執行服務帳號的授權 ─────────────────────────────────────────────────
-    #
-    # ⚠ **建立 secret 不等於 Cloud Run 讀得到它。**
-    # Cloud Run 的 revision 是以「執行服務帳號」的身分跑的（預設是 Compute Engine 預設 SA），
-    # 而那個帳號預設**沒有**讀取 Secret Manager 的權限。少了這一步，部署會在最後一刻失敗，
-    # 訊息是一長串 `Permission denied on secret ... secret_key_ref`。
-    #
-    # 儲存桶同理，但更陰險：桶權限缺了**不會讓部署失敗**，服務照樣起來，
-    # 直到第一次有人量測時才在寫入影像的那一行炸掉 —— 使用者看到的是「後端錯誤」，
-    # 日誌裡是 403，而部署當下一切正常。所以兩個授權放在一起、每次部署都跑（本身冪等）。
-    Say "授權 Cloud Run 執行服務帳號"
-    $projNum = Invoke-GCloud projects describe $ProjectId --format "value(projectNumber)"
-    if (-not $projNum) { throw "取不到專案編號，無法授權執行服務帳號。" }
-    $runSa = "$projNum-compute@developer.gserviceaccount.com"
-    Write-Host "  服務帳號：$runSa"
+    Invoke-GCloud secrets describe $CareReceiptSecret 2>$null | Out-Null
+    Assert-GCloudOk "care receipt secret $CareReceiptSecret 不存在"
 
-    foreach ($s in @("woundai-admin-password", "woundai-jwt-secret")) {
-        Invoke-GCloud secrets add-iam-policy-binding $s `
-            --member="serviceAccount:$runSa" `
-            --role="roles/secretmanager.secretAccessor" --quiet | Out-Null
-        if ($LASTEXITCODE -ne 0) { Warn "授權 secret $s 失敗（若非 -Setup 首次執行可忽略）" }
-        else { Write-Host "  ✓ 可讀取 secret：$s" }
-    }
-
-    # objectAdmin：飛輪需要建立（存影像）、讀取、列出，以及**刪除**——
-    # 撤回同意時把影像移進 quarantine，在物件儲存是「複製再刪除」，只有讀寫是不夠的。
-    Invoke-GCloud storage buckets add-iam-policy-binding "gs://$Bucket" `
-        --member="serviceAccount:$runSa" --role="roles/storage.objectAdmin" --quiet | Out-Null
-    if ($LASTEXITCODE -ne 0) { Warn "授權儲存桶失敗——服務會起得來，但第一次量測寫影像時會 403" }
-    else { Write-Host "  ✓ 可讀寫儲存桶：gs://$Bucket" }
-
-    # 稽核桶（若已由 harden_bucket.ps1 -Audit 建立）。桶不存在就略過——
-    # 沒有稽核桶時後端會退回主桶，功能正常但稽核紀錄是刪得掉的，health 的 store 欄位會誠實反映。
-    Invoke-GCloud storage buckets describe "gs://$AuditBucket" --format="value(name)" 2>$null | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        Invoke-GCloud storage buckets add-iam-policy-binding "gs://$AuditBucket" `
-            --member="serviceAccount:$runSa" --role="roles/storage.objectAdmin" --quiet | Out-Null
-        if ($LASTEXITCODE -eq 0) { Write-Host "  ✓ 可寫入稽核桶：gs://$AuditBucket" }
-        else { Warn "授權稽核桶失敗——稽核紀錄會寫不進去" }
-    } else {
-        Warn "稽核桶 gs://$AuditBucket 不存在，稽核紀錄將寫入主桶（刪得掉）。"
-        Warn "  建立方式： .\harden_bucket.ps1 -ProjectId $ProjectId -Bucket $Bucket -Audit"
-    }
+    # IAM mutation is deliberately outside the deployment path.  A deployment
+    # must consume a previously reviewed provisioning state, not silently grant
+    # itself broader access while publishing code.
+    Say "驗證正式稽核桶與專用執行身分"
+    Invoke-DeploymentPreflight
 
     # ── 複製 engineering 模組到 vendor/ ───────────────────────────────────
     #
@@ -309,9 +578,29 @@ if (-not $VerifyOnly) {
     #   cpu 2       — 實測難例集成 796 ms；1 vCPU 會翻倍到使用者會放棄的程度
     #   concurrency 4 — 推論是 CPU-bound，預設 80 會讓請求擠在兩顆核心上
     #   max-instances 3 — 成本上限，避免被掃描機器人打到無限擴張
+    # Preserve the currently serving revision before creating a candidate.
+    # The candidate receives a tag URL but zero percent of live traffic; every
+    # runtime/security probe below targets that URL before cutover.
+    $beforeService = Get-GCloudJson "pre-deploy Cloud Run service $Service" @(
+        'run','services','describe',$Service,"--project=$ProjectId","--region=$Region",'--format=json')
+    $beforeLive = @($beforeService.status.traffic | Where-Object {
+        $null -ne $_.percent -and [int]$_.percent -eq 100
+    })
+    if ($beforeLive.Count -ne 1 -or
+            [string]::IsNullOrWhiteSpace([string]$beforeLive[0].revisionName)) {
+        throw "pre-deploy service must have exactly one 100% live revision"
+    }
+    $PreviousRevision = [string]$beforeLive[0].revisionName
+    Write-Host "  ✓ previous live revision preserved for rollback: $PreviousRevision"
+
     Invoke-GCloud run deploy $Service `
         --source . `
+        --project $ProjectId `
         --region $Region `
+        --revision-suffix $RevisionSuffix `
+        --tag $CandidateTag `
+        --no-traffic `
+        --service-account $RuntimeServiceAccount `
         --allow-unauthenticated `
         --memory $Memory `
         --cpu 2 `
@@ -319,14 +608,25 @@ if (-not $VerifyOnly) {
         --concurrency 4 `
         --min-instances 0 `
         --max-instances 3 `
-        --set-env-vars "WOUNDAI_STORE=gcs,WOUNDAI_GCS_BUCKET=$Bucket,WOUNDAI_GCS_PREFIX=flywheel,WOUNDAI_AUDIT_BUCKET=$AuditBucket,GIT_COMMIT=$GitCommit,DEPLOYED_AT=$DeployedAt" `
-        --set-secrets "ADMIN_PASSWORD=woundai-admin-password:latest,JWT_SECRET_KEY=woundai-jwt-secret:latest"
+        --set-env-vars "WOUNDAI_STORE=gcs,WOUNDAI_GCS_BUCKET=$Bucket,WOUNDAI_GCS_PREFIX=flywheel,WOUNDAI_AUDIT_BUCKET=$AuditBucket,WOUNDAI_ENABLE_LITE_API=0,GIT_COMMIT=$GitCommit,DEPLOYED_AT=$DeployedAt" `
+        --set-secrets "ADMIN_PASSWORD=woundai-admin-password:latest,JWT_SECRET_KEY=woundai-jwt-secret:latest,CARE_RECEIPT_SECRET=$CareReceiptSecret`:latest"
     Assert-GCloudOk "Cloud Run 部署"
 
 
 } else {
     Say "只跑驗證（-VerifyOnly，跳過建置與部署）"
     Invoke-GCloud config set project $ProjectId | Out-Null
+    Assert-GCloudOk "設定 gcloud project $ProjectId"
+    Assert-GCloudProjectTarget
+    Say "重驗正式稽核桶與專用執行身分"
+    Invoke-DeploymentPreflight
+}
+
+Say "驗證 Cloud Run 不可變 revision 設定"
+if ($VerifyOnly) {
+    $revisionState = Assert-CloudRunRevisionConfiguration -RequireExclusiveTraffic
+} else {
+    $revisionState = Assert-CloudRunRevisionConfiguration -CandidateTag $CandidateTag
 }
 
 # ⚠ Cloud Run 一個服務有**兩個等價網址**：
@@ -341,10 +641,17 @@ if (-not $VerifyOnly) {
 # 版本根本不存在——查詢靜默回空字串，偏好邏輯無聲失效，於是又印回舊式網址。
 # 這種「查一個不存在的欄位」不會報錯，只會安靜地什麼都不做，是最難察覺的一類 bug。
 # 改成：依文件規則組出新式網址，**實際打一次 /api/health**，200 才採用。
-$url = Invoke-GCloud run services describe $Service --region $Region --format "value(status.url)"
+$url = if ($VerifyOnly) {
+    Invoke-GCloud run services describe $Service --region $Region --project $ProjectId --format "value(status.url)"
+} else {
+    [string]$revisionState.tagged_url
+}
+if ([string]::IsNullOrWhiteSpace([string]$url)) {
+    throw "Cloud Run verification URL is empty"
+}
 $altUrl = $null
-$projNumForUrl = Invoke-GCloud projects describe $ProjectId --format "value(projectNumber)"
-if ($projNumForUrl) {
+$projNumForUrl = Invoke-GCloud projects describe $ProjectId --project $ProjectId --format "value(projectNumber)"
+if ($VerifyOnly -and $projNumForUrl) {
     $newStyle = "https://$Service-$projNumForUrl.$Region.run.app"
     if ($newStyle -ne $url) {
         $probe = Get-HttpResult -Uri "$newStyle/api/health" -TimeoutSec 30
@@ -352,6 +659,7 @@ if ($projNumForUrl) {
     }
 }
 
+$criticalHealthFailures = @()
 Say "部署後驗證"
 try {
     $h = Invoke-RestMethod "$url/api/health" -TimeoutSec 90
@@ -359,6 +667,7 @@ try {
     # 降級模式是「會回答的錯誤」——服務照常回 200 並給出面積，只是演算法完全不同。
     # 這種失敗不會有人注意到，所以部署當下就要攔。
     if ($h.status -ne "healthy") {
+        $criticalHealthFailures += "status=$($h.status)"
         Warn "❌ 後端處於降級模式：$($h.degraded_reason)"
         Warn "   量測結果不具臨床參考價值。請確認 requirements.txt 含 onnxruntime 且 models/ 內有 .onnx。"
     } else { Write-Host "  ✓ 分割模型已載入（非降級模式）" }
@@ -372,38 +681,66 @@ try {
     # 這一條分得出「端點存在但方法不對」與「端點根本不存在」，
     # 而後者正是那次事故的形狀。
     if ($h.blueprint_failures -and $h.blueprint_failures.Count -gt 0) {
+        $criticalHealthFailures += "blueprint failures"
         foreach ($bf in $h.blueprint_failures) {
             Warn "❌ 端點未註冊：$($bf.name) —— $($bf.error)"
         }
     }
     foreach ($ep in @("/api/v1/lite/segment", "/api/v1/annotation", "/api/v1/depth")) {
         $r = Get-HttpResult -Uri "$url$ep"
-        if ($r.StatusCode -eq 404) {
+        if ($r.Code -eq 404) {
+            $criticalHealthFailures += "$ep missing"
             Warn "❌ $ep 回 404 —— 這條路**沒有掛上**（blueprint 註冊失敗），不是權限問題。"
-        } elseif ($r.StatusCode -in 401, 403, 405) {
-            Write-Host "  ✓ $ep 已註冊（GET → $($r.StatusCode)）"
+        } elseif ($r.Code -in 401, 403, 405) {
+            Write-Host "  ✓ $ep 已註冊（GET → $($r.Code)）"
         } else {
-            Write-Host "  ? $ep → $($r.StatusCode)（非預期，但至少不是 404）"
+            $criticalHealthFailures += "$ep unexpected HTTP $($r.Code)"
+            Write-Host "  ? $ep → $($r.Code)（非預期）"
         }
     }
     # classify 模組單獨檢查：登入與 stats 會照常 200，只有量測會 503，
     # 光看 status 綠燈是抓不到的（實際發生過）。
     if ($h.services.classify_modules -ne $true) {
+        $criticalHealthFailures += "classify modules unavailable"
         Warn "❌ classify 模組未載入 —— /api/v1/classify 會回 503（量測會失敗）"
     } else { Write-Host "  ✓ classify 模組已載入（組織分類 / PUSH / ArUco）" }
     # 儲存後端必須是 gcs，否則資料會隨 Cloud Run 實例回收而消失且無任何錯誤
     if ($h.store -notlike "gcs://*") {
+        $criticalHealthFailures += "store is not GCS"
         Warn "❌ 儲存後端是 [$($h.store)]，不是 GCS。Cloud Run 的容器檔案系統是暫時的，"
         Warn "   佇列與影像會在實例回收時消失。請確認 WOUNDAI_STORE=gcs 已設定。"
     } else { Write-Host "  ✓ 儲存後端：$($h.store)" }
-    # 稽核桶接上時 describe() 會帶 WORM 字樣。設了環境變數卻沒帶，
-    # 幾乎必然是「只換了環境變數沒重建映像」——舊映像的程式碼不認得這個變數。
-    if ($h.store -notlike "*WORM*") {
-        Warn "ℹ 稽核紀錄寫在主桶（刪得掉）。若已建稽核桶卻仍顯示此訊息，"
-        Warn "   請確認是用 deploy_cloudrun.ps1 重建映像，而不是只跑 run services update。"
-    } else { Write-Host "  ✓ 稽核軌跡寫入 WORM 桶" }
+    if ($h.audit_retention.verified -ne $true -or $h.audit_retention.locked -ne $true `
+            -or [int64]$h.audit_retention.retention_seconds -ne 220903200) {
+        $criticalHealthFailures += "audit retention is not verified+locked for 7 years"
+    } else { Write-Host "  ✓ 稽核桶 7 年 retention 已實讀且鎖定" }
+    if ([string]$h.audit_retention.bucket -cne $AuditBucket) {
+        $criticalHealthFailures += "runtime audit bucket does not match [$AuditBucket]"
+    }
+    if ($h.care_receipt.configured -ne $true) {
+        $criticalHealthFailures += "care receipt keyring not configured"
+    } else { Write-Host "  ✓ care receipt keyring 已設定" }
+    if ($h.canonicalization_version -ne 'canon-v1;cv2==5.0.0;jpeg_q=95') {
+        $criticalHealthFailures += "canonicalization version mismatch"
+    }
+    if ($h.canonicalization_golden_sha256 -ne 'ccb92d5c6df548442a59cd71f2a41971177b679216e571a1b3f6de811d7b6748') {
+        $criticalHealthFailures += "canonicalization golden mismatch"
+    }
+    if ($h.canonicalization_golden_ok -ne $true) {
+        $criticalHealthFailures += "canonicalization golden was not computed successfully at runtime"
+    }
+    if ([string]$h.build.revision -cne $script:EXPECTED_REVISION) {
+        $criticalHealthFailures += "health revision does not match ready revision [$script:EXPECTED_REVISION]"
+    }
+    if ([string]$h.build.git_commit -cne $GitCommit) {
+        $criticalHealthFailures += "health git commit does not match clean local HEAD [$GitCommit]"
+    }
 } catch {
+    $criticalHealthFailures += "health readback failed: $_"
     Warn "健康檢查失敗（首次冷啟動可能較久，稍後重試）：$_"
+}
+if ($criticalHealthFailures.Count -gt 0) {
+    throw "部署後關鍵驗證失敗：" + ($criticalHealthFailures -join '; ')
 }
 
 # 舊的公開預設密碼必須已經失效。這條檢查存在的理由：
@@ -412,12 +749,16 @@ try {
 $r = Get-HttpResult -Uri "$url/api/auth/login" -Method POST `
      -Body '{"username":"admin","password":"woundai-admin"}'
 if (-not $r.Reached) {
-    # 連不上 ≠ 密碼失效。這兩者絕不可混為一談 —— 混了就是一個永遠會過的檢查。
-    Warn "⚠ 無法連線，**舊預設密碼未經驗證**（不是通過）：$($r.Content)"
+    $criticalHealthFailures += "known-default password probe was unreachable"
+    Warn "❌ 無法連線，舊預設密碼未經驗證：$($r.Content)"
 } elseif ($r.Code -eq 200) {
+    $criticalHealthFailures += "known default admin password accepted"
     Warn "❌ 舊的公開預設密碼仍可登入！請立即檢查 ADMIN_PASSWORD secret 是否正確掛載。"
-} else {
+} elseif ($r.Code -eq 401 -or $r.Code -eq 403) {
     Write-Host "  ✓ 舊預設密碼已失效（HTTP $($r.Code)）"
+} else {
+    $criticalHealthFailures += "known-default password probe returned unexpected HTTP $($r.Code)"
+    Warn "❌ 舊預設密碼探針回非預期 HTTP $($r.Code)"
 }
 
 # 管理端點必須 fail-closed。
@@ -432,13 +773,13 @@ foreach ($ep in @("/api/v1/users", "/api/v1/audit",
                   "/api/v1/flywheel/record/0123456789abcdef/preview.svg")) {
     $r = Get-HttpResult -Uri "$url$ep"
     if (-not $r.Reached) {
-        Warn "⚠ $ep 連不上，**未經驗證**：$($r.Content)"
-    } elseif ($r.Code -eq 200) {
-        Warn "❌ $ep 未帶 token 竟回 200 —— 帳號清單/稽核是公開的，請立即檢查 @jwt_required。"
-    } elseif ($r.Code -eq 404) {
-        Warn "⚠ $ep 回 404 —— 這版映像沒有管理端點。若剛加了功能，請確認是重建映像而非只更新環境變數。"
-    } else {
+        $criticalHealthFailures += "$ep authorization probe was unreachable"
+        Warn "❌ $ep 連不上，無法建立拒絕未授權請求的證據：$($r.Content)"
+    } elseif ($r.Code -eq 401 -or $r.Code -eq 403) {
         Write-Host "  ✓ $ep 未帶 token → HTTP $($r.Code)（拒絕）"
+    } else {
+        $criticalHealthFailures += "$ep unauthenticated probe returned unexpected HTTP $($r.Code)"
+        Warn "❌ $ep 未帶 token → 非預期 HTTP $($r.Code)"
     }
 }
 $c = Get-HttpResult -Uri "$url/console"
@@ -452,6 +793,13 @@ if (-not $c.Reached) {
     Warn "⚠ /console → HTTP $($c.Code)"
 }
 
+# These probes run after the health block above, so their failures need their
+# own terminal gate.  A warning is not an acceptable result for a known public
+# admin credential or an unauthenticated administrative response.
+if ($criticalHealthFailures.Count -gt 0) {
+    throw "部署後關鍵驗證失敗：" + ($criticalHealthFailures -join '; ')
+}
+
 # ── 部署身分：雲端跑的到底是不是本機這一版 ──────────────────────────────
 #
 # 這是整份驗證裡最直接回答「部署有沒有生效」的一條。
@@ -460,27 +808,71 @@ if (-not $c.Reached) {
 Say "部署身分"
 $hb = Get-HttpResult -Uri "$url/api/health"
 if (-not $hb.Reached) {
-    Warn "⚠ /api/health 連不上，部署身分**未經驗證**：$($hb.Content)"
+    throw "/api/health unreachable during deployment identity verification: $($hb.Content)"
 } else {
-    try { $hj = $hb.Content | ConvertFrom-Json } catch { $hj = $null }
+    try { $hj = $hb.Content | ConvertFrom-Json }
+    catch { throw "/api/health returned invalid JSON during deployment identity verification: $_" }
     $b = $hj.build
     if (-not $b) {
-        Warn "⚠ /api/health 沒有 build 區塊 —— 這版映像是舊的（請重建，不是只更新環境變數）。"
+        throw "/api/health has no build identity"
     } else {
         Write-Host "  雲端 revision   $($b.revision)"
         Write-Host "  雲端 git commit $($b.git_commit)"
         Write-Host "  部署時間        $($b.deployed_at)"
-        $local = (& git rev-parse --short HEAD 2>$null)
-        if ($LASTEXITCODE -ne 0 -or -not $local) {
-            Warn "  ⚠ 取不到本機 commit，無法比對"
-        } elseif (-not $b.git_commit -or $b.git_commit -eq "unknown") {
-            Warn "  ⚠ 雲端沒有 commit 標識 —— 這版是用舊腳本部署的，無法確認版本"
-        } elseif ($b.git_commit -eq $local -or $b.git_commit -eq "$local-dirty") {
-            Write-Host "  ✓ 與本機 $local 一致"
-        } else {
-            Warn "  ❌ 雲端是 $($b.git_commit)，本機是 $local —— **部署沒生效，或推錯了分支**。"
-            Warn "     功能測試多半仍會通過，因為舊版也能跑。請重新部署後再驗一次。"
+        if ([string]$b.revision -cne $script:EXPECTED_REVISION) {
+            throw "health revision [$($b.revision)] does not match ready revision [$script:EXPECTED_REVISION]"
         }
+        if ([string]$b.git_commit -cne $GitCommit) {
+            throw "cloud git commit [$($b.git_commit)] does not match clean local HEAD [$GitCommit]"
+        }
+        Write-Host "  ✓ 與本機完整 SHA $GitCommit 一致"
+    }
+}
+
+if (-not $VerifyOnly) {
+    Say "候選驗證全綠後切換 100% 流量"
+    try {
+        Invoke-GCloud run services update-traffic $Service `
+            --project $ProjectId `
+            --region $Region `
+            "--to-revisions=$($script:EXPECTED_REVISION)=100" `
+            "--remove-tags=$CandidateTag" `
+            --quiet
+        Assert-GCloudOk "Cloud Run candidate traffic cutover"
+        [void](Assert-CloudRunRevisionConfiguration -RequireExclusiveTraffic)
+
+        $liveUrl = Invoke-GCloud run services describe $Service --region $Region `
+            --project $ProjectId --format "value(status.url)"
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$liveUrl)) {
+            throw "cannot resolve live service URL after cutover"
+        }
+        $liveHealth = Get-HttpResult -Uri "$liveUrl/api/health" -TimeoutSec 90
+        if (-not $liveHealth.Reached -or $liveHealth.Code -ne 200) {
+            throw "live health probe failed after cutover: HTTP $($liveHealth.Code) $($liveHealth.Content)"
+        }
+        try { $liveJson = $liveHealth.Content | ConvertFrom-Json }
+        catch { throw "live health returned invalid JSON after cutover: $_" }
+        if ($liveJson.status -cne 'healthy' `
+                -or [string]$liveJson.build.revision -cne $script:EXPECTED_REVISION `
+                -or [string]$liveJson.build.git_commit -cne $GitCommit `
+                -or $liveJson.audit_retention.verified -ne $true `
+                -or $liveJson.audit_retention.locked -ne $true) {
+            throw "live health identity/security evidence mismatches the verified candidate"
+        }
+        $url = [string]$liveUrl
+        Write-Host "  ✓ live traffic and health identify revision $($script:EXPECTED_REVISION)"
+    } catch {
+        $cutoverError = $_
+        Warn "candidate cutover verification failed; rolling traffic back to $PreviousRevision"
+        Invoke-GCloud run services update-traffic $Service `
+            --project $ProjectId `
+            --region $Region `
+            "--to-revisions=$PreviousRevision=100" `
+            --quiet
+        if ($LASTEXITCODE -ne 0) {
+            throw "CUTOVER FAILED AND AUTOMATIC ROLLBACK FAILED. original=$cutoverError"
+        }
+        throw "candidate cutover failed; traffic restored to $PreviousRevision. original=$cutoverError"
     }
 }
 

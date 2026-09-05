@@ -16,7 +16,10 @@ app.py 註冊:from api_flywheel import flywheel_bp; app.register_blueprint(flywh
 佇列 jsonl 維持 append-only(稽核軌跡不竄改, IEC 62304),排除發生在消費端。
 
 驗證邏輯抽出為純函式(validate_annotation/effective_queue/...)供契約與單元測試。"""
-import os, json, re, time, hashlib, shutil, base64, logging
+import os, json, re, time, hashlib, shutil, base64, logging, random, secrets
+
+from audit_chain_contract import AUDIT_CHAIN_FIELDS, CHAIN_FIELD_VERSIONS, CHAIN_V, \
+    UNVERSIONED_CHAIN_VERSIONS, audit_hash, loads_json_object_strict, validate_current_record
 
 # ⚠ 這個模組原本沒有 logger，而 except 區塊裡卻呼叫了 logger.warning——
 # 於是**錯誤處理本身會拋 NameError**，把一個「遮罩存不進去」的小問題
@@ -130,15 +133,17 @@ def validate_annotation(d: dict, require_image: bool = True):
     for k in need:
         if k not in d or d.get(k) is None:
             issues.append(f"缺 {k}")
-    if not d.get("doctor_verified"): issues.append("未經醫師驗證(doctor_verified=false)")
-    if not d.get("deidentified"): issues.append("未去識別化(deidentified=false)")
-    if not d.get("consent_train"): issues.append("未取得訓練同意(consent_train=false)")
+    if d.get("doctor_verified") is not True: issues.append("未經醫師驗證(doctor_verified=false)")
+    if d.get("deidentified") is not True: issues.append("未去識別化(deidentified=false)")
+    if d.get("consent_train") is not True: issues.append("未取得訓練同意(consent_train=false)")
     if d.get("code") is not None and not CODE_RE.match(str(d.get("code"))):
         issues.append("code 格式不合(應為 WD- 加英數/底線/連字號,1-32 字)")
     if require_image and d.get("image_id") is not None and not ID_RE.match(str(d.get("image_id"))):
         issues.append("image_id 格式不合(應為 16 位小寫十六進位;防路徑穿越)")
 
     src = d.get("source")
+    if require_image and src is None:
+        issues.append("缺 source（clinical/sample/phantom/external）")
     if src is not None and str(src) not in SOURCES:
         issues.append(f"source 須為 {'/'.join(SOURCES)}(預設 {DEFAULT_SOURCE})")
 
@@ -239,59 +244,298 @@ def read_jsonl(path: str, with_bad: bool = False):
 # role/org 也進雜湊鏈:稽核要回答的是「**誰、以什麼身分**做了什麼」。
 # 角色只查當下的帳號設定是不夠的——使用者的角色日後可能變更,
 # 而那不該讓歷史紀錄的意義跟著改變。
-AUDIT_CHAIN_FIELDS = ("seq", "ts", "actor", "role", "org", "action", "code", "result", "prev")
+# 稽核鏈的欄位定義**依版本凍結**。
+#
+# 2026-08-04 的教訓：`AUDIT_CHAIN_FIELDS` 被就地改過一次（91ea736 的 7 欄 →
+# 2d5cb74 加入 role/org 成 9 欄）,結果是變更之前寫的每一筆紀錄,在往後每一次驗證
+# 都被判為 `hash_mismatch` ——而那個標籤對外顯示為「內容被改過」。紀錄沒有被動過,
+# 是驗證用的公式換了。這種缺陷在鎖定(Bucket Lock)之後無法補救,因為紀錄不可改寫。
+#
+# 所以規則是:**只新增版本,永遠不要就地修改既有版本的欄位組**。
+# 驗證結果中屬「資訊性」而非異常的類別。
+INFORMATIONAL_KINDS = ("legacy_no_hash", "legacy_formula")
 
 
-def _audit_hash(rec: dict) -> str:
-    """對紀錄的正規化形式取雜湊。欄位順序固定,不含 hash 自身。"""
-    payload = json.dumps({k: rec.get(k) for k in AUDIT_CHAIN_FIELDS},
-                         ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+def _audit_hash(rec: dict, version: int = None) -> str:
+    """對紀錄的正規化形式取雜湊。欄位順序固定,不含 hash 自身。
+
+    `version` 沒給時,以紀錄自身宣告的 `chain_v` 為準;連那個都沒有(v1/v2 舊紀錄)
+    才退回現行版本——驗證路徑不依賴這個退路,它會明確逐一試算已知的歷史公式。
+    """
+    return audit_hash(rec, version)
+
+
+def _audit_hash_resolve(rec: dict):
+    """回 (是否有效, 命中的版本, 是否為已被取代的舊公式)。
+
+    有 `chain_v` 的紀錄只認它宣告的那一組——不做退讓式的多公式嘗試,
+    否則等於容許用「換一組公式去湊」來規避比對。
+    """
+    declared = rec.get("chain_v")
+    if declared is not None:
+        # Python treats True == 1 and 1.0 == 1 when indexing a dict.  Audit
+        # version declarations are protocol identifiers, not numeric values;
+        # accepting either alias would let a noncanonical record appear to use
+        # a historical formula.
+        if type(declared) is not int:
+            return (False, declared, False)
+        try:
+            return (_audit_hash(rec, declared) == rec.get("hash"), declared, False)
+        except ValueError:
+            return (False, declared, False)
+    for v in UNVERSIONED_CHAIN_VERSIONS:
+        if _audit_hash(rec, v) == rec.get("hash"):
+            return (True, v, v != UNVERSIONED_CHAIN_VERSIONS[0])
+    return (False, None, False)
+
+
+# 稽核寫入的重試參數。衝突只發生在多個寫入者搶同一格時;每次重試都會重讀尾端,
+# 所以是「搶下一格」而不是「再搶同一格」,正常負載下 1–2 次就會落地。
+# Cloud Run is configured for at most 3 instances × 4 concurrent requests.
+# Sixteen attempts cover one fully synchronized 12-writer burst while retaining
+# fail-closed behavior under sustained contention.
+AUDIT_MAX_RETRY = 16
+AUDIT_BACKOFF_BASE = 0.05
+AUDIT_BACKOFF_CAP = 2.0
+class AuditWriteConflict(RuntimeError):
+    """稽核鏈持續搶格失敗。呼叫端必須讓當前操作失敗——寫不了稽核就不繼續。"""
+
+
+class AuditChainCorrupt(RuntimeError):
+    """The current tail cannot be authenticated; never extend it."""
+
+
+class AuditUnavailable(RuntimeError):
+    """A state transition cannot start because its durable audit intent failed."""
 
 
 def audit(actor: str, action: str, code: str, result: str,
           role: str = None, org: str = None):
-    prev_recs = read_jsonl(AUDIT)
-    last = prev_recs[-1] if prev_recs else None
-    # actor 是 `<org>:<user>`；org 沒另外傳就從中拆出來，讓舊呼叫端不必全部改。
+    """寫一筆稽核紀錄到雜湊鏈上,**序列化**:同一個 seq 全桶只能被建立一次。
+
+    舊版是「讀全部 → 算 seq+1 → append」,讀寫之間沒有原子性,並行寫入會產生
+    同 prev 的 fork(正式桶 675 筆裡有 26 處)。GCS 現在由 Store 在單一 admission
+    中驗完整名稱 manifest 與尚未驗過的 suffix，再以條件建立搶下一格；LocalStore
+    則在行程鎖內驗完整鏈。離線 verifier 永遠另做全量讀取，不採 admission 快取。
+    """
+    from store import ChainConflict, GcsStore
+    # actor 是 `<org>:<user>`;org 沒另外傳就從中拆出來,讓舊呼叫端不必全部改。
     if org is None and isinstance(actor, str) and ":" in actor:
         org = actor.split(":", 1)[0]
-    rec = {
-        "seq": (last.get("seq", len(prev_recs) - 1) + 1) if last else 0,
-        "ts": utc_now(), "actor": actor, "role": role, "org": org,
-        "action": action, "code": code, "result": result,
-        # 鏈首用固定字串,讓「第一筆」與「前面被刪光了」可以區分開來
-        "prev": (last or {}).get("hash") or "GENESIS",
-    }
-    rec["hash"] = _audit_hash(rec)
-    append_jsonl(AUDIT, rec)
+    for field, value in (("actor", actor), ("role", role), ("org", org),
+                         ("action", action), ("code", code), ("result", result)):
+        if not isinstance(value, str) or not value:
+            raise ValueError("audit requires explicit non-empty %s" % field)
+    st = _store()
+    key = _key(AUDIT)
+
+    def build_record(seq, prev):
+        rec = {
+            "chain_v": CHAIN_V,
+            "nonce": secrets.token_hex(16),
+            "seq": seq,
+            "ts": utc_now(), "actor": actor, "role": role, "org": org,
+            "action": action, "code": code, "result": result,
+            "prev": prev,
+        }
+        rec["hash"] = _audit_hash(rec)
+        return rec
+
+    if isinstance(st, GcsStore):
+        for attempt in range(AUDIT_MAX_RETRY):
+            try:
+                return st.append_next_chained(key, build_record)
+            except ChainConflict:
+                if attempt + 1 < AUDIT_MAX_RETRY:
+                    delay = min(AUDIT_BACKOFF_CAP, AUDIT_BACKOFF_BASE * (2 ** attempt))
+                    time.sleep(delay * random.uniform(0.5, 1.5))
+            except Exception as exc:
+                raise AuditChainCorrupt("audit chain admission unavailable") from exc
+        raise AuditWriteConflict(
+            "audit chain slot contention persisted for %d attempts" % AUDIT_MAX_RETRY)
+
+    for attempt in range(AUDIT_MAX_RETRY):
+        # A valid tail is not proof that every immutable slot before it is
+        # intact: an attacker could alter a middle payload while preserving its
+        # old hash/prev fields.  For GCS, obtain the fully verified records and
+        # tail from one fresh slot snapshot.  The locked WORM gate above makes
+        # that snapshot stable until conditional creation; without it, no
+        # application-level pair of reads can close the external TOCTOU window.
+        try:
+            lines = st.read_lines_fresh(key)
+            tail_seq, tail = st.chain_tail(key)
+            recs = [json.loads(line) for line in lines]
+            _, issues, stats = verify_audit_chain(recs=recs)
+        except Exception as exc:
+            raise AuditChainCorrupt("audit chain full verification unavailable") from exc
+        kinds = stats.get("kinds", {})
+        if stats.get("real_issues", 0) or kinds.get("legacy_no_hash", 0):
+            raise AuditChainCorrupt(
+                "audit chain full verification failed: %s" %
+                ",".join(sorted(kinds)) if issues else "audit chain invalid")
+        # Admission is current-v4-only on every backend.  Historical v1/v2/v3
+        # records remain readable and verifiable for evidence, but extending a
+        # mixed local log through a strict v4 primitive used to surface as an
+        # unwrapped IOError/500.  Reject it here with an actionable, fail-closed
+        # migration boundary instead.  Final GCS epochs must likewise start
+        # clean; never extend an old formula merely because it still verifies.
+        if any(r.get("chain_v") != CHAIN_V for r in recs):
+            raise AuditChainCorrupt(
+                "audit chain contains a historical version; start a reviewed v4 epoch before writing")
+        rec = build_record(tail_seq + 1, (tail or {}).get("hash") or "GENESIS")
+        try:
+            st.append_chained(key, rec["seq"], json.dumps(rec, ensure_ascii=False))
+            return rec
+        except ChainConflict:
+            if attempt + 1 < AUDIT_MAX_RETRY:
+                delay = min(AUDIT_BACKOFF_CAP, AUDIT_BACKOFF_BASE * (2 ** attempt))
+                time.sleep(delay * random.uniform(0.5, 1.5))
+    raise AuditWriteConflict(
+        "audit chain slot contention persisted for %d attempts" % AUDIT_MAX_RETRY)
 
 
-def verify_audit_chain(audit_path=None, recs=None):
+def audit_intent(actor: str, action: str, code: str,
+                 role: str = None, org: str = None, detail=None):
+    """Write a durable intent *before* any endpoint changes persistent state.
+
+    Cross-bucket operations cannot be made atomic with a single transaction.
+    The minimal safe ordering is therefore an immutable intent first, followed
+    by the state transition and its richer outcome audit.  If the intent cannot
+    be recorded, callers must return 503 before any image, queue, consent, or
+    account state is changed.  A later outcome-write failure is still visible
+    as an unmatched request intent; it is deliberately *not* presented as a
+    fully-audited success.  Automated intent/outcome reconciliation is not
+    supplied by this helper and must not be claimed by callers.
+    """
+    try:
+        if detail is None:
+            rendered = "requested"
+        elif isinstance(detail, str):
+            rendered = detail
+        else:
+            rendered = json.dumps(detail, ensure_ascii=False, sort_keys=True,
+                                  separators=(",", ":"))
+        return audit(actor, action + "_intent", code, rendered, role, org)
+    except Exception as exc:
+        logger.exception("audit intent unavailable for %s", action)
+        raise AuditUnavailable("audit intent unavailable for " + action) from exc
+
+
+def _read_audit_records_strict(audit_path):
+    """Read raw audit lines without losing duplicate-key or malformed evidence."""
+    records, parse_issues = [], []
+    st = _store()
+    key = _key(audit_path)
+    # GCS audit objects are immutable *slots*, not a generic text log.  The
+    # normal read_lines() helper splits every blob by newline and would make a
+    # two-line slot look like two legitimate records.  The slot-aware snapshot
+    # validates object names, contiguity, one-record-per-slot, v4 schema, hash,
+    # and predecessor links before the offline verifier sees any line.
+    try:
+        from store import GcsStore
+        is_gcs_audit = isinstance(st, GcsStore) and st._is_audit_chain_root(key)
+    except Exception:
+        is_gcs_audit = False
+    if is_gcs_audit:
+        _, _, lines = st.audit_snapshot_fresh(key)
+    else:
+        lines = st.read_lines(key)
+    for source_index, line in enumerate(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(loads_json_object_strict(line))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            parse_issues.append({
+                "index": source_index,
+                "kind": "invalid_record",
+                "detail": "稽核 JSON 無法以唯一、標準形式解析: %s" % exc,
+                "ts": None,
+            })
+    return records, parse_issues
+
+
+def verify_audit_chain(audit_path=None, recs=None, parse_issues=None):
     """驗證稽核軌跡的完整性。回 (ok, 問題清單, 統計)。
 
     `recs` 可傳入已讀好的紀錄以避免重複讀取——GCS 後端下每次 read 都要列舉
     整個前綴的物件，主控台同時要「列表」與「驗鏈」時讀兩遍會明顯變慢。
 
-    分開回報三種異常,因為處置完全不同:
+    分開回報各種異常,因為處置完全不同:
       - `hash_mismatch`  紀錄內容被改過
       - `broken_link`    前一筆被刪除或順序被調換
       - `fork`           兩筆指向同一個前驅(多實例並行寫入,或有人補塞紀錄)
+      - `seq_discontinuity` hashed 紀錄的 seq 不等於其完整軌跡位置
+      - `legacy_after_hashed` 無 hash 紀錄出現在雜湊鏈已開始之後
+      - `version_regression` 鏈版本比早先已出現的版本更舊
     """
-    recs = read_jsonl(audit_path or AUDIT) if recs is None else recs
-    issues, seen_prev = [], {}
+    if recs is None:
+        if parse_issues is not None:
+            raise ValueError("parse_issues requires an explicit record snapshot")
+        recs, parse_issues = _read_audit_records_strict(audit_path or AUDIT)
+    else:
+        # Callers that already took a strict snapshot must be able to carry its
+        # parse evidence into the verifier.  Dropping those issues would turn a
+        # malformed line into a shorter, apparently valid chain.
+        parse_issues = list(parse_issues or [])
+    issues, seen_prev = list(parse_issues), {}
     prev_hash = "GENESIS"
+    seen_hashed = False
+    max_chain_version = None
     for i, r in enumerate(recs):
         # 舊格式(雜湊鏈導入前)的紀錄沒有 hash 欄位,跳過但要計數——
         # 靜默忽略會讓「整條鏈其實沒在驗」看起來像通過
         if "hash" not in r:
+            if seen_hashed:
+                issues.append({"index": i, "kind": "legacy_after_hashed",
+                               "detail": "無 hash 的歷史紀錄只能位於 hashed 軌跡之前",
+                               "ts": r.get("ts")})
             issues.append({"index": i, "kind": "legacy_no_hash",
                            "detail": "雜湊鏈導入前的舊紀錄,無法驗證", "ts": r.get("ts")})
             prev_hash = "GENESIS"   # 舊紀錄之後重新起鏈
             continue
-        if _audit_hash(r) != r.get("hash"):
+        seen_hashed = True
+        if type(r.get("seq")) is not int or r.get("seq") != i:
+            issues.append({"index": i, "kind": "seq_discontinuity",
+                           "detail": "hashed 紀錄 seq=%r,但其完整軌跡位置應為 %d"
+                                     % (r.get("seq"), i),
+                           "ts": r.get("ts")})
+        # A final v4 record must meet the same exact schema and type contract as
+        # the immutable-store admission path.  Earlier historical versions stay
+        # backward-compatible; only records presenting themselves as v4 are held
+        # to the current slot definition.
+        if r.get("chain_v") == CHAIN_V:
+            try:
+                validate_current_record(r, r.get("seq"))
+            except (TypeError, ValueError) as exc:
+                issues.append({"index": i, "kind": "schema_invalid",
+                               "detail": "v4 稽核紀錄不符合不可變 slot 合約: %s" % exc,
+                               "ts": r.get("ts")})
+        valid, matched_v, superseded = _audit_hash_resolve(r)
+        declared_v = r.get("chain_v")
+        observed_v = matched_v if valid else (
+            declared_v if type(declared_v) is int and declared_v in CHAIN_FIELD_VERSIONS else None)
+        if observed_v is not None:
+            if max_chain_version is not None and observed_v < max_chain_version:
+                issues.append({"index": i, "kind": "version_regression",
+                               "detail": "chain_v=%d 不得倒退到早先已出現的 chain_v=%d 之前"
+                                         % (observed_v, max_chain_version),
+                               "ts": r.get("ts")})
+            max_chain_version = observed_v if max_chain_version is None else max(
+                max_chain_version, observed_v)
+        if not valid:
+            declared = r.get("chain_v")
+            detail = ("紀錄內容與其雜湊不符(內容被改過)" if declared is None
+                      else "紀錄宣告 chain_v=%r,但以該版公式重算不符(內容被改過)" % (declared,))
             issues.append({"index": i, "kind": "hash_mismatch",
-                           "detail": "紀錄內容與其雜湊不符(內容被改過)", "ts": r.get("ts")})
+                           "detail": detail, "ts": r.get("ts")})
+        elif superseded:
+            # 驗得過,只表示目前位元組能用已被取代的欄位組重算。
+            # 這是公式辨識結果,不是「未曾被竄改」的充分證明;還需外部鏈頭或 WORM 證據。
+            issues.append({"index": i, "kind": "legacy_formula",
+                           "detail": "以 chain_v=%d 的歷史欄位組重算吻合(不足以單獨證明未被竄改)" % matched_v,
+                           "ts": r.get("ts")})
         if r.get("prev") != prev_hash:
             issues.append({"index": i, "kind": "broken_link",
                            "detail": "prev 指向 %s,但前一筆的 hash 是 %s(前一筆被刪或順序被調換)"
@@ -304,11 +548,30 @@ def verify_audit_chain(audit_path=None, recs=None):
                            "ts": r.get("ts")})
         seen_prev[p] = i
         prev_hash = r.get("hash")
-    stats = {"total": len(recs), "issues": len(issues),
+    # `legacy_no_hash` 與 `legacy_formula` 是資訊性標記:前者是雜湊鏈導入前
+    # 的紀錄,後者是公式辨識結果。它們不單獨列為鏈結異常,但也不能單獨證明未被竄改。
+    # `ok` 維持原語意(任何標記都讓它為 False)以免打壞既有呼叫端;要區分「真異常」
+    # 請用 stats["real_issues"] ——呼叫端不必自己硬寫類別清單。
+    informational = sum(1 for x in issues if x["kind"] in INFORMATIONAL_KINDS)
+    stats = {"total": len(recs) + len(parse_issues), "issues": len(issues),
+             "informational": informational,
+             "real_issues": len(issues) - informational,
              "head": prev_hash if recs else "GENESIS",
              "kinds": {k: sum(1 for x in issues if x["kind"] == k)
                        for k in {x["kind"] for x in issues}}}
     return (len(issues) == 0, issues, stats)
+
+
+def read_verified_audit_snapshot(audit_path=None):
+    """Read and verify one strict audit snapshot.
+
+    The returned records and verification tuple are derived from the same
+    storage read.  This matters on GCS: reading the table first and verifying a
+    second snapshot can pair page contents from epoch N with a proof for epoch
+    N+1 when another instance appends between the two reads.
+    """
+    recs, parse_issues = _read_audit_records_strict(audit_path or AUDIT)
+    return recs, verify_audit_chain(recs=recs, parse_issues=parse_issues)
 
 
 def poly_sig(poly):
@@ -581,6 +844,8 @@ def classify_queue(recs, images_dir=None, wd_codes=None, wd_imgs=None,
             st = "image_file_missing"
         elif keep is not None and rec_source(r) not in keep:
             st = "other_source"
+        elif not trainable_image_receipt(r, images_dir):
+            st = "legacy_unratified"
         else:
             st = "candidate"
         prelim.append(st)
@@ -624,6 +889,7 @@ def classify_queue(recs, images_dir=None, wd_codes=None, wd_imgs=None,
 
 
 RECORD_STATUS = {
+    "legacy_unratified": "缺有效 promotion receipt 或舊資料核准（禁止所有訓練匯出）",
     "trainable":       "可訓練",
     "superseded":      "被同一人較新的修訂版取代",
     # 不是被取代，是另一位標註者對同一張影像的獨立判斷。
@@ -891,6 +1157,37 @@ def quarantine_image(image_id, images_dir=None, quarantine_dir=None):
     return _store().move(_key(src), _key(dst))
 
 
+def trainable_image_receipt(rec, images_dir=None):
+    from consent_staging import image_is_ratified
+    from store import LocalStore
+    st = _store()
+    # Offline exporters may select a different local dataset. Never consult
+    # receipts belonging to the server's default flywheel root for that dataset.
+    if isinstance(st, LocalStore) and images_dir:
+        st = LocalStore(os.path.dirname(os.path.abspath(images_dir)))
+    try:
+        return image_is_ratified(st, rec["image_id"], rec.get("code"), rec.get("org"))
+    except Exception:
+        logger.warning("receipt unavailable; excluding image from dataset")
+        return False
+
+
+def promotion_service(actor, role, org):
+    from consent_staging import Promotion
+
+    def blocked(code, image_id):
+        codes, images = withdrawn_keys()
+        return code in codes or image_id in images or is_quarantined(image_id)
+
+    def event(action, code, detail):
+        audit(actor, action, code, json.dumps(detail, ensure_ascii=False, sort_keys=True), role, org)
+
+    def intent(action, code, detail):
+        audit_intent(actor, action, code, role, org, detail)
+
+    return Promotion(_store(), event, blocked, lambda: read_jsonl(QUEUE), intent=intent)
+
+
 # ---- Flask Blueprint(import flask 失敗時不影響純函式測試) ----
 try:
     from flask import Blueprint, request, jsonify, Response
@@ -900,7 +1197,17 @@ try:
     def _who():
         """(identity, role, org)。JWT 裡沒有 role 的舊 token 一律視為無權限。"""
         c = get_jwt() or {}
-        return (get_jwt_identity() or "unknown", c.get("role"), c.get("org"))
+        actor = get_jwt_identity() or "unknown"
+        role = c.get("role")
+        org = c.get("org")
+        # 缺 claim 的舊／畸形 token 仍會走拒絕事件稽核。新 v4 epoch 不允許
+        # role/org=null，因此以明確 sentinel 留痕；sentinel 不在任何權限集合，
+        # 授權結果仍嚴格 fail-closed。
+        if not isinstance(role, str) or not role:
+            role = "unauthorised"
+        if not isinstance(org, str) or not org:
+            org = actor.split(":", 1)[0] if isinstance(actor, str) and ":" in actor else "unknown"
+        return (actor, role, org)
 
     def _can(role, perm):
         try:
@@ -910,6 +1217,26 @@ try:
             # 權限模組載不進來時 **fail-closed**。放行才是危險的那一邊——
             # 一個載不到權限表的服務不該假設「大家都可以」。
             return False
+
+    @flywheel_bp.route("/api/v1/consent/care/attest", methods=["POST"])
+    @jwt_required()
+    def attest_care():
+        from consent_staging import CareKeys, ConsentError, issue_care
+        actor, role, org = _who()
+        if not _can(role, "measure.clinical"):
+            return jsonify({"error": "權限不足"}), 403
+        d = request.get_json(silent=True) or {}
+        if not isinstance(d, dict):
+            return jsonify({"error": "invalid_care_identity"}), 400
+        try:
+            svc = promotion_service(actor, role, org)
+            token, expires = issue_care(_store(), CareKeys(), d.get("code"), actor, role, org,
+                                        svc.audit, intent=svc.intent)
+            return jsonify({"care_receipt": token, "expires_at": expires}), 200
+        except AuditUnavailable:
+            return jsonify({"error": "audit_unavailable"}), 503
+        except ConsentError as exc:
+            return jsonify({"error": exc.code}), exc.status
 
     @flywheel_bp.route("/api/v1/annotation", methods=["POST"])
     @jwt_required()
@@ -963,20 +1290,36 @@ try:
             audit(actor, "annotation_rejected", d.get("code", "?"), msg, role, org)
             return jsonify({"error": "標註不符上傳規範", "issues": [msg]}), 400
 
-        # 影像必須真的在後端(classify 時已存);沒有像素的 GT 不可訓練 → 直接擋
-        if not _store().exists(_key(os.path.join(IMAGES_DIR, image_id + ".jpg"))):
-            msg = (f"後端查無影像 {image_id}。可能是:(a) 未先呼叫 /api/v1/classify、"
-                   f"(b) 後端曾清空 flywheel/images、(c) 這是舊版 App 產生的紀錄。"
-                   f"請重新以後端模式量測一次再送出")
-            audit(actor, "annotation_rejected", d.get("code", "?"), msg, role, org)
-            return jsonify({"error": "標註不符上傳規範", "issues": [msg]}), 400
-
         # 組織遮罩也是身分的一部分——只改組織不改邊界時，沒有它就會被誤判為重複
         # 而把醫師的標註丟掉（見 sample_key 的說明）。
         t_sig = tissue_sig(d.get("tissue_mask_png"))
+        from consent_staging import ConsentError, annotation_receipt
+        rid = annotation_receipt(d["code"], actor, image_id, poly_sig(d.get("gt_polygon")), t_sig)
+        svc = promotion_service(actor, role, org)
+        try:
+            promotion_fields = svc.prepare(d, actor, role, org, rid)
+        except AuditUnavailable:
+            return jsonify({"error": "audit_unavailable"}), 503
+        except ConsentError as exc:
+            audit(actor, "annotation_rejected", d["code"], exc.code, role, org)
+            return jsonify({"error": exc.code}), exc.status
         exact, same_img = find_duplicate(QUEUE, image_id, d.get("gt_polygon"), t_sig)
+        # Same contour by a different actor is a parallel annotation, not a dup.
+        exact = next((r for r in reversed(same_img)
+                      if r.get("actor") == actor
+                      and sample_key(image_id, r.get("gt_polygon"), r.get("tissue_sig"))
+                      == sample_key(image_id, d.get("gt_polygon"), t_sig)), None)
         # 已撤回的舊紀錄不算重複(否則重新取得同意後永遠補不回來)
         if exact is not None and exact.get("code") not in wd_codes:
+            try:
+                audit_intent(actor, "annotation_duplicate", d.get("code", "?"), role, org,
+                             {"annotation_receipt_id": rid, "image_id": image_id})
+            except AuditUnavailable:
+                return jsonify({"error": "audit_unavailable"}), 503
+            try:
+                svc.finish(image_id, rid)
+            except Exception:
+                logger.warning("staging cleanup deferred to retry/TTL")
             audit(actor, "annotation_duplicate", d.get("code", "?"),
                   f"同影像、同輪廓、同組織遮罩已在佇列({exact.get('code')})", role, org)
             return jsonify({"status": "duplicate_skipped", "code": d.get("code"),
@@ -984,6 +1327,7 @@ try:
                                     "已自動略過（避免重複樣本）。若您剛才有修改，請確認是否按下了「完成修邊」。"}), 200
 
         rec = {k: d.get(k) for k in REQUIRED}
+        rec.update(promotion_fields)
         for k in PROVENANCE:
             if d.get(k) is not None: rec[k] = d.get(k)
         rec["source"] = str(d.get("source") or DEFAULT_SOURCE)   # 顯式落盤,免得日後靠預設值猜
@@ -991,10 +1335,15 @@ try:
         # 落盤，否則下一次的去重比對拿不到它，同樣的漏洞會再出現一次。
         if t_sig:
             rec["tissue_sig"] = t_sig
-        rec["supersedes"] = [r.get("code") for r in same_img] or None
+        rec["supersedes"] = [r.get("code") for r in same_img if r.get("actor") == actor] or None
         rec["actor"] = actor
         rec["role"] = role
         rec["org"] = org        # 現在只有一個值也要寫:事後補欄位=舊紀錄全是 null
+        try:
+            audit_intent(actor, "annotation_enqueue", rec["code"], role, org,
+                         {"annotation_receipt_id": rid, "image_id": image_id})
+        except AuditUnavailable:
+            return jsonify({"error": "audit_unavailable"}), 503
         # 組織遮罩落盤。**失敗不阻擋標註**——遮罩缺席只是少一個組織訓練樣本，
         # 讓整筆標註失敗會連傷口分割的 GT 一起丟掉，那是更大的損失。
         if d.get("tissue_mask_png"):
@@ -1069,7 +1418,17 @@ try:
                 rec.pop("depth_conf_key", None)
 
         rec["received_at"] = utc_now()
-        append_jsonl(QUEUE, rec)
+        try:
+            svc._guard(d["code"], image_id)
+            inserted = _store().append_record_once(_key(QUEUE), rid, rec)
+        except ConsentError as exc:
+            return jsonify({"error": exc.code}), exc.status
+        try:
+            svc.finish(image_id, rid)
+        except Exception:
+            logger.warning("staging cleanup deferred to retry/TTL")
+        if not inserted:
+            return jsonify({"status": "duplicate_skipped", "code": rec["code"]}), 200
         note = None
         if same_img:
             # ⚠ 措辭要正確，而且**兩件事可能同時成立**：
@@ -1174,6 +1533,11 @@ try:
             return jsonify({"error": "深度資料不符規範", "issues": [str(e)]}), 400
 
         key = _key(os.path.join(DEPTH_DIR, image_id + ".f32"))
+        try:
+            audit_intent(actor, "depth_store", rec.get("code", "?"), role, org,
+                         {"image_id": image_id, "bytes": len(raw)})
+        except AuditUnavailable:
+            return jsonify({"error": "audit_unavailable"}), 503
         _store().put_blob(key, raw)
         _store().put_blob(_key(os.path.join(DEPTH_DIR, image_id + ".meta.json")),
                           json.dumps(meta, ensure_ascii=False).encode("utf-8"))
@@ -1255,6 +1619,11 @@ try:
                                        "請聯絡管理者。"]}), 403
 
         code = mine[-1].get("code")
+        try:
+            audit_intent(actor, "record_retract", code or "?", role, org,
+                         {"image_id": image_id, "reason": reason})
+        except AuditUnavailable:
+            return jsonify({"error": "audit_unavailable"}), 503
         append_jsonl(RETRACTED, {
             "image_id": image_id, "code": code, "action": "retract",
             "reason": reason, "reason_zh": RETRACT_REASONS[reason], "note": note,
@@ -1292,6 +1661,11 @@ try:
         if image_id not in retracted_images():
             return jsonify({"error": "這一筆並未被排除", "image_id": image_id}), 400
         note = (d.get("note") or "").strip()
+        try:
+            audit_intent(actor, "record_unretract", image_id, role, org,
+                         {"image_id": image_id})
+        except AuditUnavailable:
+            return jsonify({"error": "audit_unavailable"}), 503
         append_jsonl(RETRACTED, {"image_id": image_id, "action": "unretract",
                                  "note": note, "actor": actor, "role": role,
                                  "org": org, "ts": utc_now()})
@@ -1741,12 +2115,17 @@ try:
             if not ID_RE.match(str(d["image_id"])):
                 return jsonify({"error": "image_id 格式不合(應為 16 位小寫十六進位)"}), 400
             imgs.add(str(d["image_id"]))
+        try:
+            audit_intent(actor, "consent_withdraw", code, role, org,
+                         {"image_ids": sorted(imgs)})
+        except AuditUnavailable:
+            return jsonify({"error": "audit_unavailable"}), 503
         append_jsonl(WITHDRAWN, {"code": code, "action": "withdraw",
                                  "image_id": (sorted(imgs)[0] if imgs else None),
                                  "image_ids": sorted(imgs), "withdrawn_at": utc_now(), "actor": actor})
         moved = [i for i in sorted(imgs) if quarantine_image(i)]
         audit(actor, "consent_withdraw", code,
-              f"排除訓練;影像隔離 {len(moved)}/{len(imgs)}")
+              f"排除訓練;影像隔離 {len(moved)}/{len(imgs)}", role, org)
         return jsonify({"status": "withdrawn", "code": code, "image_ids": sorted(imgs),
                         "quarantined": moved,
                         "effect": "已撤回:該影像的所有標註(含修訂版)一律排除於訓練集與統計,"
@@ -1778,6 +2157,11 @@ try:
             if not ID_RE.match(str(d["image_id"])):
                 return jsonify({"error": "image_id 格式不合(應為 16 位小寫十六進位)"}), 400
             imgs.add(str(d["image_id"]))
+        try:
+            audit_intent(actor, "consent_restore", code, role, org,
+                         {"image_ids": sorted(imgs)})
+        except AuditUnavailable:
+            return jsonify({"error": "audit_unavailable"}), 503
         restored = []
         for i in sorted(imgs):
             if _store().move(_key(os.path.join(QUARANTINE_DIR, f"{i}.jpg")),
@@ -1786,7 +2170,8 @@ try:
         append_jsonl(WITHDRAWN, {"code": code, "action": "restore", "image_ids": sorted(imgs),
                                  "restored_at": utc_now(), "actor": actor,
                                  "note": d.get("note")})
-        audit(actor, "consent_restore", code, f"重新同意;影像回復 {len(restored)}/{len(imgs)}")
+        audit(actor, "consent_restore", code,
+              f"重新同意;影像回復 {len(restored)}/{len(imgs)}", role, org)
         return jsonify({"status": "restored", "code": code, "image_ids": sorted(imgs),
                         "restored": restored,
                         "effect": "已重新納入:該 code/影像不再被排除,可重新上傳標註。"

@@ -1,15 +1,15 @@
-flask>=3.0.0
-flask-cors>=4.0.0
-flask-jwt-extended>=4.6.0
-numpy>=1.24.0
-opencv-python-headless>=4.8.0
-Pillow>=10.0.0
-requests>=2.31.0
-werkzeug>=3.0.0
-gunicorn>=21.2.0
+flask==3.1.3
+flask-cors==6.0.5
+flask-jwt-extended==4.7.4
+numpy==2.4.6
+opencv-contrib-python-headless==5.0.0.93
+Pillow==12.3.0
+requests==2.34.2
+werkzeug==3.1.8
+gunicorn==26.2.0
 
 # 雲端物件儲存（WOUNDAI_STORE=gcs 時才用得到；本機模式不會 import）
-google-cloud-storage>=2.14.0
+google-cloud-storage==3.13.1
 
 # ⚠ 推論引擎。**這一行曾經漏掉，導致雲端部署靜默跑在降級模式**：
 # 模型檔 82 MB 好端端在映像裡，但沒有東西能載入它們，app.py 就退回 HSV 色彩法。
@@ -17,4 +17,4 @@ google-cloud-storage>=2.14.0
 # 只是那個數字來自完全不同的演算法，唯一的線索是啟動時一行
 # 「降級模式: 無可用的 ML 模型」的日誌警告。
 # 本機能跑是因為開發環境早就裝了；容器是乾淨的，requirements 沒寫就是沒有。
-onnxruntime>=1.17.0
+onnxruntime==1.29.0

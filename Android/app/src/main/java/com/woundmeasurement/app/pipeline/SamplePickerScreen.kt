@@ -42,6 +42,7 @@ fun SamplePickerScreen(
     measureEnabled: Boolean = true,
     /** measureEnabled=false 時顯示的原因。 */
     disabledReason: String? = null,
+    careCodeProvider: suspend () -> String? = { null },
     /** 辨識參照圖，透傳給 MeasureScreen（顯示於量測數值與滲液輸入之間）。 */
     preview: @Composable () -> Unit = {}
 ) {
@@ -54,7 +55,8 @@ fun SamplePickerScreen(
         // 印刷色塊是分布外樣本,模型本來就分不出來(實測空遮罩);而量測鏈驗證也不該用 AI 當量尺。
         val segMode = if (source == "phantom") "color" else null
         if (useBackend && backend != null)
-            vm.analyzeViaBackend(bitmap = bmp, backend = backend, exudate = null, seg = segMode)
+            vm.analyzeViaBackend(bitmap = bmp, backend = backend, exudate = null, seg = segMode,
+                careCodeProvider = careCodeProvider)
         else vm.analyze(bitmap = bmp, exudate = null)
     }
 
