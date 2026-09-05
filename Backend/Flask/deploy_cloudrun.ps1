@@ -371,14 +371,18 @@ function Assert-CloudRunRevisionConfiguration([switch]$RequireExclusiveTraffic,
             throw "ready revision environment [$name] does not match the deployment contract"
         }
     }
-    $secretExpected = @{
-        ADMIN_PASSWORD = 'woundai-admin-password';
-        JWT_SECRET_KEY = 'woundai-jwt-secret';
-        CARE_RECEIPT_SECRET = $CareReceiptSecret
-    }
-    foreach ($name in $secretExpected.Keys) {
+    # These are Secret Manager resource names, never secret values.  Keep the
+    # environment key and resource name in distinct fields so scanners (and
+    # reviewers) cannot mistake this deployment contract for a credential.
+    $secretExpected = @(
+        [pscustomobject]@{ EnvironmentName = 'ADMIN_PASSWORD'; SecretName = 'woundai-admin-password' },
+        [pscustomobject]@{ EnvironmentName = 'JWT_SECRET_KEY'; SecretName = 'woundai-jwt-secret' },
+        [pscustomobject]@{ EnvironmentName = 'CARE_RECEIPT_SECRET'; SecretName = $CareReceiptSecret }
+    )
+    foreach ($expectedSecret in $secretExpected) {
+        $name = [string]$expectedSecret.EnvironmentName
         $ref = $envByName[$name].valueFrom.secretKeyRef
-        if ($null -eq $ref -or [string]$ref.name -cne [string]$secretExpected[$name] `
+        if ($null -eq $ref -or [string]$ref.name -cne [string]$expectedSecret.SecretName `
                 -or [string]$ref.key -cne 'latest') {
             throw "ready revision secret reference [$name] does not match the deployment contract"
         }

@@ -30,6 +30,14 @@ class DeploymentScriptSafetyTests(unittest.TestCase):
         self.assertIn("deployment source must be the checked-out main branch", src)
         self.assertIn("local main is not the current reviewed origin/main commit", src)
         self.assertIn("https://github.com/JackH0001/WoundAI_Proj.git", src)
+        self.assertIn("EnvironmentName = 'ADMIN_PASSWORD'", src)
+        self.assertIn("SecretName = 'woundai-admin-password'", src)
+        self.assertIn("EnvironmentName = 'JWT_SECRET_KEY'", src)
+        self.assertIn("SecretName = 'woundai-jwt-secret'", src)
+        self.assertNotRegex(
+            src, r"(?m)^\s+(?:ADMIN_PASSWORD|JWT_SECRET_KEY)\s*=",
+            "Secret Manager resource names must not resemble credential assignments",
+        )
 
     def test_deploy_preflight_precedes_publish_and_verify_only_repeats_it(self):
         src = text(DEPLOY)
