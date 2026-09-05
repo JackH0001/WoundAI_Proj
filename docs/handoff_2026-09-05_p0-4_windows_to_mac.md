@@ -13,8 +13,9 @@
 - Cloud SDK 相容修正：`ad059f71c87267f511440931793ff3509333d2c2`
 - audit v4／原子序列化：`346d8d7553e63075995e6b6f241ffd7ca9c0dd0e`
 - least-privilege canary 部署閘門：`e0e6761a4819247fb5745b54b2905f247527f86d`
+- gitleaks 資源名誤判精確處置：`d3e6e5e47e23486bdfd3f798ea15cdf804741a7d`
 
-Windows 端完成本文件時，最後兩筆 commit 尚未經遠端 CI；應以 push 後 PR #4 的新 head 與新 checks 為準，不得引用舊 head `ad059f7` 的綠燈替代。
+應以包含本文件的 PR #4 最新 head 與該 head 的 checks 為準；不得引用舊 head `ad059f7` 或 `f817e41` 的綠燈替代。
 
 ## 2. Windows 已建立的證據
 
@@ -39,6 +40,7 @@ Windows 隔離 runner 結果：**56/56 測試檔通過、0 失敗**，且 `sourc
   - `harden_bucket.ps1`：2597 tokens／90 variables。
   - `provision_runtime_identity.ps1`：2049 tokens／73 variables。
 - `git diff --check`：PASS。
+- gitleaks 8.28.0：修補後實掃 4 筆 commit 為 0 finding；另以 4 個新命中作負向控制，4/4 仍被攔截。`.gitleaksignore` 只列 `e0e6761` 的兩個完整 fingerprint，不按檔案或規則做寬泛豁免。
 - Docker Desktop engine 在本輪未能啟動，因此本機沒有建立部署映像；`.github/workflows/p0-4-audit.yml` 的 `backend-image` 必須在 GitHub CI 成功，才能補上這項證據。
 
 ## 3. Mac 取得與 commit 完整性檢查
@@ -58,7 +60,7 @@ git merge-base --is-ancestor 505ff2e69f68a3b263f16adca8608a4036d5953f HEAD
 git diff --check 505ff2e69f68a3b263f16adca8608a4036d5953f..HEAD
 ```
 
-須看到上述五筆 P0-4 commit 保持在同一條 first-parent 之外的分支歷史中；若 SHA 不同，先停下確認 PR 是否有經覆核的新 commit，不要自行 cherry-pick 舊 SHA。
+須看到上述六筆 P0-4 implementation／evidence commit 保持在線性分支歷史中；若 SHA 不同，先停下確認 PR 是否有經覆核的新 commit，不要自行 cherry-pick 舊 SHA。
 
 ## 4. Mac build／test
 
