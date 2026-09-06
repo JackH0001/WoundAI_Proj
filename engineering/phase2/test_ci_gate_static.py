@@ -83,6 +83,22 @@ class CIGateStaticTests(unittest.TestCase):
         self.assertIn("if ($pending.Count -eq 0) { break }", src)
         self.assertRegex(src, r'Die "timed out after \$TimeoutSeconds s')
 
+    def test_every_matching_run_is_judged_not_just_the_newest(self):
+        src = code_only(text(GATE))
+        # One commit can carry a push run and a pull_request run of the same
+        # workflow under separate ids (observed 2026-09-06 on gitleaks and
+        # integrity-gate). Selecting only the newest would let a red run hide
+        # behind a green one.
+        self.assertIn("$matched += $run", src)
+        self.assertIn("if ($matched.Count -eq 0)", src)
+        self.assertIn("$completed[$workflowName] = $matched", src)
+        self.assertIn("foreach ($run in @($completed[$workflowName])) {", src)
+        # No "newest wins" selection may come back.
+        self.assertNotIn("$matchCreated", src)
+        self.assertNotRegex(src, r"\$created\s+-gt\s")
+        # Every matching run must also be finished before any verdict is given.
+        self.assertIn("if ($unfinished.Count -gt 0)", src)
+
     def test_only_success_passes(self):
         src = code_only(text(GATE))
         self.assertIn("$verdict = 'FAIL'", src)

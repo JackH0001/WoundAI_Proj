@@ -192,6 +192,12 @@ if ($LASTEXITCODE -ne 0) { throw "CI gate failed -- STOP, do not merge" }
 `Backend/Flask/**`，所以 `endpoint-guards.yml` 不適用，必填清單只列
 `p0-4-audit.yml`、`gitleaks.yml`、`phase0-check.yml`。
 
+**三、同一個 commit 可能有同一個 workflow 的多個 run。**
+push 事件與 pull_request 事件各自產生獨立的 run id。2026-09-06 實測 `gitleaks` 與
+`integrity-gate` 在同一個 commit 上各有兩個 run。閘門判定的是**所有**符合條件的 run，
+不是只取最新的一個——否則紅的可以躲在綠的後面。（GitHub 的 re-run 是在同一個 run id 上
+增加 attempt，不會多出一筆，所以這條嚴格化不會擋住重跑。）
+
 決定清單的方法：看每個 workflow 的 `on:` 區塊。`on: [push, pull_request]`（`gitleaks`、
 `phase0-check`）一定會跑；有 `paths:` 的，逐條對照 `git diff --name-only origin/main...HEAD`
 的結果，有交集才列入。**寧可列少而準，也不要列一個跑不出來的**——但真正適用卻沒綠的，

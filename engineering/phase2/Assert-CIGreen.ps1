@@ -122,26 +122,32 @@ try {
             $runs = Invoke-GhJson "list runs of $workflowName" @(
                 'run', 'list', '--repo', $Repo, '--workflow', $workflowName, '--limit', '50',
                 '--json', 'databaseId,headSha,status,conclusion,createdAt,event,url')
-            $match = $null
-            $matchCreated = [datetime]::MinValue
+            $matched = @()
             foreach ($run in @($runs)) {
                 if ([string](Get-Prop $run 'headSha') -cne $Sha) { continue }
                 $created = ConvertTo-Utc ([string](Get-Prop $run 'createdAt')) "createdAt of a run"
                 # A run created before the caller pushed belongs to an earlier
                 # push of the same commit. It cannot answer for this one.
                 if ($created -lt $notBeforeUtc) { continue }
-                if ($null -eq $match -or $created -gt $matchCreated) {
-                    $match = $run
-                    $matchCreated = $created
+                # Keep every match, not just the newest. One commit can carry a
+                # push run and a pull_request run of the same workflow under
+                # separate ids; taking only the newest lets a red one hide
+                # behind a green one.
+                $matched += $run
+            }
+            if ($matched.Count -eq 0) { $pending += "$workflowName (no run yet)"; continue }
+            $unfinished = @()
+            foreach ($run in $matched) {
+                $status = [string](Get-Prop $run 'status')
+                if ($status -cne 'completed') {
+                    $unfinished += ("run " + [string](Get-Prop $run 'databaseId') + " $status")
                 }
             }
-            if ($null -eq $match) { $pending += "$workflowName (no run yet)"; continue }
-            $status = [string](Get-Prop $match 'status')
-            if ($status -cne 'completed') {
-                $pending += ("$workflowName (run " + [string](Get-Prop $match 'databaseId') + " $status)")
+            if ($unfinished.Count -gt 0) {
+                $pending += ("$workflowName (" + ($unfinished -join ', ') + ")")
                 continue
             }
-            $completed[$workflowName] = $match
+            $completed[$workflowName] = $matched
         }
         if ($pending.Count -eq 0) { break }
         if ((Get-Date).ToUniversalTime() -ge $deadline) {
@@ -154,15 +160,19 @@ try {
     Say "Verdict"
     $failed = @()
     foreach ($workflowName in $Workflow) {
-        $run = $completed[$workflowName]
-        $conclusion = [string](Get-Prop $run 'conclusion')
-        # Only 'success' passes. 'skipped' and 'neutral' mean the gate did not
-        # actually run, which is the state this script exists to refuse.
-        $verdict = 'FAIL'
-        if ($conclusion -ceq 'success') { $verdict = 'PASS' }
-        Write-Host ("{0,-5} {1,-24} run {2,-12} {3,-10} {4}" -f $verdict, $workflowName,
-            [string](Get-Prop $run 'databaseId'), $conclusion, [string](Get-Prop $run 'url'))
-        if ($verdict -cne 'PASS') { $failed += "$workflowName=$conclusion" }
+        # Every matching run is judged, so a second run of the same workflow for
+        # the same commit cannot be skipped over.
+        foreach ($run in @($completed[$workflowName])) {
+            $conclusion = [string](Get-Prop $run 'conclusion')
+            $runEvent = [string](Get-Prop $run 'event')
+            # Only 'success' passes. 'skipped' and 'neutral' mean the gate did
+            # not actually run, which is the state this script exists to refuse.
+            $verdict = 'FAIL'
+            if ($conclusion -ceq 'success') { $verdict = 'PASS' }
+            Write-Host ("{0,-5} {1,-24} {2,-13} run {3,-12} {4,-10} {5}" -f $verdict, $workflowName,
+                $runEvent, [string](Get-Prop $run 'databaseId'), $conclusion, [string](Get-Prop $run 'url'))
+            if ($verdict -cne 'PASS') { $failed += "$workflowName/$runEvent=$conclusion" }
+        }
     }
     if ($failed.Count -gt 0) { Die "required workflows not successful: $($failed -join ', ')" }
 
