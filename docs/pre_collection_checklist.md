@@ -178,6 +178,25 @@ if ($LASTEXITCODE -ne 0) { throw "CI gate failed -- STOP, do not merge" }
 `.github/workflows/p0-4-audit.yml` 的 CI 步驟與 path filter 內——**測試沒被 CI 跑，
 就只是文件，不是閘門**。
 
+#### 兩個順序陷阱（2026-09-06 第一次實跑閘門時撞到）
+
+**一、只在 `pull_request` 觸發的 workflow，必須先開 PR 才跑得出 run。**
+`p0-4-audit.yml` 與 `endpoint-guards.yml` 的 `push` 觸發都限定 `branches: [main]`，
+推到功能分支不會產生 run；要等 PR 存在、`pull_request` 事件觸發之後才有。所以順序是
+**push → `gh pr create --draft` → 跑閘門**，不是 push 之後直接跑閘門。用 draft 開 PR
+即可，`gh pr ready` 仍留在閘門通過之後。
+
+**二、必填清單必須是對「這次變更」真正適用的 workflow。**
+帶 `paths:` 的 workflow 只在改到那些路徑時才跑。把一個結構上不會被觸發的 workflow 列進
+必填，閘門會正確地永遠不通過——那不是誤判，是清單開錯。2026-09-06 這次變更沒有碰
+`Backend/Flask/**`，所以 `endpoint-guards.yml` 不適用，必填清單只列
+`p0-4-audit.yml`、`gitleaks.yml`、`phase0-check.yml`。
+
+決定清單的方法：看每個 workflow 的 `on:` 區塊。`on: [push, pull_request]`（`gitleaks`、
+`phase0-check`）一定會跑；有 `paths:` 的，逐條對照 `git diff --name-only origin/main...HEAD`
+的結果，有交集才列入。**寧可列少而準，也不要列一個跑不出來的**——但真正適用卻沒綠的，
+一個都不能省。
+
 合併仍為獨立閘門：CI 全綠只是必要條件，`gh pr ready` 與 `gh pr merge` 需要專案負責人
 在看過閘門輸出後另行決定。
 
