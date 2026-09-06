@@ -132,6 +132,80 @@ python engineering\phase2\smoke_audit_chain_gcs.py  # 僅限明確標記的空 s
 或另一個帳號）。這是唯一能揭露「整條鏈被重算」的手段——雜湊鏈本身偵測得了單點竄改，
 但擋不住有寫入權限的人把整條重算成一致的樣子。
 
+### B5. 合併閘門 —— CI 必須先綠，而且必須是**這一次推送**的 CI
+
+2026-09-06 的實際教訓（兩個 fail-open，同一天各出現一次）：
+
+1. `gh pr checks <n> --watch` 印出 `no checks reported`，被當成「沒有紅燈＝可以合併」。
+   它真正的意思是**查詢當下 check run 還沒被建立**。該次 check run 的建立時間是
+   `07:05:51Z`，晚於指令執行的時刻。`--watch` 不會等待 check 被「建立」，筆數為 0 就
+   直接結束；PowerShell 預設不會因為非零 exit code 停下，於是 `gh pr ready` 與
+   `gh pr merge` 在**完全沒有任何 CI 結果**的狀態下跑完了。
+2. 補救時改用 `gh run list --commit $sha` ＋ `gh run watch --exit-status`，回報
+   `already completed with 'success'`——但那個 run 屬於**更早一次推送**，而當下要驗的
+   那次 `git push` 其實失敗了（指令裡留著 `<branch>` 佔位符）。只憑 SHA 查 run，
+   分不出「這次推上去的」與「上次推上去的」。
+
+因此**不要**用 `gh pr checks --watch` 當閘門。改用：
+
+```powershell
+cd C:\dev\WoundAI_Proj
+$notBefore = (Get-Date).ToUniversalTime()      # 一定要在 push 之前抓
+$sha = (git rev-parse HEAD)
+git push origin HEAD:refs/heads/<你要推的分支名，親手打，不要留角括號>
+if ($LASTEXITCODE -ne 0) { throw "push failed -- STOP" }
+
+.\engineering\phase2\Assert-CIGreen.ps1 `
+  -Repo JackH0001/WoundAI_Proj `
+  -Ref  heads/<同一個分支名> `
+  -Sha  $sha `
+  -Workflow p0-4-audit.yml, gitleaks.yml, phase0-check.yml, endpoint-guards.yml `
+  -NotBefore $notBefore
+if ($LASTEXITCODE -ne 0) { throw "CI gate failed -- STOP, do not merge" }
+```
+
+`Assert-CIGreen.ps1` 只觀察、不動作（不 push、不 ready、不 merge），並且機械性地拒絕：
+
+- 帶佔位符形狀的參數（`<>`、`輸入`、`填入`、`placeholder`、`範本`、`TODO`）
+- 縮寫的 commit id（只收完整 40 碼，避免前綴比對配到別的 run）
+- 遠端 ref 不等於要驗的 commit（＝推送沒真的落地）
+- 建立時間早於 `-NotBefore` 的 run（＝上一次推送留下的綠燈）
+- 沒有 run、run 還沒跑完、逾時（一律不算綠）
+- `success` 以外的任何結論，`skipped` 與 `neutral` 也算失敗——那代表閘門根本沒跑
+
+這些性質由 `engineering/phase2/test_ci_gate_static.py` 靜態鎖住，並已用突變測試證明
+每一條斷言都真的會抓（拿掉任何一項保護，對應的測試就變紅）。該測試本身也在
+`.github/workflows/p0-4-audit.yml` 的 CI 步驟與 path filter 內——**測試沒被 CI 跑，
+就只是文件，不是閘門**。
+
+#### 三個實跑才發現的陷阱（2026-09-06 第一次真正使用閘門時撞到）
+
+**一、只在 `pull_request` 觸發的 workflow，必須先開 PR 才跑得出 run。**
+`p0-4-audit.yml` 與 `endpoint-guards.yml` 的 `push` 觸發都限定 `branches: [main]`，
+推到功能分支不會產生 run；要等 PR 存在、`pull_request` 事件觸發之後才有。所以順序是
+**push → `gh pr create --draft` → 跑閘門**，不是 push 之後直接跑閘門。用 draft 開 PR
+即可，`gh pr ready` 仍留在閘門通過之後。
+
+**二、必填清單必須是對「這次變更」真正適用的 workflow。**
+帶 `paths:` 的 workflow 只在改到那些路徑時才跑。把一個結構上不會被觸發的 workflow 列進
+必填，閘門會正確地永遠不通過——那不是誤判，是清單開錯。2026-09-06 這次變更沒有碰
+`Backend/Flask/**`，所以 `endpoint-guards.yml` 不適用，必填清單只列
+`p0-4-audit.yml`、`gitleaks.yml`、`phase0-check.yml`。
+
+**三、同一個 commit 可能有同一個 workflow 的多個 run。**
+push 事件與 pull_request 事件各自產生獨立的 run id。2026-09-06 實測 `gitleaks` 與
+`integrity-gate` 在同一個 commit 上各有兩個 run。閘門判定的是**所有**符合條件的 run，
+不是只取最新的一個——否則紅的可以躲在綠的後面。（GitHub 的 re-run 是在同一個 run id 上
+增加 attempt，不會多出一筆，所以這條嚴格化不會擋住重跑。）
+
+決定清單的方法：看每個 workflow 的 `on:` 區塊。`on: [push, pull_request]`（`gitleaks`、
+`phase0-check`）一定會跑；有 `paths:` 的，逐條對照 `git diff --name-only origin/main...HEAD`
+的結果，有交集才列入。**寧可列少而準，也不要列一個跑不出來的**——但真正適用卻沒綠的，
+一個都不能省。
+
+合併仍為獨立閘門：CI 全綠只是必要條件，`gh pr ready` 與 `gh pr merge` 需要專案負責人
+在看過閘門輸出後另行決定。
+
 ---
 
 ## C. 程式解決不了的（這一節才是真正的關卡）
