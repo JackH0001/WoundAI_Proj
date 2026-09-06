@@ -178,7 +178,7 @@ if ($LASTEXITCODE -ne 0) { throw "CI gate failed -- STOP, do not merge" }
 `.github/workflows/p0-4-audit.yml` 的 CI 步驟與 path filter 內——**測試沒被 CI 跑，
 就只是文件，不是閘門**。
 
-#### 兩個順序陷阱（2026-09-06 第一次實跑閘門時撞到）
+#### 三個實跑才發現的陷阱（2026-09-06 第一次真正使用閘門時撞到）
 
 **一、只在 `pull_request` 觸發的 workflow，必須先開 PR 才跑得出 run。**
 `p0-4-audit.yml` 與 `endpoint-guards.yml` 的 `push` 觸發都限定 `branches: [main]`，
