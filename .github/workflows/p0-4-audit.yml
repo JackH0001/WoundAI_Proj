@@ -16,6 +16,8 @@ on:
       - 'engineering/phase2/test_runtime_golden_contract.py'
       - 'engineering/phase2/test_store_abstraction.py'
       - 'engineering/phase2/verify_audit_chain.py'
+      - 'engineering/phase2/Assert-CIGreen.ps1'
+      - 'engineering/phase2/test_ci_gate_static.py'
       - '.github/workflows/p0-4-audit.yml'
   pull_request:
     paths:
@@ -31,6 +33,8 @@ on:
       - 'engineering/phase2/test_runtime_golden_contract.py'
       - 'engineering/phase2/test_store_abstraction.py'
       - 'engineering/phase2/verify_audit_chain.py'
+      - 'engineering/phase2/Assert-CIGreen.ps1'
+      - 'engineering/phase2/test_ci_gate_static.py'
       - '.github/workflows/p0-4-audit.yml'
   workflow_dispatch:
 
@@ -67,6 +71,7 @@ jobs:
           python -B engineering/phase2/test_admin_console.py
           python -B engineering/phase2/test_deployment_scripts_static.py
           python -B engineering/phase2/test_check_locked_epoch_gate.py
+          python -B engineering/phase2/test_ci_gate_static.py
           python -B engineering/phase2/test_store_abstraction.py
           python -B engineering/phase2/test_p0_4_staging.py
           python -B engineering/phase2/test_runtime_golden_contract.py
