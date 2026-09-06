@@ -9,6 +9,8 @@ environment behavior and prevents module/global state leaking between files.
 from __future__ import annotations
 
 import argparse
+import ast
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -41,6 +43,23 @@ CI_TESTS = {
 INTEGRATION_TESTS = {"engineering/phase2/test_backend_http.py"}
 
 
+def source_snapshot(repo: Path) -> dict:
+    """Bind evidence to actual tracked and untracked code, not just dirty HEAD."""
+    git = ["git", "-c", "safe.directory=" + repo.as_posix(), "--no-optional-locks", "-C", str(repo)]
+    def read(*args):
+        return subprocess.run(git + list(args), check=True, capture_output=True).stdout
+    paths = set(read("ls-files", "-z").decode("utf-8").split("\0"))
+    paths.update(read("ls-files", "--others", "--exclude-standard", "-z").decode("utf-8").split("\0"))
+    # No weights, patient images, generated build products or secret values.
+    suffixes = {".py", ".kt", ".swift", ".ps1", ".md", ".yaml", ".yml"}
+    hashes = {}
+    for rel in sorted(paths):
+        p = repo / rel
+        if rel and p.suffix.lower() in suffixes and p.is_file():
+            hashes[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+    return {"head": read("rev-parse", "HEAD").decode().strip(), "sha256": hashes}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, required=True)
@@ -71,21 +90,31 @@ def main() -> int:
     env["PYTHONPATH"] = os.pathsep.join(map(str, search))
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+    env["WOUNDAI_REQUIRE_FUNCTIONAL_TESTS"] = "1"
     temp_root = out / "temp"
     temp_root.mkdir(parents=True, exist_ok=True)
     env["TEMP"] = str(temp_root)
     env["TMP"] = str(temp_root)
 
     results: list[dict[str, object]] = []
+    snapshot_before = source_snapshot(repo)
     started = time.time()
     for index, test in enumerate(tests, 1):
         rel = test.relative_to(repo).as_posix()
         log_path = logs / (rel.replace("/", "__") + ".log")
         print(f"[{index:02d}/{len(tests):02d}] {rel}", flush=True)
         t0 = time.time()
+        tree = ast.parse(test.read_text(encoding="utf-8-sig"))
+        has_entrypoint = any(isinstance(n, ast.If) and "__name__" in ast.unparse(n.test)
+                             for n in tree.body)
+        pytest_only = not has_entrypoint and any(
+            isinstance(n, ast.FunctionDef) and n.name.startswith("test_") for n in tree.body)
+        command = ([sys.executable, "-m", "pytest", str(test), "-q", "-p", "no:cacheprovider",
+                    "--junitxml=" + str(log_path.with_suffix(".xml"))]
+                   if pytest_only else [sys.executable, str(test)])
         try:
             proc = subprocess.run(
-                [sys.executable, str(test)],
+                command,
                 cwd=repo,
                 env=env,
                 text=True,
@@ -105,6 +134,7 @@ def main() -> int:
         log_path.write_text(output, encoding="utf-8")
         result = {
             "test": rel,
+            "runner": "pytest" if pytest_only else "script-entrypoint",
             "status": status,
             "exit_code": code,
             "seconds": round(time.time() - t0, 3),
@@ -113,6 +143,8 @@ def main() -> int:
         results.append(result)
         print(f"       {status.upper()} ({result['seconds']}s)", flush=True)
 
+    snapshot_after = source_snapshot(repo)
+    stable = snapshot_before == snapshot_after
     summary = {
         "repo": str(repo),
         "python": sys.version,
@@ -122,6 +154,10 @@ def main() -> int:
         "failed": sum(r["status"] != "passed" for r in results),
         "seconds": round(time.time() - started, 3),
         "results": results,
+        "source_snapshot_before": snapshot_before,
+        "source_snapshot_same_after": stable,
+        "does_not_establish": ["iOS build", "Android UI/HTTP end-to-end", "deployment image golden bytes",
+                               "cloud configuration or live service state", "clinical readiness"],
     }
     (out / "python-summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -130,7 +166,9 @@ def main() -> int:
         f"Python summary: {summary['passed']}/{summary['total']} passed; "
         f"{summary['failed']} failed; {summary['seconds']}s"
     )
-    return 0 if summary["failed"] == 0 else 1
+    if not stable:
+        print("SOURCE CHANGED DURING VALIDATION: results cannot sign off the current tree")
+    return 0 if summary["failed"] == 0 and stable else 1
 
 
 if __name__ == "__main__":

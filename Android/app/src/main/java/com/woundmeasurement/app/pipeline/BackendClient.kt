@@ -82,7 +82,9 @@ data class ClassifyResult(
      */
     val imageReused: Boolean = false,
     /** 模擬圖模式實際用了哪一段:strict / gray_world_wb(偏色時已自動白平衡重試)。 */
-    val phantomPass: String? = null
+    val phantomPass: String? = null,
+    val persisted: Boolean = false,
+    val persistenceReason: String? = null
 )
 
 /**
@@ -240,11 +242,24 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
      * @param seg null/"auto"=AI 分割(student→難例 A∪U);"color"=印刷模擬圖走決定性 HSV 色彩分割,
      *   **完全不碰模型**。印刷色塊是分布外樣本,模型實測回空遮罩;而驗證量測鏈也不該拿 AI 當量尺。
      */
-    fun classify(jpeg: ByteArray, cmPerPixel: Double? = null, seg: String? = null): ClassifyResult {
+    /** Call only after a fresh care-consent check or an explicit sample/phantom selection. */
+    fun attestCare(code: String): String? {
+        val body = JSONObject().put("code", code).toString().toRequestBody("application/json".toMediaType())
+        val req = Request.Builder().url("$baseUrl/api/v1/consent/care/attest")
+            .header("Authorization", "Bearer $jwt").post(body).build()
+        return http.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) null else JSONObject(resp.body!!.string())
+                .optString("care_receipt").takeIf { it.isNotBlank() }
+        }
+    }
+
+    fun classify(jpeg: ByteArray, cmPerPixel: Double? = null, seg: String? = null,
+                 careReceipt: String? = null): ClassifyResult {
         val bodyBuilder = MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("image", "wound.jpg", jpeg.toRequestBody("image/jpeg".toMediaType()))
         if (cmPerPixel != null) bodyBuilder.addFormDataPart("cm_per_pixel", cmPerPixel.toString())
         if (seg != null) bodyBuilder.addFormDataPart("seg", seg)
+        if (careReceipt != null) bodyBuilder.addFormDataPart("care_receipt", careReceipt)
         val req = Request.Builder().url("$baseUrl/api/v1/classify")
             .header("Authorization", "Bearer $jwt").post(bodyBuilder.build()).build()
         http.newCall(req).execute().use { resp ->
@@ -317,7 +332,7 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
                     if (c.optBoolean("ok")) c.optString("reason", "").takeIf { it.isNotBlank() }
                     else c.optString("reason", "色準校正未執行").takeIf { it.isNotBlank() }
                 },
-                imageId = if (j.isNull("image_id")) null else j.getString("image_id"),
+                imageId = if (!j.optBoolean("persisted", false) || j.isNull("image_id")) null else j.getString("image_id"),
                 imageW = j.optInt("image_w", 0),
                 imageH = j.optInt("image_h", 0),
                 segModel = if (s2.isNull("model")) null else s2.getString("model"),
@@ -326,7 +341,9 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
                 // isNull() 已涵蓋「鍵不存在」與「值為 JSON null」兩種情形,故此處可直接 getString。
                 // 不用 optString(name, null):org.json 把 fallback 宣告為非 null,傳 null 會讓
                 // Kotlin 推導出 Nothing? 而發出型別警告(執行期雖可行,但那是靠平台型別的漏洞)。
-                phantomPass = if (j.isNull("phantom_pass")) null else j.getString("phantom_pass")
+                phantomPass = if (j.isNull("phantom_pass")) null else j.getString("phantom_pass"),
+                persisted = j.optBoolean("persisted", false),
+                persistenceReason = j.optString("persistence_reason").takeIf { it.isNotBlank() }
             )
         }
     }

@@ -1,0 +1,7 @@
+# Published PR commit e0e6761 used these two literal strings only as Google
+# Secret Manager resource names in a deployment-contract map. They were never
+# credential values. The current source models resource names separately so
+# future commits do not need an exception; these fingerprints cover only the
+# immutable historical false positives reported by gitleaks 8.28.0.
+e0e6761a4819247fb5745b54b2905f247527f86d:Backend/Flask/deploy_cloudrun.ps1:woundai-generic-pw-assign:375
+e0e6761a4819247fb5745b54b2905f247527f86d:Backend/Flask/deploy_cloudrun.ps1:woundai-flask-secret-default:376

@@ -7,14 +7,40 @@
 > **2026-07-28 更新**：飛輪端點已實作（非「待實作」）；classify 回應新增 `image_id` / `image_w` / `image_h`，
 > 且 annotation **強制**帶回這三者。原因見「飛輪資料鏈」一節。
 
+## P0-4 Phase A（本地候選，尚未部署）
+
+先取得 `POST /api/v1/consent/care/attest {"code":"WD-..."}` 收據，需 JWT 與
+`measure.clinical`。App 必須先重讀①照護同意；sample/phantom 則由授權角色對 demo code
+明確斷言。這是角色負責的聲明，不是伺服器驗證了病患簽名。回傳 `care_receipt` 與
+`expires_at`；收據僅存記憶體，不寫 log／URL／App 資料庫。
+
+classify multipart 可帶 `care_receipt`。無效或缺席仍可分析，但回
+`persisted:false, image_id:null, persistence_reason`，且不寫任何影像／bind。
+有效時只寫 `staging/` 與無身分明文的 `staging_meta/bind/`；不是訓練集。
+`canonicalization_version` 回報實際 canonical 演算法／OpenCV／JPEG q95。
+影像一律 canonical JPEG：safe JFIF 原位元組保留；metadata 移除前先套方向；PNG
+若有 alpha/tRNS 回400，否則轉 JPEG。分析像素一律為 decode(canonical)。
+
+annotation 通過原有權限／三同意與撤回閘門後，先建立受保護的不可覆寫 promotion
+receipt，再複製到 images，最後入列。code/org/image_id 必須與 receipt 一致；同人同
+sample_key 重送略過，異人平行標註保留。失敗恢復不由 audit 文字推導。
+舊資料缺有效 promotion receipt 且未受核准的 legacy 清單涵蓋時，三個訓練匯出入口
+都以 `legacy_unratified` 排除，不能用 `legacy_image:false` 繞過。
+
+Phase A TTL 是配置目標（staging30天／metadata37天），**目前程式不代表雲端規則已套用**。
+部署映像 lock/golden、Mac build、雲端 lifecycle 讀回與獨立覆核尚是交付閘門。
+Phase B exact-byte restage／7天 TTL 未交付；不得據此解除範例／模擬資料限制。
+
 ## POST /api/v1/classify
-**Req(multipart)**：`image=<jpg/png>`；選配 `cm_per_pixel=<float>`（無 ArUco 時手動校正，
+**Req(multipart)**：`image=<jpg/png>`；選配 `care_receipt`（持久化選入）；選配 `cm_per_pixel=<float>`（無 ArUco 時手動校正，
 單位為**上傳影像**的 cm/px——App 若先縮圖，須換算後再傳）；選配 `escalate=off` 關閉自動上雲；選配 **`seg=color`**（印刷模擬圖走決定性 HSV 色彩分割，**不使用 AI 模型**，回應多 `phantom_mode:true`、`route:"phantom_color(非AI)"`、`model:"color_hsv(phantom)"`；組織/PUSH 照常計算但附 `note` 警語，因模擬圖可能做成多組織混色示範）。
 
 **Resp 200(json)**：
 ```json
 {
  "image_id": "aaaabbbbccccdddd",
+ "persisted": true, "persistence_reason": "staged",
+ "canonicalization_version": "canon-v1;cv2==<runtime>;jpeg_q=95",
  "image_w": 2048, "image_h": 1536,
  "stage2_segment": {"model":"student","wound_ratio":0.077,"confidence":0.83,
                     "route":"student","escalated":false,"au_area_ratio":1.02,"iou_student_au":0.87,
@@ -28,7 +54,7 @@
 
 | 欄位 | 用途 |
 |---|---|
-| `image_id` | 上傳影像內容 sha1 前 16 碼；後端已存於 `flywheel/images/<id>.jpg`。**送標註時必須帶回** |
+| `image_id` | canonical JPEG 的 sha1 前16碼；客戶端視為 opaque ID。僅 persisted=true 才發給 App，通常尚在 staging，不表示已有訓練同意 |
 | `image_w` / `image_h` | `wound_polygon` 與醫師修邊 GT 的座標空間。缺了就無法把 polygon 柵格化成遮罩 |
 | `wound_polygon` | 最大連通輪廓（approxPolyDP 0.003），供 App 醫師修邊起點 |
 | `mm_per_px` | ArUco 尺度直傳。App 修邊面積＝像素數×(mm/px)²，**不依賴 AI 初始面積** |
@@ -54,7 +80,7 @@ Req `image` → Resp `{ mask_png_b64, model, model_version, route:"cloud" }`；�
 | `image_id` | ✔ | classify 回傳值，`^[0-9a-f]{16}$`；後端須查得到該影像 |
 | `image_w` / `image_h` | ✔ | classify 回傳值 |
 | `mm_per_px` / `route` / `seg_model` / `app_version` / `correction_iou` / `care_note` | — | 溯源，建議都帶 |
-| `source` | — | `clinical`(預設) / `sample` / `phantom` / `external`。**範例與模擬影像務必標明**，否則臨床樣本數會被灌水 |
+| `source` | ✔ | `clinical` / `sample` / `phantom` / `external`。新標註不可省略；舊紀錄的歷史預設值仍保留 |
 
 **Resp**：
 - `200 {status:"enqueued", code, image_id, note}` — 已入佇列（`note` 非空表示本筆是同影像的醫師修訂版）
@@ -90,14 +116,14 @@ Req `image` → Resp `{ mask_png_b64, model, model_version, route:"cloud" }`；�
 佇列裡 8/8 筆都是「孤兒 GT」，既無像素可訓練，也無尺寸可柵格化。修正後的鏈路：
 
 ```
-classify（存影像、回 image_id + 尺寸）
+care/attest → classify（canonical → staging，回 image_id + 尺寸；無收據只分析）
    → App 醫師修邊（GT，座標空間＝image_w×image_h）
-   → annotation（強制綁定，缺者 400）
+   → annotation（強制身分綁定＋同意；receipt → images → queue）
    → stats（看 trainable）
    → engineering/phase2/export_flywheel_dataset.py → images/masks/manifest/資料卡
 ```
 
 其他細節見 `Backend/Flask/flywheel/README.md`。
 
-> 註：iOS 走的是另一套 `/annotations` 契約（`openapi/annotation_segmentation.yaml`、
-> `AnnotationFlywheelService.swift`），**尚未對齊本次修正**，是已知待收斂項。
+> iOS `Core/BackendClient.swift` 與 Android `pipeline/BackendClient.kt` 都已接此契約。
+> 本地候選的 iOS 修改仍須 Mac build/test；不能以文件更新取代平台驗證。

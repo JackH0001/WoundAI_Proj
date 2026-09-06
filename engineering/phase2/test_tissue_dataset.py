@@ -103,6 +103,9 @@ def main():
         open(os.path.join(tmp, "images", iid + ".jpg"), "wb").write(jpg)
         ids[tag] = iid
 
+    from _synthetic_receipts import ratify_synthetic
+    ratify_synthetic(tmp, ids.values())
+
     GOOD_Q = {"focus_lapvar": 180.0, "clipped_frac": 0.01, "marker_skew": 0.05,
               "marker_frac": 0.09, "roi_short_px": 700}
 
@@ -233,6 +236,7 @@ def main():
     pid = hashlib.sha1(jpg).hexdigest()[:16]
     open(os.path.join(tmp, "images", pid + ".jpg"), "wb").write(jpg)
     ids["pair"] = pid
+    ratify_synthetic(tmp, [pid])
 
     s1, _ = post("/api/v1/annotation", "physician", anno("pair", "WD-PAIR", make_png(val=1)))
     d2 = anno("pair", "WD-PAIR", make_png(val=2))

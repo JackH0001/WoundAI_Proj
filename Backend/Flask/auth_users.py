@@ -158,17 +158,33 @@ def get_user(org: str, user: str):
     return _read_all().get(identity(org, user))
 
 
-def upsert_user(org: str, user: str, role: str, password: str = None,
-                display_name: str = None, disabled: bool = None, actor: str = "system"):
-    """新增或更新。**append 一筆新紀錄**，不改寫舊的——帳號的變更歷史本身就是稽核軌跡。"""
-    if not ORG_RE.match(org or ""):
+def validate_upsert_user(org: str, user: str, role: str, password: str = None):
+    """驗證帳號異動而不寫入，並回傳目前紀錄。
+
+    API 必須在寫入不可變 audit intent 之前先拒絕格式錯誤。驗證規則集中在這裡，
+    避免路由與真正寫入路徑各自維護一份、日後悄悄漂移。
+    """
+    if not isinstance(org, str) or not ORG_RE.match(org):
         raise ValueError("org 格式不合（小寫英數與連字號，2-21 字）")
-    if not USER_RE.match(user or ""):
+    if not isinstance(user, str) or not USER_RE.match(user):
         raise ValueError("user 格式不合（小寫英數起始，可含 . _ -，2-31 字）")
-    if role not in ROLES:
+    if not isinstance(role, str) or role not in ROLES:
         raise ValueError("role 須為 %s" % "/".join(ROLES))
 
     cur = get_user(org, user) or {}
+    if password is not None and not isinstance(password, str):
+        raise ValueError("password 必須是字串")
+    if password and len(password) < 10:
+        raise ValueError("密碼至少 10 字元")
+    if not password and not cur.get("pw"):
+        raise ValueError("新帳號必須提供密碼")
+    return cur
+
+
+def upsert_user(org: str, user: str, role: str, password: str = None,
+                display_name: str = None, disabled: bool = None, actor: str = "system"):
+    """新增或更新。**append 一筆新紀錄**，不改寫舊的——帳號的變更歷史本身就是稽核軌跡。"""
+    cur = validate_upsert_user(org, user, role, password)
     rec = {
         "org": org, "user": user, "role": role,
         "display_name": display_name if display_name is not None else cur.get("display_name"),
@@ -178,14 +194,9 @@ def upsert_user(org: str, user: str, role: str, password: str = None,
         "updated_by": actor,
     }
     if password:
-        if len(password) < 10:
-            # 這是公開網址上的服務，密碼是唯一的門
-            raise ValueError("密碼至少 10 字元")
         rec["pw"] = hash_password(password)
     elif cur.get("pw"):
         rec["pw"] = cur["pw"]
-    else:
-        raise ValueError("新帳號必須提供密碼")
 
     _store().append_line(USERS_KEY, json.dumps(rec, ensure_ascii=False))
     return {k: v for k, v in rec.items() if k != "pw"}

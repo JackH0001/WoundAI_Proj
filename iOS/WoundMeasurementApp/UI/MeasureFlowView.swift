@@ -45,6 +45,7 @@ final class MeasureViewModel: ObservableObject {
     @Published var submitStatus: String?
 
     private var backend: BackendClient?
+    private var boundCareCode: String?
 
     func ensureLogin() async -> Bool {
         let user = AppSettings.backendUser(), pass = AppSettings.backendPassword()
@@ -135,7 +136,9 @@ final class MeasureViewModel: ObservableObject {
     /// - Parameter depth: 相機拍攝當下的深度圖（相簿／檔案來源傳 nil）。
     @Published var loadingHint = "分析中…"
 
-    func analyze(_ img: UIImage, phantom: Bool, depth: DepthCapture? = nil) async {
+    func analyze(_ img: UIImage, phantom: Bool, depth: DepthCapture? = nil,
+                 repo: CaseRepository? = nil, woundCase: WoundCase? = nil) async {
+        boundCareCode = nil
         // ⚠ 轉圈圈必須在 **ensureLogin 之前**開始：冷啟動吃在登入那一次呼叫上，
         //   之前 loading 是 classify 才開——喚醒的 10–30 秒畫面看起來像當機。
         loading = true; error = nil; statusNote = nil
@@ -159,7 +162,20 @@ final class MeasureViewModel: ObservableObject {
             error = "影像編碼失敗"; return
         }
         do {
-            var r = try await backend.classify(jpeg: jpeg, seg: phantom ? "color" : nil)
+            var careCode: String?
+            if source == "clinical", let repo, let woundCase {
+                let fresh = await repo.activeConsent(patientId: woundCase.patientId)
+                if fresh?.consentCare == true && fresh?.withdrawnAt == nil { careCode = woundCase.wdCode }
+            } else if source == "sample" || source == "phantom" {
+                careCode = WoundCase.newWdCode()
+            }
+            var receipt: String?
+            if let careCode { receipt = try? await backend.attestCare(code: careCode) }
+            var r = try await backend.classify(jpeg: jpeg, seg: phantom ? "color" : nil, careReceipt: receipt)
+            guard r.imageW == Int(work.size.width * work.scale), r.imageH == Int(work.size.height * work.scale) else {
+                error = "後端影像座標空間不一致"; return
+            }
+            boundCareCode = receipt != nil && r.persisted ? careCode : nil
             AppSettings.markBackendOk()
             // ArUco 認到貼紙時，把「大部分落在貼紙上的傷口輪廓」自動排除——
             // 印刷黑白方塊常被分割當成壞死組織（實機 2026-08-09 發生：貼紙被當成多傷口之一）。
@@ -322,6 +338,10 @@ final class MeasureViewModel: ObservableObject {
             saveNote = "尚未完成量測，沒有可存的結果。"
             return false
         }
+        if let woundCase, let boundCareCode, woundCase.wdCode != boundCareCode {
+            saveNote = "量測後個案已切換，不得把舊影像存入另一個案；請重新量測"
+            return false
+        }
         saving = true
         defer { saving = false }
 
@@ -368,7 +388,7 @@ final class MeasureViewModel: ObservableObject {
                                     route: r.route, iou: raster?.correctionIou)
         m.isPatientIdentified = woundCase?.patientId != nil
         m.caseId = woundCase?.id
-        m.wdCode = woundCase?.wdCode
+        m.wdCode = boundCareCode ?? woundCase?.wdCode
         m.imageId = r.imageId
         m.mmPerPx = r.mmPerPx
         m.route = r.route
@@ -474,7 +494,9 @@ final class MeasureViewModel: ObservableObject {
             submitStatus = "⚠️ " + (error ?? "後端未連線"); return
         }
         // 臨床用個案的**穩定** wdCode（回診沿用同一組）；範例／模擬圖沒有個案才另發。
-        let code = woundCase?.wdCode ?? WoundCase.newWdCode()
+        guard let code = boundCareCode, !clinicalMode || woundCase?.wdCode == code else {
+            submitStatus = "⚠️ 缺照護收據綁定或個案已切換，請重新量測"; return
+        }
         // 深度研究資料（去識別幾何：深度圖＋內參，無 RGB、無 PHI）。
         // 隨②同意把關的標註一起上傳——契約 docs/depth_capture_contract.md。
         // 深度 PNG／組織遮罩的編碼＋base64 是 MB 級工作，移出主執行緒；
@@ -759,7 +781,8 @@ struct MeasureFlowView: View {
                     if let data = try? await newValue.loadTransferable(type: Data.self),
                        let img = UIImage(data: data) {
                         vm.source = clinicalMode ? "clinical" : (phantom ? "phantom" : "sample")
-                        await vm.analyze(img, phantom: phantom && !clinicalMode)
+                        await vm.analyze(img, phantom: phantom && !clinicalMode,
+                                         repo: app.repo, woundCase: clinicalMode ? app.chosenCase : nil)
                     }
                 }
             }
@@ -779,7 +802,8 @@ struct MeasureFlowView: View {
                         showCamera = false
                         Task {
                             vm.source = clinicalMode ? "clinical" : (phantom ? "phantom" : "sample")
-                            await vm.analyze(img, phantom: phantom && !clinicalMode, depth: depth)
+                            await vm.analyze(img, phantom: phantom && !clinicalMode, depth: depth,
+                                             repo: app.repo, woundCase: clinicalMode ? app.chosenCase : nil)
                         }
                     },
                     onCancel: { showCamera = false })
@@ -795,7 +819,8 @@ struct MeasureFlowView: View {
                 }
                 Task {
                     vm.source = clinicalMode ? "clinical" : (phantom ? "phantom" : "sample")
-                    await vm.analyze(img, phantom: phantom && !clinicalMode)
+                    await vm.analyze(img, phantom: phantom && !clinicalMode,
+                                     repo: app.repo, woundCase: clinicalMode ? app.chosenCase : nil)
                 }
             }
             .onChange(of: vm.submitStatus) { _, s in

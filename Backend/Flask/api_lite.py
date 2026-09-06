@@ -508,11 +508,9 @@ def lite_delete(anon_id):
     # 那既無法訓練，也還留著一份這個裝置曾經提供過資料的痕跡。
     labels = os.path.join(_dir(), "lite_labels.jsonl")
     n_lab = len([e for e in _fw.read_jsonl(labels) if e.get("anon_id") == anon_id])
-    if n_lab:
-        _fw.append_jsonl(labels, {"anon_id": anon_id, "action": "deleted",
-                                  "received_at": _fw.utc_now()})
     st = _fw._store()
     n = 0
+    failures = []
     for e in rows:
         for suf in (".jpg", ".json", ".depth.png", ".conf.png"):
             k = _fw._key(os.path.join(_dir(), "lite/%s/%s%s" % (anon_id, e.get("image_id"), suf)))
@@ -520,8 +518,20 @@ def lite_delete(anon_id):
                 if st.exists(k):
                     st.delete(k)
                     n += 1
-            except Exception:
-                pass
+            except Exception as exc:
+                # A 200 "deleted" response after a failed object delete is a
+                # false privacy claim.  Keep the mutable local index honest so
+                # an operator can retry without pretending the request worked.
+                failures.append({"key": k, "error": type(exc).__name__})
+    if failures:
+        _fw.append_jsonl(idx, {"anon_id": anon_id, "action": "delete_incomplete",
+                               "objects_removed": n, "failures": failures,
+                               "received_at": _fw.utc_now()})
+        return jsonify({"error": "delete_incomplete", "anon_id": anon_id,
+                        "objects_removed": n, "failed_objects": len(failures)}), 503
+    if n_lab:
+        _fw.append_jsonl(labels, {"anon_id": anon_id, "action": "deleted",
+                                  "received_at": _fw.utc_now()})
     # 索引另寫一筆刪除紀錄，不改寫原本那幾行——與飛輪的 append-only 一致：
     # 「這個 anon_id 曾經有資料而且已依請求刪除」本身就是要留的事實。
     _fw.append_jsonl(idx, {"anon_id": anon_id, "action": "deleted",

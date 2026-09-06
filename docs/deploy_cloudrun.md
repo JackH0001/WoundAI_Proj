@@ -76,14 +76,51 @@ $jwt | gcloud secrets create woundai-jwt-secret --data-file=- --replication-poli
 ## 4. 部署
 
 **用腳本，不要手打 gcloud。** 腳本除了部署還會做建置上下文檢查（確認病人影像不會被烤進映像）、
-服務帳號授權、以及**六項部署後驗證**——那些驗證抓到過三次「部署成功但服務其實壞了」的情況。
+驗證既有的專用服務帳號／精確 IAM，以及**六項部署後驗證**——那些驗證抓到過三次
+「部署成功但服務其實壞了」的情況。部署腳本刻意不建立 IAM；先分別執行經覆核的
+`harden_bucket.ps1` 與 `provision_runtime_identity.ps1`。
 
 ```powershell
 cd C:\dev\WoundAI_Proj\Backend\Flask
-.\deploy_cloudrun.ps1 -ProjectId woundai-jackh001 -Bucket woundai-flywheel-jackh001
+.\deploy_cloudrun.ps1 `
+  -ProjectId woundai-jackh001 `
+  -Bucket woundai-flywheel-jackh001 `
+  -AuditBucket woundai-flywheel-jackh001-audit-epoch-20260905 `
+  -RuntimeServiceAccount woundai-runtime@woundai-jackh001.iam.gserviceaccount.com `
+  -CandidateOnly
 ```
 
-第一次（或換專案）才加 `-Setup`：開 API、建桶、產生並存入密碼與 JWT 金鑰。
+`-Setup` 已退役；部署、儲存硬化與 IAM 必須留下三份互相獨立的證據。第一次先用
+`-CandidateOnly` 建立 tagged、零正式流量的 candidate 並完成腳本探針。Mac／App E2E
+對 candidate URL 通過且取得另一次切流量授權後，才用同一組參數改帶
+`-PromoteCandidate`；它不重建映像，而會重驗現有 candidate 後切換流量。`-VerifyOnly`
+只重驗目前 100% live revision。三個模式互斥。
+
+切流量不是沿用可變 tag 即可。Mac／App E2E 的 JSON 證據必須使用 schema
+`woundai.p0-4-candidate-e2e/1`，逐字綁定 `candidate_revision`、`git_commit` 與
+`candidate_url`，並標示 `synthetic_data_only=true`、`contains_phi=false`、實際執行者與
+UTC 時間。`cases[]` 必須恰好包含且全數為 `passed`：`no-care-consent`、
+`care-consent-staging`、`training-consent-denied`、`training-consent-promotion`、
+`idempotent-resubmit-parallel`、`withdrawn-repair`、`exact-byte-restage`、`network-cutover`。
+
+```powershell
+$candidateRevision = Read-Host '輸入已完成 App E2E 的不可變 Cloud Run revision'
+$e2eEvidence = 'C:\dev\WoundAI_Proj\docs\evidence\p0-4\CANDIDATE_E2E.json'
+$promotionApproval = Read-Host '由實際授權者親自輸入，且須逐字包含 candidate revision'
+.\deploy_cloudrun.ps1 `
+  -ProjectId woundai-jackh001 `
+  -Bucket woundai-flywheel-jackh001 `
+  -AuditBucket woundai-flywheel-jackh001-audit-epoch-20260905 `
+  -RuntimeServiceAccount woundai-runtime@woundai-jackh001.iam.gserviceaccount.com `
+  -PromoteCandidate `
+  -ExpectedCandidateRevision $candidateRevision `
+  -CandidateE2EEvidencePath $e2eEvidence `
+  -PromotionAuthorisationRef $promotionApproval
+```
+
+promotion 會在長探針後、切流前再讀一次 candidate 與 100% live revision。若期間流量被
+其他部署或事故處置改動，流程中止且不以舊快照自動覆寫；只有確定 live 正由本次 candidate
+承接時，失敗處理才會回復至切流前 revision。
 
 <details>
 <summary>等效的手打指令（僅供理解腳本在做什麼）</summary>
@@ -92,6 +129,9 @@ cd C:\dev\WoundAI_Proj\Backend\Flask
 gcloud run deploy woundai-backend `
   --source . `
   --region asia-east1 `
+  --tag p0-4-candidate `
+  --no-traffic `
+  --service-account <專用-runtime-SA>@<你的專案ID>.iam.gserviceaccount.com `
   --allow-unauthenticated `
   --memory 4Gi `
   --cpu 2 `
@@ -99,8 +139,8 @@ gcloud run deploy woundai-backend `
   --concurrency 4 `
   --min-instances 0 `
   --max-instances 3 `
-  --set-env-vars "WOUNDAI_STORE=gcs,WOUNDAI_GCS_BUCKET=<你的桶名>,WOUNDAI_GCS_PREFIX=flywheel,WOUNDAI_AUDIT_BUCKET=<你的桶名>-audit" `
-  --set-secrets "ADMIN_PASSWORD=woundai-admin-password:latest,JWT_SECRET_KEY=woundai-jwt-secret:latest"
+  --set-env-vars "WOUNDAI_STORE=gcs,WOUNDAI_GCS_BUCKET=<你的桶名>,WOUNDAI_GCS_PREFIX=flywheel,WOUNDAI_AUDIT_BUCKET=<你的新稽核桶>-audit-epoch-YYYYMMDD" `
+  --set-secrets "ADMIN_PASSWORD=woundai-admin-password:latest,JWT_SECRET_KEY=woundai-jwt-secret:latest,CARE_RECEIPT_SECRET=woundai-care-receipt-secret:latest"
 ```
 
 ⚠ 兩個容易漏掉、且**漏掉不會有任何錯誤訊息**的地方：

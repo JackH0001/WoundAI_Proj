@@ -91,6 +91,9 @@ def main():
     poly1 = [[300, 250], [820, 250], [820, 700], [300, 700]]
     poly2 = [[305, 255], [830, 250], [825, 705], [300, 700], [295, 480]]  # 醫師重新修邊
 
+    from _synthetic_receipts import ratify_synthetic
+    ratify_synthetic(tmp, [image_id])
+
     def anno(poly, code=CODE, iou=1.0, consent=True, src="clinical"):
         """完全對應 BackendClient.submitAnnotation 送出的欄位組合。"""
         return {

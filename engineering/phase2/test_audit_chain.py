@@ -6,9 +6,13 @@
 
     python engineering/phase2/test_audit_chain.py
 """
+import ast
 import json
 import os
+from pathlib import Path
+import runpy
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -43,7 +47,8 @@ def main():
 
     P = os.path.join(tmp, "audit.jsonl")
     for i in range(5):
-        fw.audit("dr_%d" % i, "annotation_enqueued", "WD-TEST%04d" % i, "ok")
+        fw.audit("test:dr_%d" % i, "annotation_enqueued",
+                 "WD-TEST%04d" % i, "ok", "test", "test")
     shutil.copy(P, P + ".bak")
 
     def load():
@@ -112,6 +117,144 @@ def main():
     check("7  導入前舊紀錄被標記為 legacy_no_hash",
           any(i["kind"] == "legacy_no_hash" for i in iss))
     restore()
+
+    # v4 admission and offline verification must share the same strict schema:
+    # a self-hash-valid extra field cannot become invisible simply because the
+    # verifier reads a local JSONL rather than an immutable GCS slot.
+    r = load()
+    schema_bad = dict(r[2], reviewer_note="unhashed extra field")
+    schema_bad["hash"] = fw._audit_hash(schema_bad)
+    save(r[:2] + [schema_bad] + r[3:])
+    ok, iss, _ = fw.verify_audit_chain()
+    check("8  自雜湊正確但 v4 額外欄位 → schema_invalid",
+          not ok and any(i["kind"] == "schema_invalid" for i in iss))
+    restore()
+
+    # `seq` is evidence, not decorative metadata.  Re-hash the whole chain so
+    # hash/prev remain valid; the dedicated sequence invariant must still catch
+    # a gap at the exact trajectory position.
+    r, out, prev = load(), [], "GENESIS"
+    for i, rec in enumerate(r):
+        rec = dict(rec, seq=(7 if i == 2 else i), prev=prev)
+        rec["hash"] = fw._audit_hash(rec)
+        prev = rec["hash"]
+        out.append(rec)
+    save(out)
+    ok, iss, _ = fw.verify_audit_chain()
+    check("9  整條重算仍不能掩蓋 hashed seq 不連續",
+          not ok and any(x["kind"] == "seq_discontinuity" and x["index"] == 2 for x in iss))
+    restore()
+
+    # Hashless history is supported only as a prefix.  Give the following v4
+    # records their historical physical positions and rebuild the links: this
+    # prefix is informational, not a real structural issue.
+    legacy = {"ts": "2026-07-28T00:00:00Z", "actor": "old", "action": "x",
+              "code": "-", "result": "舊紀錄"}
+    out, prev = [legacy], "GENESIS"
+    for i, rec in enumerate(load(), 1):
+        rec = dict(rec, seq=i, prev=prev)
+        rec["hash"] = fw._audit_hash(rec)
+        prev = rec["hash"]
+        out.append(rec)
+    save(out)
+    ok, iss, stats = fw.verify_audit_chain()
+    check("10 hashless prefix 只是資訊性標記",
+          not ok and stats["real_issues"] == 0
+          and sum(x["kind"] == "legacy_no_hash" for x in iss) == 1,
+          stats["kinds"])
+    restore()
+
+    # The same record inserted after hashing has begun is not historical
+    # preface.  It would create an unauthenticated hole and must be a real issue.
+    r = load()
+    save([r[0], legacy])
+    ok, iss, stats = fw.verify_audit_chain()
+    check("11 hashed 之後的 hashless 紀錄是 real issue",
+          not ok and stats["real_issues"] >= 1
+          and any(x["kind"] == "legacy_after_hashed" for x in iss), stats["kinds"])
+    restore()
+
+    # The command-line verifier must not lose duplicate JSON keys via the
+    # standard decoder's last-key-wins behavior.  Exercise the actual CLI and
+    # require its non-zero result, not merely the in-process helper.
+    raw = open(P, encoding="utf-8").readlines()
+    raw[2] = raw[2].rstrip("\n")[:-1] + ',"code":"WD-DUPLICATE"}\n'
+    with open(P, "w", encoding="utf-8") as f:
+        f.writelines(raw)
+    cli = subprocess.run([sys.executable, os.path.join(HERE, "verify_audit_chain.py"),
+                          "--head-only"], cwd=os.path.join(HERE, "..", ".."),
+                         env=os.environ.copy(), capture_output=True, text=True)
+    check("12 CLI 拒絕重複 JSON key", cli.returncode == 1,
+          {"returncode": cli.returncode, "stderr": cli.stderr[-300:]})
+    restore()
+
+    # --require-worm is an evidence gate, not a label.  Local verification must
+    # fail, while a GcsStore helper must call retention_info and require the
+    # exact locked seven-year policy.
+    cli = subprocess.run([sys.executable, os.path.join(HERE, "verify_audit_chain.py"),
+                          "--head-only", "--require-worm"],
+                         cwd=os.path.join(HERE, "..", ".."), env=os.environ.copy(),
+                         capture_output=True, text=True, encoding="utf-8")
+    check("13 Local --require-worm fail-closed 且輸出證據", cli.returncode == 1
+          and "WORM retention_info" in cli.stderr and "LocalStore" in cli.stderr,
+          {"returncode": cli.returncode, "stderr": cli.stderr[-300:]})
+
+    tool = runpy.run_path(os.path.join(HERE, "verify_audit_chain.py"))
+    fake_gcs = st.GcsStore.__new__(st.GcsStore)
+    calls = []
+    fake_gcs.retention_info = lambda: calls.append("read") or {
+        "verified": True, "locked": True,
+        "retention_seconds": st.AUDIT_RETENTION_SECONDS,
+        "bucket": "synthetic-audit",
+    }
+    worm_ok, evidence = tool["worm_evidence"](fake_gcs)
+    check("13b GCS WORM 必須實讀 retention_info 且精確 7 年",
+          worm_ok and calls == ["read"]
+          and evidence["retention_info"]["bucket"] == "synthetic-audit", evidence)
+    fake_gcs.retention_info = lambda: {
+        "verified": True, "locked": True,
+        "retention_seconds": st.AUDIT_RETENTION_SECONDS - 1,
+    }
+    wrong_retention_ok, _ = tool["worm_evidence"](fake_gcs)
+    check("13c 已鎖但保留秒數不精確仍 fail", not wrong_retention_ok)
+    fake_gcs.retention_info = lambda: {
+        "verified": True, "locked": False,
+        "retention_seconds": st.AUDIT_RETENTION_SECONDS,
+    }
+    unlocked_ok, _ = tool["worm_evidence"](fake_gcs)
+    check("13d 精確 7 年但未鎖仍 fail", not unlocked_ok)
+    fake_gcs.retention_info = lambda: {
+        "verified": False, "locked": True,
+        "retention_seconds": st.AUDIT_RETENTION_SECONDS,
+    }
+    unverified_ok, _ = tool["worm_evidence"](fake_gcs)
+    check("13e metadata 未經即時驗證仍 fail", not unverified_ok)
+
+    # Production audit calls must carry the historical role/org facts.  Scan
+    # the three modules that directly call api_flywheel.audit; consent_staging
+    # intentionally receives a different callback signature and is excluded.
+    root = Path(HERE).parents[1]
+    missing, observed = [], 0
+    for rel in ("Backend/Flask/app.py", "Backend/Flask/api_flywheel.py",
+                "Backend/Flask/api_users.py"):
+        source = (root / rel).read_text(encoding="utf-8-sig")
+        tree = ast.parse(source, filename=rel)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            target = node.func
+            direct = isinstance(target, ast.Name) and target.id == "audit"
+            qualified = (isinstance(target, ast.Attribute) and target.attr == "audit"
+                         and isinstance(target.value, ast.Name)
+                         and target.value.id in {"fw", "_fw", "api_flywheel"})
+            if not (direct or qualified):
+                continue
+            observed += 1
+            keyword_names = {kw.arg for kw in node.keywords if kw.arg}
+            if len(node.args) < 6 and not {"role", "org"} <= keyword_names:
+                missing.append("%s:%d" % (rel, node.lineno))
+    check("14 production audit calls 皆明確傳 role/org",
+          observed > 0 and not missing, {"observed": observed, "missing": missing})
 
     st.reset_store(None)
     shutil.rmtree(tmp, ignore_errors=True)

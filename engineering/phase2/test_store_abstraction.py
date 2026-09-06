@@ -36,7 +36,10 @@ def check(name, ok, detail=""):
         FAILED.append(name)
 
 
-class FakeObjectStore:
+from store import Store
+
+
+class FakeObjectStore(Store):
     """模擬物件儲存：不可變物件、無 append、無 rename、無目錄。"""
 
     def __init__(self):
@@ -77,6 +80,35 @@ class FakeObjectStore:
     def describe(self):
         return "fake-object-store"
 
+    # 稽核鏈序列化原語。假物件儲存要忠實模擬 GCS 的「只在物件不存在時建立」語意——
+    # 這正是序列化依賴的那條性質,所以不能用 append_line 的舊路徑退回去。
+    def chain_tail(self, key):
+        from store import _CHAIN_NAME_RE
+        base = key + "/"
+        names = sorted(k for k in self.objects if k.startswith(base))
+        if not names:
+            return (-1, None)
+        leaf = names[-1][len(base):]
+        m = _CHAIN_NAME_RE.match(leaf)
+        if not m:
+            raise RuntimeError("legacy time-named records in " + base)
+        rec = json.loads(self.objects[names[-1]].decode())
+        return (int(m.group(1)), rec)
+
+    def append_chained(self, key, seq, line):
+        from store import ChainConflict, _chain_name
+        import threading
+        lock = self.__dict__.setdefault("_chain_lock", threading.Lock())
+        name = key + "/" + _chain_name(seq)
+        data = (line.rstrip("\n") + "\n").encode()
+        with lock:                                  # 模擬伺服器端的原子條件建立
+            if name in self.objects:
+                if self.objects[name] == data:
+                    return False
+                raise ChainConflict(name)
+            self.objects[name] = data
+            return True
+
 
 def main():
     import store as st
@@ -97,6 +129,9 @@ def main():
 
     # 影像先進儲存（模擬 classify）
     fake.put_blob("images/%s.jpg" % IID, b"\xff\xd8fake-jpeg\xff\xd9")
+    fake.put_blob("receipts/legacy_ratification.json", json.dumps({
+        "schema": "woundai.legacy-ratification/1", "image_ids": [IID],
+        "approved_by": "SYNTHETIC TEST FIXTURE - NOT AN OWNER APPROVAL"}).encode())
 
     # 1 附加與讀回
     fw.append_jsonl(fw.QUEUE, {**BASE, "received_at": "2026-08-03T10:00:00Z"})
@@ -143,7 +178,7 @@ def main():
           "WD-UT9001" not in codes_r and IID not in imgs_r)
 
     # 8 稽核軌跡
-    fw.audit("tester", "unit_test", "WD-UT9001", "ok")
+    fw.audit("test:tester", "unit_test", "WD-UT9001", "ok", "test", "test")
     ad = fw.read_jsonl(fw.AUDIT)
     check("8  稽核軌跡寫得進、讀得出", len(ad) == 1 and ad[0]["action"] == "unit_test")
 
