@@ -1,0 +1,42 @@
+{
+  "schema": "woundai.p0-4-evidence-annotation/1",
+  "observed_at_utc": "2026-09-06T09:20:00Z",
+  "purpose": "Annotate an earlier evidence record; the annotated record is not modified.",
+  "annotates": {
+    "file": "docs/evidence/p0-4/PRELOCK_VERIFICATION_20260905.json",
+    "section": "validation.gcs_smoke",
+    "git_blob_id": "67c5acfc08164836f71df8e5889e363c2b1e4840",
+    "content_sha256": "72c46578a10571fdfa00474a2250353303874df5f8a28d3e5fa1cb2bbd7ee0fa"
+  },
+  "finding": {
+    "summary": "The 1,011-record GCS smoke run was executed with the locked-epoch admission gate replaced by a no-op, so that run establishes chain behaviour under real GCS concurrency but establishes nothing about the gate.",
+    "mechanism": "engineering/phase2/smoke_audit_chain_gcs.py assigns g.require_locked_audit_epoch = lambda: None on the single GcsStore instance under test, after asserting the target bucket is readable, unlocked, carries no retention policy, has a name containing 'smoke', differs from the main bucket, and is entirely empty, and after requiring WOUNDAI_AUDIT_SMOKE=1.",
+    "scope_of_substitution": "instance attribute on one object inside one short-lived test process",
+    "environment_variable_bypass_exists": false,
+    "production_code_path_modified": false
+  },
+  "why_it_matters": [
+    "A reader of validation.gcs_smoke could otherwise conclude that require_locked_audit_epoch() had been exercised against a real bucket during that run. It had not.",
+    "The gate's first execution against a genuinely locked bucket happened separately, after the lock, and is recorded below."
+  ],
+  "gate_actually_exercised_on": {
+    "tool": "engineering/phase2/check_locked_epoch_gate.py",
+    "bucket": "woundai-flywheel-jackh001-audit-epoch-20260905",
+    "observed_at_utc": "2026-09-06T07:00:00Z",
+    "retention_info": {
+      "verified": true,
+      "retention_seconds": 220903200,
+      "locked": true
+    },
+    "result": "PASS: exact locked seven-year epoch accepted; whole bucket is empty; no object was written",
+    "objects_written": 0
+  },
+  "does_not_establish": [
+    "that the smoke run validated the locked-epoch gate",
+    "any change to the annotated record",
+    "runtime identity provisioning",
+    "candidate deployment",
+    "traffic cutover",
+    "clinical readiness"
+  ]
+}
