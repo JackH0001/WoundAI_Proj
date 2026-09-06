@@ -1,0 +1,18 @@
+{
+    "schema":  "woundai.bucket-lock-record/1",
+    "generator":  "harden_bucket.ps1",
+    "observed_at_utc":  "2026-09-06T06:02:13Z",
+    "project_id":  "woundai-jackh001",
+    "project_number":  "421209514056",
+    "bucket":  "woundai-flywheel-jackh001-audit-epoch-20260905",
+    "operator":  "jack.hou@gmail.com",
+    "authorisation_reference":  "Jack Hou, woundai-flywheel-jackh001-audit-epoch-20260905 -Region asia-east1, 7 年, 鎖後不能縮短或移除",
+    "authorisation_reference_verifiable_by_script":  false,
+    "retention_seconds":  220903200,
+    "lock_performed_this_run":  true,
+    "before_raw_sha256":  "a9b0b30abfbc3fd6f787c51c4d9c822d203cd5a1b34031905df8ae8a028b00a5",
+    "after_raw_sha256":  "860f8f1e8ace6e9f01e7233c029a45dcaafcfaf53a30c4f929b14f6344d7b750",
+    "hash_basis":  "UTF-8 text from --raw --format=json with output lines joined by LF",
+    "locked":  true,
+    "scope":  "audit bucket retention lock only; no deployment or clinical-release assertion"
+}

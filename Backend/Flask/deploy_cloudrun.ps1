@@ -9,7 +9,8 @@
 # 用法：
 #   .\deploy_cloudrun.ps1 -ProjectId my-proj -Bucket woundai-flywheel-abc `
 #       -AuditBucket woundai-flywheel-abc-audit-epoch-20260905 `
-#       -RuntimeServiceAccount woundai-runtime@my-proj.iam.gserviceaccount.com
+#       -RuntimeServiceAccount woundai-runtime@my-proj.iam.gserviceaccount.com `
+#       -CandidateOnly
 #
 # -Setup 已退役：正式 P0-4 發布必須先分別執行 harden_bucket.ps1 與
 # provision_runtime_identity.ps1，讓不可逆儲存與 IAM 變更有各自可覆核的證據。
@@ -35,7 +36,16 @@ param(
     # 只跑部署後驗證，跳過建置與部署。
     # 存在的理由很實際：驗證段本身出錯時（例如用了某個 PowerShell 版本沒有的參數），
     # 若要重跑就得再等一次五分鐘的映像重建 —— 那個成本會讓人乾脆不驗。
-    [switch]$VerifyOnly
+    [switch]$VerifyOnly,
+    # 建立並完整驗證 tagged candidate，但保持既有 revision 100% live。
+    # App/device E2E 必須對這個 candidate URL 完成後，才能另行授權切流量。
+    [switch]$CandidateOnly,
+    # 不重建映像；重驗現有 tagged candidate，成功後才切換正式流量。
+    [switch]$PromoteCandidate,
+    # PromoteCandidate 必須鎖定 Mac/App E2E 實際驗過的不可變 revision。
+    [string]$ExpectedCandidateRevision,
+    [string]$CandidateE2EEvidencePath,
+    [string]$PromotionAuthorisationRef
 )
 
 # ⚠ 刻意**不設** $ErrorActionPreference = "Stop"。
@@ -136,6 +146,39 @@ function Assert-DeploymentInputs {
     if ($Setup) {
         throw "-Setup is retired for P0-4; run reviewed hardening and identity provisioning separately"
     }
+    $exclusiveModes = @(@($VerifyOnly,$CandidateOnly,$PromoteCandidate) |
+        Where-Object { [bool]$_ })
+    if ($exclusiveModes.Count -ne 1) {
+        throw "exactly one of -VerifyOnly, -CandidateOnly or -PromoteCandidate is required"
+    }
+    $promotionOnlyValues = @($ExpectedCandidateRevision,$CandidateE2EEvidencePath,
+        $PromotionAuthorisationRef)
+    if ($PromoteCandidate) {
+        if ($ExpectedCandidateRevision -notmatch '^[a-z][a-z0-9-]{0,62}$') {
+            throw "-ExpectedCandidateRevision must be an explicit Cloud Run revision name"
+        }
+        if ([string]::IsNullOrWhiteSpace($PromotionAuthorisationRef) `
+                -or $PromotionAuthorisationRef -match "[`r`n<>（）]" `
+                -or $PromotionAuthorisationRef -match '(?i)(placeholder|範本|填入|輸入)') {
+            throw "-PromotionAuthorisationRef must be operator-supplied single-line text"
+        }
+        # Windows PowerShell 5.1 / .NET Framework has no
+        # String.Contains(string, StringComparison) overload.
+        if ($PromotionAuthorisationRef.IndexOf(
+                $ExpectedCandidateRevision, [StringComparison]::Ordinal) -lt 0) {
+            throw "promotion authorization must name the exact candidate revision"
+        }
+        if ([string]::IsNullOrWhiteSpace($CandidateE2EEvidencePath) `
+                -or -not [IO.Path]::IsPathRooted($CandidateE2EEvidencePath) `
+                -or [IO.Path]::GetExtension($CandidateE2EEvidencePath) -cne '.json' `
+                -or -not (Test-Path -LiteralPath $CandidateE2EEvidencePath -PathType Leaf)) {
+            throw "-CandidateE2EEvidencePath must be an existing absolute .json file"
+        }
+    } elseif (@($promotionOnlyValues | Where-Object {
+            -not [string]::IsNullOrWhiteSpace([string]$_)
+        }).Count -ne 0) {
+        throw "candidate revision, E2E evidence and promotion authorization are valid only with -PromoteCandidate"
+    }
     if ($AuditBucket -ceq "$Bucket-audit") {
         throw "AuditBucket must be an explicit fresh locked epoch, not the legacy default [$AuditBucket]"
     }
@@ -157,6 +200,40 @@ function Assert-DeploymentInputs {
             -or $RuntimeServiceAccount -match '@appspot\.gserviceaccount\.com$') {
         throw "default Compute/App Engine service accounts are forbidden for the clinical runtime"
     }
+}
+function Assert-CandidateE2EEvidence([string]$Revision, [string]$CandidateUrl) {
+    try { $evidence = Get-Content -LiteralPath $CandidateE2EEvidencePath -Raw | ConvertFrom-Json }
+    catch { throw "candidate E2E evidence is not valid JSON: $_" }
+    if ([string]$evidence.schema -cne 'woundai.p0-4-candidate-e2e/1' `
+            -or [string]$evidence.candidate_revision -cne $Revision `
+            -or [string]$evidence.git_commit -cne $GitCommit `
+            -or ([string]$evidence.candidate_url).TrimEnd('/') -cne $CandidateUrl.TrimEnd('/') `
+            -or $evidence.synthetic_data_only -ne $true `
+            -or $evidence.contains_phi -ne $false `
+            -or [string]::IsNullOrWhiteSpace([string]$evidence.performed_by) `
+            -or [string]::IsNullOrWhiteSpace([string]$evidence.observed_at_utc)) {
+        throw "candidate E2E evidence identity/safety fields do not match the candidate"
+    }
+    $expectedCases = @(
+        'no-care-consent','care-consent-staging','training-consent-denied',
+        'training-consent-promotion','idempotent-resubmit-parallel',
+        'withdrawn-repair','exact-byte-restage','network-cutover'
+    )
+    $seen = @{}
+    foreach ($case in @($evidence.cases)) {
+        $id = [string]$case.id
+        if ($seen.ContainsKey($id)) { throw "candidate E2E evidence has duplicate case [$id]" }
+        if ($expectedCases -notcontains $id -or [string]$case.status -cne 'passed') {
+            throw "candidate E2E case [$id] is unexpected or did not pass"
+        }
+        $seen[$id] = $true
+    }
+    $missing = @($expectedCases | Where-Object { -not $seen.ContainsKey($_) })
+    if ($missing.Count -ne 0 -or $seen.Count -ne $expectedCases.Count) {
+        throw "candidate E2E evidence is incomplete; missing=[$($missing -join '; ')]"
+    }
+    $evidenceHash = (Get-FileHash -LiteralPath $CandidateE2EEvidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Write-Host "  ✓ candidate E2E evidence: $evidenceHash"
 }
 function Get-GCloudJson([string]$What, [string[]]$Arguments) {
     $raw = (& $script:GCLOUD @Arguments)
@@ -309,7 +386,8 @@ function Get-CleanGitCommit {
     return ([string]$full).Trim()
 }
 function Assert-CloudRunRevisionConfiguration([switch]$RequireExclusiveTraffic,
-                                               [string]$CandidateTag) {
+                                               [string]$CandidateTag,
+                                               [string]$ExpectedLiveRevision) {
     $serviceState = Get-GCloudJson "Cloud Run service $Service" @(
         'run','services','describe',$Service,"--project=$ProjectId","--region=$Region",'--format=json')
     $created = [string]$serviceState.status.latestCreatedRevisionName
@@ -338,6 +416,18 @@ function Assert-CloudRunRevisionConfiguration([switch]$RequireExclusiveTraffic,
             throw "candidate tag [$CandidateTag] is not bound to ready revision [$ready]"
         }
         $taggedUrl = [string]$tagged[0].url
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedLiveRevision)) {
+            $live = @($traffic | Where-Object {
+                $null -ne $_.percent -and [int]$_.percent -gt 0
+            })
+            if ($live.Count -ne 1 -or [int]$live[0].percent -ne 100 `
+                    -or [string]$live[0].revisionName -cne $ExpectedLiveRevision) {
+                throw "candidate deployment changed live traffic away from [$ExpectedLiveRevision]"
+            }
+            if ($tagged | Where-Object { $null -ne $_.percent -and [int]$_.percent -gt 0 }) {
+                throw "candidate tag [$CandidateTag] unexpectedly receives live traffic"
+            }
+        }
     }
 
     $revision = Get-GCloudJson "Cloud Run revision $ready" @(
@@ -403,7 +493,7 @@ $PreviousRevision = $null
 
 # -VerifyOnly 時整段建置流程跳過。這裡不是「加速」——是讓驗證能獨立重跑，
 # 因為一個要等五分鐘才能重試的檢查，實務上等於沒有檢查。
-if (-not $VerifyOnly) {
+if (-not $VerifyOnly -and -not $PromoteCandidate) {
 
     # ── 出發前檢查 ───────────────────────────────────────────────────────
     # 這兩個檔案是病人影像不進容器映像的唯一防線。缺了就中止——
@@ -614,19 +704,34 @@ if (-not $VerifyOnly) {
 
 
 } else {
-    Say "只跑驗證（-VerifyOnly，跳過建置與部署）"
+    if ($VerifyOnly) { Say "只跑正式環境驗證（-VerifyOnly，跳過建置與部署）" }
+    else { Say "重驗現有 candidate 後準備切流量（-PromoteCandidate）" }
     Invoke-GCloud config set project $ProjectId | Out-Null
     Assert-GCloudOk "設定 gcloud project $ProjectId"
     Assert-GCloudProjectTarget
     Say "重驗正式稽核桶與專用執行身分"
     Invoke-DeploymentPreflight
+    if ($PromoteCandidate) {
+        Say "讀取既有 no-traffic candidate 與目前正式 revision"
+        $beforeService = Get-GCloudJson "pre-promotion Cloud Run service $Service" @(
+            'run','services','describe',$Service,"--project=$ProjectId","--region=$Region",'--format=json')
+        $beforeLive = @($beforeService.status.traffic | Where-Object {
+            $null -ne $_.percent -and [int]$_.percent -eq 100
+        })
+        if ($beforeLive.Count -ne 1 -or
+                [string]::IsNullOrWhiteSpace([string]$beforeLive[0].revisionName)) {
+            throw "pre-promotion service must have exactly one 100% live revision"
+        }
+        $PreviousRevision = [string]$beforeLive[0].revisionName
+    }
 }
 
 Say "驗證 Cloud Run 不可變 revision 設定"
 if ($VerifyOnly) {
     $revisionState = Assert-CloudRunRevisionConfiguration -RequireExclusiveTraffic
 } else {
-    $revisionState = Assert-CloudRunRevisionConfiguration -CandidateTag $CandidateTag
+    $revisionState = Assert-CloudRunRevisionConfiguration -CandidateTag $CandidateTag `
+        -ExpectedLiveRevision $PreviousRevision
 }
 
 # ⚠ Cloud Run 一個服務有**兩個等價網址**：
@@ -648,6 +753,12 @@ $url = if ($VerifyOnly) {
 }
 if ([string]::IsNullOrWhiteSpace([string]$url)) {
     throw "Cloud Run verification URL is empty"
+}
+if ($PromoteCandidate) {
+    if ([string]$revisionState.revision -cne $ExpectedCandidateRevision) {
+        throw "tagged candidate revision [$($revisionState.revision)] does not match authorized revision [$ExpectedCandidateRevision]"
+    }
+    Assert-CandidateE2EEvidence $ExpectedCandidateRevision $url
 }
 $altUrl = $null
 $projNumForUrl = Invoke-GCloud projects describe $ProjectId --project $ProjectId --format "value(projectNumber)"
@@ -829,8 +940,21 @@ if (-not $hb.Reached) {
     }
 }
 
-if (-not $VerifyOnly) {
+if (-not $VerifyOnly -and $CandidateOnly) {
+    Say "候選驗證完成；維持零正式流量"
+    [void](Assert-CloudRunRevisionConfiguration -CandidateTag $CandidateTag `
+        -ExpectedLiveRevision $PreviousRevision)
+    Write-Host "  ✓ candidate 已驗證；原 revision $PreviousRevision 仍承接 100% 流量" -ForegroundColor Green
+}
+
+if (-not $VerifyOnly -and -not $CandidateOnly) {
     Say "候選驗證全綠後切換 100% 流量"
+    $candidateRevision = [string]$script:EXPECTED_REVISION
+    $finalCandidateState = Assert-CloudRunRevisionConfiguration -CandidateTag $CandidateTag `
+        -ExpectedLiveRevision $PreviousRevision
+    if ([string]$finalCandidateState.revision -cne $candidateRevision) {
+        throw "candidate changed during probes; refuse traffic cutover"
+    }
     try {
         Invoke-GCloud run services update-traffic $Service `
             --project $ProjectId `
@@ -863,16 +987,28 @@ if (-not $VerifyOnly) {
         Write-Host "  ✓ live traffic and health identify revision $($script:EXPECTED_REVISION)"
     } catch {
         $cutoverError = $_
-        Warn "candidate cutover verification failed; rolling traffic back to $PreviousRevision"
-        Invoke-GCloud run services update-traffic $Service `
-            --project $ProjectId `
-            --region $Region `
-            "--to-revisions=$PreviousRevision=100" `
-            --quiet
-        if ($LASTEXITCODE -ne 0) {
-            throw "CUTOVER FAILED AND AUTOMATIC ROLLBACK FAILED. original=$cutoverError"
+        $failureState = Get-GCloudJson "post-failure Cloud Run service $Service" @(
+            'run','services','describe',$Service,"--project=$ProjectId","--region=$Region",'--format=json')
+        $failureLive = @($failureState.status.traffic | Where-Object {
+            $null -ne $_.percent -and [int]$_.percent -eq 100
+        })
+        if ($failureLive.Count -eq 1 -and
+                [string]$failureLive[0].revisionName -ceq $candidateRevision) {
+            Warn "candidate cutover verification failed; rolling traffic back to $PreviousRevision"
+            Invoke-GCloud run services update-traffic $Service `
+                --project $ProjectId `
+                --region $Region `
+                "--to-revisions=$PreviousRevision=100" `
+                --quiet
+            if ($LASTEXITCODE -ne 0) {
+                throw "CUTOVER FAILED AND AUTOMATIC ROLLBACK FAILED. original=$cutoverError"
+            }
+            throw "candidate cutover failed; traffic restored to $PreviousRevision. original=$cutoverError"
+        } elseif ($failureLive.Count -eq 1 -and
+                [string]$failureLive[0].revisionName -ceq $PreviousRevision) {
+            throw "candidate cutover failed before live traffic changed. original=$cutoverError"
         }
-        throw "candidate cutover failed; traffic restored to $PreviousRevision. original=$cutoverError"
+        throw "candidate cutover failed and live traffic changed outside the reviewed transition; no automatic rollback was attempted. original=$cutoverError"
     }
 }
 

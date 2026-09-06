@@ -104,6 +104,24 @@ function Get-ActiveOperator {
     }
     return ([string]$account).Trim()
 }
+function Assert-LockRecordTargetWritable {
+    # Probe the exact final pathname, not merely a random short file in the
+    # parent directory.  This catches invalid/reserved basenames, path-length
+    # limits and target-specific ACLs before the irreversible API call.
+    $probe = $LockRecordPath
+    $probeText = '{"schema":"woundai.bucket-lock-record-preflight/1","preflight_only":true}' + "`r`n"
+    try {
+        [IO.File]::WriteAllText($probe, $probeText, (New-Object Text.UTF8Encoding $false))
+        if (([IO.File]::ReadAllText($probe)) -cne $probeText) {
+            Die "Bucket Lock record directory write/read probe mismatch"
+        }
+        Remove-Item -LiteralPath $probe -Force -ErrorAction Stop
+    } catch {
+        Die "Bucket Lock record directory is not safely writable before lock: $_"
+    } finally {
+        Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+    }
+}
 function Write-LockRecord([string]$BeforeRaw, [string]$AfterRaw, [bool]$PerformedThisRun) {
     if ([string]::IsNullOrWhiteSpace($LockRecordPath) -or
             -not [IO.Path]::IsPathRooted($LockRecordPath) -or
@@ -138,8 +156,24 @@ function Write-LockRecord([string]$BeforeRaw, [string]$AfterRaw, [bool]$Performe
         scope = 'audit bucket retention lock only; no deployment or clinical-release assertion'
     }
     $json = $record | ConvertTo-Json -Depth 8
-    [IO.File]::WriteAllText($LockRecordPath, $json + "`r`n", (New-Object Text.UTF8Encoding $false))
-    try { $readback = Get-Content -LiteralPath $LockRecordPath -Raw | ConvertFrom-Json }
+    $pendingPath = "$LockRecordPath.pending-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        [IO.File]::WriteAllText($pendingPath, $json + "`r`n", (New-Object Text.UTF8Encoding $false))
+        [IO.File]::Move($pendingPath, $LockRecordPath)
+    } catch {
+        # Leave a successfully written pending file in place if the final move
+        # fails after the irreversible API call; it is better evidence than a
+        # cleanup that erases the only local record.
+        Die "Bucket Lock succeeded but atomic evidence publication failed; preserve [$pendingPath]: $_"
+    }
+    # Read back with the same explicit encoding the writer used.  PowerShell 5.1's
+    # Get-Content has no BOM to detect here and would fall back to the system ANSI
+    # code page (Big5 on zh-TW Windows), turning a non-ASCII authorisation
+    # reference into mojibake and breaking the JSON after the lock already happened.
+    try {
+        $readbackText = [IO.File]::ReadAllText($LockRecordPath, (New-Object Text.UTF8Encoding $false))
+        $readback = $readbackText | ConvertFrom-Json
+    }
     catch { Die "Bucket Lock record readback failed: $_" }
     if ($readback.schema -cne $record.schema -or $readback.bucket -cne $AuditBucket -or
             $readback.operator -cne $operator -or $readback.authorisation_reference -cne $LockAuthorisationRef -or
@@ -295,6 +329,7 @@ if ($LockRetention) {
         Die "Bucket Lock record directory does not exist: $lockRecordParent"
     }
     $script:LOCK_OPERATOR = Get-ActiveOperator
+    Assert-LockRecordTargetWritable
 }
 foreach ($durationDays in @($QuarantineDays,$StagingDays,$StagingMetaExtraDays,$NoncurrentDays,$SoftDeleteDays)) {
     if ($durationDays -lt 1) { Die "retention durations must be positive" }
@@ -388,8 +423,11 @@ if ($Apply) {
             $script:LOCK_PERFORMED_THIS_RUN = $false
             if (-not $alreadyLocked) {
                 Say "IRREVERSIBLE: lock audit retention"
+                # Cloud SDK intentionally defaults this irreversible prompt to
+                # "no" under --quiet. Keep its native confirmation visible;
+                # Test-AuthorisationRef above remains the first authorization gate.
                 Invoke-GCloudChecked "lock audit retention" @(
-                    'storage','buckets','update',"gs://$AuditBucket",'--lock-retention-period','--quiet')
+                    'storage','buckets','update',"gs://$AuditBucket",'--lock-retention-period')
                 $script:LOCK_PERFORMED_THIS_RUN = $true
             }
             $script:LOCK_BEFORE_RAW = $preLockRaw

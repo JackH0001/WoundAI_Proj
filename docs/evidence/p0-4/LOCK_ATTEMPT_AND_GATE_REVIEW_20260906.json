@@ -1,0 +1,52 @@
+{
+  "schema": "woundai.p0-4-lock-attempt-and-gate-review/1",
+  "observed_at_utc": "2026-09-05T18:36:55Z",
+  "target": {
+    "project_id": "woundai-jackh001",
+    "project_number": "421209514056",
+    "bucket": "woundai-flywheel-jackh001-audit-epoch-20260905",
+    "location": "ASIA-EAST1",
+    "retention_seconds": 220903200,
+    "object_count_before": 0
+  },
+  "operator_authorization": {
+    "exact_target_and_irreversibility_supplied_by_owner": true,
+    "authorization_text_not_reproduced_in_this_record": true
+  },
+  "attempt": {
+    "reversible_hardening_readback_passed": true,
+    "irreversible_api_operation_completed": false,
+    "tool_message": "Abort locking retention policy",
+    "script_exit_code": 1,
+    "post_attempt_locked": false,
+    "post_attempt_object_count": 0
+  },
+  "root_cause": {
+    "component": "Google Cloud CLI PromptContinue",
+    "finding": "--quiet selected the dangerous prompt's default=false and aborted instead of confirming",
+    "source": "googlecloudsdk/command_lib/storage/tasks/buckets/update_bucket_task.py::_confirm_and_lock_retention_policy",
+    "remediation": "Remove --quiet only from the lock call and retain the native interactive confirmation"
+  },
+  "gate_review": {
+    "owner_acknowledged_exact_irreversible_target": true,
+    "authorization_does_not_override_repository_prerequisites": true,
+    "lock_retry_performed": false,
+    "reason_not_retried": "Repository pre-collection policy still requires P0-2, P0-5, isolated/local App protocol E2E, and IRB/DPA completion before irreversible Bucket Lock.",
+    "candidate_deployment_issue": "The reviewed script lacked a candidate-only stop point and would cut live traffic immediately after internal probes.",
+    "corrective_changes_staged_for_pull_request_review": [
+      "interactive lock confirmation",
+      "read-only locked-epoch production gate",
+      "CandidateOnly mode",
+      "PromoteCandidate mode",
+      "corrected runbooks and lock record argument"
+    ]
+  },
+  "does_not_establish": [
+    "Bucket Lock",
+    "runtime identity provisioning",
+    "PR merge",
+    "candidate deployment",
+    "traffic cutover",
+    "clinical readiness"
+  ]
+}

@@ -114,12 +114,12 @@ E2E 應對準另行提供的 candidate URL，不得直接拿 production live URL
 
 - [ ] PR #4 的新 head 上 `audit-contract` 與 `backend-image` 等 checks 全綠。
 - [ ] 獨立覆核與 Mac iOS build／test、App E2E 完成。
-- [ ] 新的 dedicated runtime service account 與三個精確 secret IAM 完成；不得再使用預設 Compute service account 的廣泛權限。
 - [x] 以拋棄式 smoke bucket 驗證 final code 的真 GCS atomic append、1,000+ pagination／大量物件與嚴格 verifier（1,011 筆、0 real issue）。
 - [x] 建立全新的正式 audit epoch bucket並驗證空桶、區域、PAP、UBLA 與 7 年 retention；目前仍為 `locked=false`、0 物件。
-- [ ] 完成 dedicated runtime identity 後，驗證正式 audit epoch bucket 的精確 IAM。
 - [ ] 只對新 audit epoch bucket 執行 Bucket Lock，且先保存 before/after 與授權記錄。
-- [ ] PR 合併至 remote `main` 後，才可由 `deploy_cloudrun.ps1` 建立 no-traffic candidate；candidate 全探針通過才切流量，失敗須回滾。
+- [ ] 鎖後以 `check_locked_epoch_gate.py` 唯讀驗證 production lock gate，且正式 epoch 仍為空。
+- [ ] 對已鎖定的正式 epoch 建立 dedicated runtime service account 與三個精確 secret IAM；不得再使用預設 Compute service account 的廣泛權限。
+- [ ] PR 合併至 remote `main` 後，才可由 `deploy_cloudrun.ps1 -CandidateOnly` 建立 no-traffic candidate；candidate 的腳本探針與 Mac／App E2E 都通過並取得獨立切流量授權後，才可用 `-PromoteCandidate` 重驗並切流量，失敗須回滾。
 - [ ] 列舉並移除舊預設 Compute service account 的過度權限，完成切換後覆核。
 - [ ] P0-2（JWT 撤銷）與 P0-5（Android 離線事件排序／最後意願）完成；兩者目前仍未解。
 

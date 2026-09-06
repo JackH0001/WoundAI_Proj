@@ -10,6 +10,8 @@ on:
       - 'engineering/phase2/test_audit_chain_versioning.py'
       - 'engineering/phase2/test_admin_console.py'
       - 'engineering/phase2/test_deployment_scripts_static.py'
+      - 'engineering/phase2/check_locked_epoch_gate.py'
+      - 'engineering/phase2/test_check_locked_epoch_gate.py'
       - 'engineering/phase2/test_p0_4_staging.py'
       - 'engineering/phase2/test_runtime_golden_contract.py'
       - 'engineering/phase2/test_store_abstraction.py'
@@ -23,6 +25,8 @@ on:
       - 'engineering/phase2/test_audit_chain_versioning.py'
       - 'engineering/phase2/test_admin_console.py'
       - 'engineering/phase2/test_deployment_scripts_static.py'
+      - 'engineering/phase2/check_locked_epoch_gate.py'
+      - 'engineering/phase2/test_check_locked_epoch_gate.py'
       - 'engineering/phase2/test_p0_4_staging.py'
       - 'engineering/phase2/test_runtime_golden_contract.py'
       - 'engineering/phase2/test_store_abstraction.py'
@@ -62,6 +66,7 @@ jobs:
           python -B engineering/phase2/test_audit_chain_concurrency.py
           python -B engineering/phase2/test_admin_console.py
           python -B engineering/phase2/test_deployment_scripts_static.py
+          python -B engineering/phase2/test_check_locked_epoch_gate.py
           python -B engineering/phase2/test_store_abstraction.py
           python -B engineering/phase2/test_p0_4_staging.py
           python -B engineering/phase2/test_runtime_golden_contract.py

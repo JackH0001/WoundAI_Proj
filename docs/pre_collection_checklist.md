@@ -29,14 +29,19 @@
 
 ## B. 你要執行的指令
 
-### B1. 儲存桶強化
+### B1. 主桶強化（不帶 `-Audit`）
 
 ```powershell
 cd C:\dev\WoundAI_Proj\Backend\Flask
-.\harden_bucket.ps1 -ProjectId woundai-jackh001 -Bucket woundai-flywheel-jackh001 -Audit
-# 上一行是唯讀稽核；符合預期後才執行：
-.\harden_bucket.ps1 -ProjectId woundai-jackh001 -Bucket woundai-flywheel-jackh001 -Audit -Apply
+.\harden_bucket.ps1 -ProjectId woundai-jackh001 -Bucket woundai-flywheel-jackh001
+# 上一行是唯讀稽核；符合預期（PASS）後才執行：
+.\harden_bucket.ps1 -ProjectId woundai-jackh001 -Bucket woundai-flywheel-jackh001 -Apply
 ```
+
+⚠ 這一段**不要**加 `-Audit`。`-Audit` 不帶 `-AuditBucket` 時會退回預設的 legacy 桶
+`woundai-flywheel-jackh001-audit`，而該桶的 675 個時間戳命名物件會讓 `Assert-AuditObjectsExpected`
+必然 DIE——那是正確行為（legacy 桶只讀不寫），不是主桶有問題。稽核桶一律在 B2 以**顯式**
+`-AuditBucket` 指定。任何一步 DIE，就停在那一步；不要接著跑 `-Apply`。
 
 做四件事：封鎖公開存取（`publicAccessPrevention=enforced`）、統一存取控管、物件版本控制、
 以及生命週期規則。
@@ -63,14 +68,35 @@ GCS 執行延遲可能延後實體不可回復時間。
 桶完成真 GCS 條件寫入測試。煙霧桶必須是未鎖、無 retention policy 且完全空白；測完要由
 操作者確認目標、位置與物件清單後才刪除。正式桶也必須在第一次寫入前為空。
 
-只有 smoke 驗證、目標桶讀回驗證、P0-2/P0-5、App E2E 與 IRB/DPA 全部通過後，才可以對
-**明確指定的新桶**執行以下不可逆操作：
+只有 smoke 驗證與目標桶讀回驗證通過後，才可以對**明確指定的新桶**執行以下不可逆操作。
+專案負責人於 2026-09-06 決定：空桶鎖定屬 §D 所述之「技術步驟」，不涉及任何資料流入；
+7 年為醫療紀錄保存下限、且鎖後只能延長不能縮短；**資料流入仍受 P0-2/P0-5、隔離／本機 App 協議
+E2E 與 IRB/DPA 閘門管制（§D）**，鎖定不代表任何限制解除。
 
 ```powershell
 .\harden_bucket.ps1 -ProjectId woundai-jackh001 -Bucket woundai-flywheel-jackh001 `
   -Audit -AuditBucket '<new-clean-audit-bucket>' -Apply -LockRetention `
-  -LockAuthorisationRef '由實際授權者輸入的單行授權參照'
+  -LockAuthorisationRef '由實際授權者輸入的單行授權參照' `
+  -LockRecordPath 'C:\dev\WoundAI_Proj\docs\evidence\p0-4\BUCKET_LOCK_YYYYMMDD.json'
 ```
+
+鎖定成功後、授予 runtime identity 之前，以正式程式碼做一次零寫入閘門核對：
+
+```powershell
+# Python GCS client 使用 ADC；這與 gcloud CLI 的互動登入是兩套憑證。
+gcloud.cmd auth application-default login
+$env:WOUNDAI_STORE = 'gcs'
+$env:WOUNDAI_GCS_BUCKET = 'woundai-flywheel-jackh001'
+$env:WOUNDAI_GCS_PREFIX = 'flywheel'
+$env:WOUNDAI_AUDIT_BUCKET = '<new-clean-audit-bucket>'
+python C:\dev\WoundAI_Proj\engineering\phase2\check_locked_epoch_gate.py `
+  --audit-bucket '<new-clean-audit-bucket>' `
+  --project-number '421209514056' `
+  --location 'asia-east1'
+```
+
+此檢查會比對明確 bucket、project number、region、prefix、7 年 locked retention，並列舉
+**整個**新稽核桶確認仍為空；它不會寫入物件。
 
 稽核桶必須獨立。GCS 的保留政策是桶層級、
 不能只套在前綴上。套在主桶會連影像一起鎖住——而影像必須刪得掉（撤回同意、保存期限）。

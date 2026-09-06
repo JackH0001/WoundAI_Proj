@@ -44,7 +44,7 @@ class DeploymentScriptSafetyTests(unittest.TestCase):
         publish = src.index("Invoke-GCloud run deploy")
         preflight = src.rfind("Invoke-DeploymentPreflight", 0, publish)
         self.assertGreater(preflight, 0)
-        verify = src.index('Say "只跑驗證')
+        verify = src.index('Say "只跑正式環境驗證')
         self.assertGreater(src.find("Invoke-DeploymentPreflight", verify), verify)
         self.assertIn("Assert-CloudRunRevisionConfiguration", src)
         self.assertIn("latest created revision", src)
@@ -54,6 +54,20 @@ class DeploymentScriptSafetyTests(unittest.TestCase):
 
     def test_deploy_verifies_a_no_traffic_candidate_before_cutover(self):
         src = text(DEPLOY)
+        self.assertIn("[switch]$CandidateOnly", src)
+        self.assertIn("[switch]$PromoteCandidate", src)
+        self.assertIn("exactly one of -VerifyOnly, -CandidateOnly or -PromoteCandidate is required", src)
+        for promotion_input in (
+            "$ExpectedCandidateRevision",
+            "$CandidateE2EEvidencePath",
+            "$PromotionAuthorisationRef",
+        ):
+            self.assertIn(promotion_input, src)
+        self.assertIn("promotion authorization must name the exact candidate revision", src)
+        self.assertIn("$PromotionAuthorisationRef.IndexOf(", src)
+        self.assertNotIn("$PromotionAuthorisationRef.Contains(", src)
+        self.assertIn("candidate E2E evidence identity/safety fields do not match the candidate", src)
+        self.assertIn("candidate E2E evidence is incomplete", src)
         publish = src.index("Invoke-GCloud run deploy")
         no_traffic = src.index("--no-traffic", publish)
         candidate_config = src.index(
@@ -70,6 +84,13 @@ class DeploymentScriptSafetyTests(unittest.TestCase):
         self.assertLess(cutover, live_verify)
         self.assertLess(live_verify, rollback)
         self.assertIn("--to-revisions=$PreviousRevision=100", src)
+        self.assertIn("-ExpectedLiveRevision $PreviousRevision", src)
+        self.assertIn("if (-not $VerifyOnly -and $CandidateOnly)", src)
+        self.assertIn("if (-not $VerifyOnly -and -not $CandidateOnly)", src)
+        self.assertIn("candidate deployment changed live traffic", src)
+        self.assertIn("candidate tag [$CandidateTag] unexpectedly receives live traffic", src)
+        self.assertIn("candidate changed during probes; refuse traffic cutover", src)
+        self.assertIn("live traffic changed outside the reviewed transition; no automatic rollback was attempted", src)
 
     def test_harden_lock_is_named_and_evidenced(self):
         src = text(HARDEN)
@@ -81,8 +102,24 @@ class DeploymentScriptSafetyTests(unittest.TestCase):
         ):
             self.assertIn(field, src)
         self.assertIn("--lock-retention-period", src)
+        self.assertIn("Assert-LockRecordTargetWritable", src)
+        self.assertIn(".pending-", src)
+        lock_call = src[src.index('Invoke-GCloudChecked "lock audit retention"'):]
+        lock_call = lock_call[:lock_call.index("$script:LOCK_PERFORMED_THIS_RUN")]
+        self.assertNotIn("--quiet", lock_call)
+        lock_flag = src.index("--lock-retention-period")
+        self.assertGreater(src.rfind("Assert-LockRecordTargetWritable", 0, lock_flag), 0)
         self.assertLess(src.index("Assert-AuditObjectsExpected $AuditBucket -RequireEmpty:$LockRetention"),
                         src.index("--lock-retention-period"))
+        # 2026-09-06 regression: the lock record is written as UTF-8 without BOM, and
+        # PowerShell 5.1's Get-Content would read it back in the system ANSI code page
+        # (Big5 on zh-TW Windows).  A non-ASCII authorisation reference then broke the
+        # JSON *after* the irreversible lock.  Reader and writer must name UTF-8 explicitly.
+        record_write = src.index("[IO.File]::WriteAllText($pendingPath")
+        record_read = src.index("ConvertFrom-Json", record_write)
+        readback_block = src[record_write:record_read]
+        self.assertIn("[IO.File]::ReadAllText($LockRecordPath, (New-Object Text.UTF8Encoding $false))", readback_block)
+        self.assertNotRegex(readback_block, r"Get-Content[^\n]*\$LockRecordPath")
 
     def test_provisioner_is_dry_by_default_and_uses_exact_roles(self):
         src = text(PROVISION)
