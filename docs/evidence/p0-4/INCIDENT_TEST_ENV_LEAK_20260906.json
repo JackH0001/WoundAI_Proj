@@ -1,0 +1,92 @@
+{
+  "schema": "woundai.p0-4-incident/1",
+  "title": "Leaked cloud-store environment sent a test suite at production storage",
+  "observed_at_utc": "2026-09-07T00:10:00Z",
+  "severity": "irreversible contamination of a locked retention bucket; no data loss; no clinical data involved",
+  "timeline_utc": [
+    {
+      "at": "2026-09-06T06:01:57Z",
+      "event": "audit epoch bucket locked, seven-year retention"
+    },
+    {
+      "at": "2026-09-06T07:00Z",
+      "event": "check_locked_epoch_gate.py verified the bucket EMPTY; zero objects written"
+    },
+    {
+      "at": "2026-09-06T~09:00Z",
+      "event": "operator set WOUNDAI_STORE=gcs, WOUNDAI_GCS_BUCKET, WOUNDAI_GCS_PREFIX, WOUNDAI_AUDIT_BUCKET in the shell for that gate check; no teardown was given"
+    },
+    {
+      "at": "2026-09-06T16:09-16:17Z",
+      "event": "run_python_tests.py executed in the same shell; env inherited"
+    },
+    {
+      "at": "2026-09-06T16:10:15Z",
+      "event": "first contaminating write: seq 0, actor default:t_admin, action user_upsert_intent, code default:ns09, prev GENESIS"
+    },
+    {
+      "at": "2026-09-06T16:29-16:36Z",
+      "event": "second run (pristine origin/main control worktree) added further writes"
+    },
+    {
+      "at": "2026-09-07T~00:00Z",
+      "event": "root cause identified; environment variables cleared; no further writes"
+    }
+  ],
+  "impact": {
+    "locked_audit_epoch": {
+      "bucket": "woundai-flywheel-jackh001-audit-epoch-20260905",
+      "objects_before": 0,
+      "objects_after": 125,
+      "all_under_prefix": "flywheel/audit.jsonl/",
+      "content": "well-formed chain_v=4 audit slots written by test fixtures; seq 0 occupies prev=GENESIS",
+      "deletable": false,
+      "deletable_reason": "locked seven-year retention policy; objects cannot be removed or overwritten until 2033",
+      "consequence": "this bucket can no longer serve as the formal clean audit epoch"
+    },
+    "main_bucket": {
+      "bucket": "woundai-flywheel-jackh001",
+      "objects_total_after": 403,
+      "objects_written_2026_09_06": 96,
+      "objects_pre_existing_august": 307,
+      "deletable": true
+    },
+    "legacy_audit_bucket": {
+      "bucket": "woundai-flywheel-jackh001-audit",
+      "objects": 675,
+      "affected": false,
+      "note": "not referenced by any leaked variable; unchanged; still must not be locked"
+    },
+    "clinical_data_involved": false,
+    "data_lost": false
+  },
+  "root_cause_layers": [
+    "tools/windows/run_python_tests.py built the child environment with os.environ.copy() and did not remove cloud-store variables",
+    "the backend could not tell it was running inside a test process; get_store() asked only whether the audit bucket was a locked seven-year epoch, which it was",
+    "isolation depended on each test file remembering os.environ.pop('WOUNDAI_STORE'); all 12 tests that reached production storage lacked it, while every test that had it passed"
+  ],
+  "evidence_of_causation": {
+    "method": "identical suite run on the contaminated environment against the branch and against a pristine origin/main worktree, then again after clearing the variables",
+    "contaminated_branch": "47/59 passed, 12 failed",
+    "contaminated_control_origin_main": "46/58 passed, 12 failed",
+    "failing_sets_identical": true,
+    "clean_environment_after_fix": "60/60 passed, 0 failed, 82.7s (from 404s: the failures were network round-trips to GCS)"
+  },
+  "remediation": {
+    "layer_1": "run_python_tests.py strips WOUNDAI_STORE, WOUNDAI_GCS_*, WOUNDAI_AUDIT_BUCKET before spawning any test",
+    "layer_2": "store.get_store() raises when WOUNDAI_STORE=gcs and WOUNDAI_REQUIRE_FUNCTIONAL_TESTS=1; it refuses rather than silently falling back to local, which would hand out a false green",
+    "layer_3": "engineering/phase2/test_test_isolation_from_cloud.py pins both layers, including a subprocess that proves a test process cannot construct a GcsStore, plus negative controls proving real GCS use and LocalStore are unaffected",
+    "mutation_checked": "6 mutations, each caught"
+  },
+  "decisions": {
+    "epoch_bucket": "abandoned; a new epoch bucket will be created for the formal start",
+    "new_epoch_must_not_be_locked_early": "Locking an empty bucket was documented as a technical step with no data implications. That was wrong: a locked bucket can be contaminated but never cleaned, so locking early converts a same-day mistake into a seven-year liability. The new epoch bucket stays unlocked until real collection begins -- which also makes it immune to this failure mode, since require_locked_audit_epoch() refuses to write to an unlocked bucket."
+  },
+  "does_not_establish": [
+    "any change to the three earlier evidence records, which are left untouched",
+    "runtime identity provisioning",
+    "candidate deployment",
+    "traffic cutover",
+    "clinical readiness"
+  ]
+}

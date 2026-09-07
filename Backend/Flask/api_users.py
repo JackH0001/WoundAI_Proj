@@ -236,8 +236,15 @@ def read_audit():
         # 一個 slot 是否恰好一筆、slot 名與 seq 是否相符；繞過它會讓畸形物件假綠。
         # `verification` 與上面呈現的 recs 來自同一份 strict snapshot。
         ok, issues, stats = verification
+        # `ok` 是 len(issues) == 0，資訊性標記（legacy_formula / legacy_no_hash）
+        # 也會讓它變 False，所以它不能單獨讀成「鏈壞了」。真正的判準由
+        # fw.chain_integrity_ok 提供——寫入路徑用的是同一個函式，兩邊不會再各說各話。
+        integrity_ok = fw.chain_integrity_ok(stats)
         out["verified"] = {
             "ok": ok,
+            "integrity_ok": integrity_ok,
+            "real_issues": stats.get("real_issues"),
+            "informational": stats.get("informational"),
             "head": stats.get("head"),
             "total": stats.get("total"),
             "issues": issues[:50],
@@ -246,11 +253,20 @@ def read_audit():
             "verified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "verified_by": actor,
         }
-        if ok:
-            fw.audit(actor, "audit_verify", "-",
-                     "鏈驗證通過（%d 筆，%d 處異常）"
-                     % (stats.get("total", 0), len(issues)), role, org)
-            out["verified"]["verification_event_recorded"] = True
+        if integrity_ok:
+            try:
+                fw.audit(actor, "audit_verify", "-",
+                         "鏈驗證通過（%d 筆，%d 處異常，其中 %d 處為資訊性）"
+                         % (stats.get("total", 0), len(issues),
+                            stats.get("informational", 0)), role, org)
+                out["verified"]["verification_event_recorded"] = True
+            except Exception as exc:
+                # 驗證成功，記錄失敗。寫入端拒絕延伸欄位組早於現行版本的鏈，
+                # 而一個唯讀的驗證端點不該因此變成 500——操作者仍然需要上面那份證明。
+                # 回報原因而不是吞掉它。
+                out["verified"]["verification_event_recorded"] = False
+                out["verified"]["recording_reason"] = "verification_not_appendable"
+                out["verified"]["recording_error"] = type(exc).__name__
         else:
             # 損壞鏈不可再延伸；回傳失敗證據比用 500 蓋掉它更重要。
             out["verified"]["verification_event_recorded"] = False

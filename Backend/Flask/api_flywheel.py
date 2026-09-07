@@ -256,6 +256,24 @@ def read_jsonl(path: str, with_bad: bool = False):
 INFORMATIONAL_KINDS = ("legacy_no_hash", "legacy_formula")
 
 
+def chain_integrity_ok(stats) -> bool:
+    """驗證結果是否代表「這條鏈可以被信任、也可以繼續延伸」。
+
+    `verify_audit_chain` 的第一個回傳值 `ok` 是 `len(issues) == 0`,資訊性標記
+    也會讓它變成 False,所以 **`ok` 不能拿來回答「鏈有沒有壞」**。
+
+    寫入路徑與主控台判定必須透過這一個函式問同一個問題。兩邊各自把判準寫死
+    的後果已經發生過:寫入端用 `real_issues` 正常延伸鏈,主控台卻只看 `ok`,
+    於是一條只帶 `legacy_formula` 的鏈在畫面上被標成 `chain_integrity_failure`,
+    而且那次驗證不會留下任何 `audit_verify` 紀錄。
+
+    `legacy_formula` 的紀錄以較早的欄位組通過密碼學驗證,不阻擋;
+    `legacy_no_hash` 的紀錄早於雜湊鏈,無法證明未被竄改,阻擋。
+    """
+    kinds = (stats.get("kinds") or {})
+    return not (stats.get("real_issues", 0) or kinds.get("legacy_no_hash", 0))
+
+
 def _audit_hash(rec: dict, version: int = None) -> str:
     """對紀錄的正規化形式取雜湊。欄位順序固定,不含 hash 自身。
 
@@ -369,7 +387,7 @@ def audit(actor: str, action: str, code: str, result: str,
         except Exception as exc:
             raise AuditChainCorrupt("audit chain full verification unavailable") from exc
         kinds = stats.get("kinds", {})
-        if stats.get("real_issues", 0) or kinds.get("legacy_no_hash", 0):
+        if not chain_integrity_ok(stats):
             raise AuditChainCorrupt(
                 "audit chain full verification failed: %s" %
                 ",".join(sorted(kinds)) if issues else "audit chain invalid")

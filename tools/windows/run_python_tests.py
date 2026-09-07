@@ -81,6 +81,16 @@ def main() -> int:
         tests = [p for p in tests if p.relative_to(repo).as_posix() in CI_TESTS]
 
     env = os.environ.copy()
+    # 2026-09-06: this runner inherited WOUNDAI_STORE=gcs from the operator's
+    # shell (left over from a bucket gate check) and every test that did not
+    # defensively clear it ran against real Cloud Storage.  125 test audit
+    # records landed in a locked seven-year bucket and can never be removed.
+    # A test run must never be able to reach production storage, and that must
+    # not depend on each test file remembering to opt out.
+    for leaked in [k for k in env
+                   if k == "WOUNDAI_STORE" or k.startswith("WOUNDAI_GCS_")
+                   or k == "WOUNDAI_AUDIT_BUCKET"]:
+        env.pop(leaked)
     search = [
         repo / "engineering" / "phase0",
         repo / "engineering" / "phase1",
