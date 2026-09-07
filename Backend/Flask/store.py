@@ -976,6 +976,18 @@ def get_store(root: str = None) -> Store:
     if _ACTIVE is not None:
         return _ACTIVE
     kind = (os.environ.get("WOUNDAI_STORE") or "local").lower()
+    if kind == "gcs" and os.environ.get("WOUNDAI_REQUIRE_FUNCTIONAL_TESTS") == "1":
+        # 這個標記由測試 runner 設定,代表「目前這個行程是測試」。測試永遠不該
+        # 碰到正式儲存。2026-09-06 一次外洩的 WOUNDAI_STORE=gcs 讓測試把 125 筆
+        # 紀錄寫進鎖定七年的稽核桶,而那些物件永遠刪不掉。
+        #
+        # 拒絕而不是默默退回 local:靜默退回會讓「我以為在測雲端」的人拿到假的綠燈。
+        # 這道防線擋的是繞過 runner 直接執行單支測試的情況——runner 自己已經在
+        # spawn 前剝除那些變數了。
+        raise RuntimeError(
+            "WOUNDAI_STORE=gcs is refused inside a test process "
+            "(WOUNDAI_REQUIRE_FUNCTIONAL_TESTS=1); clear the cloud store "
+            "variables before running tests")
     if kind == "gcs":
         bucket = os.environ.get("WOUNDAI_GCS_BUCKET")
         if not bucket:

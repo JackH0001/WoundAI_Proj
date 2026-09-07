@@ -68,6 +68,17 @@ GCS 執行延遲可能延後實體不可回復時間。
 桶完成真 GCS 條件寫入測試。煙霧桶必須是未鎖、無 retention policy 且完全空白；測完要由
 操作者確認目標、位置與物件清單後才刪除。正式桶也必須在第一次寫入前為空。
 
+> **2026-09-07 修正前述判斷。** 下一段記錄的是 2026-09-06 當天的決定，該決定有一個
+> 錯誤前提：把「鎖定空桶」當成不涉及資料的零風險技術步驟。當天稍晚，一組殘留在操作者
+> shell 裡的 `WOUNDAI_STORE=gcs` 讓整份測試套件打到真的 GCS，**125 筆測試稽核紀錄寫進
+> 那個剛鎖好的空桶，七年內無法刪除**，該桶因此永久失去「乾淨紀元」的資格。
+> 詳見 `docs/evidence/p0-4/INCIDENT_TEST_ENV_LEAK_20260906.json`。
+>
+> **鎖定的桶可以被污染，但永遠無法清理。** 所以提早鎖不是省事，是把當天就可能發生的
+> 失誤變成七年的負債。新的紀元桶**必須保持未鎖**，直到真正要收第一筆正式紀錄的前一刻。
+> 未鎖也順帶免疫這次的失效模式——`require_locked_audit_epoch()` 要求桶必須已鎖，
+> 未鎖的桶收不到任何稽核寫入。
+
 只有 smoke 驗證與目標桶讀回驗證通過後，才可以對**明確指定的新桶**執行以下不可逆操作。
 專案負責人於 2026-09-06 決定：空桶鎖定屬 §D 所述之「技術步驟」，不涉及任何資料流入；
 7 年為醫療紀錄保存下限、且鎖後只能延長不能縮短；**資料流入仍受 P0-2/P0-5、隔離／本機 App 協議
@@ -117,6 +128,22 @@ unsafe label 與無法寫 audit 的情況。
 **不要刪 `audit.jsonl/`** —— 稽核鏈要連續，斷在中間比雜訊更糟。
 
 ### B4. 驗證
+
+**跑任何本機測試之前，先確認 shell 沒有殘留雲端 store 變數：**
+
+```powershell
+Get-ChildItem Env: | Where-Object Name -like 'WOUNDAI_*'
+```
+
+有 `WOUNDAI_STORE` / `WOUNDAI_GCS_*` / `WOUNDAI_AUDIT_BUCKET` 就先清掉：
+
+```powershell
+Remove-Item Env:WOUNDAI_STORE, Env:WOUNDAI_GCS_BUCKET, Env:WOUNDAI_GCS_PREFIX, Env:WOUNDAI_AUDIT_BUCKET -ErrorAction SilentlyContinue
+```
+
+這一步現在有兩道程式防護（runner 剝除、後端拒絕，見
+`engineering/phase2/test_test_isolation_from_cloud.py`），但**操作紀律仍然是第一道**：
+任何為了雲端操作而設的 session 變數，用完就清。
 
 ```powershell
 python engineering\phase2\verify_audit_chain.py
