@@ -43,7 +43,7 @@ class HttpLauncherIsolationTests(unittest.TestCase):
                         "CLOUDSDK_CONFIG", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
                 self.assertTrue(Path(env[key]).resolve().is_relative_to(Path(tmp).resolve()),
                                 (key, env[key]))
-            for key in ("ADMIN_PASSWORD", "JWT_SECRET_KEY", "FLASK_SECRET_KEY", "CARE_RECEIPT_SECRET"):
+            for key in launcher._SERVER_ONLY_SECRETS:
                 self.assertGreaterEqual(len(env[key]), 32)
                 self.assertNotEqual(env[key], "parent-value")
             self.assertEqual(env["ADMIN_PASSWORD"], env["WOUNDAI_HTTP_TEST_PASSWORD"])

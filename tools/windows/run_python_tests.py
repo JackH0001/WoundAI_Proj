@@ -44,6 +44,13 @@ CI_TESTS = {
 # Requires a separately launched Flask server and writes a full flywheel
 # lifecycle. Run-WindowsValidation.ps1 executes it in an isolated runtime.
 INTEGRATION_TESTS = {"engineering/phase2/test_backend_http.py"}
+_STRIPPED_ENVIRONMENT_KEYS = set("""
+ADMIN_PASSWORD JWT_SECRET_KEY FLASK_SECRET_KEY CARE_RECEIPT_SECRET
+WOUNDAI_HTTP_TEST_ADMIN_PASSWORD WOUNDAI_HTTP_TEST_PASSWORD WOUNDAI_API_TOKEN
+WOUNDAI_PW LITE_IP_SALT GOOGLE_APPLICATION_CREDENTIALS GOOGLE_CLOUD_PROJECT
+CLOUDSDK_CONFIG AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TENANT_ID HTTP_PROXY HTTPS_PROXY ALL_PROXY
+""".split())
 
 
 def atomic_json(path: Path, value: dict) -> None:
@@ -92,17 +99,7 @@ def sanitized_test_environment(source) -> dict:
         if upper == "WOUNDAI_STORE" or upper.startswith("WOUNDAI_GCS_") \
                 or upper == "WOUNDAI_AUDIT_BUCKET" \
                 or upper == "WOUNDAI_REQUIRE_FUNCTIONAL_TESTS" \
-                or upper in {
-                    "ADMIN_PASSWORD", "JWT_SECRET_KEY", "FLASK_SECRET_KEY",
-                    "CARE_RECEIPT_SECRET", "WOUNDAI_HTTP_TEST_ADMIN_PASSWORD",
-                    "WOUNDAI_HTTP_TEST_PASSWORD", "WOUNDAI_API_TOKEN",
-                    "WOUNDAI_PW", "LITE_IP_SALT",
-                    "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT",
-                    "CLOUDSDK_CONFIG", "AWS_ACCESS_KEY_ID",
-                    "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
-                    "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_TENANT_ID",
-                    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
-                }:
+                or upper in _STRIPPED_ENVIRONMENT_KEYS:
             env.pop(key)
     env["WOUNDAI_REQUIRE_FUNCTIONAL_TESTS"] = "1"
     return env
