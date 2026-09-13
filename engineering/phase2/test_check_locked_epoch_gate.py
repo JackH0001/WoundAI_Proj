@@ -14,7 +14,7 @@ from unittest import mock
 import check_locked_epoch_gate as gate
 
 
-FORMAL_BUCKET = "woundai-flywheel-jackh001-audit-epoch-20260905"
+FORMAL_BUCKET = "woundai-flywheel-synthetic-audit-epoch-20990101"
 MAIN_BUCKET = "woundai-flywheel-jackh001"
 
 

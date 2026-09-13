@@ -21,6 +21,13 @@ on:
       - 'engineering/phase2/test_audit_console_verdict.py'
       - 'engineering/phase2/test_test_isolation_from_cloud.py'
       - 'tools/windows/run_python_tests.py'
+      - 'tools/windows/run_backend_http_test.py'
+      - 'tools/windows/Run-WindowsValidation.ps1'
+      - 'engineering/phase2/test_backend_http*.py'
+      - 'engineering/phase2/test_http_launcher_isolation.py'
+      - 'engineering/phase2/test_ci_gate_runtime.py'
+      - 'engineering/phase2/test_hardening_lifecycle.py'
+      - 'engineering/phase2/test_deployment_input_gate.py'
       - '.github/workflows/p0-4-audit.yml'
   pull_request:
     paths:
@@ -41,6 +48,13 @@ on:
       - 'engineering/phase2/test_audit_console_verdict.py'
       - 'engineering/phase2/test_test_isolation_from_cloud.py'
       - 'tools/windows/run_python_tests.py'
+      - 'tools/windows/run_backend_http_test.py'
+      - 'tools/windows/Run-WindowsValidation.ps1'
+      - 'engineering/phase2/test_backend_http*.py'
+      - 'engineering/phase2/test_http_launcher_isolation.py'
+      - 'engineering/phase2/test_ci_gate_runtime.py'
+      - 'engineering/phase2/test_hardening_lifecycle.py'
+      - 'engineering/phase2/test_deployment_input_gate.py'
       - '.github/workflows/p0-4-audit.yml'
   workflow_dispatch:
 
@@ -70,14 +84,21 @@ jobs:
       - name: Audit-chain and P0-4 regression gates
         env:
           PYTHONDONTWRITEBYTECODE: '1'
+          WOUNDAI_REQUIRE_FUNCTIONAL_TESTS: '1'
         run: |
+          command -v pwsh
           python -B engineering/phase2/test_audit_chain.py
           python -B engineering/phase2/test_audit_chain_versioning.py
           python -B engineering/phase2/test_audit_chain_concurrency.py
           python -B engineering/phase2/test_admin_console.py
           python -B engineering/phase2/test_deployment_scripts_static.py
+          python -B engineering/phase2/test_deployment_input_gate.py
           python -B engineering/phase2/test_check_locked_epoch_gate.py
           python -B engineering/phase2/test_ci_gate_static.py
+          python -B engineering/phase2/test_ci_gate_runtime.py
+          python -B engineering/phase2/test_hardening_lifecycle.py
+          python -B engineering/phase2/test_backend_http_safety.py
+          python -B engineering/phase2/test_http_launcher_isolation.py
           python -B engineering/phase2/test_audit_console_verdict.py
           python -B engineering/phase2/test_test_isolation_from_cloud.py
           python -B engineering/phase2/test_store_abstraction.py
@@ -86,6 +107,9 @@ jobs:
 
       - name: Runtime canonicalization golden
         run: python -B Backend/Flask/runtime_golden.py --verify
+
+      - name: Synthetic HTTP consent lifecycle in isolated LocalStore
+        run: python -B tools/windows/run_backend_http_test.py --out "$RUNNER_TEMP/woundai-http" --timeout 300
 
   backend-image:
     name: backend-image

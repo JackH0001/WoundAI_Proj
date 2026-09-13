@@ -99,6 +99,20 @@ class CIGateStaticTests(unittest.TestCase):
         # Every matching run must also be finished before any verdict is given.
         self.assertIn("if ($unfinished.Count -gt 0)", src)
 
+    def test_finished_workflows_are_rechecked_and_ref_is_revalidated(self):
+        src = code_only(text(GATE))
+        self.assertNotIn("if ($completed.ContainsKey($workflowName)) { continue }", src)
+        loop = src.index("while ($true) {")
+        reset = src.index("$completed = @{}", loop)
+        query = src.index("foreach ($workflowName in $Workflow) {", reset)
+        self.assertLess(loop, reset)
+        self.assertLess(reset, query)
+        self.assertIn("Assert-RemoteRef 'before waiting'", src)
+        final = src.index("Assert-RemoteRef 'after workflow verification'")
+        self.assertLess(src.index('if ($failed.Count -gt 0)'), final)
+        self.assertLess(final, src.index("$exitCode = 0"))
+        self.assertIn("observed snapshot only", src)
+
     def test_only_success_passes(self):
         src = code_only(text(GATE))
         self.assertIn("$verdict = 'FAIL'", src)

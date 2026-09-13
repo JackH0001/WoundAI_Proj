@@ -48,45 +48,8 @@ Run-Stage "Python engineering tests" {
 }
 if (-not $Quick) {
     Run-Stage "isolated backend HTTP integration" {
-        $runtime = Join-Path $out "backend-http-runtime"
-        $flywheel = Join-Path $runtime "flywheel"
-        New-Item -ItemType Directory -Force -Path $runtime, $flywheel | Out-Null
-        $serverOut = Join-Path $out "backend-http-server.stdout.log"
-        $serverErr = Join-Path $out "backend-http-server.stderr.log"
-        $oldFlywheel = $env:WOUNDAI_FLYWHEEL_DIR
-        $oldAdmin = $env:ADMIN_PASSWORD
-        $oldSecret = $env:FLASK_SECRET_KEY
-        $env:WOUNDAI_FLYWHEEL_DIR = $flywheel
-        $env:ADMIN_PASSWORD = "woundai-admin"
-        $env:FLASK_SECRET_KEY = "windows-test-only-secret"
-        $server = $null
-        try {
-            $server = Start-Process -FilePath $python `
-                -ArgumentList @((Join-Path $RepoRoot "Backend\Flask\app.py")) `
-                -WorkingDirectory $runtime -RedirectStandardOutput $serverOut `
-                -RedirectStandardError $serverErr -WindowStyle Hidden -PassThru
-            $ready = $false
-            foreach ($attempt in 1..60) {
-                if ($server.HasExited) { break }
-                try {
-                    $health = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:5000/api/health" -TimeoutSec 2
-                    if ($health.StatusCode -eq 200) { $ready = $true; break }
-                } catch { Start-Sleep -Milliseconds 500 }
-            }
-            if (-not $ready) {
-                Write-Host "Backend did not become healthy. See $serverErr" -ForegroundColor Red
-                $global:LASTEXITCODE = 1
-            } else {
-                & $python (Join-Path $RepoRoot "engineering\phase2\test_backend_http.py") `
-                    --url "http://127.0.0.1:5000" `
-                    --img (Join-Path $RepoRoot "Windows\test_upload_image.jpg")
-            }
-        } finally {
-            if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -Force }
-            $env:WOUNDAI_FLYWHEEL_DIR = $oldFlywheel
-            $env:ADMIN_PASSWORD = $oldAdmin
-            $env:FLASK_SECRET_KEY = $oldSecret
-        }
+        & $python (Join-Path $PSScriptRoot "run_backend_http_test.py") `
+            --out (Join-Path $out "backend-http") --timeout 300
     }
 }
 Run-Stage "cross-platform parity" { & $python (Join-Path $RepoRoot "tools\parity_check.py") }

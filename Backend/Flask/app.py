@@ -81,15 +81,23 @@ app = Flask(__name__)
 CORS(app)
 
 # 配置
+_RUNTIME_ROOT = os.environ.get('WOUNDAI_RUNTIME_DIR')
+
+
+def _runtime_path(name):
+    """Keep mutable runtime files out of the source tree when explicitly set."""
+    return os.path.join(_RUNTIME_ROOT, name) if _RUNTIME_ROOT else name
+
+
 app.config.update(
     MAX_CONTENT_LENGTH=16 * 1024 * 1024,  # 16MB最大上傳
-    UPLOAD_FOLDER='uploads',
-    PROCESSED_FOLDER='processed',
-    MODEL_FOLDER='models',
+    UPLOAD_FOLDER=_runtime_path('uploads'),
+    PROCESSED_FOLDER=_runtime_path('processed'),
+    MODEL_FOLDER=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models'),
     SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', 'REPLACE_ME_SET_FLASK_SECRET_KEY_VIA_ENV'),
     JWT_SECRET_KEY=os.environ.get('JWT_SECRET_KEY', 'REPLACE_ME_SET_JWT_SECRET_VIA_ENV'),
     JWT_ACCESS_TOKEN_EXPIRES=timedelta(hours=24),
-    DATABASE='wound_analysis.db'
+    DATABASE=_runtime_path('wound_analysis.db')
 )
 
 jwt = JWTManager(app)
@@ -208,7 +216,8 @@ except Exception as _ae:
     print(f"⚠ 帳號模組載入失敗，所有登入都會失敗: {_ae}")
 
 # 創建必要目錄
-for folder in ['uploads', 'processed', 'models', 'logs']:
+for folder in [app.config['UPLOAD_FOLDER'], app.config['PROCESSED_FOLDER'],
+               _runtime_path('logs')]:
     os.makedirs(folder, exist_ok=True)
 
 # 配置日誌
@@ -216,7 +225,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/wound_analysis.log'),
+        logging.FileHandler(_runtime_path('logs/wound_analysis.log')),
         logging.StreamHandler()
     ]
 )

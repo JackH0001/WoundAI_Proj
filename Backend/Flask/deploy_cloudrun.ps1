@@ -8,7 +8,7 @@
 #
 # 用法：
 #   .\deploy_cloudrun.ps1 -ProjectId my-proj -Bucket woundai-flywheel-abc `
-#       -AuditBucket woundai-flywheel-abc-audit-epoch-20260905 `
+#       -AuditBucket woundai-flywheel-abc-audit-epoch-YYYYMMDD `
 #       -RuntimeServiceAccount woundai-runtime@my-proj.iam.gserviceaccount.com `
 #       -CandidateOnly
 #
@@ -179,15 +179,18 @@ function Assert-DeploymentInputs {
         }).Count -ne 0) {
         throw "candidate revision, E2E evidence and promotion authorization are valid only with -PromoteCandidate"
     }
-    if ($AuditBucket -ceq "$Bucket-audit") {
+    if ($AuditBucket -eq "$Bucket-audit") {
         throw "AuditBucket must be an explicit fresh locked epoch, not the legacy default [$AuditBucket]"
+    }
+    if ($AuditBucket -eq 'woundai-flywheel-jackh001-audit-epoch-20260905') {
+        throw "AuditBucket was retired after the 2026-09-06 test contamination; preserve it for incident review, never deploy to it"
     }
     if ($AuditBucket -match '(?i)(smoke|test|tmp|temp|dev|sandbox)') {
         throw "AuditBucket name identifies a disposable environment and cannot be deployed: [$AuditBucket]"
     }
     if ($AuditBucket -eq $Bucket) { throw "AuditBucket must differ from the main Bucket" }
     foreach ($candidate in @($Bucket, $AuditBucket)) {
-        if ($candidate -notmatch '^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$') {
+        if ($candidate -cnotmatch '^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$') {
             throw "invalid bucket name: [$candidate]"
         }
     }
