@@ -12,7 +12,17 @@ tags = ["password","hardcoded"]
 [[rules]]
 id = "woundai-flask-secret-default"
 description = "Hardcoded Flask SECRET_KEY default fallback"
-regex = '''(?i)secret[_-]?key['"]?\s*[,=]\s*['"][\w\-]{8,}['"]'''
+# 2026-09-20：原式是 `secret[_-]?key['"]?\s*[,=]\s*['"][\w\-]{8,}['"]`。
+# 那個 `,` 沒有限定前後文，於是把**環境變數名稱清單**
+# （例如 ("JWT_SECRET_KEY", "FLASK_SECRET_KEY")）判成「指派了一個 8 字元以上的值」。
+# PR #8 因此三度誤報，還逼得程式碼改寫成 "A B C".split() 去閃避——修 regex 才是正解。
+# 現在只認兩種**真的是指派**的語法，名稱並列不再命中：
+#   1) SECRET_KEY = "..."                        （與舊式相同，只是不再吃逗號）
+#   2) get('...SECRET_KEY', '...') / getenv("SECRET_KEY", "...")  ← 規則描述真正指的那個預設值
+# 刻意**不**一併擴大涵蓋範圍：加上 `:` 與 `']` 會順手命中 20 處既有 phase2 測試裡的
+# 字典字面量與 app.config["..."] = "..."，那是另一個改動（要嘛清理呼叫端、要嘛加豁免），
+# 混進來會讓這次的修正沒人審得動。已知缺口記在 test_gitleaks_rule_precision.py。
+regex = '''(?i)(?:secret[_-]?key['"]?\s*=\s*['"][\w\-]{8,}['"]|get(?:env)?\(\s*['"]\w*secret[_-]?key['"]\s*,\s*['"][\w\-]{8,}['"])'''
 tags = ["secret","flask"]
 
   # 誤報豁免：phase2 合成測試以自我描述的假金鑰簽 in-process Flask test client

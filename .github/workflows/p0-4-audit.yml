@@ -28,6 +28,13 @@ on:
       - 'engineering/phase2/test_ci_gate_runtime.py'
       - 'engineering/phase2/test_hardening_lifecycle.py'
       - 'engineering/phase2/test_deployment_input_gate.py'
+      - 'engineering/phase2/test_backend_url_parity.py'
+      - 'engineering/phase2/test_secret_key_fail_closed.py'
+      - 'engineering/phase2/test_gitleaks_rule_precision.py'
+      - 'iOS/WoundMeasurementApp/Core/AppSettings.swift'
+      - 'Android/app/build.gradle'
+      - 'docs/admin_operations.md'
+      - '.gitleaks.toml'
       - '.github/workflows/p0-4-audit.yml'
   pull_request:
     paths:
@@ -55,6 +62,13 @@ on:
       - 'engineering/phase2/test_ci_gate_runtime.py'
       - 'engineering/phase2/test_hardening_lifecycle.py'
       - 'engineering/phase2/test_deployment_input_gate.py'
+      - 'engineering/phase2/test_backend_url_parity.py'
+      - 'engineering/phase2/test_secret_key_fail_closed.py'
+      - 'engineering/phase2/test_gitleaks_rule_precision.py'
+      - 'iOS/WoundMeasurementApp/Core/AppSettings.swift'
+      - 'Android/app/build.gradle'
+      - 'docs/admin_operations.md'
+      - '.gitleaks.toml'
       - '.github/workflows/p0-4-audit.yml'
   workflow_dispatch:
 
@@ -101,6 +115,9 @@ jobs:
           python -B engineering/phase2/test_http_launcher_isolation.py
           python -B engineering/phase2/test_audit_console_verdict.py
           python -B engineering/phase2/test_test_isolation_from_cloud.py
+          python -B engineering/phase2/test_backend_url_parity.py
+          python -B engineering/phase2/test_secret_key_fail_closed.py
+          python -B engineering/phase2/test_gitleaks_rule_precision.py
           python -B engineering/phase2/test_store_abstraction.py
           python -B engineering/phase2/test_p0_4_staging.py
           python -B engineering/phase2/test_runtime_golden_contract.py
