@@ -470,6 +470,7 @@ function Assert-CloudRunRevisionConfiguration([switch]$RequireExclusiveTraffic,
     $secretExpected = @(
         [pscustomobject]@{ EnvironmentName = 'ADMIN_PASSWORD'; SecretName = 'woundai-admin-password' },
         [pscustomobject]@{ EnvironmentName = 'JWT_SECRET_KEY'; SecretName = 'woundai-jwt-secret' },
+        [pscustomobject]@{ EnvironmentName = 'FLASK_SECRET_KEY'; SecretName = 'woundai-flask-secret' },
         [pscustomobject]@{ EnvironmentName = 'CARE_RECEIPT_SECRET'; SecretName = $CareReceiptSecret }
     )
     foreach ($expectedSecret in $secretExpected) {
@@ -702,7 +703,7 @@ if (-not $VerifyOnly -and -not $PromoteCandidate) {
         --min-instances 0 `
         --max-instances 3 `
         --set-env-vars "WOUNDAI_STORE=gcs,WOUNDAI_GCS_BUCKET=$Bucket,WOUNDAI_GCS_PREFIX=flywheel,WOUNDAI_AUDIT_BUCKET=$AuditBucket,WOUNDAI_ENABLE_LITE_API=0,GIT_COMMIT=$GitCommit,DEPLOYED_AT=$DeployedAt" `
-        --set-secrets "ADMIN_PASSWORD=woundai-admin-password:latest,JWT_SECRET_KEY=woundai-jwt-secret:latest,CARE_RECEIPT_SECRET=$CareReceiptSecret`:latest"
+        --set-secrets "ADMIN_PASSWORD=woundai-admin-password:latest,JWT_SECRET_KEY=woundai-jwt-secret:latest,FLASK_SECRET_KEY=woundai-flask-secret:latest,CARE_RECEIPT_SECRET=$CareReceiptSecret`:latest"
     Assert-GCloudOk "Cloud Run 部署"
 
 

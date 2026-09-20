@@ -230,6 +230,44 @@ push 事件與 pull_request 事件各自產生獨立的 run id。2026-09-06 實�
 的結果，有交集才列入。**寧可列少而準，也不要列一個跑不出來的**——但真正適用卻沒綠的，
 一個都不能省。
 
+#### 第四個陷阱（2026-09-20，PR #8 實測）
+
+**綠的 `push` run 不代表這個 PR 是乾淨的。**
+`gitleaks-action` 在兩種事件下掃描的範圍不同：`push` 只掃**該次推送帶上去的 commit**，
+`pull_request` 掃**整個 PR range**（base..head）。PR #8 因此同一顆 commit 同時有：
+
+| run | 事件 | 掃描範圍 | 結論 |
+|---|---|---|---|
+| 34745004911 | push | 只有 `a69d9ac` | success |
+| 34745006397 | pull_request | `566baf2..a69d9ac` 兩顆 | **failure** |
+
+三個 finding 全在第一顆 commit `566baf2`；第二顆 `a69d9ac` 已經把那些寫法改掉了。
+換句話說**最終的樹是乾淨的，但歷史不是**，而 gitleaks 掃的是歷史。
+
+由此得到三條規則：
+
+1. 不要用「`push` run 是綠的」推論這個 PR 沒問題。`Assert-CIGreen.ps1` 判定**所有**符合
+   條件的 run（見上面第三個陷阱），所以它會自己抓到兩個 run 的差異——這也是那條嚴格化
+   第一次真正擋下紅燈。
+2. 中間 commit 帶著 finding、最終樹已乾淨時，用 **`--squash` 合併**，不要用 `--merge`。
+   squash 產生的單一 commit 內容等於最終樹（實測 `no leaks found`）；`--merge` 會把中間
+   commit 併進 main 的歷史，main 的 gitleaks push run 就會變紅。
+3. squash 之後 commit SHA 會變，但 **tree hash 不變**。合併後用這個驗，證明併進去的
+   就是通過閘門的那棵樹：
+
+```powershell
+$mergedTree = (git rev-parse "origin/main^{tree}")
+$testedTree = (git rev-parse "<通過閘門那顆 commit 的完整 40 碼，親手貼>^{tree}")
+if ($mergedTree -cne $testedTree) { throw "merged tree != tested tree" }
+```
+
+（`^` 在 PowerShell 是跳脫字元，`^{tree}` 一定要加引號，否則 `git rev-parse` 收到的是
+`origin/main{tree}`。）
+
+另外，誤報要修的是規則本身，不是程式碼。PR #8 當下的處置是把應用程式碼改寫成
+`"A B C".split()` 去閃避 regex——方向是反的。正解見 `.gitleaks.toml` 的
+`woundai-flask-secret-default` 與 `engineering/phase2/test_gitleaks_rule_precision.py`。
+
 合併仍為獨立閘門：CI 全綠只是必要條件，`gh pr ready` 與 `gh pr merge` 需要專案負責人
 在看過閘門輸出後另行決定。
 

@@ -24,6 +24,10 @@ from queue import Queue
 import sqlite3
 import hashlib
 
+# Signing keys are configuration, not source. See runtime_secrets for why there
+# is no literal fallback here any more.
+from runtime_secrets import resolve_secret
+
 # ImageJ和深度學習相關
 try:
     import imagej
@@ -94,8 +98,8 @@ app.config.update(
     UPLOAD_FOLDER=_runtime_path('uploads'),
     PROCESSED_FOLDER=_runtime_path('processed'),
     MODEL_FOLDER=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models'),
-    SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', 'REPLACE_ME_SET_FLASK_SECRET_KEY_VIA_ENV'),
-    JWT_SECRET_KEY=os.environ.get('JWT_SECRET_KEY', 'REPLACE_ME_SET_JWT_SECRET_VIA_ENV'),
+    SECRET_KEY=resolve_secret('FLASK_SECRET_KEY', 'Flask session and itsdangerous signing'),
+    JWT_SECRET_KEY=resolve_secret('JWT_SECRET_KEY', 'access tokens issued to the apps and console'),
     JWT_ACCESS_TOKEN_EXPIRES=timedelta(hours=24),
     DATABASE=_runtime_path('wound_analysis.db')
 )
