@@ -54,6 +54,7 @@ import os
 import shutil
 import tempfile
 import re
+import sys
 import threading
 import time
 import uuid
@@ -67,6 +68,45 @@ from audit_chain_contract import AUDIT_CHAIN_FIELDS, CHAIN_FIELD_VERSIONS, CHAIN
 # Keeping this policy with the low-level chained-write guard means callers
 # cannot bypass api_flywheel.audit() and write a shorter locked chain directly.
 AUDIT_RETENTION_SECONDS = 220903200
+
+# Preserve incident evidence for reads, but never admit more writes into the
+# contaminated epoch. This is an exact target, not a ban on populated epochs.
+RETIRED_AUDIT_EPOCHS = {
+    "woundai-flywheel-jackh001-audit-epoch-20260905":
+        "docs/evidence/p0-4/INCIDENT_TEST_ENV_LEAK_20260906.json",
+}
+
+
+def _is_test_process() -> bool:
+    """Recognize supported test entrypoints without treating imports as execution.
+
+    The runner marker covers subprocesses. Entry-point checks cover direct
+    ``python test_*.py``, pytest and unittest runs before collection starts.
+    Importing unittest/pytest in a production process alone is not a signal.
+    This prevents accidental SDK construction; it is not a network sandbox.
+    """
+    if os.environ.get("WOUNDAI_REQUIRE_FUNCTIONAL_TESTS") == "1" \
+            or "PYTEST_CURRENT_TEST" in os.environ:
+        return True
+    main = sys.modules.get("__main__")
+    module = getattr(getattr(main, "__spec__", None), "name", "")
+    if module in {"pytest.__main__", "unittest.__main__"}:
+        return True
+    for entry in (sys.argv[0] if sys.argv else "", getattr(main, "__file__", "")):
+        path = str(entry or "").replace("\\", "/").lower()
+        leaf = path.rsplit("/", 1)[-1]
+        if (leaf.startswith("test_") and leaf.endswith(".py")) \
+                or leaf in {"pytest", "pytest.exe", "py.test", "py.test.exe"} \
+                or path.endswith(("/pytest/__main__.py", "/unittest/__main__.py")):
+            return True
+    return False
+
+
+def _refuse_cloud_in_test_process() -> None:
+    if _is_test_process():
+        raise RuntimeError(
+            "GCS storage is refused inside a test process; use the isolated "
+            "test runner or an explicitly constructed in-memory store double")
 
 
 class Store:
@@ -517,8 +557,11 @@ class GcsStore(Store):
     # （`AUDIT_KEYS` 已移到基底 `Store`，兩種後端共用同一份清單。）
 
     def __init__(self, bucket: str, prefix: str = "flywheel", audit_bucket: str = None):
+        # Guard before even importing the SDK: Client() may discover live ADC.
+        _refuse_cloud_in_test_process()
         from google.cloud import storage  # noqa: 延後 import，見 docstring
         self._client = storage.Client()
+        self._cloud_client_constructed = True
         self._bucket = self._client.bucket(bucket)
         self._bucket_name = bucket
         self.prefix = prefix.strip("/")
@@ -911,6 +954,9 @@ class GcsStore(Store):
 
     def require_locked_audit_epoch(self) -> None:
         """Fail closed for every direct GCS audit-chain append path."""
+        reason = RETIRED_AUDIT_EPOCHS.get(self._audit_bucket_name)
+        if reason:
+            raise PermissionError("retired audit epoch is read-only: " + reason)
         info = self.retention_info()
         retention = int(info.get("retention_seconds") or 0)
         if (info.get("verified") is True and info.get("locked") is True
@@ -973,27 +1019,18 @@ _ACTIVE = None
 def get_store(root: str = None) -> Store:
     """依環境變數挑實作。root 只給 LocalStore 用（相容既有的 WOUNDAI_FLYWHEEL_DIR）。"""
     global _ACTIVE
+    kind = (os.environ.get("WOUNDAI_STORE") or "local").lower()
+    # Check before returning a cache populated before tests started. A later
+    # env change to local must not make that live client safe to reuse.
+    if kind == "gcs" or getattr(_ACTIVE, "_cloud_client_constructed", False):
+        _refuse_cloud_in_test_process()
     if _ACTIVE is not None:
         return _ACTIVE
-    kind = (os.environ.get("WOUNDAI_STORE") or "local").lower()
-    if kind == "gcs" and os.environ.get("WOUNDAI_REQUIRE_FUNCTIONAL_TESTS") == "1":
-        # 這個標記由測試 runner 設定,代表「目前這個行程是測試」。測試永遠不該
-        # 碰到正式儲存。2026-09-06 一次外洩的 WOUNDAI_STORE=gcs 讓測試把 125 筆
-        # 紀錄寫進鎖定七年的稽核桶,而那些物件永遠刪不掉。
-        #
-        # 拒絕而不是默默退回 local:靜默退回會讓「我以為在測雲端」的人拿到假的綠燈。
-        # 這道防線擋的是繞過 runner 直接執行單支測試的情況——runner 自己已經在
-        # spawn 前剝除那些變數了。
-        raise RuntimeError(
-            "WOUNDAI_STORE=gcs is refused inside a test process "
-            "(WOUNDAI_REQUIRE_FUNCTIONAL_TESTS=1); clear the cloud store "
-            "variables before running tests")
     if kind == "gcs":
         bucket = os.environ.get("WOUNDAI_GCS_BUCKET")
         if not bucket:
             raise RuntimeError("WOUNDAI_STORE=gcs 但缺 WOUNDAI_GCS_BUCKET")
-        # 稽核桶為選填。沒設就退回主桶——功能正常，但稽核軌跡是刪得掉的，
-        # describe() 會誠實反映這件事（不會顯示 WORM 字樣）。
+        # Protected-key access refuses a missing audit bucket in _target().
         _ACTIVE = GcsStore(bucket, os.environ.get("WOUNDAI_GCS_PREFIX", "flywheel"),
                            os.environ.get("WOUNDAI_AUDIT_BUCKET") or None)
     else:

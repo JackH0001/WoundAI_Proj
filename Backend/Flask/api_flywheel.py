@@ -257,12 +257,13 @@ INFORMATIONAL_KINDS = ("legacy_no_hash", "legacy_formula")
 
 
 def chain_integrity_ok(stats) -> bool:
-    """驗證結果是否代表「這條鏈可以被信任、也可以繼續延伸」。
+    """驗證結果是否沒有實質完整性異常。
 
     `verify_audit_chain` 的第一個回傳值 `ok` 是 `len(issues) == 0`,資訊性標記
     也會讓它變成 False,所以 **`ok` 不能拿來回答「鏈有沒有壞」**。
 
-    寫入路徑與主控台判定必須透過這一個函式問同一個問題。兩邊各自把判準寫死
+    寫入路徑與主控台必須先透過這一個函式回答同一個完整性問題；寫入端隨後
+    另行要求全鏈皆為目前版本，才能判定是否可延伸。兩邊各自把完整性判準寫死
     的後果已經發生過:寫入端用 `real_issues` 正常延伸鏈,主控台卻只看 `ok`,
     於是一條只帶 `legacy_formula` 的鏈在畫面上被標成 `chain_integrity_failure`,
     而且那次驗證不會留下任何 `audit_verify` 紀錄。

@@ -1,151 +1,219 @@
 # -*- coding: utf-8 -*-
-"""後端真實 HTTP 連線測試(本機啟動 Flask 後執行)。
-用法:1) cd Backend/Flask && python app.py   2) python engineering/phase2/test_backend_http.py [--url http://127.0.0.1:5000] --img <測試圖>
-需 requests。驗證:登入→classify(schema+影像綁定)→annotation(守門/孤兒擋下/去重)→stats→consent/withdraw。
+"""Synthetic loopback HTTP validation for the P0-4 consent contract.
 
-【2026-07-28 資料鏈修正】annotation 現在強制 image_id/image_w/image_h。
-本測試因此**必須先跑 classify 取得 image_id**(故 --img 由選配改為必要),
-並新增三個守門斷言:孤兒 GT→400、座標超界→400、同影像同遮罩→duplicate_skipped。"""
-import os, sys, uuid, argparse
-try:
-    import requests
-except ImportError:
-    print("需 pip install requests"); sys.exit(1)
-sys.path.insert(0, ".")
-from test_api_contract import validate   # 重用契約 schema 驗證
+Start with tools/windows/run_backend_http_test.py. This client refuses remote
+URLs, proxies, redirects and servers without a matching per-run response marker.
+Only generated synthetic pixels are accepted, never an arbitrary patient photo.
+"""
+import argparse
+import ipaddress
+import os
+from pathlib import Path
+import re
+import sys
+from urllib.parse import urlsplit
+import uuid
+import requests
 
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--url", default="http://127.0.0.1:5000")
-    ap.add_argument("--img", default=None, help="測試影像(取得 image_id 用;不給則跳過飛輪資料鏈測試)")
-    ap.add_argument("--user", default="admin"); ap.add_argument("--pw", default="woundai-admin")  # 後端預設 ADMIN_PASSWORD
-    a = ap.parse_args(); U = a.url; ok = True
-
-    # 1 登入
-    r = requests.post(f"{U}/api/auth/login", json={"username": a.user, "password": a.pw}, timeout=10)
-    if r.status_code != 200:
-        print("登入失敗", r.status_code, r.text[:120]); return 1
-    tok = r.json().get("access_token"); admin_h = {"Authorization": f"Bearer {tok}"}
-    print("管理者登入 OK")
-
-    # RBAC 上線後 admin 刻意不能替醫師背書 GT。HTTP 整合測試先用管理者建立
-    # 一個隔離環境用醫師帳號，再以醫師 token 跑臨床資料鏈；否則測到的是
-    # 「管理者越權被正確擋下」，不是 annotation/consent 的端到端行為。
-    clinical_user, clinical_pw = "http-test-physician", "http-test-physician-1234"
-    r = requests.post(f"{U}/api/v1/users", headers=admin_h,
-                      json={"user": clinical_user, "role": "physician",
-                            "password": clinical_pw, "display_name": "HTTP integration test"},
-                      timeout=10)
-    if r.status_code != 200:
-        print("建立測試醫師失敗", r.status_code, r.text[:160]); return 1
-    r = requests.post(f"{U}/api/auth/login",
-                      json={"username": clinical_user, "password": clinical_pw}, timeout=10)
-    if r.status_code != 200:
-        print("測試醫師登入失敗", r.status_code, r.text[:160]); return 1
-    tok = r.json().get("access_token"); H = {"Authorization": f"Bearer {tok}"}
-    print("測試醫師登入 OK")
-
-    if not a.img:
-        print("(未提供 --img:跳過 classify 與飛輪資料鏈測試——新契約需 image_id,無影像測不了)")
-        print("\n總結: 略過 ⚠")
-        return 0
-
-    # 2 classify:schema + 影像綁定欄位
-    # ⚠ 每輪必須用「內容不同」的影像:image_id 是內容雜湊,而本測試結尾會撤回同意;
-    #   沿用同一張圖 → 第二次跑就會被「該影像已撤回」擋下,被誤判成產品迴歸。
-    #   JPEG 解碼器會忽略 EOI 之後的位元組,故附加隨機尾碼可安全地讓雜湊唯一。
-    with open(a.img, "rb") as f:
-        payload = f.read() + os.urandom(8)
-    code = "WD-T" + uuid.uuid4().hex[:8].upper()
-    print(f"本輪測試代碼 {code}(每輪唯一,避免污染產線佇列的既有樣本)")
-    r = requests.post(f"{U}/api/v1/classify", headers=H,
-                      files={"image": ("wound.jpg", payload, "image/jpeg")}, timeout=120)
-    if r.status_code != 200:
-        print("classify HTTP", r.status_code, r.text[:160]); print("\n總結: 有 FAIL ✗"); return 1
-    j = r.json()
-    good, iss = validate(j); print("classify schema:", "PASS" if good else f"FAIL {iss}"); ok &= good
-    iid, iw, ih = j.get("image_id"), j.get("image_w"), j.get("image_h")
-    bind = bool(iid) and (iw or 0) > 0 and (ih or 0) > 0
-    print(f"classify 影像綁定: {'PASS' if bind else 'FAIL'} (image_id={iid}, {iw}x{ih})"); ok &= bind
-    if not bind:
-        print("\n總結: 有 FAIL ✗(後端未重啟?image_id/image_w/image_h 是本輪新增)"); return 1
-
-    # 2b 模擬圖模式:確認執行中的後端**真的**是含 seg=color 的版本。
-    # 這一項專治「改了 app.py 但忘記重啟」——Flask debug=False 不熱載,舊進程會默默忽略 seg 參數,
-    # 表面上一切正常,只有 route 仍是 student 這個線索。
-    with open(a.img, "rb") as f:
-        r2 = requests.post(f"{U}/api/v1/classify", headers=H,
-                           files={"image": ("wound.jpg", f.read() + os.urandom(8), "image/jpeg")},
-                           data={"seg": "color"}, timeout=120)
-    if r2.status_code == 200:
-        j2 = r2.json()
-        pm = j2.get("phantom_mode")
-        rt = (j2.get("stage2_segment") or {}).get("route", "")
-        good = (pm is True) and str(rt).startswith("phantom_color")
-        print(f"seg=color 模擬圖模式: {'PASS' if good else 'FAIL'} "
-              f"(phantom_mode={pm}, route={rt}, pass={j2.get('phantom_pass')})")
-        if not good:
-            print("   → phantom_mode 是 None 代表**後端是舊進程**(改了 app.py 沒重啟);"
-                  "Flask debug=False 不熱載,舊版會忽略 seg 參數")
-        ok &= good
-    else:
-        print("seg=color HTTP", r2.status_code); ok = False
-
-    poly = (j.get("stage2_segment") or {}).get("wound_polygon") or []
-    if len(poly) < 3:   # AI 空遮罩(OOD)時用一個安全的假多邊形,仍可測資料鏈守門
-        poly = [[10, 10], [min(200, iw - 1), 10], [min(200, iw - 1), min(200, ih - 1)], [10, min(200, ih - 1)]]
-    base = {"code": code, "gt_polygon": poly, "exudate": 2,
-            "doctor_verified": True, "deidentified": True, "consent_train": True,
-            "image_id": iid, "image_w": iw, "image_h": ih,
-            "mm_per_px": (j.get("stage3_calibrate") or {}).get("mm_per_px"),
-            "route": (j.get("stage2_segment") or {}).get("route"),
-            "care_note": "test_backend_http"}
-
-    # 3 annotation 守門矩陣
-    def post_anno(payload, label, expect, expect_status=None):
-        rr = requests.post(f"{U}/api/v1/annotation", headers=H, json=payload, timeout=15)
-        st = rr.json().get("status") if rr.status_code == 200 else None
-        good_ = (rr.status_code == expect) and (expect_status is None or st == expect_status)
-        print(f"annotation {label}→ {rr.status_code}{'/' + str(st) if st else ''} (期望 {expect}"
-              f"{'/' + expect_status if expect_status else ''}) {'PASS' if good_ else 'FAIL ' + rr.text[:140]}")
-        return good_
-
-    ok &= post_anno(base, "合格", 200, "enqueued")
-    ok &= post_anno(base, "同影像同遮罩(去重)", 200, "duplicate_skipped")
-    ok &= post_anno({**base, "consent_train": False}, "未同意", 400)
-    ok &= post_anno({k: v for k, v in base.items() if k != "image_id"}, "孤兒GT(無image_id)", 400)
-    ok &= post_anno({**base, "image_id": "deadbeefdeadbeef"}, "影像不存在", 400)
-    ok &= post_anno({**base, "gt_polygon": [[0, 0], [iw + 500, 0], [0, 10]]}, "座標超界", 400)
-    ok &= post_anno({**base, "exudate": 9}, "滲液超出0-3", 400)
-
-    # 4 佇列健康度
-    r = requests.get(f"{U}/api/v1/flywheel/stats", headers=H, timeout=10)
-    if r.status_code == 200:
-        s = r.json(); print("stats:", s)
-        ok &= (s.get("trainable", 0) >= 1)
-        print(f"可訓練樣本 ≥1: {'PASS' if s.get('trainable', 0) >= 1 else 'FAIL'}")
-    else:
-        print("stats HTTP", r.status_code); ok = False
-
-    # 5 撤回 → 應從可訓練樣本中消失
-    r = requests.post(f"{U}/api/v1/consent/withdraw", headers=H, json={"code": code}, timeout=10)
-    print("withdraw→", r.status_code, "(期望200)"); ok &= (r.status_code == 200)
-    s2 = requests.get(f"{U}/api/v1/flywheel/stats", headers=H, timeout=10).json()
-    gone = s2.get("withdrawn", 0) >= 1
-    print(f"撤回後排除生效: {'PASS' if gone else 'FAIL'} (withdrawn={s2.get('withdrawn')}, trainable={s2.get('trainable')})")
-    ok &= gone
-    ok &= post_anno(base, "撤回後再送(應擋)", 400)
-
-    # 6 重新取得同意 → 應可再次入列(沒有這條,撤回就是死局)
-    r = requests.post(f"{U}/api/v1/consent/restore", headers=H, json={"code": code}, timeout=10)
-    print("restore→", r.status_code, "(期望200)"); ok &= (r.status_code == 200)
-    ok &= post_anno({**base, "gt_polygon": poly[::-1] if len(poly) > 3 else poly,
-                     "care_note": "re-consent"}, "重新同意後再送", 200)
-
-    print("\n總結:", "全部 PASS ✓" if ok else "有 FAIL ✗")
-    print("提示:本腳本會寫入產線 flywheel/。要完全隔離,啟動後端時設 WOUNDAI_FLYWHEEL_DIR=<暫存目錄>。")
-    return 0 if ok else 1
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from test_api_contract import validate
 
 
-if __name__ == "__main__": sys.exit(main())
+class TestRefused(RuntimeError):
+    pass
+
+
+def loopback_origin(url):
+    """Accept only an unambiguous literal loopback origin; never resolve DNS."""
+    try:
+        parsed = urlsplit(url)
+        address = ipaddress.ip_address(parsed.hostname or "")
+        port = parsed.port
+    except (ValueError, TypeError) as exc:
+        raise TestRefused("URL must contain a literal loopback address") from exc
+    if (parsed.scheme != "http" or not address.is_loopback
+            or parsed.hostname not in ("127.0.0.1", "::1")
+            or parsed.username is not None or parsed.password is not None
+            or parsed.path not in ("", "/") or parsed.query or parsed.fragment
+            or port is None or not 1 <= port <= 65535):
+        raise TestRefused("Only http://127.0.0.1:PORT or http://[::1]:PORT is allowed")
+    host = "[::1]" if address.version == 6 else "127.0.0.1"
+    return "http://%s:%d" % (host, port)
+
+
+class LocalTestClient:
+    def __init__(self, url, run_id):
+        self.origin = loopback_origin(url)
+        if not re.fullmatch(r"[0-9a-f]{32,64}", run_id or ""):
+            raise TestRefused("A random 32-64 lowercase hex test run ID is required")
+        self.run_id = run_id
+        self.session = requests.Session()
+        self.session.trust_env = False
+        self.verified = False
+
+    def request(self, method, path, **kwargs):
+        if not path.startswith("/api/") or "://" in path or "\\" in path:
+            raise TestRefused("Request path must stay under the fixed local API origin")
+        if not self.verified and (method != "GET" or path != "/api/health"):
+            raise TestRefused("Verify the isolated server before sending credentials or writes")
+        response = self.session.request(method, self.origin + path,
+                                        allow_redirects=False, timeout=120, **kwargs)
+        if 300 <= response.status_code < 400 or response.history:
+            raise TestRefused("Redirects are forbidden during a write-capable test")
+        if response.headers.get("X-WoundAI-Local-Test-Run") != self.run_id:
+            raise TestRefused("Server did not prove the expected isolated test run")
+        return response
+
+    def verify_server(self):
+        response = self.request("GET", "/api/health")
+        if response.status_code != 200:
+            raise TestRefused("Isolated backend health check failed")
+        self.verified = True
+
+
+def synthetic_jpeg(run_id):
+    """Make pixels unique, then encode JPEG; never append EOI garbage."""
+    import cv2
+    import numpy as np
+    pixels = np.full((256, 320, 3), 230, dtype=np.uint8)
+    cv2.ellipse(pixels, (160, 128), (76, 52), 0, 0, 360, (45, 45, 200), -1)
+    for i, value in enumerate(bytes.fromhex(run_id)):
+        x = 5 + i * 4
+        pixels[5:17, x:x + 4] = (value, 255 - value, (value * 7) % 256)
+    success, encoded = cv2.imencode(".jpg", pixels, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    if not success:
+        raise TestRefused("Synthetic JPEG encoding failed")
+    sys.path.insert(0, str(HERE.parents[1] / "Backend" / "Flask"))
+    from image_canonical import canonicalize
+    payload = encoded.tobytes()
+    canonical = canonicalize(payload)
+    if canonical.data != payload or canonical.pixels.shape != pixels.shape:
+        raise TestRefused("Synthetic JPEG did not satisfy the exact canonical contract")
+    return payload
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--url", default="http://127.0.0.1:5000")
+    parser.add_argument("--synthetic", action="store_true", required=True)
+    parser.add_argument("--test-run-id", required=True)
+    parser.add_argument("--user", default="admin")
+    args = parser.parse_args(argv)
+    admin_password = os.environ.pop("WOUNDAI_HTTP_TEST_PASSWORD", "")
+    if len(admin_password) < 32:
+        raise TestRefused("A child-only synthetic HTTP password is required")
+    client = LocalTestClient(args.url, args.test_run_id)
+    payload = synthetic_jpeg(args.test_run_id)
+    client.verify_server()
+    failures = []
+
+    def check(label, condition):
+        print(("PASS " if condition else "FAIL ") + label)
+        if not condition:
+            failures.append(label)
+        return condition
+
+    def post(path, **kwargs):
+        return client.request("POST", path, **kwargs)
+
+    def login(user, password):
+        response = post("/api/auth/login", json={"username": user, "password": password})
+        if response.status_code != 200 or not response.json().get("access_token"):
+            raise TestRefused("Isolated login failed: HTTP %s" % response.status_code)
+        return {"Authorization": "Bearer " + response.json()["access_token"]}
+
+    admin_headers = login(args.user, admin_password)
+    physician = "http-test-" + args.test_run_id[:12]
+    password = uuid.uuid4().hex + uuid.uuid4().hex
+    response = post("/api/v1/users", headers=admin_headers,
+                    json={"user": physician, "role": "physician", "password": password,
+                          "display_name": "Synthetic isolated HTTP test"})
+    if response.status_code != 200:
+        raise TestRefused("Could not create isolated physician: HTTP %s" % response.status_code)
+    headers = login(physician, password)
+    code = "WD-T" + args.test_run_id[:12].upper()
+
+    def classify(receipt=None):
+        form = {"seg": "color"}
+        if receipt:
+            form["care_receipt"] = receipt
+        response = post("/api/v1/classify", headers=headers,
+                        files={"image": ("synthetic.jpg", payload, "image/jpeg")}, data=form)
+        if response.status_code != 200:
+            raise TestRefused("Synthetic classify failed: HTTP %s" % response.status_code)
+        result = response.json()
+        valid, issues = validate(result)
+        check("classify response schema", valid)
+        if not valid:
+            print(issues)
+        return result
+
+    unconsented = classify()
+    check("no care receipt: analysis only, no image identifier",
+          unconsented.get("persisted") is False and unconsented.get("image_id") is None
+          and unconsented.get("persistence_reason") == "care_receipt_required")
+    response = post("/api/v1/consent/care/attest", headers=headers, json={"code": code})
+    if response.status_code != 200 or not response.json().get("care_receipt"):
+        raise TestRefused("Care attestation failed: HTTP %s" % response.status_code)
+    result = classify(response.json()["care_receipt"])
+    iid, iw, ih = result.get("image_id"), result.get("image_w"), result.get("image_h")
+    if not check("care receipt stages the canonical image",
+                 bool(iid) and iw == 320 and ih == 256 and result.get("persisted") is True
+                 and result.get("persistence_reason") == "staged"):
+        return 1
+    check("synthetic route uses phantom colour segmentation",
+          result.get("phantom_mode") is True
+          and str(result.get("stage2_segment", {}).get("route", "")).startswith("phantom_color"))
+    polygon = [[100, 90], [210, 90], [210, 170], [100, 170]]
+    annotation = {"code": code, "gt_polygon": polygon, "exudate": 2,
+                  "doctor_verified": True, "deidentified": True, "consent_train": True,
+                  "image_id": iid, "image_w": iw, "image_h": ih, "source": "phantom",
+                  "route": result["stage2_segment"]["route"],
+                  "care_note": "synthetic isolated test " + args.test_run_id}
+
+    def annotate(body, label, expected, status=None):
+        response = post("/api/v1/annotation", headers=headers, json=body)
+        actual_status = response.json().get("status") if response.status_code == 200 else None
+        return check(label, response.status_code == expected
+                     and (status is None or actual_status == status))
+
+    def stats():
+        response = client.request("GET", "/api/v1/flywheel/stats", headers=headers)
+        if response.status_code != 200:
+            raise TestRefused("Flywheel statistics unavailable")
+        return response.json()
+
+    initial = stats()
+    annotate({**annotation, "consent_train": False}, "training consent denied before promotion", 400)
+    check("denied training consent adds no trainable sample",
+          stats().get("trainable", 0) == initial.get("trainable", 0))
+    annotate({k: v for k, v in annotation.items() if k != "image_id"}, "orphan annotation rejected", 400)
+    annotate({**annotation, "image_id": "d" * 40}, "missing image rejected", 400)
+    annotate({**annotation, "gt_polygon": [[0, 0], [iw + 500, 0], [0, 10]]}, "out-of-bounds rejected", 400)
+    annotate({**annotation, "exudate": 9}, "invalid exudate rejected", 400)
+    annotate(annotation, "training consent promotes and enqueues", 200, "enqueued")
+    annotate(annotation, "exact repeat is idempotent", 200, "duplicate_skipped")
+    check("exactly one new trainable sample", stats().get("trainable", 0) == initial.get("trainable", 0) + 1)
+    annotate({**annotation, "code": "WD-T" + uuid.uuid4().hex[:12].upper()},
+             "promoted image cannot be rebound to another case", 400)
+    response = post("/api/v1/consent/withdraw", headers=headers, json={"code": code})
+    check("withdraw accepted", response.status_code == 200)
+    withdrawn = stats()
+    check("withdraw removes this sample from training",
+          withdrawn.get("trainable", 0) == initial.get("trainable", 0)
+          and withdrawn.get("withdrawn", 0) == initial.get("withdrawn", 0) + 1)
+    annotate(annotation, "withdrawn annotation cannot be resubmitted", 400)
+    response = post("/api/v1/consent/restore", headers=headers, json={"code": code})
+    check("explicit renewed consent accepted", response.status_code == 200)
+    annotate({**annotation, "gt_polygon": polygon[::-1]}, "renewed consent permits annotation", 200)
+    print("HTTP synthetic contract: %s (%d failures)" % ("PASS" if not failures else "FAIL", len(failures)))
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (TestRefused, requests.RequestException) as exc:
+        print("REFUSE/FAIL:", exc)
+        raise SystemExit(2)

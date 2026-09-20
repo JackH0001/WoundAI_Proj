@@ -200,21 +200,45 @@ function Assert-NoPublicIam([string]$Name) {
     })
     if ($public.Count -ne 0) { Die "gs://$Name has public IAM bindings" }
 }
+function Assert-LifecyclePropertySet($Value, [string[]]$Expected, [string]$What) {
+    if ($null -eq $Value) { Die "$What is missing" }
+    $actual = @($Value.PSObject.Properties | ForEach-Object { $_.Name } | Sort-Object)
+    $wanted = @($Expected | Sort-Object)
+    if (($actual -join "`n") -cne ($wanted -join "`n")) {
+        Die "$What has unreviewed or missing fields: [$($actual -join '; ')]"
+    }
+}
 function Get-LifecycleKeys($Configuration) {
     $rules = @(Get-Field $Configuration @('lifecycle_config.rule','lifecycle.rule'))
     $keys = @()
     foreach ($rule in $rules) {
+        Assert-LifecyclePropertySet $rule @('action','condition') 'lifecycle rule'
+        Assert-LifecyclePropertySet $rule.action @('type') 'lifecycle action'
         if ($rule.action.type -ne 'Delete') { Die "unexpected non-Delete lifecycle action" }
         $condition = $rule.condition
+        if ($null -eq $condition) { Die "lifecycle condition is missing" }
         $prefixes = @($condition.matchesPrefix | Where-Object { $null -ne $_ })
-        if ($null -ne $condition.daysSinceNoncurrentTime) {
-            if ($condition.isLive -ne $false -or $prefixes.Count -ne 0) {
+        if ($null -ne $condition.PSObject.Properties['daysSinceNoncurrentTime']) {
+            # GCS combines conditions with AND. An ignored suffix, storage
+            # class, or numNewerVersions condition can prevent the promised
+            # TTL from ever deleting staging objects while the shorthand key
+            # still looks correct. Both raw and normalized SDK rule objects
+            # must contain precisely the reviewed condition fields.
+            Assert-LifecyclePropertySet $condition @('daysSinceNoncurrentTime','isLive') 'noncurrent lifecycle condition'
+            if ($condition.isLive -isnot [bool] -or $condition.isLive -ne $false `
+                    -or ($condition.daysSinceNoncurrentTime -isnot [int] -and $condition.daysSinceNoncurrentTime -isnot [long]) `
+                    -or $condition.daysSinceNoncurrentTime -lt 1) {
                 Die "invalid noncurrent lifecycle rule"
             }
             $keys += "noncurrent|$($condition.daysSinceNoncurrentTime)"
-        } elseif ($null -ne $condition.age -and $prefixes.Count -eq 1) {
+        } else {
+            Assert-LifecyclePropertySet $condition @('age','matchesPrefix') 'age lifecycle condition'
+            if (($condition.age -isnot [int] -and $condition.age -isnot [long]) `
+                    -or $condition.age -lt 1 -or $prefixes.Count -ne 1) {
+                Die "invalid age lifecycle rule"
+            }
             $keys += "age|$($condition.age)|$($prefixes[0])"
-        } else { Die "unrecognized lifecycle rule" }
+        }
     }
     return @($keys | Sort-Object)
 }

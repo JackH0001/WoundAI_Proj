@@ -82,10 +82,11 @@ $jwt | gcloud secrets create woundai-jwt-secret --data-file=- --replication-poli
 
 ```powershell
 cd C:\dev\WoundAI_Proj\Backend\Flask
+$auditEpoch = Read-Host '輸入另行核准且完成驗證的新稽核桶名稱'
 .\deploy_cloudrun.ps1 `
   -ProjectId woundai-jackh001 `
   -Bucket woundai-flywheel-jackh001 `
-  -AuditBucket woundai-flywheel-jackh001-audit-epoch-20260905 `
+  -AuditBucket $auditEpoch `
   -RuntimeServiceAccount woundai-runtime@woundai-jackh001.iam.gserviceaccount.com `
   -CandidateOnly
 ```
@@ -96,6 +97,10 @@ cd C:\dev\WoundAI_Proj\Backend\Flask
 `-PromoteCandidate`；它不重建映像，而會重驗現有 candidate 後切換流量。`-VerifyOnly`
 只重驗目前 100% live revision。三個模式互斥。
 
+`woundai-flywheel-jackh001-audit-epoch-20260905` 已因測試資料寫入而退役；保留作事故證據。
+它的 7 年鎖定仍有效，但不能再當成正式發布目標。新的桶尚待命名、核准與驗證，
+詳見 `pre_collection_checklist.md`；本機 App/HTTP 合成測試可先用 LocalStore 進行。
+
 切流量不是沿用可變 tag 即可。Mac／App E2E 的 JSON 證據必須使用 schema
 `woundai.p0-4-candidate-e2e/1`，逐字綁定 `candidate_revision`、`git_commit` 與
 `candidate_url`，並標示 `synthetic_data_only=true`、`contains_phi=false`、實際執行者與
@@ -104,13 +109,14 @@ UTC 時間。`cases[]` 必須恰好包含且全數為 `passed`：`no-care-consen
 `idempotent-resubmit-parallel`、`withdrawn-repair`、`exact-byte-restage`、`network-cutover`。
 
 ```powershell
+$auditEpoch = Read-Host '再次輸入已完成驗證的新稽核桶名稱'
 $candidateRevision = Read-Host '輸入已完成 App E2E 的不可變 Cloud Run revision'
 $e2eEvidence = 'C:\dev\WoundAI_Proj\docs\evidence\p0-4\CANDIDATE_E2E.json'
 $promotionApproval = Read-Host '由實際授權者親自輸入，且須逐字包含 candidate revision'
 .\deploy_cloudrun.ps1 `
   -ProjectId woundai-jackh001 `
   -Bucket woundai-flywheel-jackh001 `
-  -AuditBucket woundai-flywheel-jackh001-audit-epoch-20260905 `
+  -AuditBucket $auditEpoch `
   -RuntimeServiceAccount woundai-runtime@woundai-jackh001.iam.gserviceaccount.com `
   -PromoteCandidate `
   -ExpectedCandidateRevision $candidateRevision `

@@ -68,6 +68,15 @@ function ConvertTo-Utc([string]$Value, [string]$What) {
     }
     return $parsed
 }
+function Assert-RemoteRef([string]$When) {
+    $refObject = Invoke-GhJson "read ref $Ref ($When)" @(
+        'api', "repos/$Repo/git/ref/$Ref", '--jq', '.object')
+    $remoteSha = [string](Get-Prop $refObject 'sha')
+    if ($remoteSha -cne $Sha) {
+        Die "remote $Repo $Ref is at [$remoteSha], not the gated commit [$Sha] ($When); the push did not land or the ref moved"
+    }
+    Write-Host "OK: $Repo $Ref = $Sha ($When)"
+}
 
 $exitCode = 1
 try {
@@ -104,21 +113,17 @@ try {
     if ($LASTEXITCODE -ne 0) { Die "gh is not authenticated (gh auth status exit $LASTEXITCODE)" }
 
     Say "The remote ref must already point at the commit being gated"
-    $refObject = Invoke-GhJson "read ref $Ref" @(
-        'api', "repos/$Repo/git/ref/$Ref", '--jq', '.object')
-    $remoteSha = [string](Get-Prop $refObject 'sha')
-    if ($remoteSha -cne $Sha) {
-        Die "remote $Repo $Ref is at [$remoteSha], not the gated commit [$Sha]; the push did not land"
-    }
-    Write-Host "OK: $Repo $Ref = $Sha"
+    Assert-RemoteRef 'before waiting'
 
     Say "Waiting for a run of each required workflow created at or after $($notBeforeUtc.ToString('o'))"
     $deadline = (Get-Date).ToUniversalTime().AddSeconds($TimeoutSeconds)
-    $completed = @{}
     while ($true) {
+        # Re-query every workflow on every poll. A prior green workflow may gain
+        # a new run (or a re-run attempt) while another workflow is still pending.
+        # Keeping the earlier result would hide that later failure.
+        $completed = @{}
         $pending = @()
         foreach ($workflowName in $Workflow) {
-            if ($completed.ContainsKey($workflowName)) { continue }
             $runs = Invoke-GhJson "list runs of $workflowName" @(
                 'run', 'list', '--repo', $Repo, '--workflow', $workflowName, '--limit', '50',
                 '--json', 'databaseId,headSha,status,conclusion,createdAt,event,url')
@@ -176,9 +181,14 @@ try {
     }
     if ($failed.Count -gt 0) { Die "required workflows not successful: $($failed -join ', ')" }
 
+    # This is a snapshot, not an atomic GitHub merge lock. Ref advancement while
+    # waiting must fail here; a caller must still bind its merge to this exact
+    # SHA because refs/checks can change after this final read.
+    Assert-RemoteRef 'after workflow verification'
     Write-Host ""
     Write-Host "PASS: every required workflow succeeded for $Sha on $Repo $Ref" -ForegroundColor Green
     Write-Host "      workflows: $($Workflow -join ', ')"
+    Write-Host "      observed snapshot only; bind any subsequent merge to this exact SHA"
     $exitCode = 0
 }
 catch {
