@@ -26,7 +26,9 @@ open WoundMeasurementApp.xcodeproj
 `project.yml` 已寫入 `DEVELOPMENT_TEAM: LY2F24ZM68`（沿用舊專案的設定）。若換了 Apple
 開發者帳號，改那一行即可。
 
-- Bundle ID：`com.woundmeasurement.app`
+- Bundle ID：`com.woundai.app`（2026-09-20 定案；Lite 為 `com.woundai.lite`）
+  ⚠ Android 套件名維持 `com.woundmeasurement.app` 不動——換掉會斷開 Play 商店的既有版本鏈。
+  ⚠ `PhiCrypto` 的 Keychain service 字串也維持舊值，理由見該檔註解。
 - 部署目標：iOS 17.0
 - `CURRENT_PROJECT_VERSION`：目前 **19**，與 Android `version.properties` 的
   `versionCode` 對齊。

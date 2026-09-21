@@ -80,6 +80,12 @@ enum PhiCrypto {
         cachedKey = nil; cachedMac = nil
     }
 
+    // ⚠ kSecAttrService 刻意維持 "com.woundmeasurement.app.phi"，即使 2026-09-20
+    // Bundle ID 已改為 com.woundai.app。Keychain 的 service 字串與 Bundle ID 無關，
+    // 它只是這些金鑰的查找鍵：改掉它，既有裝置上用舊字串存的 PHI 金鑰就找不到，
+    // 已加密的個案資料會全部解不開——而且是靜默的，SecItemCopyMatching 只回
+    // errSecItemNotFound，看起來像「還沒有金鑰」而不是「金鑰在另一個名字底下」。
+    // 要改必須先寫遷移（舊字串讀出 → 新字串寫入 → 驗證 → 才刪舊的）。
     private static func loadOrCreateKey(tag: String) throws -> SymmetricKey {
         let query: [String: Any] = [
             kSecClass as String:       kSecClassGenericPassword,
