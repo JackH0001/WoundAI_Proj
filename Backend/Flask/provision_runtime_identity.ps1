@@ -16,6 +16,17 @@ param(
 $ErrorActionPreference = 'Stop'
 $script:GCLOUD = if (Get-Command gcloud.cmd -ErrorAction SilentlyContinue) { 'gcloud.cmd' } else { 'gcloud' }
 $script:AUDIT_RETENTION_SECONDS = 220903200L
+
+# 2026-09-20：這份清單原本在檔案裡重複四次（preflight、Ensure-Binding、
+# Assert-SecretHasEnabledVersion、Assert-ExactBinding）。`woundai-flask-secret`
+# 在 deploy_cloudrun.ps1 加進去時，這四處一個都沒補——後果是 revision 起不來，
+# 因為 runtime service account 讀不到那個密鑰。四份平行清單就是漏掉的原因，
+# 所以改成一份。新增 runtime 密鑰只要改這裡。
+$script:RUNTIME_SECRET_NAMES = @(
+    'woundai-admin-password',
+    'woundai-jwt-secret',
+    'woundai-flask-secret'
+)
 $script:MAIN_PERMISSIONS = @(
     'storage.objects.create','storage.objects.delete','storage.objects.get','storage.objects.list')
 $script:AUDIT_PERMISSIONS = @(
@@ -223,7 +234,7 @@ if ([string]::IsNullOrWhiteSpace($projectNumber) -or [string]$project.projectId 
 }
 Assert-Bucket $Bucket $projectNumber $false
 Assert-Bucket $AuditBucket $projectNumber $true
-foreach ($requiredSecret in @('woundai-admin-password','woundai-jwt-secret')) {
+foreach ($requiredSecret in $script:RUNTIME_SECRET_NAMES) {
     [void](Get-GCloudJson "required secret $requiredSecret" @('secrets','describe',$requiredSecret,'--format=json'))
     Assert-SecretHasEnabledVersion $requiredSecret
 }
@@ -249,7 +260,7 @@ $mainRole = "projects/$ProjectId/roles/$RuntimeMainRoleId"
 $auditRole = "projects/$ProjectId/roles/$RuntimeAuditRoleId"
 Ensure-Binding bucket $Bucket $mainRole
 Ensure-Binding bucket $AuditBucket $auditRole
-foreach ($secret in @('woundai-admin-password','woundai-jwt-secret',$CareReceiptSecret)) {
+foreach ($secret in ($script:RUNTIME_SECRET_NAMES + $CareReceiptSecret)) {
     Ensure-Binding secret $secret 'roles/secretmanager.secretAccessor'
 }
 
@@ -258,12 +269,12 @@ if ($Apply) {
     Ensure-ServiceAccount
     Ensure-CustomRole $RuntimeMainRoleId 'WoundAI Runtime Main Objects' $script:MAIN_PERMISSIONS
     Ensure-CustomRole $RuntimeAuditRoleId 'WoundAI Runtime Audit Append' $script:AUDIT_PERMISSIONS
-    foreach ($secret in @('woundai-admin-password','woundai-jwt-secret',$CareReceiptSecret)) {
+    foreach ($secret in ($script:RUNTIME_SECRET_NAMES + $CareReceiptSecret)) {
         Assert-SecretHasEnabledVersion $secret
     }
     Assert-ExactBinding bucket $Bucket $mainRole
     Assert-ExactBinding bucket $AuditBucket $auditRole
-    foreach ($secret in @('woundai-admin-password','woundai-jwt-secret',$CareReceiptSecret)) {
+    foreach ($secret in ($script:RUNTIME_SECRET_NAMES + $CareReceiptSecret)) {
         Assert-ExactBinding secret $secret 'roles/secretmanager.secretAccessor'
     }
     $projectPolicy = Get-GCloudJson 'project IAM readback' @('projects','get-iam-policy',$ProjectId,'--format=json')

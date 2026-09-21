@@ -13,12 +13,21 @@ JWT_SECRET_KEY from Secret Manager but never supplied FLASK_SECRET_KEY, and
 nothing compared the two lists. The code needed a key the deployment did not
 provide, for months, silently.
 
-These tests pin both halves:
+2026-09-20 follow-up: the first version of this test compared app.py against
+deploy_cloudrun.ps1 only, and passed while provision_runtime_identity.ps1 still
+bound secretAccessor for just the two original secrets. The runtime service
+account could not read woundai-flask-secret, so the revision would have failed
+to start -- the same "the code needs a key some part of the infrastructure does
+not supply" failure this file exists to catch, one layer over. The check is now
+three-way.
+
+These tests pin all of it:
   * no literal fallback survives, and a serving process with no key refuses to
     start (rather than generating one, which would break tokens across
     instances and read as an intermittent login bug);
   * every secret app.py requires appears in the deploy script's --set-secrets
-    AND in its post-deploy contract check.
+    AND in its post-deploy contract check;
+  * the Secret Manager name each one maps to is granted to the runtime identity.
 """
 import ast
 import re
@@ -30,6 +39,7 @@ ROOT = Path(__file__).resolve().parents[2]
 FLASK_DIR = ROOT / "Backend" / "Flask"
 APP = FLASK_DIR / "app.py"
 DEPLOY = FLASK_DIR / "deploy_cloudrun.ps1"
+PROVISION = FLASK_DIR / "provision_runtime_identity.ps1"
 
 sys.path.insert(0, str(FLASK_DIR))
 import runtime_secrets  # noqa: E402
@@ -163,6 +173,52 @@ class NoInventedSecretsTests(unittest.TestCase):
                 name, verified,
                 "the deploy script sets %s but never verifies it on the ready revision, "
                 "so a revision missing it would still be accepted." % name)
+
+    def test_runtime_identity_can_read_every_secret_the_deployment_injects(self):
+        """Code -> deploy -> IAM must agree, not just code -> deploy.
+
+        A secret the deploy script injects but the runtime service account cannot
+        read does not fail at deploy time with a useful message; the revision
+        simply never becomes ready.
+        """
+        deploy = text(DEPLOY)
+        pairs = dict(re.findall(
+            r"EnvironmentName\s*=\s*'([^']+)'\s*;\s*SecretName\s*=\s*'([^']+)'", deploy))
+        if not pairs:
+            raise AssertionError(
+                "cannot read the EnvironmentName/SecretName contract from "
+                "deploy_cloudrun.ps1; this test can no longer map env vars to secrets")
+
+        provision = text(PROVISION)
+        declared = re.search(
+            r"\$script:RUNTIME_SECRET_NAMES\s*=\s*@\((?P<body>[^)]*)\)", provision)
+        if not declared:
+            raise AssertionError(
+                "provision_runtime_identity.ps1 no longer declares "
+                "$script:RUNTIME_SECRET_NAMES; this test cannot tell which secrets the "
+                "runtime identity is actually granted")
+        granted = set(re.findall(r"'([^']+)'", declared.group("body")))
+
+        # Presence of the string somewhere in the file is not enough: the list has
+        # to be the one the binding loops iterate. Before 2026-09-20 the names were
+        # written out four times over, and woundai-flask-secret was added to none of
+        # them. A literal @('woundai-... array is that shape coming back.
+        self.assertNotIn(
+            "@('woundai-", provision,
+            "provision_runtime_identity.ps1 has an inline literal secret array again; "
+            "parallel lists are how the runtime identity came to be missing a grant")
+
+        for env_name in required_secret_names():
+            secret_name = pairs.get(env_name)
+            self.assertIsNotNone(
+                secret_name,
+                "app.py requires %s but deploy_cloudrun.ps1's secret contract does not "
+                "say which Secret Manager secret it comes from." % env_name)
+            self.assertIn(
+                secret_name, granted,
+                "provision_runtime_identity.ps1 never grants the runtime identity access "
+                "to %s (needed for %s). The revision would deploy and then fail to start."
+                % (secret_name, env_name))
 
 
 if __name__ == "__main__":
