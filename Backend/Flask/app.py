@@ -596,6 +596,15 @@ def health_check():
     except Exception as _e:
         canonicalization_golden_error = type(_e).__name__
 
+    # A∪U 是升級路由，不是主路徑，所以**刻意不進 degraded**：缺它服務仍能量測，
+    # 只是難例不再被集成救回。是否要讓它擋部署是產品決策（宣稱裡有沒有它），
+    # 先讓它看得見。
+    try:
+        _au = _resolve_au_paths()
+        au_ensemble_ready = bool(ONNX_AVAILABLE and _au.get("a") and _au.get("u"))
+    except Exception:
+        au_ensemble_ready = False
+
     degraded = ((not model_ready) or (not classify_ready)
                 or (not colorcal_ready) or (not bp_ok)
                 or (not canonicalization_golden_ok))
@@ -611,6 +620,13 @@ def health_check():
             'color_calibration': colorcal_ready,
             'endpoints_registered': bp_ok,
             'canonicalization_golden': canonicalization_golden_ok,
+            # 難例升級路由的 A∪U 集成。_load_cloud_au() 找不到模型時回 (None, None)
+            # 並讓請求靜默走回 student——服務照常回 200，主控台的「集成救回」
+            # 永遠是 0，而 0 也可以解釋成「沒有難例」。映像裡有沒有這兩個檔，
+            # 取決於**建置那台機器**的 Backend/Flask/models/：.onnx 被 .gitignore
+            # 忽略，但沒有被 .dockerignore 排除，所以 git 看不出兩次建置的差別。
+            # 這個欄位讓那個差別看得見。檔案檢查是本機 os.path.isfile，不打網路。
+            'au_ensemble': au_ensemble_ready,
             'lite_public_api_enabled': LITE_API_ENABLED,
             'database': True
         },

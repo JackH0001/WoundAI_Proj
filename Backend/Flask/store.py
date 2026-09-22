@@ -583,6 +583,13 @@ class GcsStore(Store):
         # generation, but downloads only the suffix not yet verified by this
         # process.  Offline verification never uses this cache.
         self._audit_prefix_cache = {}
+        # Reporting only. retention_info() records what it last observed here so
+        # describe() can state the audit bucket's real contract without adding a
+        # network call to /api/health -- a Cloud Run health probe must not depend
+        # on GCS being reachable. The gate never reads this: require_locked_audit_epoch
+        # calls retention_info() fresh every time, because a cached "locked" is
+        # exactly the kind of stale yes this whole layer exists to refuse.
+        self._last_retention_seen = None
         self._audit_append_lock = threading.RLock()
 
     def _target(self, key: str):
@@ -941,16 +948,49 @@ class GcsStore(Store):
             return self._create_chained_slot(key, seq, line)
 
     def retention_info(self) -> dict:
+        # Deliberately uncached: every call reads the bucket back. This is the
+        # gate's only evidence, and a cached answer would let a policy that was
+        # removed minutes ago still read as locked.
         if self._audit_bucket is None:
-            return {"verified": False, "locked": False, "reason": "audit bucket missing"}
+            return self._remember_retention(
+                {"verified": False, "locked": False, "reason": "audit bucket missing"})
         try:
             self._audit_bucket.reload()
             policy = self._audit_bucket._properties.get("retentionPolicy", {})
-            return {"verified": True, "bucket": self._audit_bucket_name,
-                    "retention_seconds": int(policy.get("retentionPeriod", 0)),
-                    "locked": policy.get("isLocked") is True}
+            return self._remember_retention(
+                {"verified": True, "bucket": self._audit_bucket_name,
+                 "retention_seconds": int(policy.get("retentionPeriod", 0)),
+                 "locked": policy.get("isLocked") is True})
         except Exception:
-            return {"verified": False, "locked": False, "reason": "readback failed"}
+            return self._remember_retention(
+                {"verified": False, "locked": False, "reason": "readback failed"})
+
+    def _remember_retention(self, info: dict) -> dict:
+        self._last_retention_seen = dict(info)
+        return info
+
+    @staticmethod
+    def render_retention(info) -> str:
+        """One phrase for the audit bucket's real contract.
+
+        The deployed 2026-08-23 revision said plain "WORM" for any configured
+        audit bucket. The legacy bucket has a 7-year retention period that is
+        NOT locked, so objects cannot be deleted today but the policy itself can
+        be removed with one API call and then they can. WORM promises the second
+        half, and that is the half that matters for an audit trail, so the word
+        was doing work the configuration did not support.
+        """
+        if not info:
+            return "retention not yet read back"
+        if not info.get("verified"):
+            return "retention unknown (%s)" % (info.get("reason") or "readback failed")
+        seconds = int(info.get("retention_seconds") or 0)
+        if seconds <= 0:
+            return "no retention policy"
+        years = seconds / 31557600.0
+        if info.get("locked") is True:
+            return "WORM: retention %.1fy, LOCKED (irreversible)" % years
+        return "retention %.1fy, NOT locked (policy is revocable)" % years
 
     def require_locked_audit_epoch(self) -> None:
         """Fail closed for every direct GCS audit-chain append path."""
@@ -1009,7 +1049,8 @@ class GcsStore(Store):
     def describe(self) -> str:
         d = "gcs://%s/%s" % (self._bucket_name, self.prefix)
         if self._audit_bucket_name:
-            d += " (稽核→gcs://%s; retention must be read back)" % self._audit_bucket_name
+            d += " (稽核→gcs://%s; %s)" % (
+                self._audit_bucket_name, self.render_retention(self._last_retention_seen))
         return d
 
 
