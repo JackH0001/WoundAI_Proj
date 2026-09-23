@@ -222,6 +222,33 @@ class TestSeedRefusals(SeedBase):
         self.assertFalse(out.get("seeded"))
         self.assertEqual(auth_users.list_users(), [])
 
+    def test_a_trailing_newline_from_a_powershell_pipe_is_removed(self):
+        # `$pw | gcloud secrets versions add NAME --data-file=-` stores the
+        # password plus a newline (CRLF from Windows PowerShell 5.1, LF from
+        # pwsh). Seeded verbatim, the account's password would end in CRLF and
+        # the reviewer typing exactly what they were given could never log in.
+        for suffix in ("\r\n", "\n"):
+            with self.subTest(suffix=repr(suffix)):
+                store_mod.reset_store(store_mod.LocalStore(tempfile.mkdtemp(dir=self.tmp)))
+                self.set_env(pw=GOOD_PW + suffix)
+                self.assertTrue(auth_users.seed_demo_from_env().get("seeded"))
+                self.assertEqual(
+                    auth_users.authenticate("default", "demo01", GOOD_PW)[1], "ok",
+                    "the password as typed does not authenticate")
+
+    def test_the_length_floor_is_measured_after_the_newline_is_removed(self):
+        self.set_env(pw="a" * (auth_users.DEMO_SEED_MIN_PW - 1) + "\r\n")
+        self.assertFalse(auth_users.seed_demo_from_env().get("seeded"))
+
+    def test_whitespace_or_control_characters_inside_are_refused(self):
+        for bad in ("synthetic-test-only\nsplit-password", "synthetic test only password",
+                    "synthetic-test-only-password\t", "synthetic-test-only\x1bpassword"):
+            with self.subTest(pw=repr(bad)):
+                self.set_env(pw=bad)
+                out = auth_users.seed_demo_from_env()
+                self.assertFalse(out.get("seeded"), "%r was seeded" % bad)
+                self.assertEqual(auth_users.list_users(), [])
+
     def test_a_twelve_character_password_is_refused(self):
         # Spelled out rather than derived from DEMO_SEED_MIN_PW. A test that
         # computes its own boundary from the constant moves with the constant,

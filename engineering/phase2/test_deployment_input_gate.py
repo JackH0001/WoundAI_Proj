@@ -103,12 +103,13 @@ $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile(
     $env:WOUNDAI_DEMO_GATE_SOURCE, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw 'demo deployment script syntax error' }
-$node = $ast.Find({param($n)
-    $n -is [Management.Automation.Language.FunctionDefinitionAst] -and
-    $n.Name -eq 'Assert-DemoInputs'
-}, $true)
-if ($null -eq $node) { throw 'missing Assert-DemoInputs' }
-. ([scriptblock]::Create($node.Extent.Text))
+foreach ($fn in @('Get-ProductionSecretNames', 'Get-DemoSecretMap', 'Assert-DemoInputs')) {
+    $node = $ast.Find({param($n)
+        $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fn
+    }, $true)
+    if ($null -eq $node) { throw "missing $fn" }
+    . ([scriptblock]::Create($node.Extent.Text))
+}
 
 $ProjectId = 'woundai-jackh001'
 $RuntimeServiceAccount = $env:WOUNDAI_DEMO_GATE_SA
@@ -117,7 +118,10 @@ $Service = $env:WOUNDAI_DEMO_GATE_SERVICE
 $ProductionService = 'woundai-backend'
 $DemoSeedUser = $env:WOUNDAI_DEMO_GATE_USER
 $DemoSeedRole = $env:WOUNDAI_DEMO_GATE_ROLE
-$DemoSeedSecret = 'woundai-demo-password'
+$DemoSeedSecret = $env:WOUNDAI_DEMO_GATE_SEED_SECRET
+$DemoJwtSecret = $env:WOUNDAI_DEMO_GATE_JWT_SECRET
+$DemoFlaskSecret = $env:WOUNDAI_DEMO_GATE_FLASK_SECRET
+$DemoCareReceiptSecret = $env:WOUNDAI_DEMO_GATE_CARE_SECRET
 try {
     Assert-DemoInputs
     Write-Host 'PASS'
@@ -134,6 +138,10 @@ GOOD_DEMO_INPUT = {
     "AUTH": "Jack 2026-09-22 approve demo revision for App Review",
     "USER": "demo01",
     "ROLE": "nurse",
+    "SEED_SECRET": "woundai-demo-password",
+    "JWT_SECRET": "woundai-demo-jwt-secret",
+    "FLASK_SECRET": "woundai-demo-flask-secret",
+    "CARE_SECRET": "woundai-demo-care-receipt-secret",
 }
 
 
@@ -218,6 +226,33 @@ class DemoDeploymentInputGateTests(unittest.TestCase):
                     result = self.invoke(shell, SA=sa)
                     self.assertNotEqual(result.returncode, 0,
                                         result.stdout + result.stderr)
+
+    def test_a_production_secret_is_refused_for_every_demo_key(self):
+        # Sharing the JWT key is what would have let a demo-issued nurse token
+        # work on production for 24 hours; the care-receipt HMAC key the same
+        # for receipts. The error must name the production secret, not merely
+        # fail the woundai-demo-* shape, so an operator can see what went wrong.
+        cases = (("JWT_SECRET", "woundai-jwt-secret"),
+                 ("FLASK_SECRET", "woundai-flask-secret"),
+                 ("CARE_SECRET", "woundai-care-receipt-secret"),
+                 ("SEED_SECRET", "woundai-admin-password"))
+        for shell in SHELLS:
+            for key, value in cases:
+                with self.subTest(shell=shell, key=key):
+                    self.reject(shell, "would use production secret [%s]" % value,
+                                **{key: value})
+
+    def test_a_secret_outside_the_demo_namespace_is_refused(self):
+        for shell in SHELLS:
+            for value in ("my-jwt-secret", "woundai-demojwt", "WOUNDAI-DEMO-JWT-SECRET"):
+                with self.subTest(shell=shell, value=value):
+                    self.reject(shell, "must use a woundai-demo-* secret", JWT_SECRET=value)
+
+    def test_one_key_may_not_serve_two_purposes(self):
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                self.reject(shell, "demo secrets must be distinct",
+                            FLASK_SECRET="woundai-demo-jwt-secret")
 
     def test_valid_demo_input_passes_without_cloud_access(self):
         for shell in SHELLS:

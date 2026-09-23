@@ -40,6 +40,7 @@ on:
       - 'engineering/phase2/test_audit_retention_disclosure.py'
       - 'engineering/phase2/test_demo_seed_guardrails.py'
       - 'engineering/phase2/test_demo_deploy_isolation.py'
+      - 'engineering/phase2/test_demo_deploy_checks.py'
       - '.github/workflows/p0-4-audit.yml'
   pull_request:
     paths:
@@ -79,6 +80,7 @@ on:
       - 'engineering/phase2/test_audit_retention_disclosure.py'
       - 'engineering/phase2/test_demo_seed_guardrails.py'
       - 'engineering/phase2/test_demo_deploy_isolation.py'
+      - 'engineering/phase2/test_demo_deploy_checks.py'
       - '.github/workflows/p0-4-audit.yml'
   workflow_dispatch:
 
@@ -132,6 +134,7 @@ jobs:
           python -B engineering/phase2/test_audit_retention_disclosure.py
           python -B engineering/phase2/test_demo_seed_guardrails.py
           python -B engineering/phase2/test_demo_deploy_isolation.py
+          python -B engineering/phase2/test_demo_deploy_checks.py
           python -B engineering/phase2/test_store_abstraction.py
           python -B engineering/phase2/test_p0_4_staging.py
           python -B engineering/phase2/test_runtime_golden_contract.py

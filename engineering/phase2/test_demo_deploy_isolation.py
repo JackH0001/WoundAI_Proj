@@ -164,10 +164,110 @@ class DemoSeedFlagsMatchTheBackend(unittest.TestCase):
         code = code_only(text(DEMO))
         # The secret is mounted by name; the value must never be read, logged
         # or used to log in from the script.
-        self.assertIn("WOUNDAI_DEMO_SEED_PASSWORD=${DemoSeedSecret}:latest", code)
+        self.assertIn("'WOUNDAI_DEMO_SEED_PASSWORD' = $DemoSeedSecret", code)
         for leak in ("secrets versions access", "/api/auth/login"):
             self.assertNotIn(leak, code,
                              "the deploy script reaches for the demo password (%s)" % leak)
+
+
+def production_mounts():
+    """(env var -> secret name) that deploy_cloudrun.ps1 mounts, variables resolved."""
+    code = code_only(text(PROD))
+    line = re.search(r'--set-secrets\s+"([^"]+)"', code)
+    if line is None:
+        raise AssertionError("cannot find --set-secrets in deploy_cloudrun.ps1")
+    defaults = dict(re.findall(r'\[string\]\$(\w+)\s*=\s*"([^"]*)"', code))
+    out = {}
+    for item in line.group(1).split(","):
+        env, ref = item.split("=", 1)
+        name = ref.replace("`", "").rsplit(":", 1)[0]
+        if name.startswith("$"):
+            name = defaults[name[1:]]
+        out[env.strip()] = name
+    return out
+
+
+def demo_production_list():
+    body = re.search(r"function Get-ProductionSecretNames \{(.*?)\n\}", code_only(text(DEMO)), re.S)
+    if body is None:
+        raise AssertionError("Get-ProductionSecretNames not found")
+    return set(re.findall(r"'([a-z0-9-]+)'", body.group(1)))
+
+
+def demo_secret_map():
+    body = re.search(r"function Get-DemoSecretMap \{(.*?)\n\}", code_only(text(DEMO)), re.S)
+    if body is None:
+        raise AssertionError("Get-DemoSecretMap not found")
+    return dict(re.findall(r"'([A-Z0-9_]+)'\s*=\s*\$(\w+)", body.group(1)))
+
+
+class DemoKeysAreNotProductionKeys(unittest.TestCase):
+    """The demo service must sign nothing with a key production trusts.
+
+    Production reads the role straight from an access token's claims and never
+    re-checks that the account exists; tokens live 24 hours. A shared JWT key
+    therefore makes every demo-issued token a production token. The first
+    version of this script shared three keys and passed every test and the CI
+    gate, because no test looked at which secrets the demo service mounted.
+    """
+
+    def test_the_production_list_matches_what_production_mounts(self):
+        # If production gains a secret and this list does not, the demo
+        # script's refusals and read-back silently stop covering it.
+        self.assertEqual(demo_production_list(), set(production_mounts().values()))
+
+    def test_every_key_production_signs_with_has_a_demo_counterpart(self):
+        # ADMIN_PASSWORD is deliberately absent: the demo needs no administrator.
+        # Anything else production mounts is a key the demo must hold its own
+        # copy of, or the demo service either breaks or borrows production's.
+        needed = set(production_mounts()) - {"ADMIN_PASSWORD"}
+        self.assertTrue(needed <= set(demo_secret_map()),
+                        "demo has no key of its own for: %s" % sorted(needed - set(demo_secret_map())))
+
+    def test_no_administrator_credential_is_mounted(self):
+        self.assertNotIn("ADMIN_PASSWORD", demo_secret_map())
+        self.assertNotIn("ADMIN_PASSWORD=", code_only(text(DEMO)))
+
+    def test_the_mount_is_built_from_the_demo_map_and_nothing_else(self):
+        code = code_only(text(DEMO))
+        self.assertIn("--set-secrets (@((Get-DemoSecretMap).GetEnumerator()", code)
+        self.assertEqual(len(re.findall(r"--set-secrets", code)), 1)
+
+    def test_no_production_secret_name_appears_outside_the_refusal_list(self):
+        code = code_only(text(DEMO))
+        body = re.search(r"function Get-ProductionSecretNames \{.*?\n\}", code, re.S)
+        rest = code.replace(body.group(0), "")
+        for name in demo_production_list():
+            self.assertNotIn(name, rest,
+                             "production secret [%s] is named in executable code" % name)
+
+    def test_every_demo_default_is_in_the_demo_namespace(self):
+        defaults = dict(re.findall(r'\[string\]\$(\w+)\s*=\s*"([^"]*)"', code_only(text(DEMO))))
+        for env, var in demo_secret_map().items():
+            with self.subTest(env=env):
+                self.assertRegex(defaults[var], r"^woundai-demo-[a-z0-9-]+$")
+
+    def test_the_identity_check_runs_before_anything_is_deployed(self):
+        code = code_only(text(DEMO))
+        call = code.index("\nAssert-DemoIdentityCannotReadProductionSecrets\n")
+        self.assertLess(call, code.index("Invoke-GCloud run deploy"))
+
+    def test_the_read_back_conditions_are_present(self):
+        # Conditions, not messages: replacing a condition with $false leaves
+        # its message behind, so a message-only pin would pass with no check.
+        code = code_only(text(DEMO))
+        for cond in ("if ($production -ccontains $refs[$envName]) {",
+                     "if ($refs.ContainsKey('ADMIN_PASSWORD')) {",
+                     "if ($refs[$envName] -cne $map[$envName]) {",
+                     "if ($production -ccontains $name) {",
+                     "if ($null -ne $binding -and @($binding.members) -ccontains $member) {"):
+            with self.subTest(cond=cond):
+                self.assertIn(cond, code)
+
+    def test_the_care_keyring_is_confirmed_live_after_deploy(self):
+        # Without its own keyring the demo answers 503 on the consent path,
+        # which a reviewer reads as a broken app.
+        self.assertIn("if (-not $health.care_receipt.configured) {", code_only(text(DEMO)))
 
 
 class ProductionScriptWasNotLoosened(unittest.TestCase):

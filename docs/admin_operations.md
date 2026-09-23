@@ -220,30 +220,81 @@ Apple 審查需要一組能登入的帳號。**不要用 /console 手動建**—
 
 `nurse` 是能走完整套流程、又不帶醫師背書與任何管理權的最小角色。
 
-### 建立（密碼全程不經過對話，也不進版控）
+### 為什麼示範服務的每一把金鑰都必須是自己的
 
-PowerShell 5.1。`RNGCryptoServiceProvider` 是密碼學等級亂數；
-`-lt 224` 是拒絕取樣（224 = 56 × 4），少了它會有模數偏差。
-字元集沿用 `api_users._gen_password`，排除 `l/1/I/O/0` 這些同形字——
-密碼要靠人抄寫，「明明打對卻登不進去」會吃掉大量時間。
+正式服務驗 access token 只看簽章，**角色直接取自 token 自己的 claim，不回查帳號
+是否存在**，效期 24 小時（`app.py` 的 `JWT_ACCESS_TOKEN_EXPIRES`、`api_flywheel.py`
+的 `_who`）。所以兩個服務只要共用 JWT 簽章金鑰，審查員在示範服務登入 `demo01`
+拿到的 nurse token，送到正式服務也會被當成 nurse 接受——而 nurse 在正式服務上
+可以對任意 WD 代碼撤回或恢復同意。care receipt 的 HMAC 金鑰同理。
+
+2026-09-23 之前的示範腳本就掛著正式的三把密文（JWT、Flask、管理者密碼），而且
+通過了全部測試與 CI 閘門，因為沒有任何測試在看示範服務掛了哪些密文。那一版從未
+部署。現在示範服務用自己的四把 `woundai-demo-*` 密文，**不掛管理者密碼**
+（示範服務不需要管理者，送審帳號由開機種子建立）。
+
+另一個相關但獨立的既有問題：`/console` 停用帳號只會讓**之後的密碼登入**失敗，
+已簽發的 token 仍有效到 24 小時期滿。這是正式服務本身的行為，不在本節處理範圍。
+
+### 建立示範身分與四把密文（密碼全程不經過對話，也不進版控）
+
+PowerShell 5.1。`RNGCryptoServiceProvider` 是密碼學等級亂數。送審密碼的字元集沿用
+`api_users._gen_password`，排除 `l/1/I/O/0` 這些同形字——密碼要靠人抄寫；
+`-lt 224` 是拒絕取樣（224 = 56 × 4），少了它會有模數偏差。另外三把金鑰從頭到尾
+**不顯示**，也沒有任何人需要知道它們的值。
+
+示範身分**只**授予這四把密文的 `secretAccessor`。不要對它跑
+`provision_runtime_identity.ps1`——那會授予它正式密文，部署腳本會因此拒絕部署。
 
 ```powershell
-$proj  = 'woundai-jackh001'
+$proj = 'woundai-jackh001'
+$sa   = "woundai-demo-run@$proj.iam.gserviceaccount.com"
+$rng  = New-Object System.Security.Cryptography.RNGCryptoServiceProvider
+function New-B64Url([int]$Bytes) {
+    $b = New-Object byte[] $Bytes
+    $rng.GetBytes($b)
+    [Convert]::ToBase64String($b).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+# 1. 示範服務自己的執行身分
+gcloud iam service-accounts create woundai-demo-run --project $proj `
+    --display-name "WoundAI demo service (App Review)"
+
+# 2. 送審密碼：人要抄寫，所以用無同形字的字元集
 $chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-$rng   = New-Object System.Security.Cryptography.RNGCryptoServiceProvider
-$pw    = ''
+$pw = ''
 while ($pw.Length -lt 24) {
     $b = New-Object byte[] 1
     $rng.GetBytes($b)
     if ($b[0] -lt 224) { $pw += $chars[$b[0] % 56] }
 }
 
-gcloud secrets create woundai-demo-password --replication-policy=automatic --project=$proj
-$pw | gcloud secrets versions add woundai-demo-password --data-file=- --project=$proj
+# 3. 另外三把：值從不顯示
+$values = [ordered]@{
+    'woundai-demo-password'            = $pw
+    'woundai-demo-jwt-secret'          = (New-B64Url 48)
+    'woundai-demo-flask-secret'        = (New-B64Url 48)
+    'woundai-demo-care-receipt-secret' = (@{ active_kid = 'demo1'; keys = @{
+                                             demo1 = @{ secret_b64 = (New-B64Url 32) } } } |
+                                          ConvertTo-Json -Compress -Depth 5)
+}
+foreach ($name in $values.Keys) {
+    gcloud secrets create $name --replication-policy=automatic --project $proj
+    $values[$name] | gcloud secrets versions add $name --data-file=- --project $proj
+    gcloud secrets add-iam-policy-binding $name --project $proj `
+        --member "serviceAccount:$sa" --role roles/secretmanager.secretAccessor
+}
 
 $pw            # ← 讀這一次，直接填進 App Store Connect「登入資訊」，不要貼到任何對話
-Remove-Variable pw, rng, b
+Remove-Variable pw, values, rng, b
 ```
+
+**關於結尾換行。** PowerShell 把字串管線給原生程式時會補一個換行（5.1 補 CRLF），
+所以上面存進去的每一把密文結尾都帶著它。這是預期中的，由程式端處理：
+`resolve_secret` 會 strip JWT／Flask 金鑰，`json.loads` 容許 care receipt JSON 結尾的
+空白，種子會去掉密碼結尾的 CR/LF（並拒絕任何其他空白或控制字元）。
+**不要把種子裡那個 `rstrip` 拿掉**——少了它，帳號密碼會以 CRLF 結尾，
+審查員照著輸入永遠登不進去。`test_demo_seed_guardrails.py` 有測試釘住這一點。
 
 ### 部署示範服務
 
@@ -264,7 +315,7 @@ cd C:\dev\WoundAI_Proj\Backend\Flask
 
 .\deploy_demo_candidate.ps1 `
     -ProjectId woundai-jackh001 `
-    -RuntimeServiceAccount <示範專用的服務帳號> `
+    -RuntimeServiceAccount woundai-demo-run@woundai-jackh001.iam.gserviceaccount.com `
     -DemoAuthorisationRef "<你親手寫的授權字句，要指名用途與日期>"
 ```
 
@@ -279,6 +330,8 @@ cd C:\dev\WoundAI_Proj\Backend\Flask
 | 切正式流量 | 沒有任何一行程式碼呼叫 `update-traffic`，且拒絕以正式 service 為目標 |
 | 寫 GCS | 沒有 `-Bucket`／`-AuditBucket` 參數，`WOUNDAI_STORE` 寫死 local |
 | 用正式執行身分 | 部署前讀正式 service 的 SA 比對，相同就拒絕 |
+| 用正式金鑰 | 四個密文參數必須是 `woundai-demo-*` 且彼此不同；部署前讀每把正式密文的 IAM 政策，示範身分在任何綁定裡就拒絕；部署後回讀 revision 的 `secretKeyRef` |
+| 帶管理者憑證 | 不掛 `ADMIN_PASSWORD`，回讀時發現就失敗 |
 | 多實例 | `--max-instances 1` 寫死，且部署後回讀 revision 的 `maxScale` 確認 |
 | 種出醫師角色 | 角色白名單只有 `nurse`／`assistant`，後端再驗一次 |
 
@@ -286,7 +339,8 @@ cd C:\dev\WoundAI_Proj\Backend\Flask
 兩個實例就是兩份互不相干的資料，審查員會在連續兩次請求之間看到不同的紀錄列表。
 
 腳本部署後會自己回讀 revision 設定（不是相信 `--set-env-vars` 傳了什麼）、
-打 `/api/health` 確認 `store` 是 `local:`、並讀啟動日誌確認種子真的跑過。
+打 `/api/health` 確認 `store` 是 `local:` 且 care receipt 金鑰已就緒、
+並讀啟動日誌確認種子真的跑過。
 
 ### 確認種子真的跑了
 

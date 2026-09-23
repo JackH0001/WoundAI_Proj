@@ -335,9 +335,18 @@ def seed_demo_from_env():
     if refusal:
         return {"seeded": False, "reason": refusal}
 
-    pw = os.environ.get("WOUNDAI_DEMO_SEED_PASSWORD") or ""
+    # 結尾的換行要去掉，這不是潔癖。PowerShell 把字串管線給原生程式時會補一個
+    # 換行（Windows PowerShell 5.1 補 CRLF），所以用 `$pw | gcloud secrets versions
+    # add ... --data-file=-` 建的密文，內容其實是「密碼＋\r\n」。Cloud Run 掛成環境
+    # 變數時原樣照給，種子就會建出一個結尾帶 CRLF 的密碼——審查員照著輸入，
+    # 永遠登不進去。只去掉結尾的 CR/LF；其餘任何空白或控制字元一律拒絕，
+    # 因為那代表密文本身就不是一個人打得出來的密碼。
+    pw = (os.environ.get("WOUNDAI_DEMO_SEED_PASSWORD") or "").rstrip("\r\n")
     if not pw:
         return {"seeded": False, "reason": "未掛 WOUNDAI_DEMO_SEED_PASSWORD"}
+    if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in pw):
+        return {"seeded": False,
+                "reason": "種子密碼含空白或控制字元，審查員無法照著輸入"}
     if len(pw) < DEMO_SEED_MIN_PW:
         return {"seeded": False,
                 "reason": "種子密碼至少 %d 字元（目前 %d）" % (DEMO_SEED_MIN_PW, len(pw))}
