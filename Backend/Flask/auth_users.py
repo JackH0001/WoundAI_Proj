@@ -237,3 +237,115 @@ def bootstrap_from_env():
                            display_name="系統管理者(bootstrap)", actor="bootstrap")
     except Exception:
         return None
+
+
+# ── demo 送審帳號的開機種子 ──────────────────────────────────────────
+#
+# 為什麼需要這個：候選版本跑 `WOUNDAI_STORE=local`，而 LocalStore 的根目錄在
+# 容器內（`api_flywheel.FLYWHEEL_DIR` = `<Backend/Flask>/flywheel`）。
+# Cloud Run 一回收執行個體，手動用 /console 建的帳號就消失了——App 審查員
+# 幾天後登入會發現帳號不存在，那是直接被拒的理由。所以送審帳號不能
+# 「建一次留著」，必須**每次冷啟動重建**。
+#
+# 為什麼不放寬 bootstrap_from_env()：那個出口只建 admin
+# （`user.manage`／`audit.read`／`gcp.console`）。把它交給外部審查員是錯的。
+#
+# 這是一個**刻意做得很窄**的出口，五道機械關卡缺一不可：
+#
+#   1. 儲存層必須真的是 LocalStore。**問物件，不問環境變數**——
+#      環境變數是「打算用什麼」，物件是「實際在用什麼」，兩者會漂移。
+#   2. 帳號名必須是 `demoNN` 形狀。環境變數種不出 `admin2` 這種名字，
+#      而且稽核軌跡裡一眼認得出哪些列是送審帳號。
+#   3. 角色必須同時通過**名單**與**權限**兩層檢查。名單擋新角色偷渡；
+#      權限檢查擋既有角色日後變胖——若哪天有人給 nurse 加上 gt.verify，
+#      種子會**拒絕**，而不是安靜地把醫師背書交給外部審查員。
+#   4. 密碼從環境變數（Cloud Run 掛 Secret Manager）來。程式碼裡沒有密碼，
+#      也**不由後端隨機產生**——隨機的話每次冷啟動都換一組，審查員就登不進去。
+#   5. 帳號已存在就不動。不覆蓋密碼，尤其不把一個被停用的帳號重新啟用。
+#
+# 送審結束後拿掉環境變數並重新部署，這個出口就跟著消失。
+#
+# **刻意不寫稽核**：種子只在 LocalStore 生效，而那個儲存層上的稽核鏈本身
+# 也是每次冷啟動重建的——在那裡寫一筆「帳號被建立」證明不了任何事，
+# 只會讓每次冷啟動都在鏈上多一筆一模一樣的紀錄。帳號的來源改為記在
+# 紀錄本身的 `updated_by` 欄（`demo-seed`），那筆資料跟帳號同生共死。
+
+DEMO_USER_RE = re.compile(r"^demo[0-9]{2}$")
+
+# 允許被種的角色。**明列**，不是「除了 admin 以外都行」——後者會讓日後
+# 新增的角色自動取得資格，而新增角色的那筆 diff 上完全看不出來。
+DEMO_SEED_ROLES = frozenset({"nurse", "assistant"})
+
+# 種子帳號絕不得持有的權限。這層跟上面的名單是**獨立**的兩道檢查：
+# 名單認的是「這個名字現在可以」，這裡認的是「這個角色現在的權力還在界內」。
+DEMO_SEED_FORBIDDEN_PERMS = frozenset({
+    "user.manage",        # 開帳號
+    "audit.read",         # 讀稽核軌跡
+    "gcp.console",        # 雲端主控台
+    "backend.config",     # 改後端設定
+    "gt.verify",          # doctor_verified 的唯一來源
+    "annotation.submit",  # 送訓練標註
+})
+
+# 種子密碼長度下限。對齊 api_users._gen_password 的 14——auth_users 本身
+# 只要求 10，對一個**外部人士會拿到、而且存在於公開網路上**的帳號太短。
+DEMO_SEED_MIN_PW = 14
+
+
+def demo_role_refusal(role):
+    """回拒絕原因字串；通過回 None。抽出來讓測試能直接問「為什麼拒絕」。"""
+    if not isinstance(role, str) or role not in ROLES:
+        return "role 不存在：%r" % (role,)
+    if role not in DEMO_SEED_ROLES:
+        return "role %s 不在種子白名單（允許：%s）" % (
+            role, "/".join(sorted(DEMO_SEED_ROLES)))
+    held = sorted(p for p in DEMO_SEED_FORBIDDEN_PERMS if can(role, p))
+    if held:
+        return ("role %s 持有禁止權限 %s——權限矩陣已變動，"
+                "請重新檢視這個角色是否還適合送審帳號" % (role, ",".join(held)))
+    return None
+
+
+def seed_demo_from_env():
+    """冷啟動時重建送審用 demo 帳號。條件見上方註解。
+
+    回傳：
+      None                                   功能未啟用（沒設 WOUNDAI_DEMO_SEED_USER）
+      {"seeded": True,  "identity", "role"}  已建立
+      {"seeded": False, "reason"}            明確拒絕或跳過
+
+    **刻意不用單純的 None 表示失敗**：一個拼錯的角色名若安靜地什麼都不做，
+    你會在 Apple 審查員回報登不進去的那天才發現。拒絕必須看得見。
+    """
+    user = (os.environ.get("WOUNDAI_DEMO_SEED_USER") or "").strip()
+    if not user:
+        return None
+
+    import store as _st
+    st = _store()
+    if not isinstance(st, _st.LocalStore):
+        return {"seeded": False,
+                "reason": "儲存層是 %s，種子只在 LocalStore 生效" % type(st).__name__}
+
+    if not DEMO_USER_RE.match(user):
+        return {"seeded": False, "reason": "帳號名 %r 不是 demoNN 形狀" % (user,)}
+
+    role = (os.environ.get("WOUNDAI_DEMO_SEED_ROLE") or "").strip()
+    refusal = demo_role_refusal(role)
+    if refusal:
+        return {"seeded": False, "reason": refusal}
+
+    pw = os.environ.get("WOUNDAI_DEMO_SEED_PASSWORD") or ""
+    if not pw:
+        return {"seeded": False, "reason": "未掛 WOUNDAI_DEMO_SEED_PASSWORD"}
+    if len(pw) < DEMO_SEED_MIN_PW:
+        return {"seeded": False,
+                "reason": "種子密碼至少 %d 字元（目前 %d）" % (DEMO_SEED_MIN_PW, len(pw))}
+
+    if get_user(DEFAULT_ORG, user) is not None:
+        return {"seeded": False, "reason": "帳號 %s 已存在，不覆蓋" % user}
+
+    rec = upsert_user(DEFAULT_ORG, user, role, pw,
+                      display_name="送審測試帳號(demo-seed)", actor="demo-seed")
+    return {"seeded": True, "identity": identity(DEFAULT_ORG, user),
+            "role": rec["role"]}

@@ -219,6 +219,25 @@ except Exception as _ae:
     auth_users = None
     print(f"⚠ 帳號模組載入失敗，所有登入都會失敗: {_ae}")
 
+# demo 送審帳號的開機種子（條件見 `auth_users.seed_demo_from_env`）。
+# **刻意用自己的 try/except，且在上面那塊之外**：種子失敗絕不能
+# 連帶把 auth_users 設成 None——那會讓**所有人**都登不進來，
+# 把一個送審便利措施變成全面停機。
+if auth_users is not None:
+    try:
+        _seed = auth_users.seed_demo_from_env()
+        if _seed is None:
+            pass                                   # 功能未啟用，正常情況
+        elif _seed.get("seeded"):
+            print("已重建送審測試帳號 %s（角色 %s）"
+                  % (_seed.get("identity"), _seed.get("role")))
+        else:
+            # 拒絕要看得見。安靜地什麼都不做，會變成審查員回報
+            # 登不進去的那一天才發現。
+            print("⚠ demo 種子未執行：%s" % _seed.get("reason"))
+    except Exception as _se:
+        print("⚠ demo 種子失敗（不影響既有帳號）: %s" % _se)
+
 # 創建必要目錄
 for folder in [app.config['UPLOAD_FOLDER'], app.config['PROCESSED_FOLDER'],
                _runtime_path('logs')]:
@@ -601,9 +620,9 @@ def health_check():
     # 先讓它看得見。
     try:
         _au = _resolve_au_paths()
-        au_ensemble_ready = bool(ONNX_AVAILABLE and _au.get("a") and _au.get("u"))
+        au_ensemble_files_present = bool(ONNX_AVAILABLE and _au.get("a") and _au.get("u"))
     except Exception:
-        au_ensemble_ready = False
+        au_ensemble_files_present = False
 
     degraded = ((not model_ready) or (not classify_ready)
                 or (not colorcal_ready) or (not bp_ok)
@@ -626,7 +645,10 @@ def health_check():
             # 取決於**建置那台機器**的 Backend/Flask/models/：.onnx 被 .gitignore
             # 忽略，但沒有被 .dockerignore 排除，所以 git 看不出兩次建置的差別。
             # 這個欄位讓那個差別看得見。檔案檢查是本機 os.path.isfile，不打網路。
-            'au_ensemble': au_ensemble_ready,
+            # 只證明「onnxruntime 在、兩個模型檔在」。**不證明載得起來、
+            # 也不證明推論跑得動**——那要真的跡一次 session.run()。
+            # 欄位名字要跟證據對齊：叫它 au_ensemble 會被讀成「集成可用」。
+            'au_ensemble_files_present': au_ensemble_files_present,
             'lite_public_api_enabled': LITE_API_ENABLED,
             'database': True
         },
@@ -687,8 +709,18 @@ def health_check():
     # 而那同樣是「一切看起來正常，直到某天統計歸零」。
     try:
         import api_flywheel as _fw
-        status['store'] = _fw._store().describe()
-        status['audit_retention'] = _fw._store().retention_info()
+        _st = _fw._store()
+        # retention_info() **先跑**。describe() 是拿「最後一次讀回看到什麼」
+        # 來渲染的，先呼叫它等於把**上一次請求**的判語，貼在這一次
+        # 的讀回結果旁邊——同一個回應裡 `store` 說 WORM、`audit_retention`
+        # 說 readback failed，講的還是同一個桶。先讀再渲染，兩個欄位就是
+        # **構造上**一致，而不是運氣好才一致。
+        #
+        # 順帶更正一個說法：describe() 不連網，不代表這支探針不連網。
+        # 它會連，就在下一行。describe() 不快取的意義是「不再多一次網路
+        # 往返」，不是「健康檢查不依賴 GCS」。
+        status['audit_retention'] = _st.retention_info()
+        status['store'] = _st.describe()
     except Exception as _e:
         status['store'] = 'unavailable: %s' % _e
 

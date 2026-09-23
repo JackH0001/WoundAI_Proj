@@ -132,7 +132,7 @@ class RetentionDisclosureTests(unittest.TestCase):
 
     def test_health_reports_whether_the_au_ensemble_is_present(self):
         src = text(APP)
-        self.assertIn("'au_ensemble': au_ensemble_ready,", src)
+        self.assertIn("'au_ensemble_files_present': au_ensemble_files_present,", src)
         self.assertIn("_resolve_au_paths()", src)
 
     def test_au_ensemble_is_deliberately_not_part_of_degraded(self):
@@ -143,10 +143,130 @@ class RetentionDisclosureTests(unittest.TestCase):
         start = src.index("degraded = ")
         condition = src[start:src.index("status = {", start)]
         self.assertNotIn(
-            "au_ensemble", condition,
+            "au_ensemble_files_present", condition,
             "au_ensemble entered the degraded condition; that is a product "
             "decision, not a refactor -- it would block every deploy built on a "
             "machine without the two .onnx files, including a rollback")
+
+
+class ScriptedRetentionStore(object):
+    """Mirrors GcsStore's caching relationship: describe() renders whatever the
+    last retention_info() saw. That coupling is the whole point -- it is what
+    lets a stale verdict leak into a fresh response if the caller renders
+    before it reads."""
+
+    def __init__(self, script):
+        self._script = list(script)
+        self._last = None
+        self.calls = []
+
+    def retention_info(self):
+        self.calls.append("retention_info")
+        info = self._script.pop(0) if self._script else {
+            "verified": False, "locked": False, "reason": "readback failed"}
+        self._last = dict(info)
+        return info
+
+    def describe(self):
+        self.calls.append("describe")
+        return "gcs://audit-bucket/flywheel (\u7a3d\u6838\u2192gcs://audit-bucket; %s)" % (
+            GcsStore.render_retention(self._last),)
+
+    def __getattr__(self, name):
+        raise AttributeError(name)
+
+
+class TestHealthResponseIsSelfConsistent(unittest.TestCase):
+    """One response must not state two different verdicts about one bucket.
+
+    Reported by the review partner on 2026-09-22: pinning that describe() makes
+    no network call of its own says nothing about the endpoint, which calls
+    retention_info() on the very next line. describe() renders from the last
+    readback, so rendering before reading prints the PREVIOUS request's verdict
+    beside this request's -- `store` saying WORM while `audit_retention` says
+    the readback failed, about the same bucket, in the same JSON.
+
+    The original 8 tests all passed while that was true, which is exactly why
+    this one exists.
+    """
+
+    def setUp(self):
+        import api_flywheel  # noqa: F401  (ensures Backend/Flask is importable)
+        import store as store_mod
+        import app as app_mod
+        self.store_mod = store_mod
+        self.client = app_mod.app.test_client()
+        self.addCleanup(store_mod.reset_store, None)
+
+    def _health(self):
+        return self.client.get("/api/health").get_json()
+
+    def test_a_failed_readback_does_not_leave_worm_in_the_store_line(self):
+        locked = {"verified": True, "bucket": "audit-bucket",
+                  "retention_seconds": SEVEN_YEARS, "locked": True}
+        failed = {"verified": False, "locked": False, "reason": "readback failed"}
+        fake = ScriptedRetentionStore([locked, failed])
+        self.store_mod.reset_store(fake)
+
+        first = self._health()
+        self.assertIn("WORM", first["store"])
+        self.assertTrue(first["audit_retention"]["verified"])
+
+        second = self._health()
+        self.assertFalse(second["audit_retention"]["verified"])
+        self.assertNotIn(
+            "WORM", second["store"],
+            "the store line still said WORM while audit_retention in the SAME "
+            "response reported a failed readback -- describe() rendered the "
+            "previous call's verdict")
+
+    def test_losing_the_lock_is_visible_in_the_same_response(self):
+        locked = {"verified": True, "bucket": "audit-bucket",
+                  "retention_seconds": SEVEN_YEARS, "locked": True}
+        unlocked = {"verified": True, "bucket": "audit-bucket",
+                    "retention_seconds": SEVEN_YEARS, "locked": False}
+        fake = ScriptedRetentionStore([locked, unlocked])
+        self.store_mod.reset_store(fake)
+
+        self._health()
+        second = self._health()
+        self.assertFalse(second["audit_retention"]["locked"])
+        self.assertNotIn("WORM", second["store"])
+        self.assertIn("NOT locked", second["store"])
+
+    def test_the_endpoint_reads_before_it_renders(self):
+        fake = ScriptedRetentionStore([
+            {"verified": True, "bucket": "b", "retention_seconds": SEVEN_YEARS,
+             "locked": True}])
+        self.store_mod.reset_store(fake)
+        self._health()
+        self.assertEqual(
+            fake.calls, ["retention_info", "describe"],
+            "describe() ran before the readback, so it rendered a stale verdict")
+
+
+class TestHealthClaimsMatchEvidence(unittest.TestCase):
+
+    def test_the_au_field_says_it_only_checked_for_files(self):
+        # Reported 2026-09-22: `au_ensemble: true` reads as "the ensemble
+        # works", but the check is onnxruntime-importable plus two files on
+        # disk via os.path.isfile. It does not load a session or run inference.
+        src = text(APP)
+        self.assertIn("'au_ensemble_files_present': au_ensemble_files_present,", src)
+        self.assertNotIn(
+            "'au_ensemble':", src,
+            "the bare name claims a working ensemble; the code only stats files")
+
+    def test_the_au_check_really_is_only_a_file_check(self):
+        # If someone later makes this actually load a model, the name has to
+        # change with it -- this test is the reminder.
+        src = function_source(APP, "health_check")
+        window = src[src.index("au_ensemble_files_present ="):]
+        window = window[:window.index("degraded = ")]
+        for real_inference in ("InferenceSession", "session.run", ".run("):
+            self.assertNotIn(
+                real_inference, window,
+                "inference now happens here, so 'files_present' understates it")
 
 
 if __name__ == "__main__":

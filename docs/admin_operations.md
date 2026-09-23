@@ -188,7 +188,163 @@ $u = "https://woundai-backend-421209514056.asia-east1.run.app"
 
 ---
 
-## 6. 驗證
+## 6. 送審測試帳號（App Review 專用）
+
+Apple 審查需要一組能登入的帳號。**不要用 /console 手動建**——候選版本跑
+`WOUNDAI_STORE=local`，而 LocalStore 的根目錄在容器裡，Cloud Run 一回收執行個體
+帳號就沒了。審查員通常隔幾天才登入，那時帳號已不存在，結果就是被拒。
+
+所以送審帳號由後端在**每次冷啟動時重建**（`auth_users.seed_demo_from_env`）。
+
+### 這個出口有多窄
+
+| 關卡 | 規則 |
+|---|---|
+| 儲存層 | 必須是 LocalStore。**問物件不問環境變數**。正式服務是 gcs，種子在那裡永遠不動 |
+| 帳號名 | 必須是 `demoNN` 形狀。種不出 `admin2`，而且稽核裡一眼認得出 |
+| 角色（名單） | 只有 `nurse`／`assistant` |
+| 角色（權限） | 該角色若持有 `gt.verify`／`annotation.submit`／`user.manage`／`audit.read`／`gcp.console`／`backend.config` 任一項就**拒絕** |
+| 密碼 | 只從環境變數來。程式碼裡沒有，後端也不隨機產生 |
+| 既有帳號 | 已存在就完全不動。不覆蓋密碼，**不把停用的帳號重新啟用** |
+
+第四道是為了未來：若哪天有人給 `nurse` 加上 `gt.verify`，種子會拒絕，
+而不是安靜地把醫師背書交給外部審查員。
+
+### 為什麼是 `nurse`
+
+`physician` 帶 `gt.verify` 與 `annotation.submit`——那是 `doctor_verified`
+的唯一來源。交給外部審查員，等於讓陌生人有辦法把資料以醫師身分送進訓練集
+（`auth_users.py` 的 `lite` 角色註解記錄了同一個錯誤已經發生過一次）。
+
+`assistant` 則沒有 `flywheel.stats`，審查員一開紀錄頁就 403，看起來像 App 壞了。
+
+`nurse` 是能走完整套流程、又不帶醫師背書與任何管理權的最小角色。
+
+### 建立（密碼全程不經過對話，也不進版控）
+
+PowerShell 5.1。`RNGCryptoServiceProvider` 是密碼學等級亂數；
+`-lt 224` 是拒絕取樣（224 = 56 × 4），少了它會有模數偏差。
+字元集沿用 `api_users._gen_password`，排除 `l/1/I/O/0` 這些同形字——
+密碼要靠人抄寫，「明明打對卻登不進去」會吃掉大量時間。
+
+```powershell
+$proj  = 'woundai-jackh001'
+$chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+$rng   = New-Object System.Security.Cryptography.RNGCryptoServiceProvider
+$pw    = ''
+while ($pw.Length -lt 24) {
+    $b = New-Object byte[] 1
+    $rng.GetBytes($b)
+    if ($b[0] -lt 224) { $pw += $chars[$b[0] % 56] }
+}
+
+gcloud secrets create woundai-demo-password --replication-policy=automatic --project=$proj
+$pw | gcloud secrets versions add woundai-demo-password --data-file=- --project=$proj
+
+$pw            # ← 讀這一次，直接填進 App Store Connect「登入資訊」，不要貼到任何對話
+Remove-Variable pw, rng, b
+```
+
+### 部署示範服務
+
+用 `deploy_demo_candidate.ps1`，**不要**用 `deploy_cloudrun.ps1`。
+
+兩支腳本刻意分離。示範版跑 `WOUNDAI_STORE=local`；若它和正式版住在同一個
+Cloud Run service，任何人對那個 service 下 `update-traffic` 都可能把正式流量
+導到 local-store revision 上——服務看起來正常，但資料不再落 GCS、稽核鏈隨實例
+分叉，而且沒有任何錯誤訊息。分成兩個 service 之後這件事不是「很小心所以不會
+發生」，而是**做不到**：流量路由跨不了 service 邊界。
+
+（`deploy_cloudrun.ps1` 的 `Assert-CloudRunRevisionConfiguration` 也把
+`WOUNDAI_STORE = 'gcs'` 當不變量檢查，所以 local-store revision 出現在那個
+service 的清單裡，對正式路徑同樣是地雷。）
+
+```powershell
+cd C:\dev\WoundAI_Proj\Backend\Flask
+
+.\deploy_demo_candidate.ps1 `
+    -ProjectId woundai-jackh001 `
+    -RuntimeServiceAccount <示範專用的服務帳號> `
+    -DemoAuthorisationRef "<你親手寫的授權字句，要指名用途與日期>"
+```
+
+`-DemoAuthorisationRef` 會機械拒絕佔位符形狀（空白、換行、`placeholder`、
+`範本`、`填入`、`TODO`、`xxx`、太短）。這個欄位的意義是「有人想過才按下去」，
+貼樣板等於沒有授權。
+
+腳本做不到的事（機械上）：
+
+| 做不到 | 怎麼擋的 |
+|---|---|
+| 切正式流量 | 沒有任何一行程式碼呼叫 `update-traffic`，且拒絕以正式 service 為目標 |
+| 寫 GCS | 沒有 `-Bucket`／`-AuditBucket` 參數，`WOUNDAI_STORE` 寫死 local |
+| 用正式執行身分 | 部署前讀正式 service 的 SA 比對，相同就拒絕 |
+| 多實例 | `--max-instances 1` 寫死，且部署後回讀 revision 的 `maxScale` 確認 |
+| 種出醫師角色 | 角色白名單只有 `nurse`／`assistant`，後端再驗一次 |
+
+最後一項的單實例是**正確性需求**，不是省錢：LocalStore 的鏈完整性鎖在行程內，
+兩個實例就是兩份互不相干的資料，審查員會在連續兩次請求之間看到不同的紀錄列表。
+
+腳本部署後會自己回讀 revision 設定（不是相信 `--set-env-vars` 傳了什麼）、
+打 `/api/health` 確認 `store` 是 `local:`、並讀啟動日誌確認種子真的跑過。
+
+### 確認種子真的跑了
+
+種子只要沒執行就會把原因印在啟動日誌——**拒絕是看得見的**，
+安靜地什麼都不做會變成審查員回報登不進去的那天才發現。
+
+```powershell
+gcloud run services logs read woundai-backend --region asia-east1 --limit 50 --project $proj |
+    Select-String 'demo 種子|已重建送審測試帳號'
+```
+
+成功長這樣：`已重建送審測試帳號 default:demo01（角色 nurse）`
+
+### ⚠ 種子解決的是「登得進去」，**不是「資料還在」**
+
+這一點務必講清楚，否則會在送審時踩到：
+
+冷啟動重建的只有**帳號**。影像、receipt、稽核鏈全部躺在同一個容器檔案系統裡，
+實例一回收就消失（[Cloud Run 檔案系統說明](https://cloud.google.com/run/docs/container-contract#file_system)）。
+所以審查員若在實例 A 完成量測，之後被導到實例 B，他的紀錄不在那裡——
+**他會看到一個空的紀錄列表，然後合理地回報「App 存不了東西」**。
+
+實務上要求：
+
+- 送審流程必須能在**單一連續工作階段**內走完，不依賴跨階段留存
+- 審查說明（App Review Notes）要明說這是示範環境、資料不留存
+- 不要把 gcsfuse ＋ 單實例當成解法：FUSE **沒有同檔多寫者鎖定**，
+  而容器本身仍是多執行緒的，多寫者會直接產生鏈分叉
+  （[官方限制](https://cloud.google.com/run/docs/configuring/services/cloud-storage-volume-mounts)）
+- 真正的資料留存要等新紀元桶，那是另一條路線
+
+### 停用不是持久的（跨冷啟動會被重建）
+
+**先前這份文件寫「種子不會把停用的帳號重新啟用」，那句話只在同一個實例上成立。**
+
+「已存在就不動」比對的是**目前這個實例的帳號檔**。實例回收後檔案是空的，
+帳號不存在，於是種子照常建立一個**啟用中**的 `demo01`。
+在 `/console` 停用只會擋住當前實例，下一次冷啟動就失效。
+
+唯一可靠的關閉方式：**把三個環境變數與密文拿掉，重新部署。**
+
+（`test_demo_seed_guardrails.py` 兩支測試分別釘住這兩種情境，
+`..._on_the_same_instance` 與 `..._cold_start_on_an_empty_store_recreates_...`。）
+
+### 送審結束後
+
+把 `WOUNDAI_DEMO_SEED_USER`／`ROLE`／`PASSWORD` 三個變數與密文拿掉，重新部署——
+這個出口就跟著消失。
+
+### 角色涵蓋範圍要反映在審查說明裡
+
+`nurse` 走得完量測與紀錄，但**沒有** `gt.verify` 與 `annotation.submit`。
+審查說明與 UI 不可宣稱「完整醫師流程均可操作」——
+審查員點得到卻做不到的按鈕，本身就是被退件的理由。
+
+---
+
+## 7. 驗證
 
 ```bash
 python engineering/phase2/test_admin_console.py   # 56 項，全通過
@@ -202,7 +358,7 @@ python engineering/phase2/test_rbac.py            # 37 項
 
 ---
 
-## 7. 效能邊界（誠實說明）
+## 8. 效能邊界（誠實說明）
 
 稽核查詢仍是 **O(n)**：每次請求都要讀完整份紀錄才能篩選與計數。
 目前的緩解有兩層，但都不是根治：
@@ -218,7 +374,7 @@ python engineering/phase2/test_rbac.py            # 37 項
 
 以目前 n=20 收案的量級（每天數十筆稽核），這一頁是即時的。
 
-## 8. 尚未做的（S2／S3）
+## 9. 尚未做的（S2／S3）
 
 - **多機構隔離**。識別碼格式 `<org>:<user>` 已經帶著 org，但目前所有人都在 `default`，
   且**沒有跨機構的資料隔離**。多院區上線前必須補（見 `rbac_design.md` §6）。

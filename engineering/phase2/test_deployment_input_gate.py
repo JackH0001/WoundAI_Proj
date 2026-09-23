@@ -10,6 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "Backend" / "Flask" / "deploy_cloudrun.ps1"
+DEMO = ROOT / "Backend" / "Flask" / "deploy_demo_candidate.ps1"
 SHELLS = []
 for candidate in (shutil.which("powershell"), shutil.which("pwsh")):
     if candidate and candidate.lower() not in {p.lower() for p in SHELLS}:
@@ -94,6 +95,138 @@ class DeploymentInputGateTests(unittest.TestCase):
                 result = self.invoke(shell, value)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn("PASS", result.stdout)
+
+
+DEMO_HARNESS = r"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile(
+    $env:WOUNDAI_DEMO_GATE_SOURCE, [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw 'demo deployment script syntax error' }
+$node = $ast.Find({param($n)
+    $n -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $n.Name -eq 'Assert-DemoInputs'
+}, $true)
+if ($null -eq $node) { throw 'missing Assert-DemoInputs' }
+. ([scriptblock]::Create($node.Extent.Text))
+
+$ProjectId = 'woundai-jackh001'
+$RuntimeServiceAccount = $env:WOUNDAI_DEMO_GATE_SA
+$DemoAuthorisationRef = $env:WOUNDAI_DEMO_GATE_AUTH
+$Service = $env:WOUNDAI_DEMO_GATE_SERVICE
+$ProductionService = 'woundai-backend'
+$DemoSeedUser = $env:WOUNDAI_DEMO_GATE_USER
+$DemoSeedRole = $env:WOUNDAI_DEMO_GATE_ROLE
+$DemoSeedSecret = 'woundai-demo-password'
+try {
+    Assert-DemoInputs
+    Write-Host 'PASS'
+    exit 0
+} catch {
+    Write-Host ('REJECT ' + $_)
+    exit 1
+}
+"""
+
+GOOD_DEMO_INPUT = {
+    "SERVICE": "woundai-backend-demo",
+    "SA": "woundai-demo-run@woundai-jackh001.iam.gserviceaccount.com",
+    "AUTH": "Jack 2026-09-22 approve demo revision for App Review",
+    "USER": "demo01",
+    "ROLE": "nurse",
+}
+
+
+@unittest.skipUnless(SHELLS, "PowerShell is required for deployment input tests")
+class DemoDeploymentInputGateTests(unittest.TestCase):
+    """Run the demo script's real guard, with no cloud command reachable.
+
+    Static string matching proves the guard is written; this proves it refuses.
+    The two that matter most are the service-boundary cases: a demo revision
+    landing in the production service is one update-traffic away from serving
+    live clinical traffic off ephemeral local storage.
+    """
+
+    def invoke(self, shell, **overrides):
+        values = dict(GOOD_DEMO_INPUT)
+        values.update(overrides)
+        with tempfile.TemporaryDirectory(prefix="woundai-demo-gate-") as temp:
+            script = Path(temp) / "gate.ps1"
+            script.write_text(DEMO_HARNESS, encoding="utf-8-sig")
+            env = os.environ.copy()
+            env["WOUNDAI_DEMO_GATE_SOURCE"] = str(DEMO)
+            for key, value in values.items():
+                env["WOUNDAI_DEMO_GATE_" + key] = value
+            return subprocess.run(
+                [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                 "-File", str(script)], env=env, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=20,
+            )
+
+    def reject(self, shell, expected, **overrides):
+        result = self.invoke(shell, **overrides)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(expected, result.stdout)
+
+    def test_the_production_service_is_refused(self):
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                self.reject(shell, "refuse to deploy the demo revision into the "
+                                   "production service",
+                            SERVICE="woundai-backend")
+
+    def test_a_service_name_not_marked_demo_is_refused(self):
+        for shell in SHELLS:
+            for name in ("woundai-staging", "woundai-backend-2", "demo-woundai"):
+                with self.subTest(shell=shell, service=name):
+                    self.reject(shell, "must end in -demo", SERVICE=name)
+
+    def test_placeholder_authorisation_is_refused(self):
+        values = ("", "   ", "placeholder for the demo deploy", "範本：請填入授權字句",
+                  "TODO write this later", "example authorisation text",
+                  "line one\nline two", "xxx approve this")
+        for shell in SHELLS:
+            for value in values:
+                with self.subTest(shell=shell, auth=value[:24]):
+                    result = self.invoke(shell, AUTH=value)
+                    self.assertNotEqual(result.returncode, 0,
+                                        result.stdout + result.stderr)
+                    self.assertIn("DemoAuthorisationRef", result.stdout)
+
+    def test_a_role_carrying_doctor_endorsement_is_refused(self):
+        # physician holds gt.verify and annotation.submit. Handing that to an
+        # external App Review account is the failure auth_users' `lite` comment
+        # records having already happened once.
+        for shell in SHELLS:
+            for role in ("physician", "admin", "engineer", "lite", "NURSE", ""):
+                with self.subTest(shell=shell, role=role):
+                    self.reject(shell, "-DemoSeedRole must be nurse or assistant",
+                                ROLE=role)
+
+    def test_a_seed_user_outside_the_demo_shape_is_refused(self):
+        for shell in SHELLS:
+            for user in ("admin", "admin2", "demo1", "demo001", "DEMO01", "lite01"):
+                with self.subTest(shell=shell, user=user):
+                    self.reject(shell, "-DemoSeedUser must match demoNN", USER=user)
+
+    def test_default_and_foreign_service_accounts_are_refused(self):
+        for shell in SHELLS:
+            for sa in ("421209514056-compute@developer.gserviceaccount.com",
+                       "woundai-demo@other-project.iam.gserviceaccount.com",
+                       "woundai-demo@woundai-jackh001.iam.gserviceaccount.com.evil.com"):
+                with self.subTest(shell=shell, sa=sa):
+                    result = self.invoke(shell, SA=sa)
+                    self.assertNotEqual(result.returncode, 0,
+                                        result.stdout + result.stderr)
+
+    def test_valid_demo_input_passes_without_cloud_access(self):
+        for shell in SHELLS:
+            for role in ("nurse", "assistant"):
+                with self.subTest(shell=shell, role=role):
+                    result = self.invoke(shell, ROLE=role)
+                    self.assertEqual(result.returncode, 0,
+                                     result.stdout + result.stderr)
+                    self.assertIn("PASS", result.stdout)
 
 
 if __name__ == "__main__":

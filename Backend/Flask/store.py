@@ -585,8 +585,12 @@ class GcsStore(Store):
         self._audit_prefix_cache = {}
         # Reporting only. retention_info() records what it last observed here so
         # describe() can state the audit bucket's real contract without adding a
-        # network call to /api/health -- a Cloud Run health probe must not depend
-        # on GCS being reachable. The gate never reads this: require_locked_audit_epoch
+        # SECOND network call -- /api/health does reach GCS, once, through
+        # retention_info(); this cache only stops describe() doubling that. An
+        # earlier version of this comment claimed the health probe does not
+        # depend on GCS. It does. Callers must therefore read before they
+        # render, or describe() reports the previous call's verdict beside this
+        # call's. The gate never reads this: require_locked_audit_epoch
         # calls retention_info() fresh every time, because a cached "locked" is
         # exactly the kind of stale yes this whole layer exists to refuse.
         self._last_retention_seen = None
