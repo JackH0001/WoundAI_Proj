@@ -329,30 +329,65 @@ cd C:\dev\WoundAI_Proj\Backend\Flask
 |---|---|
 | 切正式流量 | 沒有任何一行程式碼呼叫 `update-traffic`，且拒絕以正式 service 為目標 |
 | 寫 GCS | 沒有 `-Bucket`／`-AuditBucket` 參數，`WOUNDAI_STORE` 寫死 local |
-| 用正式執行身分 | 部署前讀正式 service 的 SA 比對，相同就拒絕 |
+| 用正式執行身分 | 部署前讀正式 service 的 SA，**讀不到就停**（權限不足、登入過期、網路中斷都算），相同就拒絕；部署後回讀示範 revision 實際跑的身分再比一次 |
 | 用正式金鑰 | 四個密文參數必須是 `woundai-demo-*` 且彼此不同；部署前讀每把正式密文的 IAM 政策，示範身分在任何綁定裡就拒絕；部署後回讀 revision 的 `secretKeyRef` |
 | 帶管理者憑證 | 不掛 `ADMIN_PASSWORD`，回讀時發現就失敗 |
 | 多實例 | `--max-instances 1` 寫死，且部署後回讀 revision 的 `maxScale` 確認 |
 | 種出醫師角色 | 角色白名單只有 `nurse`／`assistant`，後端再驗一次 |
+| 建出缺模組的映像 | 建置前把 engineering 模組複製到 `vendor/`，清單與 `deploy_cloudrun.ps1` 逐項相同（測試比對）；缺任何一個就停 |
+| 驗收沒過還說「完成」 | 部署後每一項檢查都是 `throw`，沒有一項只是警告（見下） |
 
 最後一項的單實例是**正確性需求**，不是省錢：LocalStore 的鏈完整性鎖在行程內，
 兩個實例就是兩份互不相干的資料，審查員會在連續兩次請求之間看到不同的紀錄列表。
 
-腳本部署後會自己回讀 revision 設定（不是相信 `--set-env-vars` 傳了什麼）、
-打 `/api/health` 確認 `store` 是 `local:` 且 care receipt 金鑰已就緒、
-並讀啟動日誌確認種子真的跑過。
+部署後的驗收依序如下，**任何一項不成立都中止，「完成」只在全部通過後才印**：
+
+1. service：最新建立的 revision 已就緒、就是這次建的那一版、100% 流量在它身上
+2. revision 回讀（不是相信 `--set-env-vars` 傳了什麼）：執行身分、Ready、
+   環境變數含 `GIT_COMMIT`、掛的密文恰好是四把示範密文、單實例
+3. `/api/health`：`healthy`，分割模型、classify、色準、端點、canonical golden
+   全部就位；`build.git_commit` 等於本機完整 SHA、`build.revision` 等於上一步
+   那一版；`store` 是 `local:`；care receipt 金鑰已設定
+4. **這個 revision 自己的**日誌裡有 `[demo-seed:ok]`，且沒有 `refused`／`error`
+
+2026-09-23 覆核 `b24a47c` 時發現前一版在這裡的缺口：建置沒有 `vendor/`
+（服務能登入、量測 503）；commit 讀成不存在的 `health.git_commit`（實際在
+`build` 底下），版本不符與找不到種子紀錄都只是黃字；正式身分讀不到時跳過比對。
+第 3 項只剩 A∪U 模型檔缺席是提醒而不中止——它刻意不在 `degraded` 裡（產品決策，
+見 `app.py`）。
 
 ### 確認種子真的跑了
 
-種子只要沒執行就會把原因印在啟動日誌——**拒絕是看得見的**，
-安靜地什麼都不做會變成審查員回報登不進去的那天才發現。
+部署腳本的第 4 項驗收已經做了這件事；這裡是手動重查的方法。
+
+種子每一種結果都會在啟動日誌印一行，開頭是 ASCII 標記——**拒絕是看得見的**，
+安靜地什麼都不做會變成審查員回報登不進去的那天才發現：
+
+| 標記 | 意思 |
+|---|---|
+| `[demo-seed:ok]` | 帳號已建立 |
+| `[demo-seed:exists]` | 帳號已存在、不覆蓋（同一容器裡 worker 重啟時會出現，正常） |
+| `[demo-seed:refused]` | 設定被拒絕，後面接原因 |
+| `[demo-seed:error]` | 例外，後面接原因 |
+
+標記用 ASCII 是因為 Windows PowerShell 5.1 會用主控台字碼頁解讀原生程式的
+輸出，後面的中文可能變成亂碼；標記本身不受影響。那一行也一定會 flush——
+Cloud Run 的 stdout 是管線，不 flush 的話它可能一直躺在緩衝區裡。
+
+**只看示範 service、只看目前這個 revision**，否則舊 revision 的成功紀錄會冒充新版：
 
 ```powershell
-gcloud run services logs read woundai-backend --region asia-east1 --limit 50 --project $proj |
-    Select-String 'demo 種子|已重建送審測試帳號'
+& {
+    $proj = 'woundai-jackh001'
+    $rev = gcloud run services describe woundai-backend-demo --region asia-east1 `
+        --project $proj --format "value(status.latestReadyRevisionName)"
+    gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=woundai-backend-demo AND resource.labels.revision_name=$rev" `
+        --project $proj --order=asc --limit=1000 --format "value(textPayload)" |
+        Select-String -CaseSensitive '\[demo-seed:'
+}
 ```
 
-成功長這樣：`已重建送審測試帳號 default:demo01（角色 nurse）`
+成功長這樣：`[demo-seed:ok] 已重建送審測試帳號 default:demo01（角色 nurse）`
 
 ### ⚠ 種子解決的是「登得進去」，**不是「資料還在」**
 

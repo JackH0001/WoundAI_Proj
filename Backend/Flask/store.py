@@ -220,7 +220,10 @@ class Store:
     # 民眾提供的是自己的資料且有被遺忘的期待；臨床樣本背後是 IRB 與病歷。
     def delete(self, key: str) -> bool: raise NotImplementedError
     def list_keys(self, prefix: str): raise NotImplementedError
-    def describe(self) -> str: raise NotImplementedError
+    def describe(self, *, retention=None) -> str:
+        """`retention`: one retention_info() result from this same caller, or
+        None. Never a value remembered from another call -- see GcsStore."""
+        raise NotImplementedError
 
 
 def _record_name() -> str:
@@ -535,7 +538,9 @@ class LocalStore(Store):
             return []
         return ["%s/%s" % (prefix.rstrip("/"), n) for n in sorted(os.listdir(p))]
 
-    def describe(self) -> str:
+    def describe(self, *, retention=None) -> str:
+        # Local storage has no retention contract to report; the argument is
+        # accepted so every store answers the same call from /api/health.
         return "local:%s" % self.root
 
 
@@ -583,17 +588,6 @@ class GcsStore(Store):
         # generation, but downloads only the suffix not yet verified by this
         # process.  Offline verification never uses this cache.
         self._audit_prefix_cache = {}
-        # Reporting only. retention_info() records what it last observed here so
-        # describe() can state the audit bucket's real contract without adding a
-        # SECOND network call -- /api/health does reach GCS, once, through
-        # retention_info(); this cache only stops describe() doubling that. An
-        # earlier version of this comment claimed the health probe does not
-        # depend on GCS. It does. Callers must therefore read before they
-        # render, or describe() reports the previous call's verdict beside this
-        # call's. The gate never reads this: require_locked_audit_epoch
-        # calls retention_info() fresh every time, because a cached "locked" is
-        # exactly the kind of stale yes this whole layer exists to refuse.
-        self._last_retention_seen = None
         self._audit_append_lock = threading.RLock()
 
     def _target(self, key: str):
@@ -956,22 +950,15 @@ class GcsStore(Store):
         # gate's only evidence, and a cached answer would let a policy that was
         # removed minutes ago still read as locked.
         if self._audit_bucket is None:
-            return self._remember_retention(
-                {"verified": False, "locked": False, "reason": "audit bucket missing"})
+            return {"verified": False, "locked": False, "reason": "audit bucket missing"}
         try:
             self._audit_bucket.reload()
             policy = self._audit_bucket._properties.get("retentionPolicy", {})
-            return self._remember_retention(
-                {"verified": True, "bucket": self._audit_bucket_name,
-                 "retention_seconds": int(policy.get("retentionPeriod", 0)),
-                 "locked": policy.get("isLocked") is True})
+            return {"verified": True, "bucket": self._audit_bucket_name,
+                    "retention_seconds": int(policy.get("retentionPeriod", 0)),
+                    "locked": policy.get("isLocked") is True}
         except Exception:
-            return self._remember_retention(
-                {"verified": False, "locked": False, "reason": "readback failed"})
-
-    def _remember_retention(self, info: dict) -> dict:
-        self._last_retention_seen = dict(info)
-        return info
+            return {"verified": False, "locked": False, "reason": "readback failed"}
 
     @staticmethod
     def render_retention(info) -> str:
@@ -983,9 +970,13 @@ class GcsStore(Store):
         be removed with one API call and then they can. WORM promises the second
         half, and that is the half that matters for an audit trail, so the word
         was doing work the configuration did not support.
+
+        `info` is one retention_info() result, passed in by the caller. None
+        means the caller did not read the bucket back, and the phrase says so
+        rather than guessing.
         """
         if not info:
-            return "retention not yet read back"
+            return "retention not read back"
         if not info.get("verified"):
             return "retention unknown (%s)" % (info.get("reason") or "readback failed")
         seconds = int(info.get("retention_seconds") or 0)
@@ -1050,11 +1041,24 @@ class GcsStore(Store):
         n = len(self.prefix) + 1 if self.prefix else 0
         return sorted(b.name[n:] for b in self._client.list_blobs(bname, prefix=base))
 
-    def describe(self) -> str:
+    def describe(self, *, retention=None) -> str:
+        """Where the data lives, and -- only if the caller hands one over --
+        what one readback said about the audit bucket.
+
+        The retention phrase comes from the `retention` argument and nowhere
+        else. An earlier version kept "the last readback seen" on this object
+        and rendered from it. One store object serves every request thread in
+        the worker (gunicorn runs --threads 8), so between request A's
+        retention_info() and A's describe(), request B's readback could land
+        and A's response would carry A's audit_retention beside B's verdict --
+        the same bucket described two ways in one JSON body. Reordering the two
+        calls in the caller cannot fix that; only not sharing the value can.
+        /api/health therefore reads once and passes that one result here.
+        """
         d = "gcs://%s/%s" % (self._bucket_name, self.prefix)
         if self._audit_bucket_name:
             d += " (稽核→gcs://%s; %s)" % (
-                self._audit_bucket_name, self.render_retention(self._last_retention_seen))
+                self._audit_bucket_name, self.render_retention(retention))
         return d
 
 

@@ -312,7 +312,9 @@ def seed_demo_from_env():
     回傳：
       None                                   功能未啟用（沒設 WOUNDAI_DEMO_SEED_USER）
       {"seeded": True,  "identity", "role"}  已建立
-      {"seeded": False, "reason"}            明確拒絕或跳過
+      {"seeded": False, "exists": True, "reason"}
+                                             帳號已存在，不覆蓋（預期中的跳過）
+      {"seeded": False, "reason"}            明確拒絕
 
     **刻意不用單純的 None 表示失敗**：一個拼錯的角色名若安靜地什麼都不做，
     你會在 Apple 審查員回報登不進去的那天才發現。拒絕必須看得見。
@@ -352,7 +354,10 @@ def seed_demo_from_env():
                 "reason": "種子密碼至少 %d 字元（目前 %d）" % (DEMO_SEED_MIN_PW, len(pw))}
 
     if get_user(DEFAULT_ORG, user) is not None:
-        return {"seeded": False, "reason": "帳號 %s 已存在，不覆蓋" % user}
+        # `exists` 與拒絕分開標示：同一個容器裡 worker 重啟會再跑一次種子，
+        # 那時帳號已存在是預期中的事，不是設定錯誤。
+        return {"seeded": False, "exists": True,
+                "reason": "帳號 %s 已存在，不覆蓋" % user}
 
     rec = upsert_user(DEFAULT_ORG, user, role, pw,
                       display_name="送審測試帳號(demo-seed)", actor="demo-seed")

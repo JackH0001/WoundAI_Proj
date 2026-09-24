@@ -128,6 +128,7 @@ class DemoPathCannotTouchProduction(unittest.TestCase):
         code = code_only(text(DEMO))
         self.assertIn("function Assert-NotTheProductionIdentity", code)
         self.assertIn("demo service must not run as the production runtime identity", code)
+        self.assertIn("if ($prodSa -ieq $RuntimeServiceAccount) {", code)
 
 
 class DemoSeedFlagsMatchTheBackend(unittest.TestCase):
@@ -267,7 +268,195 @@ class DemoKeysAreNotProductionKeys(unittest.TestCase):
     def test_the_care_keyring_is_confirmed_live_after_deploy(self):
         # Without its own keyring the demo answers 503 on the consent path,
         # which a reviewer reads as a broken app.
-        self.assertIn("if (-not $health.care_receipt.configured) {", code_only(text(DEMO)))
+        self.assertIn("if (-not ($care -is [bool] -and $care)) {", code_only(text(DEMO)))
+
+
+def function_body(code: str, name: str) -> str:
+    body = re.search(r"function %s\b[^{]*\{(.*?)\n\}" % re.escape(name), code, re.S)
+    if body is None:
+        raise AssertionError("%s not found" % name)
+    return body.group(1)
+
+
+def main_flow(code: str) -> str:
+    start = code.index('Say "示範服務部署（送審用）"')
+    return code[start:]
+
+
+class DemoBuildContextMatchesProduction(unittest.TestCase):
+    """Reported 2026-09-23 on b24a47c: the demo build had no vendor/ step.
+
+    The Docker build context is Backend/Flask only, so the engineering modules
+    classify imports do not exist in the image unless they are copied into
+    vendor/ first. deploy_cloudrun.ps1 has always done that; the demo script
+    did not. The service would start, logins would work, and measurement
+    would answer 503 -- or, for color_calib, silently fall back to gray-world.
+    """
+
+    @staticmethod
+    def production_vendor_list():
+        code = code_only(text(PROD))
+        block = re.search(r"\$needed = @\((.*?)\)", code, re.S)
+        if block is None:
+            raise AssertionError("deploy_cloudrun.ps1 no longer has its $needed list")
+        return re.findall(r'"([^"]+)"', block.group(1))
+
+    @staticmethod
+    def demo_vendor_list():
+        return re.findall(r'"([^"]+)"',
+                          function_body(code_only(text(DEMO)), "Get-EngineeringVendorFiles"))
+
+    def test_the_vendor_list_is_production_list(self):
+        prod = self.production_vendor_list()
+        self.assertGreaterEqual(len(prod), 6, "production vendor list parsed too short")
+        self.assertEqual(self.demo_vendor_list(), prod)
+
+    def test_vendor_is_copied_before_the_build_and_only_when_building(self):
+        flow = main_flow(code_only(text(DEMO)))
+        call = "Copy-EngineeringVendor -FlaskDir $PSScriptRoot"
+        self.assertEqual(flow.count(call), 1)
+        branch = flow.index("if (-not $VerifyOnly) {")
+        self.assertLess(branch, flow.index(call))
+        self.assertLess(flow.index(call), flow.index("Invoke-GCloud run deploy $Service"))
+        self.assertLess(flow.index("Invoke-GCloud run deploy $Service"),
+                        flow.index("} else {", branch))
+
+    def test_the_copy_is_checked_not_assumed(self):
+        body = function_body(code_only(text(DEMO)), "Copy-EngineeringVendor")
+        for cond in ("if ($missing.Count -gt 0) {",
+                     "if ($a -cne $b) { throw",
+                     "if (($present -join '|') -cne ($expected -join '|')) {"):
+            with self.subTest(cond=cond):
+                self.assertIn(cond, body)
+        # The source check precedes the delete, so a refused copy leaves the
+        # previous vendor/ in place.
+        self.assertLess(body.index("if ($missing.Count -gt 0) {"),
+                        body.index("Remove-Item -LiteralPath $vendor"))
+
+    def test_the_build_can_see_vendor_and_git_cannot(self):
+        # Copying into vendor/ must not dirty the worktree (Get-DemoGitCommit
+        # refuses a dirty tree), and must reach the build upload.
+        self.assertIn("Backend/Flask/vendor/", text(ROOT / ".gitignore"))
+        for ignore in (FLASK / ".gcloudignore", FLASK / ".dockerignore"):
+            with self.subTest(ignore=ignore.name):
+                lines = [l.strip() for l in text(ignore).splitlines()
+                         if l.strip() and not l.strip().startswith("#")]
+                self.assertFalse(any(l.rstrip("/") == "vendor" for l in lines),
+                                 "%s excludes vendor/" % ignore.name)
+
+
+class DemoAcceptanceGateCannotBeWavedThrough(unittest.TestCase):
+    """Reported 2026-09-23 on b24a47c: the post-deploy checks could print "done"
+    over an incomplete service -- no measurement-module check, the commit read
+    from a field that does not exist (health.git_commit; it is under build),
+    and a version mismatch or a missing seed line answered with a warning.
+    Behaviour is exercised in test_demo_deploy_checks; these pin the wiring.
+    """
+
+    GATES = ("$state = Assert-DemoServiceState -ExpectedRevision $ExpectedRevision",
+             "Assert-DemoRevisionConfiguration -Revision $liveRevision -ExpectedGitCommit $GitCommit",
+             "Assert-DemoHealth -Health $health -ExpectedGitCommit $GitCommit -ExpectedRevision $liveRevision",
+             "Assert-DemoSeedLogged -Revision $liveRevision")
+
+    def test_every_gate_runs_after_the_deploy_and_before_done(self):
+        flow = main_flow(code_only(text(DEMO)))
+        deploy = flow.index("Invoke-GCloud run deploy $Service")
+        done = flow.index('Say "完成"')
+        self.assertEqual(flow.count('Say "完成"'), 1)
+        last = deploy
+        for gate in self.GATES:
+            with self.subTest(gate=gate):
+                self.assertEqual(flow.count(gate), 1, gate)
+                at = flow.index(gate)
+                self.assertLess(last, at, "gate out of order: %s" % gate)
+                self.assertLess(at, done)
+                last = at
+
+    def test_a_fresh_deploy_is_verified_against_the_revision_it_created(self):
+        # Without this binding, a revision that fails to become ready leaves
+        # latestReadyRevisionName on the previous one, and every gate below
+        # would verify the old revision and pass.
+        flow = main_flow(code_only(text(DEMO)))
+        bind = '$ExpectedRevision = "$Service-$RevisionSuffix"'
+        self.assertEqual(flow.count(bind), 1)
+        deploy = flow.index("Invoke-GCloud run deploy $Service")
+        self.assertLess(deploy, flow.index(bind))
+        self.assertLess(flow.index(bind), flow.index("} else {", deploy))
+        self.assertIn("--revision-suffix $RevisionSuffix", flow)
+
+    def test_no_warning_stands_in_for_a_failed_gate(self):
+        flow = main_flow(code_only(text(DEMO)))
+        section = flow[flow.index("Invoke-GCloud run deploy $Service"):flow.index('Say "完成"')]
+        lines = section.splitlines()
+        warns = [i for i, l in enumerate(lines) if re.search(r"\bWarn\b", l)]
+        # The only warning left is the A-U ensemble reminder, which is not
+        # part of degraded by product decision (see app.py).
+        self.assertEqual(len(warns), 1, [lines[i] for i in warns])
+        context = "\n".join(lines[max(0, warns[0] - 2):warns[0] + 1])
+        self.assertIn("au_ensemble_files_present", context)
+        for fn in ("Assert-DemoServiceState", "Assert-DemoRevisionConfiguration",
+                   "Assert-DemoHealth", "Assert-NotTheProductionIdentity",
+                   "ConvertFrom-GCloudJson"):
+            with self.subTest(fn=fn):
+                self.assertNotRegex(function_body(code_only(text(DEMO)), fn), r"\bWarn\b")
+
+    def test_health_is_read_where_the_fields_are(self):
+        code = code_only(text(DEMO))
+        self.assertNotRegex(code, r"(?i)\$health\.git_commit",
+                            "the commit is under build, not at the top level")
+        body = function_body(code, "Assert-DemoHealth")
+        for cond in ("if ([string]$Health.status -cne 'healthy') {",
+                     "if ([string]$Health.build.git_commit -cne $ExpectedGitCommit) {",
+                     "if ([string]$Health.build.revision -cne $ExpectedRevision) {",
+                     "if (-not ($v -is [bool] -and $v)) {",
+                     "if ($failures.Count -gt 0) {"):
+            with self.subTest(cond=cond):
+                self.assertIn(cond, body)
+        for module in ("'segmentation_model'", "'classify_modules'", "'color_calibration'",
+                       "'endpoints_registered'", "'canonicalization_golden'"):
+            with self.subTest(module=module):
+                self.assertIn(module, body)
+
+    def test_the_seed_is_confirmed_from_this_revision_only(self):
+        code = code_only(text(DEMO))
+        self.assertNotIn("logs read", code, "service-wide log tail is back")
+        body = function_body(code, "Assert-DemoSeedLogged")
+        self.assertIn("resource.labels.revision_name=$Revision", body)
+        self.assertIn("'--order=asc'", body)
+        for cond in (r"$_ -cmatch '\[demo-seed:(refused|error)\]'",
+                     r"$_ -cmatch '\[demo-seed:ok\]'",
+                     "if ($r.Exit -ne 0) {"):
+            with self.subTest(cond=cond):
+                self.assertIn(cond, body)
+        # Falling out of the polling loop is a failure, not a shrug.
+        self.assertTrue(body.rstrip().splitlines()[-1].strip().startswith(
+            'throw "no [demo-seed:ok] line from revision'), body.rstrip().splitlines()[-1])
+
+    def test_the_markers_the_gate_reads_are_the_ones_app_prints(self):
+        app = text(FLASK / "app.py")
+        for marker in ("[demo-seed:ok]", "[demo-seed:exists]",
+                       "[demo-seed:refused]", "[demo-seed:error]"):
+            with self.subTest(marker=marker):
+                self.assertIn('"%s ' % marker, app)
+
+    def test_the_production_identity_lookup_cannot_be_skipped(self):
+        code = code_only(text(DEMO))
+        body = function_body(code, "Assert-NotTheProductionIdentity")
+        self.assertIn("ConvertFrom-GCloudJson", body)
+        self.assertNotRegex(body, r"\breturn\s*$", "a bare return skips the comparison")
+        self.assertIn("if ($Result.Exit -ne 0) {", function_body(code, "ConvertFrom-GCloudJson"))
+        flow = main_flow(code)
+        self.assertIn("$ProductionRuntimeIdentity = Assert-NotTheProductionIdentity", flow)
+        self.assertIn("-ProductionIdentity $ProductionRuntimeIdentity", flow)
+
+    def test_the_revision_identity_is_read_back(self):
+        body = function_body(code_only(text(DEMO)), "Assert-DemoRevisionConfiguration")
+        for cond in ("if ($runsAs -cne $RuntimeServiceAccount) {",
+                     "if ($runsAs -ieq $ProductionIdentity) {",
+                     "if ($envs[$k] -cne $plain[$k]) {",
+                     "if (-not $map.Contains($envName)) {"):
+            with self.subTest(cond=cond):
+                self.assertIn(cond, body)
 
 
 class ProductionScriptWasNotLoosened(unittest.TestCase):

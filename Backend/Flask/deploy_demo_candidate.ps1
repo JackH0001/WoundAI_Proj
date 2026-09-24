@@ -20,13 +20,38 @@
 #     （註解裡提到它是在解釋為何不存在；靜態測試會先剔掉註解再檢查），
 #     且拒絕以正式 service 為目標
 #   * 不能寫 GCS：沒有 -Bucket／-AuditBucket 參數，WOUNDAI_STORE 寫死 local
-#   * 不能用正式執行身分：部署前會去讀正式 service 目前的 SA 並比對，相同就拒絕
+#   * 不能用正式執行身分：部署前讀正式 service 目前的 SA，**讀不到就停**
+#     （不知道正式身分是誰，就不能宣稱兩者不同），相同就拒絕；部署後再回讀
+#     示範 revision 實際跑的身分，兩邊再比一次
 #   * 不能多實例：--max-instances 1 寫死
 #   * 不能用正式金鑰：JWT、Flask、care receipt 各用自己的 woundai-demo-* 密文，
 #     也不掛正式管理者密碼（見下方「金鑰」一節）
+#   * 不能在驗收沒過時說「完成」：部署後每一項檢查都是 throw，沒有一項是 Warn
+#     （見下方「驗收」一節）
 #
-# 最後一項是**正確性需求**，不是省錢。LocalStore 的鏈完整性鎖在行程內，
+# 多實例那一項是**正確性需求**，不是省錢。LocalStore 的鏈完整性鎖在行程內，
 # 兩個實例就是兩份互不相干的資料——審查員會在連續兩次請求之間看到不同的紀錄列表。
+#
+# ## 建置上下文：與正式部署同一份 vendor/
+#
+# Docker 的建置上下文只有 Backend/Flask/。classify 需要的 engineering 模組
+# 在映像裡不存在，必須在建置前複製到 vendor/——正式腳本一直這樣做，這支的
+# 第一版漏了。漏掉時服務照常啟動、登入 200，只有量測 503 或安靜退回
+# gray-world 白平衡；而第一版的驗收只看 store 與 care receipt，照樣印「完成」。
+# 兩份清單由靜態測試逐項比對：正式那邊多一個模組而這裡沒跟上，測試就失敗。
+#
+# ## 驗收：每一項都會中止
+#
+# 部署後依序確認，任何一項不成立都 throw，「完成」只在全部通過後才印：
+#   1. service：最新建立的 revision 已就緒、就是這次建的那一版、100% 流量在它身上
+#   2. revision 回讀：執行身分、Ready、單一容器、環境變數（含 GIT_COMMIT）、
+#      掛的密文恰好是四把示範密文、單實例
+#   3. /api/health：healthy，量測模組（分割、classify、色準、端點、canonical
+#      golden）全部就位，build.git_commit 等於本機完整 SHA，build.revision
+#      等於上面那一版，store 是 local，care receipt 金鑰已設定
+#   4. 這個 revision 自己的日誌裡有 [demo-seed:ok]，且沒有 refused／error
+# 第一版在第 3 項讀錯欄位（health.git_commit，實際在 build 底下），版本不符與
+# 找不到種子紀錄都只是一行黃字，最後照樣印「完成」。
 #
 # ## 金鑰：每一把都必須是示範服務自己的
 #
@@ -101,6 +126,80 @@ function Get-HttpResult([string]$Uri, [string]$Method = "GET", [int]$TimeoutSec 
         $status = 0
         if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
         return @{ Ok = $false; Status = $status; Body = [string]$_.Exception.Message }
+    }
+}
+
+function Invoke-GCloudCaptured {
+    # stdout 與 stderr 分開收：gcloud 會在 stderr 印「有新版可用」之類的警告，
+    # 混進去 JSON 就解析不了；而失敗原因只在 stderr。
+    $out = @(Invoke-GCloud @args 2>&1)
+    $exit = $LASTEXITCODE
+    $stdout = @($out | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } |
+                ForEach-Object { [string]$_ }) -join "`n"
+    $stderr = @($out | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } |
+                ForEach-Object { [string]$_ }) -join "`n"
+    return @{ Exit = $exit; Stdout = $stdout; Stderr = $stderr }
+}
+
+function ConvertFrom-GCloudJson([string]$What, $Result) {
+    # 讀不到、不是 JSON、是空的，一律停下來。三種情況都代表「不知道雲端現在
+    # 是什麼狀態」，而不知道的時候任何比對都不成立。
+    if ($Result.Exit -ne 0) {
+        throw "cannot read $What (gcloud exit $($Result.Exit)): $($Result.Stderr)"
+    }
+    try { $obj = $Result.Stdout | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw "$What did not come back as JSON: $($_.Exception.Message)" }
+    if ($null -eq $obj) { throw "$What came back empty" }
+    return $obj
+}
+
+function Get-EngineeringVendorFiles {
+    # 與 deploy_cloudrun.ps1 的 $needed 逐項相同，靜態測試會比對兩份清單。
+    # 每一項漏掉的後果都寫在正式腳本那一段；最危險的是 color_calib.py——
+    # 缺它 classify 不會壞，而是安靜退回 gray-world，紅色被壓到 ×0.78。
+    return @(
+        "phase2\wound_classifier.py",
+        "phase1\clinical_rules.py",
+        "phase2\aruco_calibrate.py",
+        "phase2\verify_area_sheet.py",
+        "phase2\color_calib.py",
+        "phase0\preprocessing.json"
+    )
+}
+
+function Copy-EngineeringVendor([string]$FlaskDir) {
+    # vendor/ 不進版控（.gitignore），所以複製不會弄髒工作樹、也不影響
+    # Get-DemoGitCommit 的乾淨檢查；它也不在 .gcloudignore 裡，所以會進建置上下文。
+    # 每次部署重建，來源永遠是 engineering/ 那一份。
+    $vendor = Join-Path $FlaskDir 'vendor'
+    $engRoot = Join-Path $FlaskDir (Join-Path '..' (Join-Path '..' 'engineering'))
+    $needed = @(Get-EngineeringVendorFiles)
+    # 先確認來源齊全再動 vendor/：缺檔時不該先把現有的 vendor/ 刪掉。
+    $missing = @($needed | Where-Object {
+        -not (Test-Path -LiteralPath (Join-Path $engRoot $_) -PathType Leaf) })
+    if ($missing.Count -gt 0) {
+        throw "engineering is missing modules the demo image needs; classify would answer 503: " +
+            ($missing -join ', ')
+    }
+    if (Test-Path -LiteralPath $vendor) {
+        Remove-Item -LiteralPath $vendor -Recurse -Force -ErrorAction Stop
+    }
+    New-Item -ItemType Directory -Path $vendor -ErrorAction Stop | Out-Null
+    foreach ($rel in $needed) {
+        $src = Join-Path $engRoot $rel
+        $dst = Join-Path $vendor (Split-Path $rel -Leaf)
+        Copy-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop
+        # 複製完再比一次內容。$ErrorActionPreference 是 Continue，
+        # 沒有這一步的話，一個半途失敗的複製只會留下一行紅字。
+        $a = (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash
+        $b = (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash
+        if ($a -cne $b) { throw "vendor copy of [$rel] does not match its engineering source" }
+        Ok (Split-Path $rel -Leaf)
+    }
+    $present = @(Get-ChildItem -LiteralPath $vendor -Force | ForEach-Object { $_.Name } | Sort-Object)
+    $expected = @($needed | ForEach-Object { Split-Path $_ -Leaf } | Sort-Object)
+    if (($present -join '|') -cne ($expected -join '|')) {
+        throw "vendor/ must hold exactly the reviewed engineering modules; found: " + ($present -join ', ')
     }
 }
 
@@ -184,18 +283,25 @@ function Assert-DemoInputs {
 function Assert-NotTheProductionIdentity {
     # 示範版跑 local store，程式碼根本不碰 GCS，所以這一條是縱深防禦：
     # 就算哪天有人把 WOUNDAI_STORE 改掉，這個身分也不該有正式桶的權限。
-    $prodSa = (Invoke-GCloud run services describe $ProductionService `
-        --project $ProjectId --region $Region `
-        --format "value(spec.template.spec.serviceAccountName)" 2>$null)
-    if ($LASTEXITCODE -ne 0) {
-        Warn "讀不到正式 service 的執行身分（可能尚未部署）；跳過比對"
-        return
+    #
+    # **讀不到就停。** 第一版讀失敗時印一行警告就跳過比對——權限不足、登入
+    # 過期、網路中斷、region 打錯，都會讓「沒有比對」跟「比對過、不同」
+    # 一樣走到下一步。正式 service 確實存在（它就是正在服務的那一個），
+    # 讀不到它只代表這台機器此刻看不清雲端，那正是不該部署的時候。
+    #
+    # 回傳正式身分：部署後回讀示範 revision 時要再比一次。
+    $r = Invoke-GCloudCaptured run services describe $ProductionService `
+        "--project=$ProjectId" "--region=$Region" '--format=json'
+    $svc = ConvertFrom-GCloudJson "production service [$ProductionService]" $r
+    $prodSa = ([string]$svc.spec.template.spec.serviceAccountName).Trim()
+    if ($prodSa -notmatch '^[^@\s]+@[^@\s]+$') {
+        throw "production service [$ProductionService] reports no runtime identity; refusing to compare against nothing"
     }
-    $prodSa = ([string]$prodSa).Trim()
-    if (-not [string]::IsNullOrWhiteSpace($prodSa) -and $prodSa -ceq $RuntimeServiceAccount) {
+    if ($prodSa -ieq $RuntimeServiceAccount) {
         throw "demo service must not run as the production runtime identity [$prodSa]"
     }
-    Ok "執行身分與正式服務不同"
+    Ok "執行身分與正式服務不同（正式：$prodSa）"
+    return $prodSa
 }
 
 function Assert-DemoSecretReady {
@@ -222,22 +328,16 @@ function Assert-DemoIdentityCannotReadProductionSecrets {
     # 那一層靠佈建步驟保證（docs/admin_operations.md §6：示範身分只授予四把示範密文）。
     $member = "serviceAccount:$RuntimeServiceAccount"
     foreach ($name in @(Get-ProductionSecretNames)) {
-        # stdout 與 stderr 必須分開：gcloud 會在 stderr 印「有新版可用」之類的警告，
-        # 混進去 JSON 就解析不了。JSON 只從 stdout 讀，NOT_FOUND 只從 stderr 判斷。
-        $out = @(Invoke-GCloud secrets get-iam-policy $name --project $ProjectId --format json 2>&1)
-        $exit = $LASTEXITCODE
-        $stdout = ($out | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } |
-                   ForEach-Object { [string]$_ }) -join "`n"
-        $stderr = ($out | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } |
-                   ForEach-Object { [string]$_ }) -join "`n"
-        if ($exit -ne 0) {
-            if ($stderr -match 'NOT_FOUND') {
+        # JSON 只從 stdout 讀，NOT_FOUND 只從 stderr 判斷（見 Invoke-GCloudCaptured）。
+        $r = Invoke-GCloudCaptured secrets get-iam-policy $name "--project=$ProjectId" '--format=json'
+        if ($r.Exit -ne 0) {
+            if ($r.Stderr -match 'NOT_FOUND') {
                 Ok "正式密文 [$name] 不存在，無人可讀"
                 continue
             }
             throw "cannot read the IAM policy of production secret [$name]; refusing to deploy without knowing who can read it"
         }
-        $policy = $stdout | ConvertFrom-Json
+        $policy = ConvertFrom-GCloudJson "IAM policy of production secret [$name]" $r
         foreach ($binding in @($policy.bindings)) {
             if ($null -ne $binding -and @($binding.members) -ccontains $member) {
                 throw "demo identity [$RuntimeServiceAccount] holds [$($binding.role)] on production secret [$name]"
@@ -278,14 +378,77 @@ function Get-DemoGitCommit {
     return $full
 }
 
-function Assert-DemoRevisionConfiguration([string]$Revision) {
-    $rev = Invoke-GCloud run revisions describe $Revision `
-        --project $ProjectId --region $Region --format json 2>$null | ConvertFrom-Json
-    if ($LASTEXITCODE -ne 0 -or $null -eq $rev) { throw "cannot read demo revision [$Revision]" }
+function Assert-DemoServiceState([string]$ExpectedRevision) {
+    # 部署後先確認「後面要驗的，就是這次建出來、而且正在服務的那一版」。
+    # 新 revision 起不來時 latestReadyRevisionName 仍指向上一版；沒有這一條，
+    # 後面每一項驗收都會對著舊版跑，然後通過。
+    $r = Invoke-GCloudCaptured run services describe $Service `
+        "--project=$ProjectId" "--region=$Region" '--format=json'
+    $svc = ConvertFrom-GCloudJson "demo service [$Service]" $r
+    $created = [string]$svc.status.latestCreatedRevisionName
+    $ready = [string]$svc.status.latestReadyRevisionName
+    if ([string]::IsNullOrWhiteSpace($ready) -or $created -cne $ready) {
+        throw "demo service's latest created revision [$created] is not its latest ready revision [$ready]"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedRevision) -and $ready -cne $ExpectedRevision) {
+        throw "demo service is serving [$ready], not the revision this run deployed [$ExpectedRevision]"
+    }
+    if ([string]$svc.spec.template.spec.serviceAccountName -cne $RuntimeServiceAccount) {
+        throw "demo service template does not run as [$RuntimeServiceAccount]"
+    }
+    $serving = @($svc.status.traffic | Where-Object {
+        $null -ne $_ -and $null -ne $_.percent -and [int]$_.percent -gt 0 })
+    if ($serving.Count -ne 1 -or [int]$serving[0].percent -ne 100 `
+            -or [string]$serving[0].revisionName -cne $ready) {
+        throw "demo traffic is not 100% on ready revision [$ready]"
+    }
+    $url = [string]$svc.status.url
+    if ($url -cnotmatch '^https://') { throw "demo service has no https URL [$url]" }
+    Ok "revision [$ready] 已就緒，承接 100% 流量"
+    return @{ Url = $url; Revision = $ready }
+}
+
+function Assert-DemoRevisionConfiguration([string]$Revision, [string]$ExpectedGitCommit,
+                                          [string]$ProductionIdentity) {
+    if ($ExpectedGitCommit -cnotmatch '^[0-9a-f]{40}$') {
+        throw "no full local commit to compare the demo revision against"
+    }
+    if ([string]::IsNullOrWhiteSpace($ProductionIdentity)) {
+        throw "production runtime identity is unknown; cannot confirm the demo revision is separate from it"
+    }
+    $r = Invoke-GCloudCaptured run revisions describe $Revision `
+        "--project=$ProjectId" "--region=$Region" '--format=json'
+    $rev = ConvertFrom-GCloudJson "demo revision [$Revision]" $r
+
+    # 身分：傳了 --service-account 不是證據，revision 實際跑的身分才是。
+    $runsAs = [string]$rev.spec.serviceAccountName
+    if ($runsAs -cne $RuntimeServiceAccount) {
+        throw "demo revision runs as [$runsAs], expected [$RuntimeServiceAccount]"
+    }
+    if ($runsAs -ieq $ProductionIdentity) {
+        throw "demo revision runs as the production runtime identity [$runsAs]"
+    }
+    $readyCondition = @($rev.status.conditions | Where-Object {
+        $null -ne $_ -and [string]$_.type -ceq 'Ready' -and [string]$_.status -ceq 'True' })
+    if ($readyCondition.Count -ne 1) { throw "demo revision [$Revision] is not Ready" }
+    if (@($rev.spec.containers).Count -ne 1) {
+        throw "demo revision must run exactly one container"
+    }
 
     $envs = @{}
+    $refs = @{}
     foreach ($e in @($rev.spec.containers[0].env)) {
-        if ($null -ne $e.name) { $envs[[string]$e.name] = [string]$e.value }
+        if ($null -eq $e -or $null -eq $e.name) { continue }
+        $name = [string]$e.name
+        if ($envs.ContainsKey($name) -or $refs.ContainsKey($name)) {
+            throw "demo revision has duplicate environment key [$name]"
+        }
+        # 回讀掛上的密文。傳了什麼旗標不是證據，revision 實際引用什麼才是。
+        if ($null -ne $e.valueFrom -and $null -ne $e.valueFrom.secretKeyRef) {
+            $refs[$name] = [string]$e.valueFrom.secretKeyRef.name
+        } else {
+            $envs[$name] = [string]$e.value
+        }
     }
     if ($envs['WOUNDAI_STORE'] -cne 'local') {
         throw "demo revision must run WOUNDAI_STORE=local, got [$($envs['WOUNDAI_STORE'])]"
@@ -295,12 +458,18 @@ function Assert-DemoRevisionConfiguration([string]$Revision) {
             throw "demo revision carries [$forbidden]; it must not be pointed at any bucket"
         }
     }
-    # 回讀掛上的密文。傳了什麼旗標不是證據，revision 實際引用什麼才是。
-    $refs = @{}
-    foreach ($e in @($rev.spec.containers[0].env)) {
-        $ref = $e.valueFrom.secretKeyRef
-        if ($null -ne $ref) { $refs[[string]$e.name] = [string]$ref.name }
+    $plain = [ordered]@{
+        'WOUNDAI_ENABLE_LITE_API' = '0'
+        'WOUNDAI_DEMO_SEED_USER'  = $DemoSeedUser
+        'WOUNDAI_DEMO_SEED_ROLE'  = $DemoSeedRole
+        'GIT_COMMIT'              = $ExpectedGitCommit
     }
+    foreach ($k in $plain.Keys) {
+        if ($envs[$k] -cne $plain[$k]) {
+            throw "demo revision has [$k]=[$($envs[$k])], expected [$($plain[$k])]"
+        }
+    }
+
     $production = @(Get-ProductionSecretNames)
     foreach ($envName in $refs.Keys) {
         if ($production -ccontains $refs[$envName]) {
@@ -316,12 +485,105 @@ function Assert-DemoRevisionConfiguration([string]$Revision) {
             throw "demo revision maps [$envName] to [$($refs[$envName])], expected [$($map[$envName])]"
         }
     }
+    foreach ($envName in $refs.Keys) {
+        if (-not $map.Contains($envName)) {
+            throw "demo revision mounts an unexpected secret [$($refs[$envName])] as [$envName]"
+        }
+    }
 
     $limit = [string]$rev.metadata.annotations.'autoscaling.knative.dev/maxScale'
     if ($limit -cne '1') {
         throw "demo revision must be pinned to a single instance (maxScale=1), got [$limit]"
     }
-    Ok "revision 設定正確：local store、無桶、單實例、只掛示範密文"
+    Ok "revision 設定正確：示範身分、local store、無桶、單實例、只掛四把示範密文、commit 相符"
+}
+
+function Assert-DemoHealth($Health, [string]$ExpectedGitCommit, [string]$ExpectedRevision) {
+    # 降級模式是「會回答的錯誤」：登入 200、stats 200，只有量測 503 或退回
+    # HSV／gray-world。示範服務存在的目的就是讓審查員量測，這種狀態下印
+    # 「完成」比部署失敗更糟。所以每一項都收進失敗清單，最後一次 throw。
+    if ($null -eq $Health) { throw "demo /api/health returned no JSON" }
+    if ($ExpectedGitCommit -cnotmatch '^[0-9a-f]{40}$') {
+        throw "no full local commit to compare the demo health against"
+    }
+    $failures = @()
+    if ([string]$Health.status -cne 'healthy') {
+        $failures += "status=[$($Health.status)] $($Health.degraded_reason)"
+    }
+    foreach ($name in @('segmentation_model', 'classify_modules', 'color_calibration',
+                        'endpoints_registered', 'canonicalization_golden')) {
+        $v = $Health.services.$name
+        if (-not ($v -is [bool] -and $v)) { $failures += "services.$name is not true" }
+    }
+    $lite = $Health.services.lite_public_api_enabled
+    if (-not ($lite -is [bool] -and -not $lite)) {
+        $failures += "the public lite API must be off on the demo service"
+    }
+    if ([string]$Health.store -cnotmatch '^local:') {
+        $failures += "store is [$($Health.store)], not local storage"
+    }
+    $care = $Health.care_receipt.configured
+    if (-not ($care -is [bool] -and $care)) {
+        $failures += "care receipt keyring is not configured; the consent flow would answer 503"
+    }
+    # 欄位在 build 底下。第一版讀的是 health.git_commit——一個不存在的欄位，
+    # 所以「版本不符」永遠成立，而它只印黃字，於是從來沒有人看它。
+    if ([string]$Health.build.git_commit -cne $ExpectedGitCommit) {
+        $failures += "health build.git_commit [$($Health.build.git_commit)] is not the local commit [$ExpectedGitCommit]"
+    }
+    if ([string]$Health.build.revision -cne $ExpectedRevision) {
+        $failures += "health build.revision [$($Health.build.revision)] is not the verified revision [$ExpectedRevision]"
+    }
+    if ([string]$Health.build.service -cne $Service) {
+        $failures += "health build.service [$($Health.build.service)] is not [$Service]"
+    }
+    if ($failures.Count -gt 0) {
+        throw "demo health gate failed: " + ($failures -join '; ')
+    }
+    Ok "healthy：分割、classify、色準、端點、canonical golden 全部就位"
+    Ok "build：$($Health.build.revision) @ $($Health.build.git_commit)"
+    Ok "store：$($Health.store)；care receipt 金鑰：$($Health.care_receipt.signing_kid)"
+}
+
+function Assert-DemoSeedLogged([string]$Revision, [int]$Attempts = 12, [int]$IntervalSec = 10) {
+    # 不用登入來驗證——那需要密碼，而密碼不該經過這支腳本。改讀**這個 revision**
+    # 自己的日誌。第一版讀整個 service 最近 200 行、比對中文訊息、找不到只警告：
+    # 舊 revision 的成功紀錄可以冒充新版的，Windows 主控台字碼頁可以把中文
+    # 變成亂碼讓比對落空，而落空之後照樣印「完成」。
+    #
+    # 標記由 app.py 以 ASCII、flush=True 印出（見那裡的註解）：
+    #   [demo-seed:ok]       已建立            ← 至少要有一行
+    #   [demo-seed:exists]   已存在、不覆蓋     ← 同容器 worker 重啟，正常
+    #   [demo-seed:refused]  設定被拒絕         ← 任何一行都中止
+    #   [demo-seed:error]    例外              ← 任何一行都中止
+    # 日誌寫入有延遲，所以有限次重讀；讀取本身失敗則立刻停。
+    #
+    # 由舊到新讀（--order=asc）：種子在開機時印，是這個 revision 最早的幾行之一；
+    # 由新到舊讀的話，請求日誌一多就會把它擠出 --limit。gcloud 的 --freshness
+    # 只在由新到舊時生效，所以不加；revision 名稱含 commit 與部署時間，本身就
+    # 只屬於這一次部署，不需要時間窗。篩選值刻意不加引號：Windows PowerShell 5.1
+    # 傳給原生程式時會吃掉內嵌的雙引號。
+    $filter = "resource.type=cloud_run_revision AND resource.labels.service_name=$Service " +
+              "AND resource.labels.revision_name=$Revision"
+    for ($i = 1; $i -le $Attempts; $i++) {
+        $r = Invoke-GCloudCaptured logging read $filter "--project=$ProjectId" `
+            '--order=asc' '--limit=1000' '--format=value(textPayload)'
+        if ($r.Exit -ne 0) {
+            throw "cannot read the logs of demo revision [$Revision] (gcloud exit $($r.Exit)); the review account cannot be confirmed: $($r.Stderr)"
+        }
+        $lines = @($r.Stdout -split "`r?`n")
+        $bad = @($lines | Where-Object { $_ -cmatch '\[demo-seed:(refused|error)\]' })
+        if ($bad.Count -gt 0) {
+            foreach ($line in $bad) { Warn $line }
+            throw "demo seed was refused or failed on revision [$Revision]; see the lines above"
+        }
+        if (@($lines | Where-Object { $_ -cmatch '\[demo-seed:ok\]' }).Count -gt 0) {
+            Ok "送審帳號已由 revision [$Revision] 開機時建立"
+            return
+        }
+        if ($i -lt $Attempts) { Start-Sleep -Seconds $IntervalSec }
+    }
+    throw "no [demo-seed:ok] line from revision [$Revision] after $Attempts reads; the review account may not exist"
 }
 
 # ══════════════════════════════════════════════════════════════════
@@ -332,7 +594,7 @@ Ok "輸入通過：service [$Service] 不是正式 service [$ProductionService]"
 Invoke-GCloud config set project $ProjectId | Out-Null
 Assert-GCloudOk "設定 gcloud project"
 
-Assert-NotTheProductionIdentity
+$ProductionRuntimeIdentity = Assert-NotTheProductionIdentity
 Assert-DemoIdentityCannotReadProductionSecrets
 Assert-DemoSecretReady
 
@@ -343,6 +605,9 @@ $RevisionSuffix = 'demo-' + $GitCommit.Substring(0, 8) + '-' + `
 Ok "部署來源 commit：$GitCommit"
 
 if (-not $VerifyOnly) {
+    Say "複製 engineering 模組到 vendor/（與正式部署同一份清單）"
+    Copy-EngineeringVendor -FlaskDir $PSScriptRoot
+
     Say "建置並部署到示範 service（單實例、local store）"
     # --source 用腳本所在目錄，不用 `.`。從 repo 根目錄執行
     # `.\Backend\Flask\deploy_demo_candidate.ps1` 時，`.` 會是 repo 根目錄，
@@ -363,58 +628,35 @@ if (-not $VerifyOnly) {
         --set-env-vars "WOUNDAI_STORE=local,WOUNDAI_ENABLE_LITE_API=0,WOUNDAI_DEMO_SEED_USER=$DemoSeedUser,WOUNDAI_DEMO_SEED_ROLE=$DemoSeedRole,GIT_COMMIT=$GitCommit,DEPLOYED_AT=$DeployedAt" `
         --set-secrets (@((Get-DemoSecretMap).GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value):latest" }) -join ',')
     Assert-GCloudOk "示範服務部署"
+    # 這次部署建出來的 revision 名稱是確定的；後面每一項驗收都綁在它身上。
+    $ExpectedRevision = "$Service-$RevisionSuffix"
 } else {
     Say "只跑驗證（-VerifyOnly）"
+    $ExpectedRevision = ''
 }
 
-$svc = Invoke-GCloud run services describe $Service --project $ProjectId `
-    --region $Region --format json | ConvertFrom-Json
-Assert-GCloudOk "讀取示範 service"
-$url = [string]$svc.status.url
-$liveRevision = [string]$svc.status.latestReadyRevisionName
-if ([string]::IsNullOrWhiteSpace($url)) { throw "demo service has no URL" }
+# ── 驗收。以下每一項失敗都 throw；「完成」只在全部通過後才印 ──
+Say "回讀示範 service 與 revision"
+$state = Assert-DemoServiceState -ExpectedRevision $ExpectedRevision
+$url = [string]$state.Url
+$liveRevision = [string]$state.Revision
 Ok "示範服務 URL：$url"
-Ok "目前 revision：$liveRevision"
-
-Assert-DemoRevisionConfiguration -Revision $liveRevision
+Assert-DemoRevisionConfiguration -Revision $liveRevision -ExpectedGitCommit $GitCommit `
+    -ProductionIdentity $ProductionRuntimeIdentity
 
 Say "驗證 /api/health"
-$h = Get-HttpResult -Uri "$url/api/health"
+$h = Get-HttpResult -Uri "$url/api/health" -TimeoutSec 90
 if (-not $h.Ok) { throw "health 探針失敗（HTTP $($h.Status)）：$($h.Body)" }
-$health = $h.Body | ConvertFrom-Json
-$store = [string]$health.store
-if ($store -cnotmatch '^local:') {
-    throw "demo service is not on local storage; health says [$store]"
-}
-Ok "store：$store"
-if (-not $health.care_receipt.configured) {
-    throw "care receipt keyring is not configured on the demo service; the consent flow would answer 503"
-}
-Ok "care receipt 金鑰：$($health.care_receipt.signing_kid)"
-Ok "A∪U 模型檔存在：$($health.services.au_ensemble_files_present)"
-if (-not $health.services.au_ensemble_files_present) {
+try { $health = $h.Body | ConvertFrom-Json -ErrorAction Stop }
+catch { throw "demo /api/health did not return JSON: $($_.Exception.Message)" }
+Assert-DemoHealth -Health $health -ExpectedGitCommit $GitCommit -ExpectedRevision $liveRevision
+# A∪U 是升級路由，不進 degraded（產品決策，見 app.py），所以這裡維持提醒而不是中止。
+if ($health.services.au_ensemble_files_present -ne $true) {
     Warn "映像裡沒有 A∪U 模型檔——難例升級路由不會啟用。建置機器的 models/ 目錄可能是空的。"
-}
-if ([string]$health.git_commit -cne $GitCommit.Substring(0, 7) `
-        -and [string]$health.git_commit -cne $GitCommit) {
-    Warn "health 回報的 commit [$($health.git_commit)] 與本機 [$GitCommit] 不一致"
 }
 
 Say "確認送審帳號的開機種子有跑"
-# 不用登入來驗證——那需要密碼，而密碼不該經過這支腳本。改讀啟動日誌。
-$logs = Invoke-GCloud run services logs read $Service --project $ProjectId `
-    --region $Region --limit 200 2>$null
-$seedOk = @($logs | Select-String -Pattern '已重建送審測試帳號').Count -gt 0
-$seedRefused = @($logs | Select-String -Pattern 'demo 種子未執行|demo 種子失敗')
-if ($seedRefused.Count -gt 0) {
-    foreach ($line in $seedRefused) { Warn ([string]$line) }
-    throw "demo seed refused to run; see the reasons above"
-}
-if (-not $seedOk) {
-    Warn "日誌裡沒看到種子訊息（可能已被輪替掉）。若審查員登不進去，先查這裡。"
-} else {
-    Ok "送審帳號已於開機時重建"
-}
+Assert-DemoSeedLogged -Revision $liveRevision
 
 Say "完成"
 Write-Host ""
@@ -422,6 +664,7 @@ Write-Host "  示範服務   : $Service" -ForegroundColor Green
 Write-Host "  URL        : $url" -ForegroundColor Green
 Write-Host "  revision   : $liveRevision" -ForegroundColor Green
 Write-Host "  commit     : $GitCommit" -ForegroundColor Green
+Write-Host "  執行身分    : $RuntimeServiceAccount（正式：$ProductionRuntimeIdentity）" -ForegroundColor Green
 Write-Host "  授權        : $DemoAuthorisationRef" -ForegroundColor Green
 Write-Host ""
 Write-Host "  下一步：把這個 URL 填進 App 設定頁與 App Store Connect。" -ForegroundColor Yellow

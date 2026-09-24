@@ -23,6 +23,8 @@ stayed green. That is exactly the failure auth_users' own `lite` role comment
 records having already happened once.
 """
 import ast
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -258,6 +260,22 @@ class TestSeedRefusals(SeedBase):
         self.assertFalse(out.get("seeded"), "a 12-character password was seeded")
         self.assertEqual(auth_users.list_users(), [])
 
+    def test_a_refusal_is_never_reported_as_an_existing_account(self):
+        # The deploy gate lets [demo-seed:exists] through and stops on
+        # [demo-seed:refused]. A refusal flagged `exists` would be waved on.
+        for user, role, pw in (("demo1", "nurse", GOOD_PW),
+                               ("demo01", "doctor", GOOD_PW),
+                               ("demo01", "nurse", None),
+                               ("demo01", "nurse", "x" * 13)):
+            with self.subTest(user=user, role=role, pw=pw and len(pw)):
+                self.set_env(user=user, role=role, pw=pw)
+                out = auth_users.seed_demo_from_env()
+                self.assertFalse(out.get("seeded"))
+                self.assertNotIn("exists", out)
+        store_mod.reset_store(NotALocalStore())
+        self.set_env()
+        self.assertNotIn("exists", auth_users.seed_demo_from_env())
+
     def test_never_creates_an_admin_whatever_the_variables_say(self):
         for user, role in (("demo01", "admin"), ("admin", "admin"),
                            ("demo99", "engineer")):
@@ -277,6 +295,11 @@ class TestSeedDoesNotDisturbExistingAccounts(SeedBase):
         out = auth_users.seed_demo_from_env()
         self.assertFalse(out.get("seeded"))
         self.assertIn("已存在", out["reason"])
+        # Marked as an expected skip, not a refusal: a gunicorn worker restart
+        # inside the same container runs the seed again and lands here. The
+        # deploy gate treats [demo-seed:refused] as fatal, so this case must
+        # never be reported that way.
+        self.assertIs(out.get("exists"), True)
         # The old password still works and the new one never took effect.
         self.assertEqual(auth_users.authenticate("default", "demo01",
                                                  PRIOR_PW)[1], "ok")
@@ -399,6 +422,72 @@ class TestSeedShape(unittest.TestCase):
                 _disables_auth(handler.body),
                 "the seed's own except handler sets auth_users = None, which "
                 "turns a submission convenience into a full outage")
+
+    def _boot_block(self):
+        """The module-level `if auth_users is not None:` block that runs the seed."""
+        tree = ast.parse(text(APP))
+        blocks = [n for n in tree.body
+                  if isinstance(n, ast.If) and _calls(n.body, "seed_demo_from_env")]
+        self.assertEqual(len(blocks), 1, "expected one module-level seed block in app.py")
+        return blocks[0]
+
+    def test_every_seed_outcome_prints_an_ascii_marker_and_flushes(self):
+        # deploy_demo_candidate.ps1 reads these lines back from Cloud Logging.
+        # ASCII, because Windows PowerShell 5.1 decodes native output with the
+        # console code page and Chinese can arrive as mojibake. flush=True,
+        # because Cloud Run's stdout is a pipe and Python block-buffers pipes:
+        # without it the line can sit in the buffer and the gate reports that
+        # the seed never ran.
+        prints = [n for n in ast.walk(self._boot_block())
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                  and n.func.id == "print"]
+        markers = []
+        for call in prints:
+            flush = [k for k in call.keywords if k.arg == "flush"]
+            self.assertTrue(flush and isinstance(flush[0].value, ast.Constant)
+                            and flush[0].value.value is True,
+                            "a seed print at line %d does not flush" % call.lineno)
+            first = call.args[0]
+            while isinstance(first, ast.BinOp):
+                first = first.left
+            self.assertIsInstance(first, ast.Constant)
+            markers.append(first.value.split(" ", 1)[0])
+        self.assertEqual(sorted(markers), sorted([
+            "[demo-seed:ok]", "[demo-seed:exists]", "[demo-seed:refused]", "[demo-seed:error]"]))
+
+    def test_the_boot_block_marks_each_outcome(self):
+        # Run the real block from app.py against a stand-in auth_users so each
+        # branch is exercised, not just present.
+        code = compile(ast.Module(body=[self._boot_block()], type_ignores=[]),
+                       str(APP), "exec")
+
+        class FakeAuth(object):
+            def __init__(self, outcome):
+                self.outcome = outcome
+
+            def seed_demo_from_env(self):
+                if isinstance(self.outcome, Exception):
+                    raise self.outcome
+                return self.outcome
+
+        cases = (
+            ({"seeded": True, "identity": "default/demo01", "role": "nurse"}, "[demo-seed:ok]"),
+            ({"seeded": False, "exists": True, "reason": "already there"}, "[demo-seed:exists]"),
+            ({"seeded": False, "reason": "bad role"}, "[demo-seed:refused]"),
+            (RuntimeError("boom"), "[demo-seed:error]"),
+        )
+        for outcome, marker in cases:
+            with self.subTest(marker=marker):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    exec(code, {"auth_users": FakeAuth(outcome)})
+                lines = out.getvalue().splitlines()
+                self.assertEqual(len(lines), 1, lines)
+                self.assertTrue(lines[0].startswith(marker + " "), lines[0])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            exec(code, {"auth_users": FakeAuth(None)})
+        self.assertEqual(out.getvalue(), "", "a disabled seed must print nothing")
 
     def test_the_windows_runner_strips_the_seed_variables(self):
         # An operator who just pulled the demo password out of Secret Manager to
