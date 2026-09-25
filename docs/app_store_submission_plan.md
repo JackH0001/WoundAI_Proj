@@ -11,6 +11,32 @@
 
 ---
 
+## A0. 進度（2026-08-21 更新）
+
+| 項目 | 狀態 |
+|---|---|
+| App Icon ×2 | ✅ `tools/make_app_icons.py`（SSOT，可重生） |
+| `PrivacyInfo.xcprivacy` ×2 | ✅ 已進兩個 target 的 Resources |
+| 隱私權政策 URL | ✅ 已上線並驗證可公開存取 |
+| TestFlight demo 帳號 | ✅ `demo01`（密碼由 Jack 保管，Claude 不經手） |
+| Release 設定體檢 | ✅ 後端網址正確、DEBUG 診斷不外洩 |
+| jetsam 記憶體修正 | ✅ 待實機回歸 |
+| App Attest（僅民眾版） | ⬜ 未開始——**民眾版上架的硬阻擋** |
+| 醫材法規分類諮詢 | ⬜ 未開始——**最大變數** |
+
+**隱私權政策網址**（填進 App Store Connect）：
+
+- 民眾版 WoundLite：`https://jackh0001.github.io/WoundAI_Proj/woundlite.html`
+- 醫療版 WoundAI：`https://jackh0001.github.io/WoundAI_Proj/woundai.html`
+
+站台原始碼在 `site/privacy/`（main 分支），發佈於 `gh-pages` 分支。
+**改政策時改 `site/privacy/` 再重推 gh-pages**，不要直接編 gh-pages
+——那會讓兩邊分岔，而 main 上的版本才是有版本控管的那份。
+
+⚠ 政策內容已逐條對照實作核對（EXIF 剝除、AES-256-GCM、ThisDeviceOnly、
+結案後 90 天清除、IP 加鹽雜湊），未寫程式做不到的事。
+**但這是準確的技術描述，不是法律意見**——正式送審前請法務或熟悉個資法者過目。
+
 ## A. 硬阻擋（沒有這些連上傳都不行）
 
 ### A1. App Icon 完全沒有圖 🔴 兩版都擋

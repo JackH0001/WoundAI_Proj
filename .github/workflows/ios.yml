@@ -1,15 +1,15 @@
 # .github/workflows/ios.yml
 #
-# Builds and tests the WoundMeasurementApp iOS project on every push / PR
+# Builds both iOS apps and tests the WoundMeasurementApp project on every push / PR
 # that touches the iOS directory.
 #
-# Runner: macos-14 (Apple Silicon, Xcode 15+)
+# Runner: macos-15 (Apple Silicon, newest installed Xcode)
 # Scheme: WoundMeasurementApp
 # Targets: build (Release) + XCTest unit tests (iPhone simulator)
 #
 # Code signing
 # ------------
-# CI uses xcodebuild CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO
+# CI uses xcodebuild CODE_SIGNING_ALLOWED=NO
 # to skip signing during unit-test builds. Distribution signing (for
 # TestFlight / App Store) requires separate secrets and a provisioning
 # profile — see the commented-out "archive" step at the bottom.
@@ -36,6 +36,7 @@ jobs:
     defaults:
       run:
         working-directory: iOS
+        shell: bash
 
     steps:
       - uses: actions/checkout@v4
@@ -71,55 +72,79 @@ jobs:
           xcodebuild -resolvePackageDependencies \
               -project WoundMeasurementApp.xcodeproj \
               -scheme WoundMeasurementApp \
-              CODE_SIGN_IDENTITY="" \
-              CODE_SIGNING_REQUIRED=NO
+              CODE_SIGNING_ALLOWED=NO
 
-      - name: Build (Release, no signing)
+      - name: Build both apps (Release, no signing)
         run: |
-          xcodebuild build \
+          set -euo pipefail
+          for SCHEME in WoundMeasurementApp WoundLite; do
+            xcodebuild build \
               -project WoundMeasurementApp.xcodeproj \
-              -scheme WoundMeasurementApp \
+              -scheme "$SCHEME" \
               -configuration Release \
-              -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
-              CODE_SIGN_IDENTITY="" \
-              CODE_SIGNING_REQUIRED=NO \
+              -destination 'generic/platform=iOS Simulator' \
+              CODE_SIGNING_ALLOWED=NO \
               ONLY_ACTIVE_ARCH=NO \
-              | xcpretty --color || xcodebuild build \
-                  -project WoundMeasurementApp.xcodeproj \
-                  -scheme WoundMeasurementApp \
-                  -configuration Release \
-                  -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
-                  CODE_SIGN_IDENTITY="" \
-                  CODE_SIGNING_REQUIRED=NO \
-                  ONLY_ACTIVE_ARCH=NO
+              2>&1 | tee "build-${SCHEME}.log"
+          done
+
+      - name: Select an installed iPhone simulator
+        id: simulator
+        run: |
+          xcrun simctl list devices available --json > /tmp/woundai-simulators.json
+          python3 - <<'PY'
+          import json, os, re
+          with open('/tmp/woundai-simulators.json') as source:
+              devices = json.load(source)['devices']
+          candidates = [
+              (tuple(map(int, re.findall(r'\d+', runtime))), device['udid'])
+              for runtime, rows in devices.items() if '.iOS-' in runtime
+              for device in rows if device['name'].startswith('iPhone')
+          ]
+          if not candidates:
+              raise SystemExit('No available iPhone simulator is installed')
+          selected = max(candidates)[1]
+          print('Selected iPhone simulator: ' + selected)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('udid=' + selected + '\n')
+          PY
 
       - name: Run XCTest unit tests
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
         run: |
+          set -euo pipefail
           xcodebuild test \
               -project WoundMeasurementApp.xcodeproj \
               -scheme WoundMeasurementApp \
-              -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
-              CODE_SIGN_IDENTITY="" \
-              CODE_SIGNING_REQUIRED=NO \
+              -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+              CODE_SIGNING_ALLOWED=NO \
               -resultBundlePath TestResults.xcresult \
-              | xcpretty --color --report junit \
-                  --output test-results.xml \
-              || xcodebuild test \
-                  -project WoundMeasurementApp.xcodeproj \
-                  -scheme WoundMeasurementApp \
-                  -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
-                  CODE_SIGN_IDENTITY="" \
-                  CODE_SIGNING_REQUIRED=NO \
-                  -resultBundlePath TestResults.xcresult
+              2>&1 | tee test-results.log
+
+      - name: Verify tests actually ran
+        run: |
+          xcrun xcresulttool get test-results summary \
+            --path TestResults.xcresult > test-summary.json
+          python3 - <<'PYTEST'
+          import json
+          with open('test-summary.json') as source:
+              summary = json.load(source)
+          print(json.dumps(summary, indent=2))
+          if summary.get('passedTests', 0) <= 0 or summary.get('failedTests', -1) != 0:
+              raise SystemExit('Expected at least one passing test and zero failures')
+          PYTEST
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ios-test-results-xcode${{ matrix.xcode }}
+          name: ios-test-results
           path: |
             iOS/TestResults.xcresult
-            iOS/test-results.xml
+            iOS/test-results.log
+            iOS/test-summary.json
+            iOS/build-*.log
           if-no-files-found: warn
 
       # ── Distribution build (uncomment when code signing is configured) ──

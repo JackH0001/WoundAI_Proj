@@ -32,7 +32,7 @@
 name: WoundMeasurementApp
 
 options:
-  bundleIdPrefix: com.woundmeasurement
+  bundleIdPrefix: com.woundai
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
@@ -76,7 +76,7 @@ targets:
         buildPhase: none
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.woundmeasurement.app
+        PRODUCT_BUNDLE_IDENTIFIER: com.woundai.app
         INFOPLIST_FILE: WoundMeasurementApp/Info.plist
         # ⚠ 不可同時開 GENERATE_INFOPLIST_FILE 與 INFOPLIST_FILE：舊專案兩者都設，
         #   而 build setting 裡的 NSCameraUsageDescription 與 Info.plist 裡的字串不一致，
@@ -137,7 +137,7 @@ targets:
         buildPhase: none
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.woundmeasurement.lite
+        PRODUCT_BUNDLE_IDENTIFIER: com.woundai.lite
         INFOPLIST_FILE: WoundLite/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WOUND_LITE"
@@ -163,7 +163,7 @@ targets:
         # 測試 bundle 沒有自己的 Info.plist，讓 Xcode 產生一份。上面 App target 關掉
         # GENERATE_INFOPLIST_FILE 是因為它有實體檔；這裡沒有，關掉會直接 build 失敗。
         GENERATE_INFOPLIST_FILE: YES
-        PRODUCT_BUNDLE_IDENTIFIER: com.woundmeasurement.app.tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.woundai.app.tests
 
 ## `xcodebuild -scheme WoundMeasurementApp` 需要 scheme 存在。XcodeGen 預設**不會**
 ## 自動產生 scheme（除非在 target 下寫 `scheme:`），少了這一段，BUILD_RELEASE.md 的

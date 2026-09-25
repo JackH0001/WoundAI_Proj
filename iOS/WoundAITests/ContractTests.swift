@@ -24,6 +24,7 @@ final class ClassifyContractTests: XCTestCase {
     private let fullResponse = """
     {
       "image_id": "aaaabbbbccccdddd",
+      "persisted": true,
       "image_w": 2048,
       "image_h": 1536,
       "image_reused": false,
@@ -78,6 +79,7 @@ final class ClassifyContractTests: XCTestCase {
         let r = parse(fullResponse)
 
         // 飛輪資料鏈——缺任何一項都會產生後端無法訓練的孤兒 GT
+        XCTAssertTrue(r.persisted)
         XCTAssertEqual(r.imageId, "aaaabbbbccccdddd")
         XCTAssertEqual(r.imageW, 2048)
         XCTAssertEqual(r.imageH, 1536)
@@ -123,6 +125,18 @@ final class ClassifyContractTests: XCTestCase {
     func testNullImageIdBlocksSubmission() {
         let s = fullResponse.replacingOccurrences(
             of: "\"image_id\": \"aaaabbbbccccdddd\"", with: "\"image_id\": null")
+        XCTAssertNil(parse(s).imageId)
+    }
+
+    /// A staging identifier is not proof that the image is eligible for annotation.
+    func testUnpersistedImageIdBlocksSubmission() {
+        let s = fullResponse.replacingOccurrences(
+            of: "\"persisted\": true", with: "\"persisted\": false")
+        XCTAssertNil(parse(s).imageId)
+    }
+
+    func testMissingPersistenceFlagBlocksSubmission() {
+        let s = fullResponse.replacingOccurrences(of: "\"persisted\": true,", with: "")
         XCTAssertNil(parse(s).imageId)
     }
 
