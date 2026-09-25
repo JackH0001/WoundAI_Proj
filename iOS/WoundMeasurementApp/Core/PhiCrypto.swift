@@ -80,12 +80,22 @@ enum PhiCrypto {
         cachedKey = nil; cachedMac = nil
     }
 
-    // ⚠ kSecAttrService 刻意維持 "com.woundmeasurement.app.phi"，即使 2026-09-20
-    // Bundle ID 已改為 com.woundai.app。Keychain 的 service 字串與 Bundle ID 無關，
-    // 它只是這些金鑰的查找鍵：改掉它，既有裝置上用舊字串存的 PHI 金鑰就找不到，
-    // 已加密的個案資料會全部解不開——而且是靜默的，SecItemCopyMatching 只回
-    // errSecItemNotFound，看起來像「還沒有金鑰」而不是「金鑰在另一個名字底下」。
-    // 要改必須先寫遷移（舊字串讀出 → 新字串寫入 → 驗證 → 才刪舊的）。
+    // kSecAttrService 維持 "com.woundmeasurement.app.phi" 不動。但要講清楚它「不」保證什麼：
+    //
+    // 這串字只是 item 的查找鍵之一。iOS 另外用 keychain access group 圈住 item，預設值由
+    // application identifier 推導（<TeamID>.<BundleID>）。本專案沒有 keychain-access-groups
+    // entitlement，查詢也沒帶 kSecAttrAccessGroup——所以 2026-09-20 Bundle ID 改成
+    // com.woundai.app 之後，預設群組已一併改變，舊 Bundle ID 存的金鑰新 App 查不到，
+    // SecItemCopyMatching 只回 errSecItemNotFound（靜默，看起來像「還沒建金鑰」）。
+    //
+    // 更根本：改 Bundle ID 等於換 App 身分，iOS 視為全新安裝，舊 App 的容器與 Keychain
+    // 都留在舊 App。跨 Bundle ID 的資料延續需要明確設計（共享 access group entitlement
+    // ＋遷移程序），光靠 service 字串做不到。本專案的決定是：不做跨 bundle 延續——
+    // 舊 iOS bundle ID 未曾發布（ASC 6814448065 的首個上傳是 build 22，已是 com.woundai.app）。
+    //
+    // 這串字與 Android 套件名 com.woundmeasurement.app 相同是歷史巧合，兩者無技術關聯。
+    //
+    // 在同一個 Bundle ID 內要改這串字，仍須先寫遷移：舊字串讀出 → 新字串寫入 → 驗證 → 才刪舊的。
     private static func loadOrCreateKey(tag: String) throws -> SymmetricKey {
         let query: [String: Any] = [
             kSecClass as String:       kSecClassGenericPassword,
