@@ -219,6 +219,38 @@ except Exception as _ae:
     auth_users = None
     print(f"⚠ 帳號模組載入失敗，所有登入都會失敗: {_ae}")
 
+# demo 送審帳號的開機種子（條件見 `auth_users.seed_demo_from_env`）。
+# **刻意用自己的 try/except，且在上面那塊之外**：種子失敗絕不能
+# 連帶把 auth_users 設成 None——那會讓**所有人**都登不進來，
+# 把一個送審便利措施變成全面停機。
+#
+# 每一行都以 ASCII 標記開頭，而且 flush=True。這兩點是給
+# deploy_demo_candidate.ps1 的部署後閘門用的，不是裝飾：
+#   * 閘門用 `gcloud logging read` 讀**這個 revision** 的日誌找標記。
+#     Windows PowerShell 5.1 會用主控台字碼頁解讀原生程式輸出，中文可能
+#     變成亂碼；比對 ASCII 標記不受影響。
+#   * Cloud Run 的 stdout 是管線，Python 對管線是區塊緩衝。不 flush 的話，
+#     這一行可能一直躺在緩衝區裡，閘門就會判定「種子沒跑」。
+#   * `exists` 與 `refused` 分開：同一個容器裡 worker 重啟時會再跑一次種子，
+#     那時帳號已存在是正常的；把它當成拒絕會讓閘門誤判。
+if auth_users is not None:
+    try:
+        _seed = auth_users.seed_demo_from_env()
+        if _seed is None:
+            pass                                   # 功能未啟用，正常情況
+        elif _seed.get("seeded"):
+            print("[demo-seed:ok] 已重建送審測試帳號 %s（角色 %s）"
+                  % (_seed.get("identity"), _seed.get("role")), flush=True)
+        elif _seed.get("exists"):
+            print("[demo-seed:exists] %s" % _seed.get("reason"), flush=True)
+        else:
+            # 拒絕要看得見。安靜地什麼都不做，會變成審查員回報
+            # 登不進去的那一天才發現。
+            print("[demo-seed:refused] ⚠ demo 種子未執行：%s" % _seed.get("reason"),
+                  flush=True)
+    except Exception as _se:
+        print("[demo-seed:error] ⚠ demo 種子失敗（不影響既有帳號）: %s" % _se, flush=True)
+
 # 創建必要目錄
 for folder in [app.config['UPLOAD_FOLDER'], app.config['PROCESSED_FOLDER'],
                _runtime_path('logs')]:
@@ -596,6 +628,15 @@ def health_check():
     except Exception as _e:
         canonicalization_golden_error = type(_e).__name__
 
+    # A∪U 是升級路由，不是主路徑，所以**刻意不進 degraded**：缺它服務仍能量測，
+    # 只是難例不再被集成救回。是否要讓它擋部署是產品決策（宣稱裡有沒有它），
+    # 先讓它看得見。
+    try:
+        _au = _resolve_au_paths()
+        au_ensemble_files_present = bool(ONNX_AVAILABLE and _au.get("a") and _au.get("u"))
+    except Exception:
+        au_ensemble_files_present = False
+
     degraded = ((not model_ready) or (not classify_ready)
                 or (not colorcal_ready) or (not bp_ok)
                 or (not canonicalization_golden_ok))
@@ -611,6 +652,16 @@ def health_check():
             'color_calibration': colorcal_ready,
             'endpoints_registered': bp_ok,
             'canonicalization_golden': canonicalization_golden_ok,
+            # 難例升級路由的 A∪U 集成。_load_cloud_au() 找不到模型時回 (None, None)
+            # 並讓請求靜默走回 student——服務照常回 200，主控台的「集成救回」
+            # 永遠是 0，而 0 也可以解釋成「沒有難例」。映像裡有沒有這兩個檔，
+            # 取決於**建置那台機器**的 Backend/Flask/models/：.onnx 被 .gitignore
+            # 忽略，但沒有被 .dockerignore 排除，所以 git 看不出兩次建置的差別。
+            # 這個欄位讓那個差別看得見。檔案檢查是本機 os.path.isfile，不打網路。
+            # 只證明「onnxruntime 在、兩個模型檔在」。**不證明載得起來、
+            # 也不證明推論跑得動**——那要真的跡一次 session.run()。
+            # 欄位名字要跟證據對齊：叫它 au_ensemble 會被讀成「集成可用」。
+            'au_ensemble_files_present': au_ensemble_files_present,
             'lite_public_api_enabled': LITE_API_ENABLED,
             'database': True
         },
@@ -671,8 +722,23 @@ def health_check():
     # 而那同樣是「一切看起來正常，直到某天統計歸零」。
     try:
         import api_flywheel as _fw
-        status['store'] = _fw._store().describe()
-        status['audit_retention'] = _fw._store().retention_info()
+        _st = _fw._store()
+        # **一次讀回，兩個欄位。** `audit_retention` 與 `store` 裡的 retention
+        # 描述必須出自同一次讀回，所以讀回結果放在這個請求自己的區域變數裡，
+        # 再明確交給 describe()。
+        #
+        # 先前的版本把「最後一次讀回」存在 store 物件上，describe() 從那裡讀。
+        # 光把兩行對調不夠：store 物件由同一個 worker 的所有請求執行緒共用
+        # （gunicorn --threads 8），請求 A 讀完、還沒渲染之前，請求 B 的讀回
+        # 就可能覆寫它——A 的回應裡 `audit_retention` 說 LOCKED、`store` 卻是
+        # B 的 readback failed，講的是同一個桶。共用的值拿掉，這件事才**構造上**
+        # 不可能發生。
+        #
+        # 這支探針會連 GCS（retention_info 每次都 reload 桶的中繼資料）；
+        # describe() 不另外連網，只渲染交給它的那一次結果。
+        _retention = _st.retention_info()
+        status['audit_retention'] = _retention
+        status['store'] = _st.describe(retention=_retention)
     except Exception as _e:
         status['store'] = 'unavailable: %s' % _e
 
