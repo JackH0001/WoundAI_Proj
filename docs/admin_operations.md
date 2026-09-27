@@ -243,9 +243,9 @@ PowerShell 5.1。`RNGCryptoServiceProvider` 是密碼學等級亂數。送審密
 `-lt 224` 是拒絕取樣（224 = 56 × 4），少了它會有模數偏差。另外三把金鑰從頭到尾
 **不顯示**，也沒有任何人需要知道它們的值。
 
-示範身分**只**授予這四把密文的 `secretAccessor`，專案層級**不給任何角色**。
-不要對它跑 `provision_runtime_identity.ps1`——那會授予它正式密文，部署腳本會因此
-拒絕部署。
+示範身分**只**授予這四把密文的 `secretAccessor`，專案層級**不給任何角色**，
+也不要把它加進任何群組。不要對它跑 `provision_runtime_identity.ps1`——那會授予它
+正式密文，部署腳本會因此拒絕部署。
 
 ```powershell
 $proj = 'woundai-jackh001'
@@ -299,15 +299,39 @@ Remove-Variable pw, values, rng, b
 
 ### 驗證示範身分的「有效」權限
 
-上面只保證「我們授予了什麼」，不保證「它實際能讀什麼」。專案、資料夾、組織層級的
+上面只保證「我們授予了什麼」，不保證「它實際能做什麼」。專案、資料夾、組織層級的
 角色會繼承到每一把密文，群組成員資格與拒絕政策也會改變結果，而這些都不會出現在
 單一密文自己的政策裡——**某把密文上沒有直接授權，不足以證明示範身分讀不到它**
 （[IAM 繼承說明](https://cloud.google.com/iam/docs/resource-hierarchy-access-control)）。
 
-所以佈建完要查兩件事：示範身分在專案層級沒有任何角色；用 Policy Troubleshooter
-（會一併計算上層繼承與拒絕政策）確認四把正式密文都是 `CANNOT_ACCESS`、
-四把示範密文都是 `CAN_ACCESS`。部署腳本每次部署前也會重查前兩項，任何一把正式密文
-不是 `CANNOT_ACCESS`（包括 `UNKNOWN_*`）就拒絕部署。
+**「現在讀不到」也不等於「拿不到」。** 2026-09-27 覆核指出：示範身分若經群組取得
+`roles/resourcemanager.projectIamAdmin`，四把正式密文的有效權限都會是
+`CANNOT_ACCESS`，但它可以改專案 IAM，把 `secretAccessor` 授給自己
+（[設定 IAM 政策本身就能授予其他權限](https://cloud.google.com/resource-manager/docs/access-control-proj)）。
+冒用別的服務帳號也是同一類路徑：冒用正式執行身分就讀得到正式密文。
+
+所以佈建完要查下面三件事，部署腳本每次部署前也會重查前兩件：
+
+1. **專案與上層的每一個綁定**（`get-ancestors-iam-policy`）：示範身分不得出現；
+   群組、網域、`allUsers`／`allAuthenticatedUsers`、`principal://`／`principalSet://`
+   出現在任何綁定裡也拒絕，不論角色。群組成員資格在這裡**證明不了**——Cloud Identity
+   的成員檢查只在 Workspace／Cloud Identity 的特定方案可用，而且只看得到你有權檢視的
+   成員關係，查不到不代表不是成員
+   （[checkTransitiveMembership](https://cloud.google.com/identity/docs/reference/rest/v1/groups.memberships/checkTransitiveMembership)）。
+   證明不了就不放行：專案或上層若有這類綁定，要先移除，或改授予在真正需要的資源上、
+   不放在專案層級，示範服務才部署得了。
+2. **Policy Troubleshooter 的有效權限**（會計算上層繼承、看得到的群組與拒絕政策；
+   看不清的回 `UNKNOWN_*`，一律不算數）。下列每一項都必須是 `CANNOT_ACCESS`：
+   - 四把正式密文：`secretmanager.versions.access`、`secretmanager.secrets.setIamPolicy`
+   - 專案：`resourcemanager.projects.setIamPolicy`
+   - 專案裡的每一個服務帳號，加上正式執行身分（示範身分自己除外）：
+     `iam.serviceAccounts.actAs`、`getAccessToken`、`getOpenIdToken`、`signBlob`、
+     `signJwt`、`implicitDelegation`、`iam.serviceAccountKeys.create`、
+     `iam.serviceAccounts.setIamPolicy`
+3. 四把示範密文的 `secretmanager.versions.access` 是 `CAN_ACCESS`（否則示範服務讀不到自己的金鑰）。
+
+範圍：第 2 項只涵蓋本專案的服務帳號與正式執行身分。示範身分在**其他專案**的服務帳號上
+有什麼權限，這裡看不到——示範身分只在本專案使用，不要把它加進其他專案的政策。
 
 ```powershell
 & {
@@ -317,32 +341,64 @@ Remove-Variable pw, values, rng, b
     # Policy Troubleshooter API：一次性的專案設定，部署腳本不會替你打開它
     gcloud services enable policytroubleshooter.googleapis.com --project $proj
 
-    $held = @((gcloud projects get-iam-policy $proj --format=json | ConvertFrom-Json).bindings |
-        Where-Object { @($_.members) -contains "serviceAccount:$sa" } | ForEach-Object { $_.role })
-    "專案層級角色：$($held.Count) 個（應為 0）$($held -join ', ')"
+    # 1. 專案與上層：示範身分不得出現，證明不了不含它的主體也不得出現
+    $ancestors = gcloud projects get-ancestors-iam-policy $proj --format=json | ConvertFrom-Json
+    $bad = @()
+    foreach ($e in @($ancestors)) {
+        foreach ($b in @($e.policy.bindings)) {
+            foreach ($m in @($b.members)) {
+                if (-not $m) { continue }
+                $isDemo = ($m -ieq "serviceAccount:$sa") -or ($m -ieq "user:$sa")
+                $known  = $m.StartsWith('user:') -or $m.StartsWith('serviceAccount:') -or $m.StartsWith('deleted:')
+                if ($isDemo -or -not $known) { $bad += "$($e.type)/$($e.id) $($b.role) <- $m" }
+            }
+        }
+    }
+    "專案與上層：$($bad.Count) 個不該出現的綁定（應為 0）"
+    $bad
 
-    $expect = [ordered]@{
-        'woundai-admin-password'           = 'CANNOT_ACCESS'
-        'woundai-jwt-secret'               = 'CANNOT_ACCESS'
-        'woundai-flask-secret'             = 'CANNOT_ACCESS'
-        'woundai-care-receipt-secret'      = 'CANNOT_ACCESS'
-        'woundai-demo-password'            = 'CAN_ACCESS'
-        'woundai-demo-jwt-secret'          = 'CAN_ACCESS'
-        'woundai-demo-flask-secret'        = 'CAN_ACCESS'
-        'woundai-demo-care-receipt-secret' = 'CAN_ACCESS'
+    # 2. 每一項都應為 CANNOT_ACCESS；3. 示範密文應為 CAN_ACCESS
+    $checks = @()
+    foreach ($n in 'woundai-admin-password', 'woundai-jwt-secret', 'woundai-flask-secret',
+                   'woundai-care-receipt-secret') {
+        foreach ($p in 'secretmanager.versions.access', 'secretmanager.secrets.setIamPolicy') {
+            $checks += [pscustomobject]@{ R = "//secretmanager.googleapis.com/projects/$proj/secrets/$n"
+                                          P = $p; Want = 'CANNOT_ACCESS' }
+        }
     }
-    foreach ($name in $expect.Keys) {
-        $got = (gcloud policy-intelligence troubleshoot-policy iam `
-            "//secretmanager.googleapis.com/projects/$proj/secrets/$name" `
-            "--principal-email=$sa" --permission=secretmanager.versions.access `
-            --project $proj --quiet --format=json | ConvertFrom-Json).overallAccessState
-        $mark = if ($got -eq $expect[$name]) { 'OK  ' } else { '不符' }
-        "$mark $name：$got（應為 $($expect[$name])）"
+    $checks += [pscustomobject]@{ R = "//cloudresourcemanager.googleapis.com/projects/$proj"
+                                  P = 'resourcemanager.projects.setIamPolicy'; Want = 'CANNOT_ACCESS' }
+    $prodSa = gcloud run services describe woundai-backend --project $proj --region asia-east1 `
+        --format='value(spec.template.spec.serviceAccountName)'
+    $listed = gcloud iam service-accounts list --project $proj --format=json | ConvertFrom-Json
+    $others = @(@(@($listed) | ForEach-Object { ([string]$_.email).ToLower() }) + ([string]$prodSa).ToLower() |
+        Where-Object { $_ -and $_ -ne $sa } | Sort-Object -Unique)
+    foreach ($o in $others) {
+        foreach ($p in 'iam.serviceAccounts.actAs', 'iam.serviceAccounts.getAccessToken',
+                       'iam.serviceAccounts.getOpenIdToken', 'iam.serviceAccounts.signBlob',
+                       'iam.serviceAccounts.signJwt', 'iam.serviceAccounts.implicitDelegation',
+                       'iam.serviceAccountKeys.create', 'iam.serviceAccounts.setIamPolicy') {
+            $checks += [pscustomobject]@{ R = "//iam.googleapis.com/projects/-/serviceAccounts/$o"
+                                          P = $p; Want = 'CANNOT_ACCESS' }
+        }
     }
+    foreach ($n in 'woundai-demo-password', 'woundai-demo-jwt-secret', 'woundai-demo-flask-secret',
+                   'woundai-demo-care-receipt-secret') {
+        $checks += [pscustomobject]@{ R = "//secretmanager.googleapis.com/projects/$proj/secrets/$n"
+                                      P = 'secretmanager.versions.access'; Want = 'CAN_ACCESS' }
+    }
+    $wrong = 0
+    foreach ($c in $checks) {
+        $got = (gcloud policy-intelligence troubleshoot-policy iam $c.R "--principal-email=$sa" `
+            "--permission=$($c.P)" --project $proj --quiet --format=json | ConvertFrom-Json).overallAccessState
+        if ($got -ne $c.Want) { $wrong++; "不符 $($c.R) $($c.P)：$got（應為 $($c.Want)）" }
+    }
+    "服務帳號：$($others -join ', ')"
+    "有效權限：$($checks.Count) 項，不符 $wrong 項（應為 0）"
 }
 ```
 
-任何一行是「不符」或專案層級角色不是 0，就先停下來處理，不要部署。
+專案與上層不是 0，或有效權限有任何不符，就先停下來處理，不要部署。
 
 ### 部署示範服務
 
@@ -378,7 +434,7 @@ cd C:\dev\WoundAI_Proj\Backend\Flask
 | 切正式流量 | 沒有任何一行程式碼呼叫 `update-traffic`，且拒絕以正式 service 為目標 |
 | 寫 GCS | 沒有 `-Bucket`／`-AuditBucket` 參數，`WOUNDAI_STORE` 寫死 local |
 | 用正式執行身分 | 部署前讀正式 service 的 SA，**讀不到就停**（權限不足、登入過期、網路中斷都算），相同就拒絕；部署後回讀示範 revision 實際跑的身分再比一次 |
-| 用正式金鑰 | 四個密文參數必須是 `woundai-demo-*` 且彼此不同；部署前讀每把正式密文的 IAM 政策，示範身分在任何綁定裡就拒絕；示範身分在專案層級有任何角色就拒絕；以 Policy Troubleshooter 查有效權限，任何一把正式密文不是 `CANNOT_ACCESS` 就拒絕；部署後回讀 revision 的 `secretKeyRef` |
+| 用正式金鑰，或讓示範身分自己拿到 | 四個密文參數必須是 `woundai-demo-*` 且彼此不同；部署前讀每把正式密文的 IAM 政策，示範身分在任何綁定裡就拒絕；示範身分在專案或上層有任何角色就拒絕——直接、經群組、網域或公開主體都算，證明不了就拒絕；以 Policy Troubleshooter 查有效權限：讀正式密文、把它授權給自己、改專案 IAM、冒用專案裡任何服務帳號（含正式執行身分），任何一項不是 `CANNOT_ACCESS` 就拒絕；部署後回讀 revision 的 `secretKeyRef` |
 | 帶管理者憑證 | 不掛 `ADMIN_PASSWORD`，回讀時發現就失敗 |
 | 種出醫師角色 | 角色白名單只有 `nurse`／`assistant`，後端再驗一次 |
 | 建出缺模組的映像 | 建置前把 engineering 模組複製到 `vendor/`，清單與 `deploy_cloudrun.ps1` 逐項相同（測試比對）；缺任何一個就停 |

@@ -59,15 +59,18 @@ VENDOR_FILES = ["phase2/wound_classifier.py", "phase1/clinical_rules.py",
                 "phase2/aruco_calibrate.py", "phase2/verify_area_sheet.py",
                 "phase2/color_calib.py", "phase0/preprocessing.json"]
 
-# The key is every argument that is not a --flag, joined by spaces. A scenario
-# entry answers the longest key it is a whole-word prefix of, so
+# The key is every argument that is not a --flag, joined by spaces, plus any
+# --permission= flag (the Policy Troubleshooter is asked several questions about
+# one resource, and each needs its own answer). A scenario entry answers the
+# longest key it is a whole-word prefix of, so
 # "run services describe woundai-backend" never answers a describe of
 # woundai-backend-demo. A list reply is consumed one entry per call (the last
 # entry repeats), which is how the log polling is exercised.
 FAKE_GCLOUD = r'''
 import hashlib, json, os, sys
 scenario = json.loads(os.environ["WOUNDAI_FAKE_SCENARIO"])
-key = " ".join(a for a in sys.argv[1:] if not a.startswith("--"))
+key = " ".join(a for a in sys.argv[1:]
+               if not a.startswith("--") or a.startswith("--permission="))
 with open(os.path.join(os.environ["WOUNDAI_FAKE_STATE"], "calls.jsonl"), "a") as log:
     log.write(json.dumps(sys.argv[1:]) + "\n")
 matches = [p for p in scenario if key == p or key.startswith(p + " ")]
@@ -103,7 +106,9 @@ foreach ($name in @('Ok', 'Warn', 'Invoke-GCloudCaptured', 'ConvertFrom-GCloudJs
                     'Get-EngineeringVendorFiles', 'Copy-EngineeringVendor',
                     'Assert-NotTheProductionIdentity',
                     'Assert-DemoIdentityCannotReadProductionSecrets',
-                    'Assert-DemoIdentityHoldsNoProjectRole', 'Assert-DemoIdentityEffectivelyDenied',
+                    'Get-PrincipalReach', 'Assert-DemoIdentityHoldsNoProjectRole',
+                    'Get-DemoGuardedServiceAccounts', 'Get-DemoEscalationChecks',
+                    'Assert-DemoIdentityEffectivelyDenied',
                     'Assert-DemoServiceState', 'Assert-DemoRevisionConfiguration',
                     'Assert-DemoSecretReady', 'Assert-DemoHealth', 'Assert-DemoSeedLogged')) {
     $node = $ast.Find({param($n)
@@ -142,7 +147,20 @@ foreach ($c in $cases) {
             'prod-identity' { $detail = [string](Assert-NotTheProductionIdentity) }
             'identity' { Assert-DemoIdentityCannotReadProductionSecrets | Out-Null }
             'projroles' { Assert-DemoIdentityHoldsNoProjectRole | Out-Null }
-            'effective' { Assert-DemoIdentityEffectivelyDenied | Out-Null }
+            'effective' {
+                Assert-DemoIdentityEffectivelyDenied `
+                    -ProductionIdentity ([string]$c.production_identity) | Out-Null
+            }
+            'effective-no-production' {
+                Assert-DemoIdentityEffectivelyDenied -ProductionIdentity '' | Out-Null
+            }
+            'identity-all' {
+                # The three pre-deploy identity checks in the order the script runs them.
+                Assert-DemoIdentityCannotReadProductionSecrets | Out-Null
+                Assert-DemoIdentityHoldsNoProjectRole | Out-Null
+                Assert-DemoIdentityEffectivelyDenied `
+                    -ProductionIdentity ([string]$c.production_identity) | Out-Null
+            }
             'service'  {
                 $s = Assert-DemoServiceState -ExpectedRevision ([string]$c.expected_revision)
                 $detail = "$($s.Revision) $($s.Url)"
@@ -185,11 +203,21 @@ def clean_identity(**overrides):
     return s
 
 
-def project_policy(*bindings):
+def iam_policy(bindings):
     """bindings: (role, [members], condition-or-None)."""
-    doc = {"bindings": [dict({"role": r, "members": list(m)}, **({"condition": c} if c else {}))
-                        for r, m, c in bindings], "etag": "BwY", "version": 3}
-    return {"projects get-iam-policy woundai-jackh001": {"stdout": json.dumps(doc)}}
+    return {"bindings": [dict({"role": r, "members": list(m)}, **({"condition": c} if c else {}))
+                         for r, m, c in bindings], "etag": "BwY", "version": 3}
+
+
+ANCESTORS_KEY = "projects get-ancestors-iam-policy woundai-jackh001"
+
+
+def project_policy(*bindings, ancestors=()):
+    """The project's own policy, then any (type, id, bindings) above it, as
+    gcloud projects get-ancestors-iam-policy lists them."""
+    entries = [{"id": "woundai-jackh001", "type": "project", "policy": iam_policy(bindings)}]
+    entries += [{"id": i, "type": t, "policy": iam_policy(b)} for t, i, b in ancestors]
+    return {ANCESTORS_KEY: {"stdout": json.dumps(entries)}}
 
 
 CLEAN_PROJECT = (("roles/owner", ["user:jack.hou@gmail.com"], None),
@@ -197,19 +225,74 @@ CLEAN_PROJECT = (("roles/owner", ["user:jack.hou@gmail.com"], None),
                  ("roles/logging.logWriter", ["serviceAccount:" + PROD_SA], None))
 
 
-def troubleshoot(states=None, **overrides):
-    """One Policy Troubleshooter answer per production secret."""
-    states = dict.fromkeys(PRODUCTION, "CANNOT_ACCESS") if states is None else states
-    s = {}
+COMPUTE_SA = "421209514056-compute@developer.gserviceaccount.com"
+LISTED_SAS = [PROD_SA, DEMO_SA, COMPUTE_SA]
+SA_PERMISSIONS = ["iam.serviceAccounts.actAs", "iam.serviceAccounts.getAccessToken",
+                  "iam.serviceAccounts.getOpenIdToken", "iam.serviceAccounts.signBlob",
+                  "iam.serviceAccounts.signJwt", "iam.serviceAccounts.implicitDelegation",
+                  "iam.serviceAccountKeys.create", "iam.serviceAccounts.setIamPolicy"]
+PROJECT_RESOURCE = "//cloudresourcemanager.googleapis.com/projects/woundai-jackh001"
+
+
+def secret_resource(name):
+    return "//secretmanager.googleapis.com/projects/woundai-jackh001/secrets/" + name
+
+
+def sa_resource(email):
+    return "//iam.googleapis.com/projects/-/serviceAccounts/" + email
+
+
+def guarded(listed=None):
+    """Every listed account plus the production identity, never the demo one."""
+    listed = LISTED_SAS if listed is None else listed
+    return sorted(set(e.lower() for e in list(listed) + [PROD_SA]) - {DEMO_SA})
+
+
+def escalation_matrix(listed=None):
+    """(resource, permission) for every question the demo identity must fail."""
+    rows = []
     for name in PRODUCTION:
-        key = ("policy-intelligence troubleshoot-policy iam "
-               "//secretmanager.googleapis.com/projects/woundai-jackh001/secrets/" + name)
-        state = states.get(name, "CANNOT_ACCESS")
+        rows += [(secret_resource(name), "secretmanager.versions.access"),
+                 (secret_resource(name), "secretmanager.secrets.setIamPolicy")]
+    rows.append((PROJECT_RESOURCE, "resourcemanager.projects.setIamPolicy"))
+    for email in guarded(listed):
+        rows += [(sa_resource(email), p) for p in SA_PERMISSIONS]
+    return rows
+
+
+def troubleshoot(states=None, listed=None, **overrides):
+    """The service account listing, then one Policy Troubleshooter answer per
+    (resource, permission). states maps (resource, permission) to a verdict
+    string or a whole reply."""
+    states = states or {}
+    listed_now = LISTED_SAS if listed is None else listed
+    s = {"iam service-accounts list": {"stdout": json.dumps(
+        [{"email": e, "name": "projects/woundai-jackh001/serviceAccounts/" + e}
+         for e in listed_now])}}
+    for resource, permission in escalation_matrix(listed_now):
+        state = states.get((resource, permission), "CANNOT_ACCESS")
+        key = "policy-intelligence troubleshoot-policy iam %s --permission=%s" % (resource, permission)
         s[key] = state if isinstance(state, dict) else {"stdout": json.dumps({
-            "accessTuple": {"principal": DEMO_SA, "permission": "secretmanager.versions.access"},
+            "accessTuple": {"principal": DEMO_SA, "permission": permission},
             "overallAccessState": state})}
     s.update(overrides)
     return s
+
+
+def verdicts(by_label):
+    """Readable overrides: secret name, 'project' or an account email, then
+    '::permission'."""
+    out = {}
+    for label, state in by_label.items():
+        target, permission = label.split("::")
+        if target == "project":
+            resource = PROJECT_RESOURCE
+        elif "@" in target:
+            resource = sa_resource(target)
+        else:
+            resource = secret_resource(target)
+        out[(resource, permission)] = state
+    return out
 
 
 def production_service(sa=PROD_SA, **reply):
@@ -348,17 +431,22 @@ CASES = {
         "secrets get-iam-policy woundai-jwt-secret": dict(
             policy("serviceAccount:" + PROD_SA),
             stderr="WARNING: a newer gcloud is available.\n")}), None),
+    # A group on a secret's own policy is not a direct binding; whether it
+    # reaches the demo identity is the troubleshooter's question, below.
     "identity_lookalike_member_is_not_a_match": ("identity", DEMO_SA, clean_identity(**{
         "secrets get-iam-policy woundai-jwt-secret":
             policy("serviceAccount:x" + DEMO_SA, "group:" + DEMO_SA)}), None),
     "identity_no_bindings": ("identity", DEMO_SA, clean_identity(**{
         "secrets get-iam-policy woundai-jwt-secret": {"stdout": '{"etag": "ACAB"}'}}), None),
 
-    # -- no project-level role: it would be inherited by every secret --
+    # -- no role on the project or above it, by any route --
+    # Every role there is inherited by every secret, and a principal that might
+    # contain the demo identity is refused because membership cannot be proven
+    # from here (review of 086c406, 2026-09-27).
     "projroles_clean": ("projroles", DEMO_SA, project_policy(*CLEAN_PROJECT), None),
     "projroles_viewer": ("projroles", DEMO_SA, project_policy(
         *CLEAN_PROJECT, ("roles/viewer", ["serviceAccount:" + DEMO_SA], None)),
-        "holds project-level roles [roles/viewer]"),
+        "holds roles on the project or above it [project/woundai-jackh001 roles/viewer]"),
     "projroles_secret_accessor": ("projroles", DEMO_SA, project_policy(
         *CLEAN_PROJECT, ("roles/secretmanager.secretAccessor",
                          ["user:jack.hou@gmail.com", "serviceAccount:" + DEMO_SA], None)),
@@ -366,43 +454,164 @@ CASES = {
     "projroles_conditional_binding_still_counts": ("projroles", DEMO_SA, project_policy(
         *CLEAN_PROJECT, ("roles/editor", ["serviceAccount:" + DEMO_SA],
                          {"title": "until review", "expression": "request.time < timestamp('2026-12-31T00:00:00Z')"})),
-        "holds project-level roles [roles/editor]"),
-    "projroles_lookalike_member_is_not_a_match": ("projroles", DEMO_SA, project_policy(
-        *CLEAN_PROJECT, ("roles/viewer", ["serviceAccount:x" + DEMO_SA, "group:" + DEMO_SA], None)),
+        "project/woundai-jackh001 roles/editor"),
+    "projroles_email_case_does_not_hide_it": ("projroles", DEMO_SA, project_policy(
+        *CLEAN_PROJECT, ("roles/viewer", ["serviceAccount:" + DEMO_SA.upper()], None)),
+        "holds roles on the project or above it"),
+    "projroles_written_as_a_user_is_still_it": ("projroles", DEMO_SA, project_policy(
+        *CLEAN_PROJECT, ("roles/viewer", ["user:" + DEMO_SA], None)),
+        "holds roles on the project or above it"),
+    "projroles_lookalikes_and_deleted_are_not_it": ("projroles", DEMO_SA, project_policy(
+        *CLEAN_PROJECT, ("roles/viewer", ["serviceAccount:x" + DEMO_SA,
+                                          "deleted:serviceAccount:%s?uid=123456789" % DEMO_SA,
+                                          "user:someone@example.com"], None)),
         None),
-    "projroles_unreadable": ("projroles", DEMO_SA, {"projects get-iam-policy woundai-jackh001": {
-        "exit": 1, "stderr": "ERROR: (gcloud.projects.get-iam-policy) PERMISSION_DENIED\n"}},
-        "cannot read IAM policy of project [woundai-jackh001]"),
+    # The review's counterexample: a group grants projectIamAdmin. The role
+    # reads no secret, so every secretmanager.versions.access answer is
+    # CANNOT_ACCESS -- but the holder can grant itself secretAccessor.
+    "projroles_group_with_project_iam_admin": ("projroles", DEMO_SA, project_policy(
+        *CLEAN_PROJECT, ("roles/resourcemanager.projectIamAdmin",
+                         ["group:woundai-ops@googlegroups.com"], None)),
+        "cannot prove the demo identity is outside these principals"),
+    "projroles_any_group_whatever_the_role": ("projroles", DEMO_SA, project_policy(
+        *CLEAN_PROJECT, ("roles/viewer", ["group:readers@example.com"], None)),
+        "project/woundai-jackh001 roles/viewer <- group:readers@example.com"),
+    "projroles_domain": ("projroles", DEMO_SA, project_policy(
+        *CLEAN_PROJECT, ("roles/viewer", ["domain:example.com"], None)),
+        "<- domain:example.com"),
+    "projroles_all_authenticated_users": ("projroles", DEMO_SA, project_policy(
+        *CLEAN_PROJECT, ("roles/viewer", ["allAuthenticatedUsers"], None)),
+        "<- allAuthenticatedUsers"),
+    "projroles_all_users": ("projroles", DEMO_SA, project_policy(
+        *CLEAN_PROJECT, ("roles/viewer", ["allUsers"], None)),
+        "<- allUsers"),
+    "projroles_principal_set": ("projroles", DEMO_SA, project_policy(
+        *CLEAN_PROJECT, ("roles/editor", [
+            "principalSet://iam.googleapis.com/projects/421209514056/locations/global/"
+            "workloadIdentityPools/ci/*"], None)),
+        "<- principalSet://"),
+    "projroles_principal": ("projroles", DEMO_SA, project_policy(
+        *CLEAN_PROJECT, ("roles/editor", [
+            "principal://iam.googleapis.com/projects/421209514056/locations/global/"
+            "workloadIdentityPools/ci/subject/x"], None)),
+        "<- principal://"),
+    "projroles_unfamiliar_principal_form": ("projroles", DEMO_SA, project_policy(
+        *CLEAN_PROJECT, ("roles/viewer", ["projectOwner:woundai-jackh001"], None)),
+        "<- projectOwner:woundai-jackh001"),
+    "projroles_folder_grants_it": ("projroles", DEMO_SA, project_policy(
+        *CLEAN_PROJECT, ancestors=[("folder", "123456789012", [
+            ("roles/editor", ["serviceAccount:" + DEMO_SA], None)])]),
+        "folder/123456789012 roles/editor"),
+    "projroles_organization_group": ("projroles", DEMO_SA, project_policy(
+        *CLEAN_PROJECT, ancestors=[("organization", "987654321098", [
+            ("roles/owner", ["group:admins@example.com"], None)])]),
+        "organization/987654321098 roles/owner <- group:admins@example.com"),
+    "projroles_clean_ancestors": ("projroles", DEMO_SA, project_policy(
+        *CLEAN_PROJECT, ancestors=[("organization", "987654321098", [
+            ("roles/owner", ["user:jack.hou@gmail.com"], None)])]), None),
+    "projroles_listing_without_the_project": ("projroles", DEMO_SA, {ANCESTORS_KEY: {
+        "stdout": json.dumps([{"id": "987654321098", "type": "organization",
+                               "policy": iam_policy(())}])}},
+        "did not include project [woundai-jackh001] itself"),
+    "projroles_entry_without_a_policy": ("projroles", DEMO_SA, {ANCESTORS_KEY: {
+        "stdout": json.dumps([{"id": "woundai-jackh001", "type": "project"}])}},
+        "has no policy for [project/woundai-jackh001]"),
+    "projroles_empty_listing": ("projroles", DEMO_SA, {ANCESTORS_KEY: {"stdout": "[]"}},
+        "project [woundai-jackh001]"),
+    "projroles_not_json": ("projroles", DEMO_SA, {ANCESTORS_KEY: {"stdout": "bindings: []\n"}},
+        "did not come back as JSON"),
+    "projroles_unreadable": ("projroles", DEMO_SA, {ANCESTORS_KEY: {
+        "exit": 1, "stderr": "ERROR: (gcloud.projects.get-ancestors-iam-policy) PERMISSION_DENIED\n"}},
+        "cannot read IAM policies of project [woundai-jackh001] and its ancestors"),
 
     # -- effective access, as the Policy Troubleshooter evaluates it --
+    # Not only "can it read a production secret now" but every way it could
+    # get one: re-grant the secret, change project IAM, use another account.
     "effective_all_denied": ("effective", DEMO_SA, troubleshoot(), None),
-    "effective_one_granted": ("effective", DEMO_SA, troubleshoot(
-        {"woundai-jwt-secret": "CAN_ACCESS"}),
-        "is not provably denied production secret [woundai-jwt-secret]: [CAN_ACCESS]"),
-    "effective_unknown_info_is_not_evidence": ("effective", DEMO_SA, troubleshoot(
-        {"woundai-flask-secret": "UNKNOWN_INFO"}), "[UNKNOWN_INFO]"),
-    "effective_unknown_conditional_is_not_evidence": ("effective", DEMO_SA, troubleshoot(
-        {"woundai-care-receipt-secret": "UNKNOWN_CONDITIONAL"}), "[UNKNOWN_CONDITIONAL]"),
+    "effective_reads_a_secret": ("effective", DEMO_SA, troubleshoot(verdicts({
+        "woundai-jwt-secret::secretmanager.versions.access": "CAN_ACCESS"})),
+        "is not provably unable to read production secret [woundai-jwt-secret]: [CAN_ACCESS]"),
+    "effective_can_grant_itself_a_secret": ("effective", DEMO_SA, troubleshoot(verdicts({
+        "woundai-admin-password::secretmanager.secrets.setIamPolicy": "CAN_ACCESS"})),
+        "unable to grant itself production secret [woundai-admin-password]: [CAN_ACCESS]"),
+    "effective_can_change_project_iam": ("effective", DEMO_SA, troubleshoot(verdicts({
+        "project::resourcemanager.projects.setIamPolicy": "CAN_ACCESS"})),
+        "unable to change the IAM policy of project [woundai-jackh001]: [CAN_ACCESS]"),
+    # With a group the troubleshooter cannot see into, the answer is unknown.
+    "effective_project_iam_through_an_unreadable_group": ("effective", DEMO_SA, troubleshoot(verdicts({
+        "project::resourcemanager.projects.setIamPolicy": "UNKNOWN_INFO"})),
+        "change the IAM policy of project [woundai-jackh001]: [UNKNOWN_INFO]"),
+    "effective_can_mint_tokens_for_production": ("effective", DEMO_SA, troubleshoot(verdicts({
+        PROD_SA + "::iam.serviceAccounts.getAccessToken": "CAN_ACCESS"})),
+        "use service account [%s] (iam.serviceAccounts.getAccessToken): [CAN_ACCESS]" % PROD_SA),
+    "effective_can_create_keys_for_production": ("effective", DEMO_SA, troubleshoot(verdicts({
+        PROD_SA + "::iam.serviceAccountKeys.create": "CAN_ACCESS"})),
+        "(iam.serviceAccountKeys.create): [CAN_ACCESS]"),
+    "effective_can_act_as_the_compute_default": ("effective", DEMO_SA, troubleshoot(verdicts({
+        COMPUTE_SA + "::iam.serviceAccounts.actAs": "CAN_ACCESS"})),
+        "use service account [%s] (iam.serviceAccounts.actAs)" % COMPUTE_SA),
+    "effective_production_identity_checked_even_if_unlisted": ("effective", DEMO_SA, troubleshoot(
+        verdicts({PROD_SA + "::iam.serviceAccounts.signJwt": "CAN_ACCESS"}),
+        listed=[DEMO_SA, COMPUTE_SA]),
+        "use service account [%s] (iam.serviceAccounts.signJwt)" % PROD_SA),
+    "effective_account_listing_unreadable": ("effective", DEMO_SA, troubleshoot(**{
+        "iam service-accounts list": {"exit": 1, "stderr": "ERROR: PERMISSION_DENIED\n"}}),
+        "cannot read service accounts of project [woundai-jackh001]"),
+    "effective_account_without_an_email": ("effective", DEMO_SA, troubleshoot(**{
+        "iam service-accounts list": {"stdout": json.dumps([{"email": PROD_SA}, {"name": "x"}])}}),
+        "has an entry without an email"),
+    "effective_production_identity_unknown": ("effective-no-production", DEMO_SA, troubleshoot(),
+        "the production runtime identity is unknown"),
+    "effective_unknown_info_is_not_evidence": ("effective", DEMO_SA, troubleshoot(verdicts({
+        "woundai-flask-secret::secretmanager.versions.access": "UNKNOWN_INFO"})), "[UNKNOWN_INFO]"),
+    "effective_unknown_conditional_is_not_evidence": ("effective", DEMO_SA, troubleshoot(verdicts({
+        "woundai-care-receipt-secret::secretmanager.versions.access": "UNKNOWN_CONDITIONAL"})),
+        "[UNKNOWN_CONDITIONAL]"),
     "effective_v1_not_granted_is_evidence": ("effective", DEMO_SA, troubleshoot(
-        dict.fromkeys(PRODUCTION, {"stdout": json.dumps({"access": "NOT_GRANTED"})})), None),
-    "effective_v1_granted": ("effective", DEMO_SA, troubleshoot(
-        {"woundai-admin-password": {"stdout": json.dumps({"access": "GRANTED"})}}),
-        "production secret [woundai-admin-password]: [GRANTED]"),
-    "effective_missing_verdict": ("effective", DEMO_SA, troubleshoot(
-        {"woundai-jwt-secret": {"stdout": json.dumps({"accessTuple": {}})}}),
-        "production secret [woundai-jwt-secret]: []"),
-    "effective_api_disabled_points_at_provisioning": ("effective", DEMO_SA, troubleshoot(
-        {"woundai-admin-password": {"exit": 1, "stderr":
+        {row: {"stdout": json.dumps({"access": "NOT_GRANTED"})} for row in escalation_matrix()}),
+        None),
+    "effective_v1_granted": ("effective", DEMO_SA, troubleshoot(verdicts({
+        "woundai-admin-password::secretmanager.versions.access":
+            {"stdout": json.dumps({"access": "GRANTED"})}})),
+        "read production secret [woundai-admin-password]: [GRANTED]"),
+    "effective_missing_verdict": ("effective", DEMO_SA, troubleshoot(verdicts({
+        "woundai-jwt-secret::secretmanager.versions.access":
+            {"stdout": json.dumps({"accessTuple": {}})}})),
+        "read production secret [woundai-jwt-secret]: []"),
+    "effective_api_disabled_points_at_provisioning": ("effective", DEMO_SA, troubleshoot(verdicts({
+        "woundai-admin-password::secretmanager.versions.access": {"exit": 1, "stderr":
             "ERROR: (gcloud.policy-intelligence.troubleshoot-policy.iam) PERMISSION_DENIED: "
             "Policy Troubleshooter API has not been used in project 421209514056 before or it "
-            "is disabled. reason: SERVICE_DISABLED\n"}}),
+            "is disabled. reason: SERVICE_DISABLED\n"}})),
         "gcloud services enable policytroubleshooter.googleapis.com"),
-    "effective_other_failure_refuses": ("effective", DEMO_SA, troubleshoot(
-        {"woundai-flask-secret": {"exit": 1, "stderr": "ERROR: network unreachable\n"}}),
-        "cannot evaluate the demo identity's effective access to production secret [woundai-flask-secret]"),
-    "effective_stderr_noise_is_fine": ("effective", DEMO_SA, troubleshoot(
-        {"woundai-jwt-secret": {"stdout": json.dumps({"overallAccessState": "CANNOT_ACCESS"}),
-                                "stderr": "WARNING: a newer gcloud is available.\n"}}), None),
+    "effective_other_failure_refuses": ("effective", DEMO_SA, troubleshoot(verdicts({
+        "woundai-flask-secret::secretmanager.versions.access":
+            {"exit": 1, "stderr": "ERROR: network unreachable\n"}})),
+        "cannot evaluate whether the demo identity can read production secret [woundai-flask-secret]"),
+    "effective_stderr_noise_is_fine": ("effective", DEMO_SA, troubleshoot(verdicts({
+        "woundai-jwt-secret::secretmanager.versions.access":
+            {"stdout": json.dumps({"overallAccessState": "CANNOT_ACCESS"}),
+             "stderr": "WARNING: a newer gcloud is available.\n"}})), None),
+
+    # -- the three identity checks together, in the order the script runs them --
+    "identity_all_clean": ("identity-all", DEMO_SA, dict(
+        clean_identity(), **project_policy(*CLEAN_PROJECT), **troubleshoot()), None),
+    # The review's reproduction: a group grants projectIamAdmin, no secret
+    # names the demo identity, and every answer the troubleshooter gives is
+    # CANNOT_ACCESS. The run must still stop, at the project check.
+    "identity_all_group_admin_with_a_blind_troubleshooter": ("identity-all", DEMO_SA, dict(
+        clean_identity(),
+        **project_policy(*CLEAN_PROJECT, ("roles/resourcemanager.projectIamAdmin",
+                                          ["group:woundai-ops@googlegroups.com"], None)),
+        **troubleshoot()),
+        "cannot prove the demo identity is outside these principals"),
+    # And had the project check let it through, the escalation check stops it
+    # on its own: projects.setIamPolicy is not CANNOT_ACCESS.
+    "identity_all_group_admin_seen_by_the_troubleshooter": ("identity-all", DEMO_SA, dict(
+        clean_identity(),
+        **project_policy(*CLEAN_PROJECT),
+        **troubleshoot(verdicts({"project::resourcemanager.projects.setIamPolicy": "CAN_ACCESS"}))),
+        "unable to change the IAM policy of project [woundai-jackh001]"),
 
     # -- the service is serving the revision this run built --
     "service_clean": ("service", DEMO_SA, demo_service(), None),
@@ -692,22 +901,49 @@ class DemoDeployChecksAgainstFakeGcloud(unittest.TestCase):
                         self.assertTrue(got.startswith("REJECT "), got)
                         self.assertIn(expected, got)
 
-    def test_the_troubleshooter_is_asked_about_the_right_principal_and_permission(self):
-        # The fake's routing key ignores --flags, so read what was actually sent.
-        for shell, (_proc, _seen, _cases) in self.results.items():
+    def calls(self, shell, case):
+        path = Path(self.states[shell]) / case / "calls.jsonl"
+        return [json.loads(l) for l in path.read_text().splitlines()]
+
+    def test_the_troubleshooter_is_asked_every_question_about_the_right_principal(self):
+        # The fake's routing key drops most --flags, so read what was actually sent.
+        for shell in self.results:
             with self.subTest(shell=shell):
-                calls = [json.loads(l) for l in (Path(self.states[shell]) / "effective_all_denied" /
-                                                 "calls.jsonl").read_text().splitlines()]
-                self.assertEqual(len(calls), len(PRODUCTION))
-                for argv in calls:
+                calls = self.calls(shell, "effective_all_denied")
+                self.assertEqual(calls[0], ["iam", "service-accounts", "list",
+                                            "--project=woundai-jackh001", "--format=json"])
+                asked = []
+                for argv in calls[1:]:
+                    self.assertEqual(argv[:3], ["policy-intelligence", "troubleshoot-policy", "iam"])
                     self.assertIn("--principal-email=" + DEMO_SA, argv)
-                    self.assertIn("--permission=secretmanager.versions.access", argv)
+                    self.assertIn("--project=woundai-jackh001", argv)
                     self.assertIn("--quiet", argv, "without --quiet gcloud may stop to ask about enabling an API")
                     self.assertIn("--format=json", argv)
-                resources = sorted(argv[3] for argv in calls)
-                self.assertEqual(resources, sorted(
-                    "//secretmanager.googleapis.com/projects/woundai-jackh001/secrets/" + n
-                    for n in PRODUCTION))
+                    permission = [a for a in argv if a.startswith("--permission=")]
+                    self.assertEqual(len(permission), 1, argv)
+                    asked.append((argv[3], permission[0][len("--permission="):]))
+                self.assertEqual(sorted(asked), sorted(escalation_matrix()))
+                # Eight questions for each guarded account, none about itself.
+                self.assertFalse([r for r, _p in asked if DEMO_SA in r])
+                for email in (PROD_SA, COMPUTE_SA):
+                    self.assertEqual(len([1 for r, _p in asked if r == sa_resource(email)]),
+                                     len(SA_PERMISSIONS))
+
+    def test_the_project_check_reads_the_whole_ancestry(self):
+        for shell in self.results:
+            with self.subTest(shell=shell):
+                self.assertEqual(self.calls(shell, "projroles_clean"),
+                                 [["projects", "get-ancestors-iam-policy", "woundai-jackh001",
+                                   "--format=json"]])
+
+    def test_the_review_counterexample_stops_before_any_escalation_question(self):
+        # Refused at the project check: the troubleshooter is never reached, so
+        # its (blind) CANNOT_ACCESS answers cannot be what let a run through.
+        for shell in self.results:
+            with self.subTest(shell=shell):
+                calls = self.calls(shell, "identity_all_group_admin_with_a_blind_troubleshooter")
+                self.assertTrue(calls[-1][:2] == ["projects", "get-ancestors-iam-policy"], calls[-1])
+                self.assertFalse([c for c in calls if c[:1] == ["policy-intelligence"]])
 
     def test_the_production_identity_is_returned_for_the_read_back(self):
         for shell, (_proc, seen, _cases) in self.results.items():

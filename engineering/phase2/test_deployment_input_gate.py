@@ -227,6 +227,17 @@ class DemoDeploymentInputGateTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0,
                                         result.stdout + result.stderr)
 
+    def test_a_service_account_not_written_in_lower_case_is_refused(self):
+        # IAM stores emails in lower case and the identity checks compare them
+        # exactly; a mixed-case -RuntimeServiceAccount would slip past the
+        # "is the demo identity in this binding" comparison.
+        for shell in SHELLS:
+            for sa in ("Woundai-demo-run@woundai-jackh001.iam.gserviceaccount.com",
+                       "woundai-demo-run@woundai-jackh001.iam.gserviceaccount.COM"):
+                with self.subTest(shell=shell, sa=sa):
+                    self.reject(shell, "RuntimeServiceAccount must be a dedicated service account",
+                                SA=sa)
+
     def test_a_production_secret_is_refused_for_every_demo_key(self):
         # Sharing the JWT key is what would have let a demo-issued nurse token
         # work on production for 24 hours; the care-receipt HMAC key the same

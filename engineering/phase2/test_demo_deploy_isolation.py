@@ -270,11 +270,13 @@ class DemoKeysAreNotProductionKeys(unittest.TestCase):
     def test_the_identity_check_runs_before_anything_is_deployed(self):
         code = code_only(text(DEMO))
         deploy = code.index("Invoke-GCloud run deploy")
+        identity = code.index("\n$ProductionRuntimeIdentity = Assert-NotTheProductionIdentity\n")
         for check in ("\nAssert-DemoIdentityCannotReadProductionSecrets\n",
                       "\nAssert-DemoIdentityHoldsNoProjectRole\n",
-                      "\nAssert-DemoIdentityEffectivelyDenied\n"):
+                      "\nAssert-DemoIdentityEffectivelyDenied -ProductionIdentity $ProductionRuntimeIdentity\n"):
             with self.subTest(check=check.strip()):
                 self.assertEqual(code.count(check), 1)
+                self.assertLess(identity, code.index(check))
                 self.assertLess(code.index(check), deploy)
 
     def test_the_effective_access_check_cannot_be_talked_round(self):
@@ -283,24 +285,78 @@ class DemoKeysAreNotProductionKeys(unittest.TestCase):
         roles are inherited by every secret, and groups and deny policies only
         show up in an effective-access evaluation."""
         code = code_only(text(DEMO))
-        roles = function_body(code, "Assert-DemoIdentityHoldsNoProjectRole")
-        self.assertIn("projects get-iam-policy $ProjectId", roles)
-        self.assertIn("if ($held.Count -gt 0) {", roles)
         eff = function_body(code, "Assert-DemoIdentityEffectivelyDenied")
-        for piece in ('"//secretmanager.googleapis.com/projects/$ProjectId/secrets/$name"',
-                      "policy-intelligence troubleshoot-policy iam $resource",
+        for piece in ("policy-intelligence troubleshoot-policy iam $check.Resource",
                       '"--principal-email=$RuntimeServiceAccount"',
-                      "'--permission=secretmanager.versions.access'",
+                      '"--permission=$($check.Permission)"',
                       "'--quiet'",
-                      "foreach ($name in @(Get-ProductionSecretNames)) {",
+                      "foreach ($check in $checks) {",
                       "if ($state -cne 'CANNOT_ACCESS' -and $state -cne 'NOT_GRANTED') {"):
             with self.subTest(piece=piece):
                 self.assertIn(piece, eff)
         # Nothing UNKNOWN_* may be waved through, and the script never turns
         # the API on by itself.
-        self.assertNotIn("UNKNOWN", eff.replace("UNKNOWN_*", ""))
+        self.assertNotIn("UNKNOWN", eff.replace("UNKNOWN_*", "").replace("UNKNOWN_INFO", ""))
         self.assertNotIn("services enable", code.replace(
             "gcloud services enable policytroubleshooter.googleapis.com (docs", ""))
+
+    def test_a_role_reached_through_a_group_is_not_waved_through(self):
+        """Reported by the review partner on 2026-09-27 against 086c406: the
+        project check matched only the demo identity itself. A group granting
+        roles/resourcemanager.projectIamAdmin passed it, every secret still
+        answered CANNOT_ACCESS, and the identity could grant itself access."""
+        code = code_only(text(DEMO))
+        roles = function_body(code, "Assert-DemoIdentityHoldsNoProjectRole")
+        for piece in ("projects get-ancestors-iam-policy $ProjectId",
+                      "if (-not $sawProject) {",
+                      "if ($held.Count -gt 0) {",
+                      "if ($unprovable.Count -gt 0) {",
+                      "} elseif ($reach -ceq 'unknown') {"):
+            with self.subTest(piece=piece):
+                self.assertIn(piece, roles)
+        reach = function_body(code, "Get-PrincipalReach")
+        # Only these prefixes are ever cleared; anything else is unknown.
+        self.assertEqual(sorted(set(re.findall(r"'([A-Za-z]+:)'", reach))),
+                         ["deleted:", "serviceAccount:", "user:"])
+        self.assertTrue(reach.rstrip().endswith("return 'unknown'"), reach[-200:])
+
+    def test_every_way_to_obtain_a_production_secret_is_asked_about(self):
+        code = code_only(text(DEMO))
+        checks = function_body(code, "Get-DemoEscalationChecks")
+        for piece in ("'secretmanager.versions.access'", "'secretmanager.secrets.setIamPolicy'",
+                      '"//cloudresourcemanager.googleapis.com/projects/$ProjectId"',
+                      "'resourcemanager.projects.setIamPolicy'",
+                      '"//iam.googleapis.com/projects/-/serviceAccounts/$account"',
+                      "'iam.serviceAccounts.actAs'", "'iam.serviceAccounts.getAccessToken'",
+                      "'iam.serviceAccounts.getOpenIdToken'", "'iam.serviceAccounts.signBlob'",
+                      "'iam.serviceAccounts.signJwt'", "'iam.serviceAccounts.implicitDelegation'",
+                      "'iam.serviceAccountKeys.create'", "'iam.serviceAccounts.setIamPolicy'",
+                      "foreach ($name in @(Get-ProductionSecretNames)) {"):
+            with self.subTest(piece=piece):
+                self.assertIn(piece, checks)
+        accounts = function_body(code, "Get-DemoGuardedServiceAccounts")
+        for piece in ("iam service-accounts list", "$emails += $ProductionIdentity",
+                      "Where-Object { $_ -cne $demo }"):
+            with self.subTest(piece=piece):
+                self.assertIn(piece, accounts)
+
+    def test_the_manual_verification_asks_the_same_questions(self):
+        # The block an operator runs after provisioning, not the prose around
+        # it: a question dropped from the block goes unasked however well the
+        # text describes it.
+        section = text(ROOT / "docs" / "admin_operations.md")
+        section = section[section.index("### 驗證示範身分的「有效」權限"):section.index("### 部署示範服務")]
+        self.assertIn("群組", section)
+        blocks = re.findall(r"```powershell\n(.*?)```", section, re.S)
+        self.assertEqual(len(blocks), 1)
+        block = blocks[0]
+        script = function_body(code_only(text(DEMO)), "Get-DemoEscalationChecks")
+        asked = set(re.findall(r"'((?:secretmanager|resourcemanager|iam)\.[A-Za-z.]+)'", script))
+        self.assertEqual(len(asked), 11, sorted(asked))
+        for piece in sorted(asked) + ["get-ancestors-iam-policy", "iam service-accounts list",
+                                      "'CAN_ACCESS'", "'CANNOT_ACCESS'"]:
+            with self.subTest(piece=piece):
+                self.assertIn(piece, block)
 
     def test_the_read_back_conditions_are_present(self):
         # Conditions, not messages: replacing a condition with $false leaves
@@ -446,7 +502,8 @@ class DemoAcceptanceGateCannotBeWavedThrough(unittest.TestCase):
         for fn in ("Assert-DemoServiceState", "Assert-DemoRevisionConfiguration",
                    "Assert-DemoHealth", "Assert-NotTheProductionIdentity",
                    "ConvertFrom-GCloudJson", "Assert-DemoIdentityHoldsNoProjectRole",
-                   "Assert-DemoIdentityEffectivelyDenied"):
+                   "Assert-DemoIdentityEffectivelyDenied", "Get-PrincipalReach",
+                   "Get-DemoGuardedServiceAccounts", "Get-DemoEscalationChecks"):
             with self.subTest(fn=fn):
                 self.assertNotRegex(function_body(code_only(text(DEMO)), fn), r"\bWarn\b")
 

@@ -78,8 +78,11 @@
 # 現在有三層，缺一不可：
 #   1. 名稱：四個密文參數都必須是 woundai-demo-*，彼此不同，且不得是正式密文
 #   2. 身分：部署前讀每一把正式密文的 IAM 政策，示範身分出現在任何綁定裡就拒絕；
-#      示範身分在專案層級不得有任何角色；再用 Policy Troubleshooter 查有效權限，
-#      每一把正式密文都必須是「讀不到」（含上層繼承、群組與拒絕政策）
+#      示範身分在專案與上層不得有任何角色——直接、經群組、網域或公開主體都算，
+#      證明不了「不含示範身分」的主體出現在那裡就拒絕；再用 Policy Troubleshooter
+#      查有效權限（含上層繼承、群組與拒絕政策），下列每一項都必須是 CANNOT_ACCESS：
+#      讀正式密文、把正式密文授權給自己、改專案 IAM、冒用專案裡任何服務帳號或替它
+#      簽發憑證（含正式執行身分）。「現在讀不到」不等於「拿不到」。
 #   3. 回讀：部署後讀 revision 的 secretKeyRef，任何一個指向正式密文就失敗
 # 不掛 ADMIN_PASSWORD：示範服務不需要管理者，送審帳號由開機種子建立。
 #
@@ -284,7 +287,9 @@ function Assert-DemoInputs {
 
     # ── 執行身分 ──
     $expectedSuffix = "@$ProjectId.iam.gserviceaccount.com"
-    if ($RuntimeServiceAccount -notmatch '^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$' `
+    # -cnotmatch：IAM 政策裡的 email 一律小寫，而身分比對是逐字的；大小寫不同的輸入會讓
+    # 「示範身分出現在綁定裡」的比對落空。
+    if ($RuntimeServiceAccount -cnotmatch '^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$' `
             -or -not $RuntimeServiceAccount.EndsWith($expectedSuffix, [StringComparison]::Ordinal)) {
         throw "RuntimeServiceAccount must be a dedicated service account in project [$ProjectId]"
     }
@@ -363,55 +368,159 @@ function Assert-DemoIdentityCannotReadProductionSecrets {
     Ok "示範身分不在任何一把正式密文的 IAM 綁定裡"
 }
 
-function Assert-DemoIdentityHoldsNoProjectRole {
-    # 示範身分在專案層級不需要任何角色：stdout 日誌由平台收、映像由服務代理拉、
-    # 密文逐把授權。專案層級的任何角色都會繼承到專案裡的每一把密文——包括正式的
-    # 那幾把——而各密文自己的政策裡看不到它。所以這裡不挑角色，出現就拒絕。
-    $member = "serviceAccount:$RuntimeServiceAccount"
-    $r = Invoke-GCloudCaptured projects get-iam-policy $ProjectId '--format=json'
-    $policy = ConvertFrom-GCloudJson "IAM policy of project [$ProjectId]" $r
-    $held = @()
-    foreach ($binding in @($policy.bindings)) {
-        if ($null -ne $binding -and @($binding.members) -ccontains $member) {
-            $held += [string]$binding.role
+function Get-PrincipalReach([string]$Member) {
+    # 一個 IAM 主體會不會包含示範身分：
+    #   demo     就是示範身分（email 不分大小寫）
+    #   other    一定不是：別的個人帳號、別的服務帳號、已刪除的主體（不再授予任何東西）
+    #   unknown  證明不了不是：群組、網域、allUsers、allAuthenticatedUsers、
+    #            principal:// 與 principalSet://，以及任何沒見過的形式
+    # 預設是 unknown：新的主體形式出現時，寧可拒絕部署，也不要把它當成無關。
+    foreach ($prefix in @('serviceAccount:', 'user:')) {
+        if ($Member.StartsWith($prefix, [StringComparison]::Ordinal)) {
+            # user: 加上服務帳號的 email 不是正常寫法，但既然寫的是它，就當作是它。
+            if ($Member.Substring($prefix.Length) -ieq $RuntimeServiceAccount) { return 'demo' }
+            return 'other'
         }
     }
-    if ($held.Count -gt 0) {
-        throw "demo identity [$RuntimeServiceAccount] holds project-level roles [$($held -join ', ')]; it needs none, and each one is inherited by every secret in the project"
-    }
-    Ok "示範身分在專案層級沒有任何角色"
+    if ($Member.StartsWith('deleted:', [StringComparison]::Ordinal)) { return 'other' }
+    return 'unknown'
 }
 
-function Assert-DemoIdentityEffectivelyDenied {
-    # 有效權限，不是單一政策。Policy Troubleshooter 會把密文、專案與上層資料夾／
-    # 組織的允許政策和拒絕政策一起算，也看得到群組成員資格；前兩條檢查都看不到
-    # 這些。只接受「讀不到」：UNKNOWN_* 的意思是「可能讀得到，只是看不清」，
-    # 那不是證據。
+function Assert-DemoIdentityHoldsNoProjectRole {
+    # 示範身分在專案與它的上層（資料夾、組織）都不需要任何角色：stdout 日誌由平台收、
+    # 映像由服務代理拉、密文逐把授權。這一層的任何角色都會繼承到專案裡的每一把密文
+    # ——包括正式的那幾把——而各密文自己的政策裡看不到它。所以這裡不挑角色，出現就拒絕。
+    #
+    # 「出現」包括經由群組、網域或公開主體取得。2026-09-27 覆核指出前一版只比對直接的
+    # serviceAccount 成員：示範身分若經群組取得 roles/resourcemanager.projectIamAdmin，
+    # 這一條會放行；那個角色本身讀不到密文，後面的 Troubleshooter 對四把正式密文也會
+    # 正確回答 CANNOT_ACCESS——但它可以改專案 IAM，把 secretAccessor 授給自己。
+    #
+    # 群組成員資格在這裡**證明不了**，所以不去解析：Cloud Identity 的
+    # checkTransitiveMembership 只在 Workspace／Cloud Identity 的特定方案可用，而且
+    # 只看得到呼叫者有權檢視的成員關係（「否」不等於「不是成員」）。任何證明不了
+    # 「不含示範身分」的主體，出現在專案或上層的綁定裡就拒絕，不論是什麼角色。
+    $r = Invoke-GCloudCaptured projects get-ancestors-iam-policy $ProjectId '--format=json'
+    $entries = @(ConvertFrom-GCloudJson "IAM policies of project [$ProjectId] and its ancestors" $r)
+    $sawProject = $false
+    $held = @()
+    $unprovable = @()
+    foreach ($entry in $entries) {
+        $where = "$([string]$entry.type)/$([string]$entry.id)"
+        if ($null -eq $entry.policy) {
+            throw "the ancestry listing of project [$ProjectId] has no policy for [$where]; refusing to read a missing policy as no roles"
+        }
+        if ([string]$entry.type -ceq 'project' -and [string]$entry.id -ceq $ProjectId) { $sawProject = $true }
+        foreach ($binding in @($entry.policy.bindings)) {
+            if ($null -eq $binding) { continue }
+            foreach ($member in @($binding.members)) {
+                $m = [string]$member
+                if ([string]::IsNullOrEmpty($m)) { continue }
+                $reach = Get-PrincipalReach $m
+                if ($reach -ceq 'demo') {
+                    $held += "$where $([string]$binding.role)"
+                } elseif ($reach -ceq 'unknown') {
+                    $unprovable += "$where $([string]$binding.role) <- $m"
+                }
+            }
+        }
+    }
+    if (-not $sawProject) {
+        throw "the ancestry listing did not include project [$ProjectId] itself; refusing to read an incomplete answer as no roles"
+    }
+    if ($held.Count -gt 0) {
+        throw "demo identity [$RuntimeServiceAccount] holds roles on the project or above it [$($held -join '; ')]; it needs none, and each one is inherited by every secret in the project"
+    }
+    if ($unprovable.Count -gt 0) {
+        throw "cannot prove the demo identity is outside these principals, whose roles every secret in the project inherits: [$($unprovable -join '; ')]. Group membership cannot be verified from here; remove or narrow these bindings first (docs/admin_operations.md §6)"
+    }
+    Ok "示範身分在專案與上層都沒有任何角色（$($entries.Count) 份政策；直接、群組、網域、公開主體都查過）"
+}
+
+function Get-DemoGuardedServiceAccounts([string]$ProductionIdentity) {
+    # 示範身分不得冒用的服務帳號：專案裡的每一個，加上正式執行身分（不論它在哪個專案）。
+    # 冒用任何一個都可能拿到正式密文：它本身讀得到、能改 IAM，或能以正式身分部署服務。
+    # 示範身分自己不算——冒用自己拿不到任何新權限。
+    $r = Invoke-GCloudCaptured iam service-accounts list "--project=$ProjectId" '--format=json'
+    $listed = @(ConvertFrom-GCloudJson "service accounts of project [$ProjectId]" $r)
+    $emails = @()
+    foreach ($account in $listed) {
+        $email = ([string]$account.email).Trim()
+        if ($email -notmatch '^[^@\s]+@[^@\s]+$') {
+            throw "the service account listing of project [$ProjectId] has an entry without an email; refusing to guess which account it is"
+        }
+        $emails += $email.ToLowerInvariant()
+    }
+    $emails += $ProductionIdentity.Trim().ToLowerInvariant()
+    $demo = $RuntimeServiceAccount.ToLowerInvariant()
+    return @($emails | Where-Object { $_ -cne $demo } | Sort-Object -Unique)
+}
+
+function Get-DemoEscalationChecks([string[]]$ServiceAccounts) {
+    # 每一項都是示範身分拿到正式密文的一條路：直接讀、把密文授權給自己、改專案 IAM、
+    # 冒用某個服務帳號或替它簽發憑證。只看「現在讀不讀得到」會漏掉後面三條。
+    $checks = @()
+    foreach ($name in @(Get-ProductionSecretNames)) {
+        $resource = "//secretmanager.googleapis.com/projects/$ProjectId/secrets/$name"
+        $checks += [pscustomobject]@{ Resource = $resource; Permission = 'secretmanager.versions.access'
+                                      What = "read production secret [$name]" }
+        $checks += [pscustomobject]@{ Resource = $resource; Permission = 'secretmanager.secrets.setIamPolicy'
+                                      What = "grant itself production secret [$name]" }
+    }
+    $checks += [pscustomobject]@{ Resource = "//cloudresourcemanager.googleapis.com/projects/$ProjectId"
+                                  Permission = 'resourcemanager.projects.setIamPolicy'
+                                  What = "change the IAM policy of project [$ProjectId]" }
+    foreach ($account in @($ServiceAccounts)) {
+        foreach ($permission in @('iam.serviceAccounts.actAs', 'iam.serviceAccounts.getAccessToken',
+                                  'iam.serviceAccounts.getOpenIdToken', 'iam.serviceAccounts.signBlob',
+                                  'iam.serviceAccounts.signJwt', 'iam.serviceAccounts.implicitDelegation',
+                                  'iam.serviceAccountKeys.create', 'iam.serviceAccounts.setIamPolicy')) {
+            $checks += [pscustomobject]@{ Resource = "//iam.googleapis.com/projects/-/serviceAccounts/$account"
+                                          Permission = $permission
+                                          What = "use service account [$account] ($permission)" }
+        }
+    }
+    return $checks
+}
+
+function Assert-DemoIdentityEffectivelyDenied([string]$ProductionIdentity) {
+    # 有效權限，不是單一政策。Policy Troubleshooter 會把資源、專案與上層資料夾／組織的
+    # 允許政策和拒絕政策一起算，也會展開它看得到的群組；看不到的群組回 UNKNOWN_INFO。
+    # 只接受 CANNOT_ACCESS：UNKNOWN_* 的意思是「可能可以，只是看不清」，那不是證據。
+    #
+    # 問的不只是「讀不讀得到正式密文」。2026-09-27 覆核指出：沒有讀取權的身分，只要能
+    # 改 IAM 或冒用別的服務帳號，一樣拿得到。所以也問它能不能把正式密文授權給自己、
+    # 能不能改專案 IAM，以及能不能冒用專案裡任何一個服務帳號或替它簽發憑證。
+    # 範圍：其他專案的服務帳號不在這裡；示範身分只在本專案使用（docs/admin_operations.md §6）。
     #
     # --quiet：API 若未啟用，gcloud 會停下來問要不要啟用；腳本不替你改專案設定，
     # 預設答案是否，於是直接失敗並提示佈建步驟。
     # 舊版回應只有 access 欄位；NOT_GRANTED 代表沒有任何允許政策授予，
-    # 拒絕政策只會再往下減，所以同樣足以證明讀不到。
-    foreach ($name in @(Get-ProductionSecretNames)) {
-        $resource = "//secretmanager.googleapis.com/projects/$ProjectId/secrets/$name"
-        $r = Invoke-GCloudCaptured policy-intelligence troubleshoot-policy iam $resource `
-            "--principal-email=$RuntimeServiceAccount" '--permission=secretmanager.versions.access' `
+    # 拒絕政策只會再往下減，所以同樣足以證明做不到。
+    if ([string]::IsNullOrWhiteSpace($ProductionIdentity)) {
+        throw "the production runtime identity is unknown; cannot check that the demo identity is unable to use it"
+    }
+    $guarded = @(Get-DemoGuardedServiceAccounts $ProductionIdentity)
+    $checks = @(Get-DemoEscalationChecks $guarded)
+    foreach ($check in $checks) {
+        $r = Invoke-GCloudCaptured policy-intelligence troubleshoot-policy iam $check.Resource `
+            "--principal-email=$RuntimeServiceAccount" "--permission=$($check.Permission)" `
             "--project=$ProjectId" '--quiet' '--format=json'
         if ($r.Exit -ne 0) {
             $hint = ''
             if ($r.Stderr -match 'SERVICE_DISABLED|has not been used|is disabled|not enabled') {
                 $hint = ' Enable the Policy Troubleshooter API once: gcloud services enable policytroubleshooter.googleapis.com (docs/admin_operations.md §6).'
             }
-            throw "cannot evaluate the demo identity's effective access to production secret [$name] (gcloud exit $($r.Exit)).$hint $($r.Stderr)"
+            throw "cannot evaluate whether the demo identity can $($check.What) (gcloud exit $($r.Exit)).$hint $($r.Stderr)"
         }
-        $answer = ConvertFrom-GCloudJson "effective access of the demo identity to [$name]" $r
+        $answer = ConvertFrom-GCloudJson "whether the demo identity can $($check.What)" $r
         $state = [string]$answer.overallAccessState
         if ([string]::IsNullOrEmpty($state)) { $state = [string]$answer.access }
         if ($state -cne 'CANNOT_ACCESS' -and $state -cne 'NOT_GRANTED') {
-            throw "demo identity [$RuntimeServiceAccount] is not provably denied production secret [$name]: [$state]"
+            throw "demo identity [$RuntimeServiceAccount] is not provably unable to $($check.What): [$state]"
         }
-        Ok "有效權限：示範身分讀不到正式密文 [$name]（$state）"
     }
+    Ok "有效權限：$($checks.Count) 項皆為做不到——讀或自授 $(@(Get-ProductionSecretNames).Count) 把正式密文、改專案 IAM、冒用 $($guarded.Count) 個服務帳號（$($guarded -join ', ')）"
 }
 
 function Get-DemoGitCommit {
@@ -664,7 +773,7 @@ Assert-GCloudOk "設定 gcloud project"
 $ProductionRuntimeIdentity = Assert-NotTheProductionIdentity
 Assert-DemoIdentityCannotReadProductionSecrets
 Assert-DemoIdentityHoldsNoProjectRole
-Assert-DemoIdentityEffectivelyDenied
+Assert-DemoIdentityEffectivelyDenied -ProductionIdentity $ProductionRuntimeIdentity
 Assert-DemoSecretReady
 
 $GitCommit = Get-DemoGitCommit
