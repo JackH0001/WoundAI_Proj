@@ -220,7 +220,10 @@ class Store:
     # 民眾提供的是自己的資料且有被遺忘的期待；臨床樣本背後是 IRB 與病歷。
     def delete(self, key: str) -> bool: raise NotImplementedError
     def list_keys(self, prefix: str): raise NotImplementedError
-    def describe(self) -> str: raise NotImplementedError
+    def describe(self, *, retention=None) -> str:
+        """`retention`: one retention_info() result from this same caller, or
+        None. Never a value remembered from another call -- see GcsStore."""
+        raise NotImplementedError
 
 
 def _record_name() -> str:
@@ -535,7 +538,9 @@ class LocalStore(Store):
             return []
         return ["%s/%s" % (prefix.rstrip("/"), n) for n in sorted(os.listdir(p))]
 
-    def describe(self) -> str:
+    def describe(self, *, retention=None) -> str:
+        # Local storage has no retention contract to report; the argument is
+        # accepted so every store answers the same call from /api/health.
         return "local:%s" % self.root
 
 
@@ -941,6 +946,9 @@ class GcsStore(Store):
             return self._create_chained_slot(key, seq, line)
 
     def retention_info(self) -> dict:
+        # Deliberately uncached: every call reads the bucket back. This is the
+        # gate's only evidence, and a cached answer would let a policy that was
+        # removed minutes ago still read as locked.
         if self._audit_bucket is None:
             return {"verified": False, "locked": False, "reason": "audit bucket missing"}
         try:
@@ -951,6 +959,33 @@ class GcsStore(Store):
                     "locked": policy.get("isLocked") is True}
         except Exception:
             return {"verified": False, "locked": False, "reason": "readback failed"}
+
+    @staticmethod
+    def render_retention(info) -> str:
+        """One phrase for the audit bucket's real contract.
+
+        The deployed 2026-08-23 revision said plain "WORM" for any configured
+        audit bucket. The legacy bucket has a 7-year retention period that is
+        NOT locked, so objects cannot be deleted today but the policy itself can
+        be removed with one API call and then they can. WORM promises the second
+        half, and that is the half that matters for an audit trail, so the word
+        was doing work the configuration did not support.
+
+        `info` is one retention_info() result, passed in by the caller. None
+        means the caller did not read the bucket back, and the phrase says so
+        rather than guessing.
+        """
+        if not info:
+            return "retention not read back"
+        if not info.get("verified"):
+            return "retention unknown (%s)" % (info.get("reason") or "readback failed")
+        seconds = int(info.get("retention_seconds") or 0)
+        if seconds <= 0:
+            return "no retention policy"
+        years = seconds / 31557600.0
+        if info.get("locked") is True:
+            return "WORM: retention %.1fy, LOCKED (irreversible)" % years
+        return "retention %.1fy, NOT locked (policy is revocable)" % years
 
     def require_locked_audit_epoch(self) -> None:
         """Fail closed for every direct GCS audit-chain append path."""
@@ -1006,10 +1041,24 @@ class GcsStore(Store):
         n = len(self.prefix) + 1 if self.prefix else 0
         return sorted(b.name[n:] for b in self._client.list_blobs(bname, prefix=base))
 
-    def describe(self) -> str:
+    def describe(self, *, retention=None) -> str:
+        """Where the data lives, and -- only if the caller hands one over --
+        what one readback said about the audit bucket.
+
+        The retention phrase comes from the `retention` argument and nowhere
+        else. An earlier version kept "the last readback seen" on this object
+        and rendered from it. One store object serves every request thread in
+        the worker (gunicorn runs --threads 8), so between request A's
+        retention_info() and A's describe(), request B's readback could land
+        and A's response would carry A's audit_retention beside B's verdict --
+        the same bucket described two ways in one JSON body. Reordering the two
+        calls in the caller cannot fix that; only not sharing the value can.
+        /api/health therefore reads once and passes that one result here.
+        """
         d = "gcs://%s/%s" % (self._bucket_name, self.prefix)
         if self._audit_bucket_name:
-            d += " (稽核→gcs://%s; retention must be read back)" % self._audit_bucket_name
+            d += " (稽核→gcs://%s; %s)" % (
+                self._audit_bucket_name, self.render_retention(retention))
         return d
 
 

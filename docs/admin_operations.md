@@ -188,7 +188,252 @@ $u = "https://woundai-backend-421209514056.asia-east1.run.app"
 
 ---
 
-## 6. 驗證
+## 6. 送審測試帳號（App Review 專用）
+
+Apple 審查需要一組能登入的帳號。**不要用 /console 手動建**——候選版本跑
+`WOUNDAI_STORE=local`，而 LocalStore 的根目錄在容器裡，Cloud Run 一回收執行個體
+帳號就沒了。審查員通常隔幾天才登入，那時帳號已不存在，結果就是被拒。
+
+所以送審帳號由後端在**每次冷啟動時重建**（`auth_users.seed_demo_from_env`）。
+
+### 這個出口有多窄
+
+| 關卡 | 規則 |
+|---|---|
+| 儲存層 | 必須是 LocalStore。**問物件不問環境變數**。正式服務是 gcs，種子在那裡永遠不動 |
+| 帳號名 | 必須是 `demoNN` 形狀。種不出 `admin2`，而且稽核裡一眼認得出 |
+| 角色（名單） | 只有 `nurse`／`assistant` |
+| 角色（權限） | 該角色若持有 `gt.verify`／`annotation.submit`／`user.manage`／`audit.read`／`gcp.console`／`backend.config` 任一項就**拒絕** |
+| 密碼 | 只從環境變數來。程式碼裡沒有，後端也不隨機產生 |
+| 既有帳號 | 已存在就完全不動。不覆蓋密碼，**不把停用的帳號重新啟用** |
+
+第四道是為了未來：若哪天有人給 `nurse` 加上 `gt.verify`，種子會拒絕，
+而不是安靜地把醫師背書交給外部審查員。
+
+### 為什麼是 `nurse`
+
+`physician` 帶 `gt.verify` 與 `annotation.submit`——那是 `doctor_verified`
+的唯一來源。交給外部審查員，等於讓陌生人有辦法把資料以醫師身分送進訓練集
+（`auth_users.py` 的 `lite` 角色註解記錄了同一個錯誤已經發生過一次）。
+
+`assistant` 則沒有 `flywheel.stats`，審查員一開紀錄頁就 403，看起來像 App 壞了。
+
+`nurse` 是能走完整套流程、又不帶醫師背書與任何管理權的最小角色。
+
+### 為什麼示範服務的每一把金鑰都必須是自己的
+
+正式服務驗 access token 只看簽章，**角色直接取自 token 自己的 claim，不回查帳號
+是否存在**，效期 24 小時（`app.py` 的 `JWT_ACCESS_TOKEN_EXPIRES`、`api_flywheel.py`
+的 `_who`）。所以兩個服務只要共用 JWT 簽章金鑰，審查員在示範服務登入 `demo01`
+拿到的 nurse token，送到正式服務也會被當成 nurse 接受——而 nurse 在正式服務上
+可以對任意 WD 代碼撤回或恢復同意。care receipt 的 HMAC 金鑰同理。
+
+2026-09-23 之前的示範腳本就掛著正式的三把密文（JWT、Flask、管理者密碼），而且
+通過了全部測試與 CI 閘門，因為沒有任何測試在看示範服務掛了哪些密文。那一版從未
+部署。現在示範服務用自己的四把 `woundai-demo-*` 密文，**不掛管理者密碼**
+（示範服務不需要管理者，送審帳號由開機種子建立）。
+
+另一個相關但獨立的既有問題：`/console` 停用帳號只會讓**之後的密碼登入**失敗，
+已簽發的 token 仍有效到 24 小時期滿。這是正式服務本身的行為，不在本節處理範圍。
+
+### 建立示範身分與四把密文（密碼全程不經過對話，也不進版控）
+
+PowerShell 5.1。`RNGCryptoServiceProvider` 是密碼學等級亂數。送審密碼的字元集沿用
+`api_users._gen_password`，排除 `l/1/I/O/0` 這些同形字——密碼要靠人抄寫；
+`-lt 224` 是拒絕取樣（224 = 56 × 4），少了它會有模數偏差。另外三把金鑰從頭到尾
+**不顯示**，也沒有任何人需要知道它們的值。
+
+示範身分**只**授予這四把密文的 `secretAccessor`。不要對它跑
+`provision_runtime_identity.ps1`——那會授予它正式密文，部署腳本會因此拒絕部署。
+
+```powershell
+$proj = 'woundai-jackh001'
+$sa   = "woundai-demo-run@$proj.iam.gserviceaccount.com"
+$rng  = New-Object System.Security.Cryptography.RNGCryptoServiceProvider
+function New-B64Url([int]$Bytes) {
+    $b = New-Object byte[] $Bytes
+    $rng.GetBytes($b)
+    [Convert]::ToBase64String($b).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+# 1. 示範服務自己的執行身分
+gcloud iam service-accounts create woundai-demo-run --project $proj `
+    --display-name "WoundAI demo service (App Review)"
+
+# 2. 送審密碼：人要抄寫，所以用無同形字的字元集
+$chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+$pw = ''
+while ($pw.Length -lt 24) {
+    $b = New-Object byte[] 1
+    $rng.GetBytes($b)
+    if ($b[0] -lt 224) { $pw += $chars[$b[0] % 56] }
+}
+
+# 3. 另外三把：值從不顯示
+$values = [ordered]@{
+    'woundai-demo-password'            = $pw
+    'woundai-demo-jwt-secret'          = (New-B64Url 48)
+    'woundai-demo-flask-secret'        = (New-B64Url 48)
+    'woundai-demo-care-receipt-secret' = (@{ active_kid = 'demo1'; keys = @{
+                                             demo1 = @{ secret_b64 = (New-B64Url 32) } } } |
+                                          ConvertTo-Json -Compress -Depth 5)
+}
+foreach ($name in $values.Keys) {
+    gcloud secrets create $name --replication-policy=automatic --project $proj
+    $values[$name] | gcloud secrets versions add $name --data-file=- --project $proj
+    gcloud secrets add-iam-policy-binding $name --project $proj `
+        --member "serviceAccount:$sa" --role roles/secretmanager.secretAccessor
+}
+
+$pw            # ← 讀這一次，直接填進 App Store Connect「登入資訊」，不要貼到任何對話
+Remove-Variable pw, values, rng, b
+```
+
+**關於結尾換行。** PowerShell 把字串管線給原生程式時會補一個換行（5.1 補 CRLF），
+所以上面存進去的每一把密文結尾都帶著它。這是預期中的，由程式端處理：
+`resolve_secret` 會 strip JWT／Flask 金鑰，`json.loads` 容許 care receipt JSON 結尾的
+空白，種子會去掉密碼結尾的 CR/LF（並拒絕任何其他空白或控制字元）。
+**不要把種子裡那個 `rstrip` 拿掉**——少了它，帳號密碼會以 CRLF 結尾，
+審查員照著輸入永遠登不進去。`test_demo_seed_guardrails.py` 有測試釘住這一點。
+
+### 部署示範服務
+
+用 `deploy_demo_candidate.ps1`，**不要**用 `deploy_cloudrun.ps1`。
+
+兩支腳本刻意分離。示範版跑 `WOUNDAI_STORE=local`；若它和正式版住在同一個
+Cloud Run service，任何人對那個 service 下 `update-traffic` 都可能把正式流量
+導到 local-store revision 上——服務看起來正常，但資料不再落 GCS、稽核鏈隨實例
+分叉，而且沒有任何錯誤訊息。分成兩個 service 之後這件事不是「很小心所以不會
+發生」，而是**做不到**：流量路由跨不了 service 邊界。
+
+（`deploy_cloudrun.ps1` 的 `Assert-CloudRunRevisionConfiguration` 也把
+`WOUNDAI_STORE = 'gcs'` 當不變量檢查，所以 local-store revision 出現在那個
+service 的清單裡，對正式路徑同樣是地雷。）
+
+```powershell
+cd C:\dev\WoundAI_Proj\Backend\Flask
+
+.\deploy_demo_candidate.ps1 `
+    -ProjectId woundai-jackh001 `
+    -RuntimeServiceAccount woundai-demo-run@woundai-jackh001.iam.gserviceaccount.com `
+    -DemoAuthorisationRef "<你親手寫的授權字句，要指名用途與日期>"
+```
+
+`-DemoAuthorisationRef` 會機械拒絕佔位符形狀（空白、換行、`placeholder`、
+`範本`、`填入`、`TODO`、`xxx`、太短）。這個欄位的意義是「有人想過才按下去」，
+貼樣板等於沒有授權。
+
+腳本做不到的事（機械上）：
+
+| 做不到 | 怎麼擋的 |
+|---|---|
+| 切正式流量 | 沒有任何一行程式碼呼叫 `update-traffic`，且拒絕以正式 service 為目標 |
+| 寫 GCS | 沒有 `-Bucket`／`-AuditBucket` 參數，`WOUNDAI_STORE` 寫死 local |
+| 用正式執行身分 | 部署前讀正式 service 的 SA，**讀不到就停**（權限不足、登入過期、網路中斷都算），相同就拒絕；部署後回讀示範 revision 實際跑的身分再比一次 |
+| 用正式金鑰 | 四個密文參數必須是 `woundai-demo-*` 且彼此不同；部署前讀每把正式密文的 IAM 政策，示範身分在任何綁定裡就拒絕；部署後回讀 revision 的 `secretKeyRef` |
+| 帶管理者憑證 | 不掛 `ADMIN_PASSWORD`，回讀時發現就失敗 |
+| 多實例 | `--max-instances 1` 寫死，且部署後回讀 revision 的 `maxScale` 確認 |
+| 種出醫師角色 | 角色白名單只有 `nurse`／`assistant`，後端再驗一次 |
+| 建出缺模組的映像 | 建置前把 engineering 模組複製到 `vendor/`，清單與 `deploy_cloudrun.ps1` 逐項相同（測試比對）；缺任何一個就停 |
+| 驗收沒過還說「完成」 | 部署後每一項檢查都是 `throw`，沒有一項只是警告（見下） |
+
+最後一項的單實例是**正確性需求**，不是省錢：LocalStore 的鏈完整性鎖在行程內，
+兩個實例就是兩份互不相干的資料，審查員會在連續兩次請求之間看到不同的紀錄列表。
+
+部署後的驗收依序如下，**任何一項不成立都中止，「完成」只在全部通過後才印**：
+
+1. service：最新建立的 revision 已就緒、就是這次建的那一版、100% 流量在它身上
+2. revision 回讀（不是相信 `--set-env-vars` 傳了什麼）：執行身分、Ready、
+   環境變數含 `GIT_COMMIT`、掛的密文恰好是四把示範密文、單實例
+3. `/api/health`：`healthy`，分割模型、classify、色準、端點、canonical golden
+   全部就位；`build.git_commit` 等於本機完整 SHA、`build.revision` 等於上一步
+   那一版；`store` 是 `local:`；care receipt 金鑰已設定
+4. **這個 revision 自己的**日誌裡有 `[demo-seed:ok]`，且沒有 `refused`／`error`
+
+2026-09-23 覆核 `b24a47c` 時發現前一版在這裡的缺口：建置沒有 `vendor/`
+（服務能登入、量測 503）；commit 讀成不存在的 `health.git_commit`（實際在
+`build` 底下），版本不符與找不到種子紀錄都只是黃字；正式身分讀不到時跳過比對。
+第 3 項只剩 A∪U 模型檔缺席是提醒而不中止——它刻意不在 `degraded` 裡（產品決策，
+見 `app.py`）。
+
+### 確認種子真的跑了
+
+部署腳本的第 4 項驗收已經做了這件事；這裡是手動重查的方法。
+
+種子每一種結果都會在啟動日誌印一行，開頭是 ASCII 標記——**拒絕是看得見的**，
+安靜地什麼都不做會變成審查員回報登不進去的那天才發現：
+
+| 標記 | 意思 |
+|---|---|
+| `[demo-seed:ok]` | 帳號已建立 |
+| `[demo-seed:exists]` | 帳號已存在、不覆蓋（同一容器裡 worker 重啟時會出現，正常） |
+| `[demo-seed:refused]` | 設定被拒絕，後面接原因 |
+| `[demo-seed:error]` | 例外，後面接原因 |
+
+標記用 ASCII 是因為 Windows PowerShell 5.1 會用主控台字碼頁解讀原生程式的
+輸出，後面的中文可能變成亂碼；標記本身不受影響。那一行也一定會 flush——
+Cloud Run 的 stdout 是管線，不 flush 的話它可能一直躺在緩衝區裡。
+
+**只看示範 service、只看目前這個 revision**，否則舊 revision 的成功紀錄會冒充新版：
+
+```powershell
+& {
+    $proj = 'woundai-jackh001'
+    $rev = gcloud run services describe woundai-backend-demo --region asia-east1 `
+        --project $proj --format "value(status.latestReadyRevisionName)"
+    gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=woundai-backend-demo AND resource.labels.revision_name=$rev" `
+        --project $proj --order=asc --limit=1000 --format "value(textPayload)" |
+        Select-String -CaseSensitive '\[demo-seed:'
+}
+```
+
+成功長這樣：`[demo-seed:ok] 已重建送審測試帳號 default:demo01（角色 nurse）`
+
+### ⚠ 種子解決的是「登得進去」，**不是「資料還在」**
+
+這一點務必講清楚，否則會在送審時踩到：
+
+冷啟動重建的只有**帳號**。影像、receipt、稽核鏈全部躺在同一個容器檔案系統裡，
+實例一回收就消失（[Cloud Run 檔案系統說明](https://cloud.google.com/run/docs/container-contract#file_system)）。
+所以審查員若在實例 A 完成量測，之後被導到實例 B，他的紀錄不在那裡——
+**他會看到一個空的紀錄列表，然後合理地回報「App 存不了東西」**。
+
+實務上要求：
+
+- 送審流程必須能在**單一連續工作階段**內走完，不依賴跨階段留存
+- 審查說明（App Review Notes）要明說這是示範環境、資料不留存
+- 不要把 gcsfuse ＋ 單實例當成解法：FUSE **沒有同檔多寫者鎖定**，
+  而容器本身仍是多執行緒的，多寫者會直接產生鏈分叉
+  （[官方限制](https://cloud.google.com/run/docs/configuring/services/cloud-storage-volume-mounts)）
+- 真正的資料留存要等新紀元桶，那是另一條路線
+
+### 停用不是持久的（跨冷啟動會被重建）
+
+**先前這份文件寫「種子不會把停用的帳號重新啟用」，那句話只在同一個實例上成立。**
+
+「已存在就不動」比對的是**目前這個實例的帳號檔**。實例回收後檔案是空的，
+帳號不存在，於是種子照常建立一個**啟用中**的 `demo01`。
+在 `/console` 停用只會擋住當前實例，下一次冷啟動就失效。
+
+唯一可靠的關閉方式：**把三個環境變數與密文拿掉，重新部署。**
+
+（`test_demo_seed_guardrails.py` 兩支測試分別釘住這兩種情境，
+`..._on_the_same_instance` 與 `..._cold_start_on_an_empty_store_recreates_...`。）
+
+### 送審結束後
+
+把 `WOUNDAI_DEMO_SEED_USER`／`ROLE`／`PASSWORD` 三個變數與密文拿掉，重新部署——
+這個出口就跟著消失。
+
+### 角色涵蓋範圍要反映在審查說明裡
+
+`nurse` 走得完量測與紀錄，但**沒有** `gt.verify` 與 `annotation.submit`。
+審查說明與 UI 不可宣稱「完整醫師流程均可操作」——
+審查員點得到卻做不到的按鈕，本身就是被退件的理由。
+
+---
+
+## 7. 驗證
 
 ```bash
 python engineering/phase2/test_admin_console.py   # 56 項，全通過
@@ -202,7 +447,7 @@ python engineering/phase2/test_rbac.py            # 37 項
 
 ---
 
-## 7. 效能邊界（誠實說明）
+## 8. 效能邊界（誠實說明）
 
 稽核查詢仍是 **O(n)**：每次請求都要讀完整份紀錄才能篩選與計數。
 目前的緩解有兩層，但都不是根治：
@@ -218,7 +463,7 @@ python engineering/phase2/test_rbac.py            # 37 項
 
 以目前 n=20 收案的量級（每天數十筆稽核），這一頁是即時的。
 
-## 8. 尚未做的（S2／S3）
+## 9. 尚未做的（S2／S3）
 
 - **多機構隔離**。識別碼格式 `<org>:<user>` 已經帶著 org，但目前所有人都在 `default`，
   且**沒有跨機構的資料隔離**。多院區上線前必須補（見 `rbac_design.md` §6）。
