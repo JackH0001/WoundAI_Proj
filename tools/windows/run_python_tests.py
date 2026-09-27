@@ -231,6 +231,16 @@ def main() -> int:
         test_env["GOOGLE_APPLICATION_CREDENTIALS"] = str(profile / "no-google-credentials.json")
         test_env["AWS_SHARED_CREDENTIALS_FILE"] = str(profile / "no-aws-credentials")
         test_env["AZURE_CONFIG_DIR"] = str(profile / "azure")
+        # Windows PowerShell 5.1 saves its module analysis cache on a background
+        # thread under LocalApplicationData, which it resolves through the
+        # user's shell folders -- here, a sandbox profile that has no
+        # AppData\Local. The path comes back empty and the cache is written
+        # relative to the working directory: the repository root. On 2026-09-27
+        # Microsoft/Windows/PowerShell/ModuleAnalysisCache appeared there during
+        # a test that ran PowerShell long enough for the save to fire, and the
+        # source-stability check failed the run. Name the file explicitly.
+        (profile / "PowerShell").mkdir()
+        test_env["PSModuleAnalysisCachePath"] = str(profile / "PowerShell" / "ModuleAnalysisCache")
         test_env["NO_PROXY"] = "127.0.0.1,::1"
         print(f"[{index:02d}/{len(tests):02d}] {rel}", flush=True)
         t0 = time.time()

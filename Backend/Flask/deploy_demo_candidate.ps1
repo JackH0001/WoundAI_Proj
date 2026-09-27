@@ -23,14 +23,25 @@
 #   * 不能用正式執行身分：部署前讀正式 service 目前的 SA，**讀不到就停**
 #     （不知道正式身分是誰，就不能宣稱兩者不同），相同就拒絕；部署後再回讀
 #     示範 revision 實際跑的身分，兩邊再比一次
-#   * 不能多實例：--max-instances 1 寫死
 #   * 不能用正式金鑰：JWT、Flask、care receipt 各用自己的 woundai-demo-* 密文，
 #     也不掛正式管理者密碼（見下方「金鑰」一節）
 #   * 不能在驗收沒過時說「完成」：部署後每一項檢查都是 throw，沒有一項是 Warn
 #     （見下方「驗收」一節）
 #
-# 多實例那一項是**正確性需求**，不是省錢。LocalStore 的鏈完整性鎖在行程內，
-# 兩個實例就是兩份互不相干的資料——審查員會在連續兩次請求之間看到不同的紀錄列表。
+# ## 實例上限是 1——這是上限，不是保證
+#
+# --max-instances 1 寫死，部署後也回讀 revision 的 maxScale。目的是讓第二個實例
+# 盡量不要出現，這是正確性考量，不是省錢：LocalStore 的鏈完整性鎖在行程內，
+# 兩個實例就是兩份互不相干的資料，審查員會在連續兩次請求之間看到不同的紀錄列表。
+#
+# 但 Cloud Run 不保證遵守這個上限：流量突增時可能短暫多開；上限也是按 revision
+# 各自計算，部署交接期間新舊 revision 可能同時有實例
+# （https://cloud.google.com/run/docs/configuring/max-instances-limits）。
+# 所以這支腳本能保證的只有「設定是 1」，不是「永遠只有一個實例」。登入不受影響：
+# 每個實例開機都用同一份密文重建同一個帳號，也都用同一把示範 JWT 金鑰。受影響的是
+# 資料連續性，而那本來就不承諾（見下方「解決不了的事」）。
+#
+# 2026-09-25 覆核指出，前一版把「多實例」列在「做不到的事」裡，那是超出事實的保證。
 #
 # ## 建置上下文：與正式部署同一份 vendor/
 #
@@ -45,7 +56,7 @@
 # 部署後依序確認，任何一項不成立都 throw，「完成」只在全部通過後才印：
 #   1. service：最新建立的 revision 已就緒、就是這次建的那一版、100% 流量在它身上
 #   2. revision 回讀：執行身分、Ready、單一容器、環境變數（含 GIT_COMMIT）、
-#      掛的密文恰好是四把示範密文、單實例
+#      掛的密文恰好是四把示範密文、實例上限 1
 #   3. /api/health：healthy，量測模組（分割、classify、色準、端點、canonical
 #      golden）全部就位，build.git_commit 等於本機完整 SHA，build.revision
 #      等於上面那一版，store 是 local，care receipt 金鑰已設定
@@ -66,14 +77,17 @@
 # 測試與 CI 閘門，因為沒有任何一支測試在看「示範服務掛了哪幾把密文」。
 # 現在有三層，缺一不可：
 #   1. 名稱：四個密文參數都必須是 woundai-demo-*，彼此不同，且不得是正式密文
-#   2. 身分：部署前讀每一把正式密文的 IAM 政策，示範身分出現在任何綁定裡就拒絕
+#   2. 身分：部署前讀每一把正式密文的 IAM 政策，示範身分出現在任何綁定裡就拒絕；
+#      示範身分在專案層級不得有任何角色；再用 Policy Troubleshooter 查有效權限，
+#      每一把正式密文都必須是「讀不到」（含上層繼承、群組與拒絕政策）
 #   3. 回讀：部署後讀 revision 的 secretKeyRef，任何一個指向正式密文就失敗
 # 不掛 ADMIN_PASSWORD：示範服務不需要管理者，送審帳號由開機種子建立。
 #
 # ## 這支腳本解決不了的事（請一併讀 docs/admin_operations.md §6）
 #
 # 它讓審查員**登得進去**，不保證**資料還在**。影像、receipt、稽核鏈都在容器
-# 檔案系統裡，實例回收就消失。送審流程必須能在單一連續工作階段內走完，
+# 檔案系統裡，實例回收就消失，短暫多開時也看不到另一個實例的紀錄。
+# 送審流程必須能在單一連續工作階段內走完，
 # 且 App Review Notes 要寫明這是示範環境、資料不留存。
 
 param(
@@ -324,8 +338,10 @@ function Assert-DemoIdentityCannotReadProductionSecrets {
     # 有權讀正式密文——那樣只要示範容器被攻破，正式金鑰就跟著外流。
     # 最可能的成因是拿正式的佈建腳本對示範身分跑了一次。
     #
-    # 只看得到各密文自己的 IAM 政策。專案層級授予的 secretAccessor 不在這裡，
-    # 那一層靠佈建步驟保證（docs/admin_operations.md §6：示範身分只授予四把示範密文）。
+    # 這一條只看各密文自己的政策，為的是在最常見的錯誤上給出具體訊息。它證明不了
+    # 「讀不到」：專案層級的角色會繼承到每一把密文，而那在密文自己的政策裡看不到。
+    # 有效權限由後面兩條負責——Assert-DemoIdentityHoldsNoProjectRole 與
+    # Assert-DemoIdentityEffectivelyDenied（2026-09-25 覆核指出這一層原本只寫在註解裡）。
     $member = "serviceAccount:$RuntimeServiceAccount"
     foreach ($name in @(Get-ProductionSecretNames)) {
         # JSON 只從 stdout 讀，NOT_FOUND 只從 stderr 判斷（見 Invoke-GCloudCaptured）。
@@ -345,6 +361,57 @@ function Assert-DemoIdentityCannotReadProductionSecrets {
         }
     }
     Ok "示範身分不在任何一把正式密文的 IAM 綁定裡"
+}
+
+function Assert-DemoIdentityHoldsNoProjectRole {
+    # 示範身分在專案層級不需要任何角色：stdout 日誌由平台收、映像由服務代理拉、
+    # 密文逐把授權。專案層級的任何角色都會繼承到專案裡的每一把密文——包括正式的
+    # 那幾把——而各密文自己的政策裡看不到它。所以這裡不挑角色，出現就拒絕。
+    $member = "serviceAccount:$RuntimeServiceAccount"
+    $r = Invoke-GCloudCaptured projects get-iam-policy $ProjectId '--format=json'
+    $policy = ConvertFrom-GCloudJson "IAM policy of project [$ProjectId]" $r
+    $held = @()
+    foreach ($binding in @($policy.bindings)) {
+        if ($null -ne $binding -and @($binding.members) -ccontains $member) {
+            $held += [string]$binding.role
+        }
+    }
+    if ($held.Count -gt 0) {
+        throw "demo identity [$RuntimeServiceAccount] holds project-level roles [$($held -join ', ')]; it needs none, and each one is inherited by every secret in the project"
+    }
+    Ok "示範身分在專案層級沒有任何角色"
+}
+
+function Assert-DemoIdentityEffectivelyDenied {
+    # 有效權限，不是單一政策。Policy Troubleshooter 會把密文、專案與上層資料夾／
+    # 組織的允許政策和拒絕政策一起算，也看得到群組成員資格；前兩條檢查都看不到
+    # 這些。只接受「讀不到」：UNKNOWN_* 的意思是「可能讀得到，只是看不清」，
+    # 那不是證據。
+    #
+    # --quiet：API 若未啟用，gcloud 會停下來問要不要啟用；腳本不替你改專案設定，
+    # 預設答案是否，於是直接失敗並提示佈建步驟。
+    # 舊版回應只有 access 欄位；NOT_GRANTED 代表沒有任何允許政策授予，
+    # 拒絕政策只會再往下減，所以同樣足以證明讀不到。
+    foreach ($name in @(Get-ProductionSecretNames)) {
+        $resource = "//secretmanager.googleapis.com/projects/$ProjectId/secrets/$name"
+        $r = Invoke-GCloudCaptured policy-intelligence troubleshoot-policy iam $resource `
+            "--principal-email=$RuntimeServiceAccount" '--permission=secretmanager.versions.access' `
+            "--project=$ProjectId" '--quiet' '--format=json'
+        if ($r.Exit -ne 0) {
+            $hint = ''
+            if ($r.Stderr -match 'SERVICE_DISABLED|has not been used|is disabled|not enabled') {
+                $hint = ' Enable the Policy Troubleshooter API once: gcloud services enable policytroubleshooter.googleapis.com (docs/admin_operations.md §6).'
+            }
+            throw "cannot evaluate the demo identity's effective access to production secret [$name] (gcloud exit $($r.Exit)).$hint $($r.Stderr)"
+        }
+        $answer = ConvertFrom-GCloudJson "effective access of the demo identity to [$name]" $r
+        $state = [string]$answer.overallAccessState
+        if ([string]::IsNullOrEmpty($state)) { $state = [string]$answer.access }
+        if ($state -cne 'CANNOT_ACCESS' -and $state -cne 'NOT_GRANTED') {
+            throw "demo identity [$RuntimeServiceAccount] is not provably denied production secret [$name]: [$state]"
+        }
+        Ok "有效權限：示範身分讀不到正式密文 [$name]（$state）"
+    }
 }
 
 function Get-DemoGitCommit {
@@ -493,9 +560,9 @@ function Assert-DemoRevisionConfiguration([string]$Revision, [string]$ExpectedGi
 
     $limit = [string]$rev.metadata.annotations.'autoscaling.knative.dev/maxScale'
     if ($limit -cne '1') {
-        throw "demo revision must be pinned to a single instance (maxScale=1), got [$limit]"
+        throw "demo revision must be capped at one instance (maxScale=1), got [$limit]"
     }
-    Ok "revision 設定正確：示範身分、local store、無桶、單實例、只掛四把示範密文、commit 相符"
+    Ok "revision 設定正確：示範身分、local store、無桶、實例上限 1、只掛四把示範密文、commit 相符"
 }
 
 function Assert-DemoHealth($Health, [string]$ExpectedGitCommit, [string]$ExpectedRevision) {
@@ -596,6 +663,8 @@ Assert-GCloudOk "設定 gcloud project"
 
 $ProductionRuntimeIdentity = Assert-NotTheProductionIdentity
 Assert-DemoIdentityCannotReadProductionSecrets
+Assert-DemoIdentityHoldsNoProjectRole
+Assert-DemoIdentityEffectivelyDenied
 Assert-DemoSecretReady
 
 $GitCommit = Get-DemoGitCommit
@@ -608,7 +677,7 @@ if (-not $VerifyOnly) {
     Say "複製 engineering 模組到 vendor/（與正式部署同一份清單）"
     Copy-EngineeringVendor -FlaskDir $PSScriptRoot
 
-    Say "建置並部署到示範 service（單實例、local store）"
+    Say "建置並部署到示範 service（實例上限 1、local store）"
     # --source 用腳本所在目錄，不用 `.`。從 repo 根目錄執行
     # `.\Backend\Flask\deploy_demo_candidate.ps1` 時，`.` 會是 repo 根目錄，
     # gcloud 就會把整個 repo（iOS、Android、engineering…）打包上傳。
@@ -668,4 +737,4 @@ Write-Host "  執行身分    : $RuntimeServiceAccount（正式：$ProductionRun
 Write-Host "  授權        : $DemoAuthorisationRef" -ForegroundColor Green
 Write-Host ""
 Write-Host "  下一步：把這個 URL 填進 App 設定頁與 App Store Connect。" -ForegroundColor Yellow
-Write-Host "  ⚠ 資料不留存：實例回收後影像與紀錄會消失，審查說明必須寫明。" -ForegroundColor Yellow
+Write-Host "  ⚠ 資料不留存：實例回收或短暫多開時，影像與紀錄會不見，審查說明必須寫明。" -ForegroundColor Yellow

@@ -243,8 +243,9 @@ PowerShell 5.1。`RNGCryptoServiceProvider` 是密碼學等級亂數。送審密
 `-lt 224` 是拒絕取樣（224 = 56 × 4），少了它會有模數偏差。另外三把金鑰從頭到尾
 **不顯示**，也沒有任何人需要知道它們的值。
 
-示範身分**只**授予這四把密文的 `secretAccessor`。不要對它跑
-`provision_runtime_identity.ps1`——那會授予它正式密文，部署腳本會因此拒絕部署。
+示範身分**只**授予這四把密文的 `secretAccessor`，專案層級**不給任何角色**。
+不要對它跑 `provision_runtime_identity.ps1`——那會授予它正式密文，部署腳本會因此
+拒絕部署。
 
 ```powershell
 $proj = 'woundai-jackh001'
@@ -296,6 +297,53 @@ Remove-Variable pw, values, rng, b
 **不要把種子裡那個 `rstrip` 拿掉**——少了它，帳號密碼會以 CRLF 結尾，
 審查員照著輸入永遠登不進去。`test_demo_seed_guardrails.py` 有測試釘住這一點。
 
+### 驗證示範身分的「有效」權限
+
+上面只保證「我們授予了什麼」，不保證「它實際能讀什麼」。專案、資料夾、組織層級的
+角色會繼承到每一把密文，群組成員資格與拒絕政策也會改變結果，而這些都不會出現在
+單一密文自己的政策裡——**某把密文上沒有直接授權，不足以證明示範身分讀不到它**
+（[IAM 繼承說明](https://cloud.google.com/iam/docs/resource-hierarchy-access-control)）。
+
+所以佈建完要查兩件事：示範身分在專案層級沒有任何角色；用 Policy Troubleshooter
+（會一併計算上層繼承與拒絕政策）確認四把正式密文都是 `CANNOT_ACCESS`、
+四把示範密文都是 `CAN_ACCESS`。部署腳本每次部署前也會重查前兩項，任何一把正式密文
+不是 `CANNOT_ACCESS`（包括 `UNKNOWN_*`）就拒絕部署。
+
+```powershell
+& {
+    $proj = 'woundai-jackh001'
+    $sa   = "woundai-demo-run@$proj.iam.gserviceaccount.com"
+
+    # Policy Troubleshooter API：一次性的專案設定，部署腳本不會替你打開它
+    gcloud services enable policytroubleshooter.googleapis.com --project $proj
+
+    $held = @((gcloud projects get-iam-policy $proj --format=json | ConvertFrom-Json).bindings |
+        Where-Object { @($_.members) -contains "serviceAccount:$sa" } | ForEach-Object { $_.role })
+    "專案層級角色：$($held.Count) 個（應為 0）$($held -join ', ')"
+
+    $expect = [ordered]@{
+        'woundai-admin-password'           = 'CANNOT_ACCESS'
+        'woundai-jwt-secret'               = 'CANNOT_ACCESS'
+        'woundai-flask-secret'             = 'CANNOT_ACCESS'
+        'woundai-care-receipt-secret'      = 'CANNOT_ACCESS'
+        'woundai-demo-password'            = 'CAN_ACCESS'
+        'woundai-demo-jwt-secret'          = 'CAN_ACCESS'
+        'woundai-demo-flask-secret'        = 'CAN_ACCESS'
+        'woundai-demo-care-receipt-secret' = 'CAN_ACCESS'
+    }
+    foreach ($name in $expect.Keys) {
+        $got = (gcloud policy-intelligence troubleshoot-policy iam `
+            "//secretmanager.googleapis.com/projects/$proj/secrets/$name" `
+            "--principal-email=$sa" --permission=secretmanager.versions.access `
+            --project $proj --quiet --format=json | ConvertFrom-Json).overallAccessState
+        $mark = if ($got -eq $expect[$name]) { 'OK  ' } else { '不符' }
+        "$mark $name：$got（應為 $($expect[$name])）"
+    }
+}
+```
+
+任何一行是「不符」或專案層級角色不是 0，就先停下來處理，不要部署。
+
 ### 部署示範服務
 
 用 `deploy_demo_candidate.ps1`，**不要**用 `deploy_cloudrun.ps1`。
@@ -330,21 +378,27 @@ cd C:\dev\WoundAI_Proj\Backend\Flask
 | 切正式流量 | 沒有任何一行程式碼呼叫 `update-traffic`，且拒絕以正式 service 為目標 |
 | 寫 GCS | 沒有 `-Bucket`／`-AuditBucket` 參數，`WOUNDAI_STORE` 寫死 local |
 | 用正式執行身分 | 部署前讀正式 service 的 SA，**讀不到就停**（權限不足、登入過期、網路中斷都算），相同就拒絕；部署後回讀示範 revision 實際跑的身分再比一次 |
-| 用正式金鑰 | 四個密文參數必須是 `woundai-demo-*` 且彼此不同；部署前讀每把正式密文的 IAM 政策，示範身分在任何綁定裡就拒絕；部署後回讀 revision 的 `secretKeyRef` |
+| 用正式金鑰 | 四個密文參數必須是 `woundai-demo-*` 且彼此不同；部署前讀每把正式密文的 IAM 政策，示範身分在任何綁定裡就拒絕；示範身分在專案層級有任何角色就拒絕；以 Policy Troubleshooter 查有效權限，任何一把正式密文不是 `CANNOT_ACCESS` 就拒絕；部署後回讀 revision 的 `secretKeyRef` |
 | 帶管理者憑證 | 不掛 `ADMIN_PASSWORD`，回讀時發現就失敗 |
-| 多實例 | `--max-instances 1` 寫死，且部署後回讀 revision 的 `maxScale` 確認 |
 | 種出醫師角色 | 角色白名單只有 `nurse`／`assistant`，後端再驗一次 |
 | 建出缺模組的映像 | 建置前把 engineering 模組複製到 `vendor/`，清單與 `deploy_cloudrun.ps1` 逐項相同（測試比對）；缺任何一個就停 |
 | 驗收沒過還說「完成」 | 部署後每一項檢查都是 `throw`，沒有一項只是警告（見下） |
 
-最後一項的單實例是**正確性需求**，不是省錢：LocalStore 的鏈完整性鎖在行程內，
-兩個實例就是兩份互不相干的資料，審查員會在連續兩次請求之間看到不同的紀錄列表。
+**實例上限是 1，但這是上限，不是保證。** `--max-instances 1` 寫死，部署後也回讀
+revision 的 `maxScale`。目的是讓第二個實例盡量不要出現，這是正確性考量，不是省錢：
+LocalStore 的鏈完整性鎖在行程內，兩個實例就是兩份互不相干的資料。但 Cloud Run
+在流量突增時可能短暫超過上限，而且上限按 revision 各自計算，部署交接期間新舊
+revision 可能同時有實例（[Cloud Run 說明](https://cloud.google.com/run/docs/configuring/max-instances-limits)）。
+所以腳本能保證的只有「設定是 1」。登入不受影響——每個實例開機都用同一份密文重建
+同一個帳號、用同一把示範 JWT 金鑰；受影響的是資料連續性，而那本來就不承諾
+（見下方「種子解決的是登得進去」）。前一版把「多實例」列在上表的「做不到」裡，
+2026-09-25 覆核指出那是超出事實的保證。
 
 部署後的驗收依序如下，**任何一項不成立都中止，「完成」只在全部通過後才印**：
 
 1. service：最新建立的 revision 已就緒、就是這次建的那一版、100% 流量在它身上
 2. revision 回讀（不是相信 `--set-env-vars` 傳了什麼）：執行身分、Ready、
-   環境變數含 `GIT_COMMIT`、掛的密文恰好是四把示範密文、單實例
+   環境變數含 `GIT_COMMIT`、掛的密文恰好是四把示範密文、實例上限 1
 3. `/api/health`：`healthy`，分割模型、classify、色準、端點、canonical golden
    全部就位；`build.git_commit` 等於本機完整 SHA、`build.revision` 等於上一步
    那一版；`store` 是 `local:`；care receipt 金鑰已設定

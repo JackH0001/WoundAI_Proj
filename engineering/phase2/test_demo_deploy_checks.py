@@ -68,6 +68,8 @@ FAKE_GCLOUD = r'''
 import hashlib, json, os, sys
 scenario = json.loads(os.environ["WOUNDAI_FAKE_SCENARIO"])
 key = " ".join(a for a in sys.argv[1:] if not a.startswith("--"))
+with open(os.path.join(os.environ["WOUNDAI_FAKE_STATE"], "calls.jsonl"), "a") as log:
+    log.write(json.dumps(sys.argv[1:]) + "\n")
 matches = [p for p in scenario if key == p or key.startswith(p + " ")]
 if not matches:
     sys.stderr.write("ERROR: fake gcloud has no reply for [%s]\n" % key)
@@ -101,6 +103,7 @@ foreach ($name in @('Ok', 'Warn', 'Invoke-GCloudCaptured', 'ConvertFrom-GCloudJs
                     'Get-EngineeringVendorFiles', 'Copy-EngineeringVendor',
                     'Assert-NotTheProductionIdentity',
                     'Assert-DemoIdentityCannotReadProductionSecrets',
+                    'Assert-DemoIdentityHoldsNoProjectRole', 'Assert-DemoIdentityEffectivelyDenied',
                     'Assert-DemoServiceState', 'Assert-DemoRevisionConfiguration',
                     'Assert-DemoSecretReady', 'Assert-DemoHealth', 'Assert-DemoSeedLogged')) {
     $node = $ast.Find({param($n)
@@ -138,6 +141,8 @@ foreach ($c in $cases) {
         switch ([string]$c.fn) {
             'prod-identity' { $detail = [string](Assert-NotTheProductionIdentity) }
             'identity' { Assert-DemoIdentityCannotReadProductionSecrets | Out-Null }
+            'projroles' { Assert-DemoIdentityHoldsNoProjectRole | Out-Null }
+            'effective' { Assert-DemoIdentityEffectivelyDenied | Out-Null }
             'service'  {
                 $s = Assert-DemoServiceState -ExpectedRevision ([string]$c.expected_revision)
                 $detail = "$($s.Revision) $($s.Url)"
@@ -176,6 +181,33 @@ def policy(*members):
 def clean_identity(**overrides):
     s = {"secrets get-iam-policy %s" % n: policy("serviceAccount:" + PROD_SA)
          for n in PRODUCTION}
+    s.update(overrides)
+    return s
+
+
+def project_policy(*bindings):
+    """bindings: (role, [members], condition-or-None)."""
+    doc = {"bindings": [dict({"role": r, "members": list(m)}, **({"condition": c} if c else {}))
+                        for r, m, c in bindings], "etag": "BwY", "version": 3}
+    return {"projects get-iam-policy woundai-jackh001": {"stdout": json.dumps(doc)}}
+
+
+CLEAN_PROJECT = (("roles/owner", ["user:jack.hou@gmail.com"], None),
+                 ("roles/run.invoker", ["serviceAccount:" + PROD_SA], None),
+                 ("roles/logging.logWriter", ["serviceAccount:" + PROD_SA], None))
+
+
+def troubleshoot(states=None, **overrides):
+    """One Policy Troubleshooter answer per production secret."""
+    states = dict.fromkeys(PRODUCTION, "CANNOT_ACCESS") if states is None else states
+    s = {}
+    for name in PRODUCTION:
+        key = ("policy-intelligence troubleshoot-policy iam "
+               "//secretmanager.googleapis.com/projects/woundai-jackh001/secrets/" + name)
+        state = states.get(name, "CANNOT_ACCESS")
+        s[key] = state if isinstance(state, dict) else {"stdout": json.dumps({
+            "accessTuple": {"principal": DEMO_SA, "permission": "secretmanager.versions.access"},
+            "overallAccessState": state})}
     s.update(overrides)
     return s
 
@@ -322,6 +354,56 @@ CASES = {
     "identity_no_bindings": ("identity", DEMO_SA, clean_identity(**{
         "secrets get-iam-policy woundai-jwt-secret": {"stdout": '{"etag": "ACAB"}'}}), None),
 
+    # -- no project-level role: it would be inherited by every secret --
+    "projroles_clean": ("projroles", DEMO_SA, project_policy(*CLEAN_PROJECT), None),
+    "projroles_viewer": ("projroles", DEMO_SA, project_policy(
+        *CLEAN_PROJECT, ("roles/viewer", ["serviceAccount:" + DEMO_SA], None)),
+        "holds project-level roles [roles/viewer]"),
+    "projroles_secret_accessor": ("projroles", DEMO_SA, project_policy(
+        *CLEAN_PROJECT, ("roles/secretmanager.secretAccessor",
+                         ["user:jack.hou@gmail.com", "serviceAccount:" + DEMO_SA], None)),
+        "roles/secretmanager.secretAccessor"),
+    "projroles_conditional_binding_still_counts": ("projroles", DEMO_SA, project_policy(
+        *CLEAN_PROJECT, ("roles/editor", ["serviceAccount:" + DEMO_SA],
+                         {"title": "until review", "expression": "request.time < timestamp('2026-12-31T00:00:00Z')"})),
+        "holds project-level roles [roles/editor]"),
+    "projroles_lookalike_member_is_not_a_match": ("projroles", DEMO_SA, project_policy(
+        *CLEAN_PROJECT, ("roles/viewer", ["serviceAccount:x" + DEMO_SA, "group:" + DEMO_SA], None)),
+        None),
+    "projroles_unreadable": ("projroles", DEMO_SA, {"projects get-iam-policy woundai-jackh001": {
+        "exit": 1, "stderr": "ERROR: (gcloud.projects.get-iam-policy) PERMISSION_DENIED\n"}},
+        "cannot read IAM policy of project [woundai-jackh001]"),
+
+    # -- effective access, as the Policy Troubleshooter evaluates it --
+    "effective_all_denied": ("effective", DEMO_SA, troubleshoot(), None),
+    "effective_one_granted": ("effective", DEMO_SA, troubleshoot(
+        {"woundai-jwt-secret": "CAN_ACCESS"}),
+        "is not provably denied production secret [woundai-jwt-secret]: [CAN_ACCESS]"),
+    "effective_unknown_info_is_not_evidence": ("effective", DEMO_SA, troubleshoot(
+        {"woundai-flask-secret": "UNKNOWN_INFO"}), "[UNKNOWN_INFO]"),
+    "effective_unknown_conditional_is_not_evidence": ("effective", DEMO_SA, troubleshoot(
+        {"woundai-care-receipt-secret": "UNKNOWN_CONDITIONAL"}), "[UNKNOWN_CONDITIONAL]"),
+    "effective_v1_not_granted_is_evidence": ("effective", DEMO_SA, troubleshoot(
+        dict.fromkeys(PRODUCTION, {"stdout": json.dumps({"access": "NOT_GRANTED"})})), None),
+    "effective_v1_granted": ("effective", DEMO_SA, troubleshoot(
+        {"woundai-admin-password": {"stdout": json.dumps({"access": "GRANTED"})}}),
+        "production secret [woundai-admin-password]: [GRANTED]"),
+    "effective_missing_verdict": ("effective", DEMO_SA, troubleshoot(
+        {"woundai-jwt-secret": {"stdout": json.dumps({"accessTuple": {}})}}),
+        "production secret [woundai-jwt-secret]: []"),
+    "effective_api_disabled_points_at_provisioning": ("effective", DEMO_SA, troubleshoot(
+        {"woundai-admin-password": {"exit": 1, "stderr":
+            "ERROR: (gcloud.policy-intelligence.troubleshoot-policy.iam) PERMISSION_DENIED: "
+            "Policy Troubleshooter API has not been used in project 421209514056 before or it "
+            "is disabled. reason: SERVICE_DISABLED\n"}}),
+        "gcloud services enable policytroubleshooter.googleapis.com"),
+    "effective_other_failure_refuses": ("effective", DEMO_SA, troubleshoot(
+        {"woundai-flask-secret": {"exit": 1, "stderr": "ERROR: network unreachable\n"}}),
+        "cannot evaluate the demo identity's effective access to production secret [woundai-flask-secret]"),
+    "effective_stderr_noise_is_fine": ("effective", DEMO_SA, troubleshoot(
+        {"woundai-jwt-secret": {"stdout": json.dumps({"overallAccessState": "CANNOT_ACCESS"}),
+                                "stderr": "WARNING: a newer gcloud is available.\n"}}), None),
+
     # -- the service is serving the revision this run built --
     "service_clean": ("service", DEMO_SA, demo_service(), None),
     "service_new_revision_not_ready": ("service", DEMO_SA,
@@ -395,7 +477,7 @@ CASES = {
     "revision_on_gcs": ("revision", DEMO_SA,
         revision(env={"WOUNDAI_STORE": "gcs"}), "WOUNDAI_STORE=local"),
     "revision_two_instances": ("revision", DEMO_SA, revision(max_scale="3"),
-        "single instance"),
+        "capped at one instance"),
     "revision_unreadable": ("revision", DEMO_SA, {"run revisions describe": {
         "exit": 1, "stderr": "ERROR: NOT_FOUND\n"}}, "cannot read demo revision"),
 
@@ -476,6 +558,20 @@ CASES = {
 }
 
 
+def untracked_in_repo():
+    """Untracked, non-ignored files in the working tree, or None without git."""
+    try:
+        out = subprocess.run(
+            ["git", "-c", "safe.directory=" + ROOT.as_posix(), "--no-optional-locks",
+             "-C", str(ROOT), "ls-files", "--others", "--exclude-standard", "-z"],
+            capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    return set(filter(None, out.stdout.decode("utf-8", "replace").split("\0")))
+
+
 def vendor_layout(root: Path, name: str, skip=(), stale=None):
     """A repo-shaped tree: <name>/Backend/Flask and <name>/engineering/..."""
     base = root / name
@@ -509,6 +605,8 @@ class DemoDeployChecksAgainstFakeGcloud(unittest.TestCase):
         cases = dict(CASES)
         cls.layouts = {}
         cls.results = {}
+        cls.states = {}
+        cls.untracked_before = untracked_in_repo()
         for shell_index, shell in enumerate(SHELLS):
             root = tmp / ("vendor-%d" % shell_index)
             layouts = {
@@ -541,15 +639,21 @@ class DemoDeployChecksAgainstFakeGcloud(unittest.TestCase):
             case_file.write_text(json.dumps(payload), encoding="utf-8")
             state = tmp / ("state-%d" % shell_index)
             state.mkdir()
+            cls.states[shell] = state
             env = os.environ.copy()
             env.update({"WOUNDAI_DEMO_CHECK_SOURCE": str(DEMO),
                         "WOUNDAI_DEMO_CHECK_CASES": str(case_file),
                         "WOUNDAI_DEMO_CHECK_STATE": str(state),
                         "WOUNDAI_FAKE_PYTHON": sys.executable,
-                        "WOUNDAI_FAKE_GCLOUD": str(fake)})
+                        "WOUNDAI_FAKE_GCLOUD": str(fake),
+                        # Windows PowerShell 5.1 writes this cache on a background
+                        # thread; under the validation runner's sandbox profile it
+                        # resolved to a relative path and landed in the repository
+                        # (2026-09-27). Keep it, and the working directory, here.
+                        "PSModuleAnalysisCachePath": str(tmp / ("ModuleAnalysisCache-%d" % shell_index))})
             proc = subprocess.run(
                 [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                 "-File", str(harness)], env=env, capture_output=True, text=True,
+                 "-File", str(harness)], env=env, cwd=str(tmp), capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=300)
             seen = {}
             for line in proc.stdout.splitlines():
@@ -558,9 +662,18 @@ class DemoDeployChecksAgainstFakeGcloud(unittest.TestCase):
                     seen[parts[1]] = " ".join(parts[2:])
             cls.results[shell] = (proc, seen, shell_cases)
 
+        cls.untracked_after = untracked_in_repo()
+
     @classmethod
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_the_harness_leaves_the_repository_untouched(self):
+        # The validation runner fails a run whose source changed, but cannot
+        # say which test changed it. This one can.
+        if self.untracked_before is None or self.untracked_after is None:
+            self.skipTest("not a git work tree")
+        self.assertEqual(sorted(self.untracked_after - self.untracked_before), [])
 
     def test_every_case_ran_in_every_shell(self):
         for shell, (proc, seen, cases) in self.results.items():
@@ -578,6 +691,23 @@ class DemoDeployChecksAgainstFakeGcloud(unittest.TestCase):
                     else:
                         self.assertTrue(got.startswith("REJECT "), got)
                         self.assertIn(expected, got)
+
+    def test_the_troubleshooter_is_asked_about_the_right_principal_and_permission(self):
+        # The fake's routing key ignores --flags, so read what was actually sent.
+        for shell, (_proc, _seen, _cases) in self.results.items():
+            with self.subTest(shell=shell):
+                calls = [json.loads(l) for l in (Path(self.states[shell]) / "effective_all_denied" /
+                                                 "calls.jsonl").read_text().splitlines()]
+                self.assertEqual(len(calls), len(PRODUCTION))
+                for argv in calls:
+                    self.assertIn("--principal-email=" + DEMO_SA, argv)
+                    self.assertIn("--permission=secretmanager.versions.access", argv)
+                    self.assertIn("--quiet", argv, "without --quiet gcloud may stop to ask about enabling an API")
+                    self.assertIn("--format=json", argv)
+                resources = sorted(argv[3] for argv in calls)
+                self.assertEqual(resources, sorted(
+                    "//secretmanager.googleapis.com/projects/woundai-jackh001/secrets/" + n
+                    for n in PRODUCTION))
 
     def test_the_production_identity_is_returned_for_the_read_back(self):
         for shell, (_proc, seen, _cases) in self.results.items():

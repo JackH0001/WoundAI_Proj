@@ -105,15 +105,34 @@ class DemoPathCannotTouchProduction(unittest.TestCase):
         self.assertIn("demo revision must run WOUNDAI_STORE=local", code)
         self.assertIn("demo revision carries", code)
 
-    def test_the_single_instance_pin_is_enforced_and_read_back(self):
+    def test_the_instance_cap_is_set_and_read_back(self):
         # LocalStore's chain-integrity lock is in-process. Two instances are two
         # unrelated datasets, and a reviewer would see the record list change
-        # between consecutive requests. This is correctness, not cost control.
+        # between consecutive requests. The cap keeps that rare; it cannot rule
+        # it out (see the next test). This is correctness, not cost control.
         code = code_only(text(DEMO))
         self.assertIn("--max-instances 1", code)
         self.assertIn("autoscaling.knative.dev/maxScale", code)
         self.assertIn("if ($limit -cne '1') {", code)
-        self.assertIn("demo revision must be pinned to a single instance", code)
+        self.assertIn("demo revision must be capped at one instance", code)
+
+    def test_the_instance_cap_is_not_sold_as_a_guarantee(self):
+        """Reported by the review partner on 2026-09-25.
+
+        Cloud Run may briefly run more instances than max-instances during a
+        traffic surge, and the limit is per revision, so a rollout can overlap
+        old and new instances. The previous text listed "multiple instances"
+        among the things the script makes impossible, and promised a
+        continuous LocalStore on that basis. Setting the cap is provable;
+        a single instance is not.
+        """
+        doc = text(ROOT / "docs" / "admin_operations.md")
+        for name, src in (("deploy_demo_candidate.ps1", text(DEMO)), ("admin_operations.md", doc)):
+            with self.subTest(file=name):
+                self.assertNotIn("不能多實例", src)
+                self.assertIn("不是保證", src)
+                self.assertIn("max-instances-limits", src)
+        self.assertNotIn("| 多實例 |", doc, "the cap is back in the table of impossibilities")
 
     def test_the_build_source_does_not_depend_on_where_it_was_run_from(self):
         # `--source .` uploads whatever directory the operator happens to be in.
@@ -250,8 +269,38 @@ class DemoKeysAreNotProductionKeys(unittest.TestCase):
 
     def test_the_identity_check_runs_before_anything_is_deployed(self):
         code = code_only(text(DEMO))
-        call = code.index("\nAssert-DemoIdentityCannotReadProductionSecrets\n")
-        self.assertLess(call, code.index("Invoke-GCloud run deploy"))
+        deploy = code.index("Invoke-GCloud run deploy")
+        for check in ("\nAssert-DemoIdentityCannotReadProductionSecrets\n",
+                      "\nAssert-DemoIdentityHoldsNoProjectRole\n",
+                      "\nAssert-DemoIdentityEffectivelyDenied\n"):
+            with self.subTest(check=check.strip()):
+                self.assertEqual(code.count(check), 1)
+                self.assertLess(code.index(check), deploy)
+
+    def test_the_effective_access_check_cannot_be_talked_round(self):
+        """Reported by the review partner on 2026-09-25: no direct grant on one
+        secret does not prove the demo identity cannot read it. Project-level
+        roles are inherited by every secret, and groups and deny policies only
+        show up in an effective-access evaluation."""
+        code = code_only(text(DEMO))
+        roles = function_body(code, "Assert-DemoIdentityHoldsNoProjectRole")
+        self.assertIn("projects get-iam-policy $ProjectId", roles)
+        self.assertIn("if ($held.Count -gt 0) {", roles)
+        eff = function_body(code, "Assert-DemoIdentityEffectivelyDenied")
+        for piece in ('"//secretmanager.googleapis.com/projects/$ProjectId/secrets/$name"',
+                      "policy-intelligence troubleshoot-policy iam $resource",
+                      '"--principal-email=$RuntimeServiceAccount"',
+                      "'--permission=secretmanager.versions.access'",
+                      "'--quiet'",
+                      "foreach ($name in @(Get-ProductionSecretNames)) {",
+                      "if ($state -cne 'CANNOT_ACCESS' -and $state -cne 'NOT_GRANTED') {"):
+            with self.subTest(piece=piece):
+                self.assertIn(piece, eff)
+        # Nothing UNKNOWN_* may be waved through, and the script never turns
+        # the API on by itself.
+        self.assertNotIn("UNKNOWN", eff.replace("UNKNOWN_*", ""))
+        self.assertNotIn("services enable", code.replace(
+            "gcloud services enable policytroubleshooter.googleapis.com (docs", ""))
 
     def test_the_read_back_conditions_are_present(self):
         # Conditions, not messages: replacing a condition with $false leaves
@@ -396,7 +445,8 @@ class DemoAcceptanceGateCannotBeWavedThrough(unittest.TestCase):
         self.assertIn("au_ensemble_files_present", context)
         for fn in ("Assert-DemoServiceState", "Assert-DemoRevisionConfiguration",
                    "Assert-DemoHealth", "Assert-NotTheProductionIdentity",
-                   "ConvertFrom-GCloudJson"):
+                   "ConvertFrom-GCloudJson", "Assert-DemoIdentityHoldsNoProjectRole",
+                   "Assert-DemoIdentityEffectivelyDenied"):
             with self.subTest(fn=fn):
                 self.assertNotRegex(function_body(code_only(text(DEMO)), fn), r"\bWarn\b")
 
