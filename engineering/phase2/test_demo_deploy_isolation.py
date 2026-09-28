@@ -331,14 +331,74 @@ class DemoKeysAreNotProductionKeys(unittest.TestCase):
                       "'iam.serviceAccounts.getOpenIdToken'", "'iam.serviceAccounts.signBlob'",
                       "'iam.serviceAccounts.signJwt'", "'iam.serviceAccounts.implicitDelegation'",
                       "'iam.serviceAccountKeys.create'", "'iam.serviceAccounts.setIamPolicy'",
-                      "foreach ($name in @(Get-ProductionSecretNames)) {"):
+                      "foreach ($name in @($Secrets)) {"):
             with self.subTest(piece=piece):
                 self.assertIn(piece, checks)
         accounts = function_body(code, "Get-DemoGuardedServiceAccounts")
-        for piece in ("iam service-accounts list", "$emails += $ProductionIdentity",
+        for piece in ("projects describe $ProjectId", "iam service-accounts list",
+                      "projects get-ancestors-iam-policy $ProjectId",
+                      "foreach ($name in @(Get-ProductionSecretNames)) {",
+                      "secrets get-iam-policy $name", "Get-ServiceAccountsInPolicy",
+                      "if ($r.Exit -ne 0 -and $r.Stderr -match 'NOT_FOUND') { $missing += $name; continue }",
+                      "$present += $name",
+                      "Secrets        = @($present)",
+                      "@($ProductionIdentity.Trim().ToLowerInvariant())",
+                      "if ($listed -ccontains $email) { continue }",
+                      "if (Test-ThisProjectServiceAgent $email $number) { $agents += $email; continue }",
+                      "$guarded += $email",
                       "Where-Object { $_ -cne $demo }"):
             with self.subTest(piece=piece):
                 self.assertIn(piece, accounts)
+        # Only a production secret that answered NOT_FOUND is left out of the
+        # questions; every one that exists is asked about.
+        eff = function_body(code, "Assert-DemoIdentityEffectivelyDenied")
+        self.assertIn("Get-DemoEscalationChecks -Secrets @($accounts.Secrets) -ServiceAccounts $guarded",
+                      eff)
+
+    def test_only_this_projects_google_service_agents_go_unasked(self):
+        """Reported by the review partner on 2026-09-27 against ea82c57: an
+        account from another project named in a protecting policy was never
+        asked about. Everything a policy names is asked now, except this
+        project's Google accounts, which no customer can grant anything on --
+        recognised by whole email against a reviewed list of Google domains,
+        because any project can create an account named service-<our number>."""
+        code = code_only(text(DEMO))
+        agent = function_body(code, "Test-ThisProjectServiceAgent")
+        for piece in ("foreach ($domain in @(Get-GoogleServiceAgentDomains)) {",
+                      'if ($Email -ceq "service-$ProjectNumber@$domain") { return $true }',
+                      '$Email -ceq "$ProjectNumber@cloudservices.gserviceaccount.com"',
+                      '$Email -ceq "$ProjectNumber@cloudbuild.gserviceaccount.com"'):
+            with self.subTest(piece=piece):
+                self.assertIn(piece, agent)
+        # Whole-email, case-sensitive equality only: no wildcard, pattern,
+        # prefix, suffix or substring test could widen what goes unasked.
+        operators = set(re.findall(r"(?<![\w-])-([a-z]+)\b", agent))
+        self.assertLessEqual(operators, {"ceq", "or"}, operators)
+        self.assertNotRegex(agent, r"\.(StartsWith|EndsWith|Contains|IndexOf|Substring|Split)\(")
+        found = function_body(code, "Get-ServiceAccountsInPolicy")
+        self.assertIn("if ($m.StartsWith('serviceAccount:', [StringComparison]::Ordinal)) {", found)
+
+    def test_the_service_agent_domains_are_a_reviewed_list(self):
+        domains = service_agent_domains(code_only(text(DEMO)))
+        self.assertEqual(domains, sorted(set(domains)))
+        self.assertEqual(len(domains), 6, domains)
+        for domain in domains:
+            with self.subTest(domain=domain):
+                # A Google project's own account domain, spelled out whole.
+                self.assertRegex(domain, r"^[a-z][a-z0-9-]+\.iam\.gserviceaccount\.com$")
+                self.assertNotIn("woundai", domain)
+        # The manual verification recognises exactly the same accounts, and the
+        # prose lists each domain with the documentation it was checked against.
+        section = text(ROOT / "docs" / "admin_operations.md")
+        section = section[section.index("### 驗證示範身分的「有效」權限"):section.index("### 部署示範服務")]
+        block = re.findall(r"```powershell\n(.*?)```", section, re.S)[0]
+        listed = re.search(r"\$agentDomains = (.*?)\n\n", block, re.S)
+        self.assertIsNotNone(listed)
+        self.assertEqual(sorted(re.findall(r"'([a-z0-9.-]+)'", listed.group(1))), domains)
+        prose = section[:section.index("```powershell")]
+        for domain in domains:
+            with self.subTest(prose=domain):
+                self.assertIn("`%s`" % domain, prose)
 
     def test_the_manual_verification_asks_the_same_questions(self):
         # The block an operator runs after provisioning, not the prose around
@@ -354,6 +414,11 @@ class DemoKeysAreNotProductionKeys(unittest.TestCase):
         asked = set(re.findall(r"'((?:secretmanager|resourcemanager|iam)\.[A-Za-z.]+)'", script))
         self.assertEqual(len(asked), 11, sorted(asked))
         for piece in sorted(asked) + ["get-ancestors-iam-policy", "iam service-accounts list",
+                                      "secrets get-iam-policy", "projectNumber",
+                                      "cloudservices.gserviceaccount.com",
+                                      "cloudbuild.gserviceaccount.com",
+                                      "-match 'NOT_FOUND'", "foreach ($n in $present) {",
+                                      "$agentEmails -ccontains $_",
                                       "'CAN_ACCESS'", "'CANNOT_ACCESS'"]:
             with self.subTest(piece=piece):
                 self.assertIn(piece, block)
@@ -365,10 +430,14 @@ class DemoKeysAreNotProductionKeys(unittest.TestCase):
         for cond in ("if ($production -ccontains $refs[$envName]) {",
                      "if ($refs.ContainsKey('ADMIN_PASSWORD')) {",
                      "if ($refs[$envName] -cne $map[$envName]) {",
-                     "if ($production -ccontains $name) {",
-                     "if ($null -ne $binding -and @($binding.members) -ccontains $member) {"):
+                     "if ($production -ccontains $name) {"):
             with self.subTest(cond=cond):
                 self.assertIn(cond, code)
+        secrets = function_body(code, "Assert-DemoIdentityCannotReadProductionSecrets")
+        for cond in ("if ($reach -ceq 'demo') {", "} elseif ($reach -ceq 'unknown') {",
+                     "if ($unprovable.Count -gt 0) {"):
+            with self.subTest(cond=cond):
+                self.assertIn(cond, secrets)
 
     def test_the_care_keyring_is_confirmed_live_after_deploy(self):
         # Without its own keyring the demo answers 503 on the consent path,
@@ -381,6 +450,14 @@ def function_body(code: str, name: str) -> str:
     if body is None:
         raise AssertionError("%s not found" % name)
     return body.group(1)
+
+
+def service_agent_domains(code: str) -> list:
+    """Get-GoogleServiceAgentDomains, which must be nothing but a literal list."""
+    body = function_body(code, "Get-GoogleServiceAgentDomains")
+    if not re.fullmatch(r"\s*return @\(\s*(?:'[^']*'\s*,\s*)*'[^']*'\s*\)\s*", body):
+        raise AssertionError("Get-GoogleServiceAgentDomains is not a literal list: %r" % body)
+    return sorted(re.findall(r"'([^']*)'", body))
 
 
 def main_flow(code: str) -> str:
@@ -503,7 +580,10 @@ class DemoAcceptanceGateCannotBeWavedThrough(unittest.TestCase):
                    "Assert-DemoHealth", "Assert-NotTheProductionIdentity",
                    "ConvertFrom-GCloudJson", "Assert-DemoIdentityHoldsNoProjectRole",
                    "Assert-DemoIdentityEffectivelyDenied", "Get-PrincipalReach",
-                   "Get-DemoGuardedServiceAccounts", "Get-DemoEscalationChecks"):
+                   "Get-DemoGuardedServiceAccounts", "Get-DemoEscalationChecks",
+                   "Get-ServiceAccountsInPolicy", "Test-ThisProjectServiceAgent",
+                   "Get-GoogleServiceAgentDomains",
+                   "Assert-DemoIdentityCannotReadProductionSecrets"):
             with self.subTest(fn=fn):
                 self.assertNotRegex(function_body(code_only(text(DEMO)), fn), r"\bWarn\b")
 

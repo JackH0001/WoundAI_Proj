@@ -107,6 +107,8 @@ foreach ($name in @('Ok', 'Warn', 'Invoke-GCloudCaptured', 'ConvertFrom-GCloudJs
                     'Assert-NotTheProductionIdentity',
                     'Assert-DemoIdentityCannotReadProductionSecrets',
                     'Get-PrincipalReach', 'Assert-DemoIdentityHoldsNoProjectRole',
+                    'Get-ServiceAccountsInPolicy', 'Get-GoogleServiceAgentDomains',
+                    'Test-ThisProjectServiceAgent',
                     'Get-DemoGuardedServiceAccounts', 'Get-DemoEscalationChecks',
                     'Assert-DemoIdentityEffectivelyDenied',
                     'Assert-DemoServiceState', 'Assert-DemoRevisionConfiguration',
@@ -220,12 +222,37 @@ def project_policy(*bindings, ancestors=()):
     return {ANCESTORS_KEY: {"stdout": json.dumps(entries)}}
 
 
+COMPUTE_SA = "421209514056-compute@developer.gserviceaccount.com"
+PROJECT_NUMBER = "421209514056"
+# The service-agent domains the script knows (Get-GoogleServiceAgentDomains): the
+# ones the project's own policy named on 2026-09-27, each checked in Google's
+# documentation. Matched whole, for this project's number only.
+AGENT_DOMAINS = ["containerregistry.iam.gserviceaccount.com",
+                 "gcp-sa-artifactregistry.iam.gserviceaccount.com",
+                 "gcp-sa-cloudbuild.iam.gserviceaccount.com",
+                 "gcp-sa-cloudscheduler.iam.gserviceaccount.com",
+                 "gcp-sa-pubsub.iam.gserviceaccount.com",
+                 "serverless-robot-prod.iam.gserviceaccount.com"]
+LISTED_AGENTS = ["service-%s@%s" % (PROJECT_NUMBER, d) for d in AGENT_DOMAINS]
+API_AGENT = "%s@cloudservices.gserviceaccount.com" % PROJECT_NUMBER
+LEGACY_BUILD = "%s@cloudbuild.gserviceaccount.com" % PROJECT_NUMBER
+# This project's Google accounts, as they appear in a real project policy.
+# None of them lives in a customer project, so none can be granted to anyone.
+AGENTS = ["service-%s@serverless-robot-prod.iam.gserviceaccount.com" % PROJECT_NUMBER,
+          API_AGENT, LEGACY_BUILD,
+          "service-%s@gcp-sa-cloudbuild.iam.gserviceaccount.com" % PROJECT_NUMBER]
+EXT_SA = "ci-runner@other-project-123.iam.gserviceaccount.com"
+
 CLEAN_PROJECT = (("roles/owner", ["user:jack.hou@gmail.com"], None),
                  ("roles/run.invoker", ["serviceAccount:" + PROD_SA], None),
-                 ("roles/logging.logWriter", ["serviceAccount:" + PROD_SA], None))
+                 ("roles/logging.logWriter", ["serviceAccount:" + PROD_SA], None),
+                 ("roles/editor", ["serviceAccount:" + COMPUTE_SA,
+                                   "serviceAccount:" + AGENTS[1]], None),
+                 ("roles/run.serviceAgent", ["serviceAccount:" + AGENTS[0]], None),
+                 ("roles/cloudbuild.builds.builder", ["serviceAccount:" + AGENTS[2]], None),
+                 ("roles/cloudbuild.serviceAgent", ["serviceAccount:" + AGENTS[3]], None))
 
 
-COMPUTE_SA = "421209514056-compute@developer.gserviceaccount.com"
 LISTED_SAS = [PROD_SA, DEMO_SA, COMPUTE_SA]
 SA_PERMISSIONS = ["iam.serviceAccounts.actAs", "iam.serviceAccounts.getAccessToken",
                   "iam.serviceAccounts.getOpenIdToken", "iam.serviceAccounts.signBlob",
@@ -242,34 +269,68 @@ def sa_resource(email):
     return "//iam.googleapis.com/projects/-/serviceAccounts/" + email
 
 
-def guarded(listed=None):
-    """Every listed account plus the production identity, never the demo one."""
-    listed = LISTED_SAS if listed is None else listed
-    return sorted(set(e.lower() for e in list(listed) + [PROD_SA]) - {DEMO_SA})
+def named_accounts(bindings):
+    return [m[len("serviceAccount:"):].lower() for _role, members, _cond in bindings
+            for m in members if m.startswith("serviceAccount:")]
 
 
-def escalation_matrix(listed=None):
+def is_this_projects_agent(email):
+    return email in LISTED_AGENTS + [API_AGENT, LEGACY_BUILD]
+
+
+def guarded(listed=None, named=(), production=PROD_SA):
+    """Listed accounts, the production identity and every account a protecting
+    policy names -- except this project's service agents and the demo identity."""
+    listed = [e.lower() for e in (LISTED_SAS if listed is None else listed)]
+    extra = [e for e in named if e not in listed and not is_this_projects_agent(e)]
+    return sorted(set(listed + [production] + extra) - {DEMO_SA})
+
+
+def escalation_matrix(accounts=None, secrets=PRODUCTION):
     """(resource, permission) for every question the demo identity must fail."""
+    accounts = guarded(named=named_accounts(CLEAN_PROJECT)) if accounts is None else accounts
     rows = []
-    for name in PRODUCTION:
+    for name in secrets:
         rows += [(secret_resource(name), "secretmanager.versions.access"),
                  (secret_resource(name), "secretmanager.secrets.setIamPolicy")]
     rows.append((PROJECT_RESOURCE, "resourcemanager.projects.setIamPolicy"))
-    for email in guarded(listed):
+    for email in accounts:
         rows += [(sa_resource(email), p) for p in SA_PERMISSIONS]
     return rows
 
 
-def troubleshoot(states=None, listed=None, **overrides):
-    """The service account listing, then one Policy Troubleshooter answer per
-    (resource, permission). states maps (resource, permission) to a verdict
-    string or a whole reply."""
+def troubleshoot(states=None, listed=None, project_bindings=CLEAN_PROJECT, ancestors=(),
+                 secret_members=None, missing=(), production=PROD_SA, **overrides):
+    """Everything the identity checks read, kept consistent with each other: the
+    project and ancestor policies, each production secret's policy (NOT_FOUND for
+    the missing ones), the project number, the service-account listing, and one
+    Policy Troubleshooter answer per (resource, permission) the effective check
+    will ask -- and none for anything it must not ask, so asking one fails the
+    run. states maps (resource, permission) to a verdict string or a whole reply."""
     states = states or {}
     listed_now = LISTED_SAS if listed is None else listed
-    s = {"iam service-accounts list": {"stdout": json.dumps(
+    secrets = {n: ["serviceAccount:" + production] for n in PRODUCTION}
+    secrets.update(secret_members or {})
+    for name in missing:
+        secrets[name] = []
+    s = dict(project_policy(*project_bindings, ancestors=ancestors))
+    for name in PRODUCTION:
+        if name in missing:
+            s["secrets get-iam-policy " + name] = NOT_FOUND
+        elif secrets[name]:
+            s["secrets get-iam-policy " + name] = policy(*secrets[name])
+        else:
+            s["secrets get-iam-policy " + name] = {"stdout": json.dumps({"etag": "BwX"})}
+    s["projects describe woundai-jackh001"] = {"stdout": json.dumps(
+        {"projectId": "woundai-jackh001", "projectNumber": PROJECT_NUMBER})}
+    s["iam service-accounts list"] = {"stdout": json.dumps(
         [{"email": e, "name": "projects/woundai-jackh001/serviceAccounts/" + e}
-         for e in listed_now])}}
-    for resource, permission in escalation_matrix(listed_now):
+         for e in listed_now])}
+    named = named_accounts(list(project_bindings) + [b for _t, _i, bs in ancestors for b in bs])
+    named += [m[len("serviceAccount:"):].lower() for members in secrets.values()
+              for m in members if m.startswith("serviceAccount:")]
+    present = [n for n in PRODUCTION if n not in missing]
+    for resource, permission in escalation_matrix(guarded(listed_now, named, production), present):
         state = states.get((resource, permission), "CANNOT_ACCESS")
         key = "policy-intelligence troubleshoot-policy iam %s --permission=%s" % (resource, permission)
         s[key] = state if isinstance(state, dict) else {"stdout": json.dumps({
@@ -389,6 +450,36 @@ RUN_NOT_FOUND = {"exit": 1, "stderr": "ERROR: (gcloud.run.services.describe) Can
 RUN_DENIED = {"exit": 1, "stderr": "ERROR: (gcloud.run.services.describe) PERMISSION_DENIED: "
                                    "Permission 'run.services.get' denied\n"}
 
+# The project as the read-only inventory of 2026-09-27 found it. Production runs
+# as the Compute Engine default account, which holds Editor and reads two of the
+# secrets directly; six Google service agents and the legacy Cloud Build account
+# hold their service roles; woundai-care-receipt-secret does not exist yet. The
+# demo identity is listed because it has to exist before anything is deployed.
+REAL_PROJECT = (("roles/artifactregistry.serviceAgent", ["serviceAccount:" + LISTED_AGENTS[1]], None),
+                ("roles/cloudbuild.builds.builder", ["serviceAccount:" + LEGACY_BUILD], None),
+                ("roles/cloudbuild.serviceAgent", ["serviceAccount:" + LISTED_AGENTS[2]], None),
+                ("roles/cloudscheduler.serviceAgent", ["serviceAccount:" + LISTED_AGENTS[3]], None),
+                ("roles/containerregistry.ServiceAgent", ["serviceAccount:" + LISTED_AGENTS[0]], None),
+                ("roles/editor", ["serviceAccount:" + COMPUTE_SA], None),
+                ("roles/owner", ["user:jack.hou@gmail.com"], None),
+                ("roles/pubsub.serviceAgent", ["serviceAccount:" + LISTED_AGENTS[4]], None),
+                ("roles/run.serviceAgent", ["serviceAccount:" + LISTED_AGENTS[5]], None))
+REAL_MISSING = ("woundai-care-receipt-secret",)
+
+
+def real_project(states=None):
+    return troubleshoot(states, listed=[COMPUTE_SA, DEMO_SA], project_bindings=REAL_PROJECT,
+                        secret_members={"woundai-admin-password": ["serviceAccount:" + COMPUTE_SA],
+                                        "woundai-jwt-secret": ["serviceAccount:" + COMPUTE_SA],
+                                        "woundai-flask-secret": []},
+                        missing=REAL_MISSING, production=COMPUTE_SA)
+
+
+# Cases whose production service runs as someone other than PROD_SA.
+PRODUCTION_IDENTITY = {"effective_real_project": COMPUTE_SA,
+                       "effective_real_project_compute_default_reachable": COMPUTE_SA,
+                       "identity_all_real_project": COMPUTE_SA}
+
 CASES = {
     # -- the production runtime identity must be known before anything else --
     # The first version warned and skipped the comparison when this lookup
@@ -431,11 +522,23 @@ CASES = {
         "secrets get-iam-policy woundai-jwt-secret": dict(
             policy("serviceAccount:" + PROD_SA),
             stderr="WARNING: a newer gcloud is available.\n")}), None),
-    # A group on a secret's own policy is not a direct binding; whether it
-    # reaches the demo identity is the troubleshooter's question, below.
     "identity_lookalike_member_is_not_a_match": ("identity", DEMO_SA, clean_identity(**{
         "secrets get-iam-policy woundai-jwt-secret":
-            policy("serviceAccount:x" + DEMO_SA, "group:" + DEMO_SA)}), None),
+            policy("serviceAccount:x" + DEMO_SA, "user:someone@example.com",
+                   "deleted:serviceAccount:%s?uid=1" % DEMO_SA)}), None),
+    "identity_email_case_does_not_hide_it": ("identity", DEMO_SA, clean_identity(**{
+        "secrets get-iam-policy woundai-jwt-secret": policy("serviceAccount:" + DEMO_SA.upper())}),
+        "holds [roles/secretmanager.secretAccessor] on production secret [woundai-jwt-secret]"),
+    # Who can read a production secret must be nameable: the effective check
+    # asks, for each such account, whether the demo identity can use it. A
+    # group's members cannot be listed from here (review of ea82c57).
+    "identity_group_on_a_secret": ("identity", DEMO_SA, clean_identity(**{
+        "secrets get-iam-policy woundai-flask-secret":
+            policy("serviceAccount:" + PROD_SA, "group:ops@example.com")}),
+        "production secret [woundai-flask-secret] is granted to principals whose members cannot be listed"),
+    "identity_all_users_on_a_secret": ("identity", DEMO_SA, clean_identity(**{
+        "secrets get-iam-policy woundai-admin-password": policy("allAuthenticatedUsers")}),
+        "<- allAuthenticatedUsers"),
     "identity_no_bindings": ("identity", DEMO_SA, clean_identity(**{
         "secrets get-iam-policy woundai-jwt-secret": {"stdout": '{"etag": "ACAB"}'}}), None),
 
@@ -554,6 +657,104 @@ CASES = {
         verdicts({PROD_SA + "::iam.serviceAccounts.signJwt": "CAN_ACCESS"}),
         listed=[DEMO_SA, COMPUTE_SA]),
         "use service account [%s] (iam.serviceAccounts.signJwt)" % PROD_SA),
+    # Named in a protecting policy, from another project: asked like any other.
+    "effective_external_reader_is_asked": ("effective", DEMO_SA, troubleshoot(verdicts({
+        EXT_SA + "::iam.serviceAccounts.getAccessToken": "CAN_ACCESS"}),
+        project_bindings=CLEAN_PROJECT + (("roles/secretmanager.secretAccessor",
+                                           ["serviceAccount:" + EXT_SA], None),)),
+        "use service account [%s] (iam.serviceAccounts.getAccessToken): [CAN_ACCESS]" % EXT_SA),
+    "effective_external_reader_that_cannot_be_evaluated": ("effective", DEMO_SA, troubleshoot(
+        verdicts({EXT_SA + "::iam.serviceAccounts.actAs": "UNKNOWN_INFO"}),
+        secret_members={"woundai-jwt-secret": ["serviceAccount:" + PROD_SA, "serviceAccount:" + EXT_SA]}),
+        "use service account [%s] (iam.serviceAccounts.actAs): [UNKNOWN_INFO]" % EXT_SA),
+    "effective_folder_named_account_is_asked": ("effective", DEMO_SA, troubleshoot(
+        verdicts({EXT_SA + "::iam.serviceAccounts.signBlob": "CAN_ACCESS"}),
+        ancestors=[("folder", "123456789012", [("roles/viewer", ["serviceAccount:" + EXT_SA], None)])]),
+        "use service account [%s] (iam.serviceAccounts.signBlob)" % EXT_SA),
+    # Another project's service agent is not ours to vouch for: asked, and here
+    # the troubleshooter cannot see its policy.
+    "effective_another_projects_agent_is_asked": ("effective", DEMO_SA, troubleshoot(
+        verdicts({"service-999999999999@gcp-sa-cloudbuild.iam.gserviceaccount.com"
+                  "::iam.serviceAccounts.actAs": "UNKNOWN_INFO"}),
+        project_bindings=CLEAN_PROJECT + (("roles/run.admin", [
+            "serviceAccount:service-999999999999@gcp-sa-cloudbuild.iam.gserviceaccount.com"], None),)),
+        "service-999999999999@gcp-sa-cloudbuild.iam.gserviceaccount.com] (iam.serviceAccounts.actAs): [UNKNOWN_INFO]"),
+    # Created in this project with an agent's name: a customer account, asked.
+    "effective_lookalike_agent_in_this_project_is_asked": ("effective", DEMO_SA, troubleshoot(
+        verdicts({"service-421209514056@woundai-jackh001.iam.gserviceaccount.com"
+                  "::iam.serviceAccounts.getAccessToken": "CAN_ACCESS"}),
+        listed=LISTED_SAS + ["service-421209514056@woundai-jackh001.iam.gserviceaccount.com"]),
+        "use service account [service-421209514056@woundai-jackh001.iam.gserviceaccount.com]"),
+    # Named like an agent but in this project's own domain: a customer account,
+    # asked even when the listing does not show it.
+    "effective_agent_named_account_in_this_projects_domain_is_asked": ("effective", DEMO_SA, troubleshoot(
+        verdicts({"service-421209514056@woundai-jackh001.iam.gserviceaccount.com"
+                  "::iam.serviceAccounts.actAs": "CAN_ACCESS"}),
+        project_bindings=CLEAN_PROJECT + (("roles/viewer", [
+            "serviceAccount:service-421209514056@woundai-jackh001.iam.gserviceaccount.com"], None),)),
+        "use service account [service-421209514056@woundai-jackh001.iam.gserviceaccount.com] (iam.serviceAccounts.actAs)"),
+    # Another project's Google APIs agent is not this project's: asked.
+    "effective_another_projects_api_agent_is_asked": ("effective", DEMO_SA, troubleshoot(
+        verdicts({"999999999999@cloudservices.gserviceaccount.com"
+                  "::iam.serviceAccounts.actAs": "UNKNOWN_INFO"}),
+        project_bindings=CLEAN_PROJECT + (("roles/editor", [
+            "serviceAccount:999999999999@cloudservices.gserviceaccount.com"], None),)),
+        "use service account [999999999999@cloudservices.gserviceaccount.com] (iam.serviceAccounts.actAs): [UNKNOWN_INFO]"),
+    # Nor is another project's legacy Cloud Build account.
+    "effective_another_projects_legacy_build_account_is_asked": ("effective", DEMO_SA, troubleshoot(
+        verdicts({"999999999999@cloudbuild.gserviceaccount.com"
+                  "::iam.serviceAccounts.signJwt": "UNKNOWN_INFO"}),
+        project_bindings=CLEAN_PROJECT + (("roles/cloudbuild.builds.builder", [
+            "serviceAccount:999999999999@cloudbuild.gserviceaccount.com"], None),)),
+        "use service account [999999999999@cloudbuild.gserviceaccount.com] (iam.serviceAccounts.signJwt): [UNKNOWN_INFO]"),
+    # Found re-reading this fix (2026-09-27): a first version recognised agents by
+    # the shape service-<our number>@..., and any project can create an account
+    # with that name. Whoever owns that project decides who may use it: asked.
+    "effective_lookalike_agent_in_another_project_is_asked": ("effective", DEMO_SA, troubleshoot(
+        verdicts({"service-421209514056@lookalike-project.iam.gserviceaccount.com"
+                  "::iam.serviceAccounts.getAccessToken": "CAN_ACCESS"}),
+        project_bindings=CLEAN_PROJECT + (("roles/secretmanager.secretAccessor", [
+            "serviceAccount:service-421209514056@lookalike-project.iam.gserviceaccount.com"], None),)),
+        "use service account [service-421209514056@lookalike-project.iam.gserviceaccount.com] "
+        "(iam.serviceAccounts.getAccessToken): [CAN_ACCESS]"),
+    # A Google domain the script has not been told about is asked like anything
+    # else -- and refused until someone checks the documentation and lists it.
+    "effective_agent_of_an_unlisted_service_is_asked": ("effective", DEMO_SA, troubleshoot(
+        verdicts({"service-421209514056@gcp-sa-newservice.iam.gserviceaccount.com"
+                  "::iam.serviceAccounts.actAs": "UNKNOWN_INFO"}),
+        project_bindings=CLEAN_PROJECT + (("roles/newservice.serviceAgent", [
+            "serviceAccount:service-421209514056@gcp-sa-newservice.iam.gserviceaccount.com"], None),)),
+        "use service account [service-421209514056@gcp-sa-newservice.iam.gserviceaccount.com] "
+        "(iam.serviceAccounts.actAs): [UNKNOWN_INFO]"),
+    # Every listed domain for this project's number, and the two older Google
+    # accounts: none of them may be asked (the fake has no answer for them).
+    "effective_every_listed_agent_goes_unasked": ("effective", DEMO_SA, troubleshoot(
+        project_bindings=CLEAN_PROJECT + tuple(
+            ("roles/viewer", ["serviceAccount:" + a], None)
+            for a in LISTED_AGENTS + [API_AGENT, LEGACY_BUILD])), None),
+    "effective_deleted_accounts_are_not_asked": ("effective", DEMO_SA, troubleshoot(
+        project_bindings=CLEAN_PROJECT + (("roles/viewer", [
+            "deleted:serviceAccount:gone@other-project-123.iam.gserviceaccount.com?uid=1"], None),)),
+        None),
+    "effective_project_number_unreadable": ("effective", DEMO_SA, troubleshoot(**{
+        "projects describe woundai-jackh001": {"exit": 1, "stderr": "ERROR: PERMISSION_DENIED\n"}}),
+        "cannot read project [woundai-jackh001]"),
+    "effective_project_number_missing": ("effective", DEMO_SA, troubleshoot(**{
+        "projects describe woundai-jackh001": {"stdout": json.dumps({"projectId": "woundai-jackh001"})}}),
+        "reports no project number"),
+    # Nothing to read and no policy to change: a production secret that does not
+    # exist is not asked about (the fake has no answer for it).
+    "effective_missing_production_secret_is_not_asked": ("effective", DEMO_SA, troubleshoot(
+        missing=("woundai-care-receipt-secret",)), None),
+    # The project as inventoried on 2026-09-27: passes, and the one account that
+    # can read the secrets is exactly the one the demo identity must not reach.
+    "effective_real_project": ("effective", DEMO_SA, real_project(), None),
+    "effective_real_project_compute_default_reachable": ("effective", DEMO_SA, real_project(verdicts({
+        COMPUTE_SA + "::iam.serviceAccounts.actAs": "CAN_ACCESS"})),
+        "use service account [%s] (iam.serviceAccounts.actAs): [CAN_ACCESS]" % COMPUTE_SA),
+    "effective_unreadable_production_secret_policy": ("effective", DEMO_SA, troubleshoot(**{
+        "secrets get-iam-policy woundai-flask-secret": DENIED}),
+        "cannot read IAM policy of production secret [woundai-flask-secret]"),
     "effective_account_listing_unreadable": ("effective", DEMO_SA, troubleshoot(**{
         "iam service-accounts list": {"exit": 1, "stderr": "ERROR: PERMISSION_DENIED\n"}}),
         "cannot read service accounts of project [woundai-jackh001]"),
@@ -594,24 +795,33 @@ CASES = {
              "stderr": "WARNING: a newer gcloud is available.\n"}})), None),
 
     # -- the three identity checks together, in the order the script runs them --
-    "identity_all_clean": ("identity-all", DEMO_SA, dict(
-        clean_identity(), **project_policy(*CLEAN_PROJECT), **troubleshoot()), None),
-    # The review's reproduction: a group grants projectIamAdmin, no secret
-    # names the demo identity, and every answer the troubleshooter gives is
+    "identity_all_clean": ("identity-all", DEMO_SA, troubleshoot(), None),
+    "identity_all_real_project": ("identity-all", DEMO_SA, real_project(), None),
+    # The review of 086c406: a group grants projectIamAdmin, no secret names
+    # the demo identity, and every answer the troubleshooter gives is
     # CANNOT_ACCESS. The run must still stop, at the project check.
-    "identity_all_group_admin_with_a_blind_troubleshooter": ("identity-all", DEMO_SA, dict(
-        clean_identity(),
-        **project_policy(*CLEAN_PROJECT, ("roles/resourcemanager.projectIamAdmin",
-                                          ["group:woundai-ops@googlegroups.com"], None)),
-        **troubleshoot()),
+    "identity_all_group_admin_with_a_blind_troubleshooter": ("identity-all", DEMO_SA, troubleshoot(
+        project_bindings=CLEAN_PROJECT + (("roles/resourcemanager.projectIamAdmin",
+                                           ["group:woundai-ops@googlegroups.com"], None),)),
         "cannot prove the demo identity is outside these principals"),
     # And had the project check let it through, the escalation check stops it
     # on its own: projects.setIamPolicy is not CANNOT_ACCESS.
-    "identity_all_group_admin_seen_by_the_troubleshooter": ("identity-all", DEMO_SA, dict(
-        clean_identity(),
-        **project_policy(*CLEAN_PROJECT),
-        **troubleshoot(verdicts({"project::resourcemanager.projects.setIamPolicy": "CAN_ACCESS"}))),
+    "identity_all_group_admin_seen_by_the_troubleshooter": ("identity-all", DEMO_SA, troubleshoot(
+        verdicts({"project::resourcemanager.projects.setIamPolicy": "CAN_ACCESS"})),
         "unable to change the IAM policy of project [woundai-jackh001]"),
+    # The review of ea82c57: an account from another project may read the
+    # production secrets -- granted on the project, or on a secret -- and the
+    # demo identity may mint tokens for it. Both used to pass all three checks,
+    # because that account was never asked about.
+    "identity_all_external_reader_granted_on_the_project": ("identity-all", DEMO_SA, troubleshoot(
+        verdicts({EXT_SA + "::iam.serviceAccounts.getAccessToken": "CAN_ACCESS"}),
+        project_bindings=CLEAN_PROJECT + (("roles/secretmanager.secretAccessor",
+                                           ["serviceAccount:" + EXT_SA], None),)),
+        "use service account [%s] (iam.serviceAccounts.getAccessToken): [CAN_ACCESS]" % EXT_SA),
+    "identity_all_external_reader_granted_on_a_secret": ("identity-all", DEMO_SA, troubleshoot(
+        verdicts({EXT_SA + "::iam.serviceAccounts.getAccessToken": "CAN_ACCESS"}),
+        secret_members={"woundai-jwt-secret": ["serviceAccount:" + PROD_SA, "serviceAccount:" + EXT_SA]}),
+        "use service account [%s] (iam.serviceAccounts.getAccessToken): [CAN_ACCESS]" % EXT_SA),
 
     # -- the service is serving the revision this run built --
     "service_clean": ("service", DEMO_SA, demo_service(), None),
@@ -836,7 +1046,8 @@ class DemoDeployChecksAgainstFakeGcloud(unittest.TestCase):
             payload = []
             for cid, (fn, sa, scenario, _) in shell_cases.items():
                 item = {"id": cid, "fn": fn, "sa": sa, "scenario_json": json.dumps(scenario),
-                        "commit": COMMIT, "production_identity": PROD_SA,
+                        "commit": COMMIT,
+                        "production_identity": PRODUCTION_IDENTITY.get(cid, PROD_SA),
                         "expected_revision": REVISION}
                 if fn == "health":
                     item["health"] = scenario
@@ -910,10 +1121,16 @@ class DemoDeployChecksAgainstFakeGcloud(unittest.TestCase):
         for shell in self.results:
             with self.subTest(shell=shell):
                 calls = self.calls(shell, "effective_all_denied")
-                self.assertEqual(calls[0], ["iam", "service-accounts", "list",
-                                            "--project=woundai-jackh001", "--format=json"])
+                reads = [["projects", "describe", "woundai-jackh001", "--format=json"],
+                         ["iam", "service-accounts", "list", "--project=woundai-jackh001",
+                          "--format=json"],
+                         ["projects", "get-ancestors-iam-policy", "woundai-jackh001",
+                          "--format=json"]]
+                reads += [["secrets", "get-iam-policy", n, "--project=woundai-jackh001",
+                           "--format=json"] for n in PRODUCTION]
+                self.assertEqual(calls[:len(reads)], reads)
                 asked = []
-                for argv in calls[1:]:
+                for argv in calls[len(reads):]:
                     self.assertEqual(argv[:3], ["policy-intelligence", "troubleshoot-policy", "iam"])
                     self.assertIn("--principal-email=" + DEMO_SA, argv)
                     self.assertIn("--project=woundai-jackh001", argv)
@@ -923,11 +1140,31 @@ class DemoDeployChecksAgainstFakeGcloud(unittest.TestCase):
                     self.assertEqual(len(permission), 1, argv)
                     asked.append((argv[3], permission[0][len("--permission="):]))
                 self.assertEqual(sorted(asked), sorted(escalation_matrix()))
-                # Eight questions for each guarded account, none about itself.
+                # Eight questions for each guarded account; none about the demo
+                # identity itself or this project's Google service agents.
                 self.assertFalse([r for r, _p in asked if DEMO_SA in r])
+                for agent in AGENTS:
+                    self.assertFalse([r for r, _p in asked if agent in r], agent)
                 for email in (PROD_SA, COMPUTE_SA):
                     self.assertEqual(len([1 for r, _p in asked if r == sa_resource(email)]),
                                      len(SA_PERMISSIONS))
+
+    def test_the_project_as_inventoried_is_asked_exactly_the_right_questions(self):
+        # 2026-09-27: three production secrets exist, one account can reach
+        # them, and the Google accounts go unasked. Fifteen questions.
+        for shell in self.results:
+            with self.subTest(shell=shell):
+                asked = []
+                for argv in self.calls(shell, "effective_real_project"):
+                    if argv[:1] != ["policy-intelligence"]:
+                        continue
+                    permission = [a for a in argv if a.startswith("--permission=")]
+                    asked.append((argv[3], permission[0][len("--permission="):]))
+                present = [n for n in PRODUCTION if n not in REAL_MISSING]
+                self.assertEqual(sorted(asked), sorted(escalation_matrix([COMPUTE_SA], present)))
+                self.assertEqual(len(asked), 15)
+                for account in LISTED_AGENTS + [LEGACY_BUILD, DEMO_SA] + list(REAL_MISSING):
+                    self.assertFalse([r for r, _p in asked if account in r], account)
 
     def test_the_project_check_reads_the_whole_ancestry(self):
         for shell in self.results:
@@ -942,6 +1179,7 @@ class DemoDeployChecksAgainstFakeGcloud(unittest.TestCase):
         for shell in self.results:
             with self.subTest(shell=shell):
                 calls = self.calls(shell, "identity_all_group_admin_with_a_blind_troubleshooter")
+                self.assertTrue(calls, "no gcloud call was made at all")
                 self.assertTrue(calls[-1][:2] == ["projects", "get-ancestors-iam-policy"], calls[-1])
                 self.assertFalse([c for c in calls if c[:1] == ["policy-intelligence"]])
 
