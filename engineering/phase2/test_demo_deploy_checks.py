@@ -73,6 +73,17 @@ key = " ".join(a for a in sys.argv[1:]
                if not a.startswith("--") or a.startswith("--permission="))
 with open(os.path.join(os.environ["WOUNDAI_FAKE_STATE"], "calls.jsonl"), "a") as log:
     log.write(json.dumps(sys.argv[1:]) + "\n")
+# The real Policy Troubleshooter refuses a Secret Manager name that carries the
+# project ID instead of the project number, whatever the permission
+# (woundai-jackh001, 2026-09-29): the request itself is rejected. Answer the
+# same way, so a script that goes back to the project ID cannot pass here.
+args = sys.argv[1:]
+if (args[:3] == ["policy-intelligence", "troubleshoot-policy", "iam"] and len(args) > 3
+        and args[3].startswith("//secretmanager.googleapis.com/projects/")
+        and not args[3].split("/")[4].isdigit()):
+    sys.stderr.write("ERROR: (gcloud.policy-intelligence.troubleshoot-policy.iam) "
+                     "INVALID_ARGUMENT: Request contains an invalid argument.\n")
+    sys.exit(1)
 matches = [p for p in scenario if key == p or key.startswith(p + " ")]
 if not matches:
     sys.stderr.write("ERROR: fake gcloud has no reply for [%s]\n" % key)
@@ -182,6 +193,11 @@ foreach ($c in $cases) {
                     -Attempts 3 -IntervalSec 0 | Out-Null
             }
             'vendor'   { Copy-EngineeringVendor -FlaskDir ([string]$c.flask) | Out-Null }
+            'escalation' {
+                $rows = @(Get-DemoEscalationChecks -Secrets @('woundai-admin-password') `
+                    -ServiceAccounts @() -ProjectNumber ([string]$c.project_number))
+                $detail = (@($rows | ForEach-Object { "$($_.Resource)::$($_.Permission)" }) -join ' ')
+            }
             default    { throw "unknown fn $($c.fn)" }
         }
         Write-Output ("CASE {0} PASS {1}" -f $c.id, $detail).TrimEnd()
@@ -262,7 +278,9 @@ PROJECT_RESOURCE = "//cloudresourcemanager.googleapis.com/projects/woundai-jackh
 
 
 def secret_resource(name):
-    return "//secretmanager.googleapis.com/projects/woundai-jackh001/secrets/" + name
+    # By project number: the real Policy Troubleshooter rejects the project ID
+    # here (2026-09-29), and the fake above does the same.
+    return "//secretmanager.googleapis.com/projects/%s/secrets/%s" % (PROJECT_NUMBER, name)
 
 
 def sa_resource(email):
@@ -474,6 +492,11 @@ def real_project(states=None):
                                         "woundai-flask-secret": []},
                         missing=REAL_MISSING, production=COMPUTE_SA)
 
+
+# The project number handed to Get-DemoEscalationChecks directly.
+ESCALATION_NUMBER = {"escalation_names_secrets_by_project_number": PROJECT_NUMBER,
+                     "escalation_refuses_the_project_id_for_a_number": "woundai-jackh001",
+                     "escalation_refuses_a_missing_project_number": ""}
 
 # Cases whose production service runs as someone other than PROD_SA.
 PRODUCTION_IDENTITY = {"effective_real_project": COMPUTE_SA,
@@ -789,6 +812,21 @@ CASES = {
         "woundai-flask-secret::secretmanager.versions.access":
             {"exit": 1, "stderr": "ERROR: network unreachable\n"}})),
         "cannot evaluate whether the demo identity can read production secret [woundai-flask-secret]"),
+    # 2026-09-29, the first run against the real project: every secret question
+    # came back INVALID_ARGUMENT. A rejected request is not a verdict; it refuses,
+    # and says so rather than looking like an access problem.
+    "effective_rejected_request_is_not_a_verdict": ("effective", DEMO_SA, troubleshoot(verdicts({
+        "woundai-admin-password::secretmanager.versions.access": {"exit": 1, "stderr":
+            "ERROR: (gcloud.policy-intelligence.troubleshoot-policy.iam) INVALID_ARGUMENT: "
+            "Request contains an invalid argument.\n"}})),
+        "rejected the request itself; that is not an access verdict"),
+    # The questions themselves: secrets by project number, and nothing is asked
+    # without one -- the project ID in its place is refused, not sent.
+    "escalation_names_secrets_by_project_number": ("escalation", DEMO_SA, {}, None),
+    "escalation_refuses_the_project_id_for_a_number": ("escalation", DEMO_SA, {},
+        "without the project number of [woundai-jackh001]"),
+    "escalation_refuses_a_missing_project_number": ("escalation", DEMO_SA, {},
+        "without the project number of [woundai-jackh001]"),
     "effective_stderr_noise_is_fine": ("effective", DEMO_SA, troubleshoot(verdicts({
         "woundai-jwt-secret::secretmanager.versions.access":
             {"stdout": json.dumps({"overallAccessState": "CANNOT_ACCESS"}),
@@ -1048,6 +1086,7 @@ class DemoDeployChecksAgainstFakeGcloud(unittest.TestCase):
                 item = {"id": cid, "fn": fn, "sa": sa, "scenario_json": json.dumps(scenario),
                         "commit": COMMIT,
                         "production_identity": PRODUCTION_IDENTITY.get(cid, PROD_SA),
+                        "project_number": ESCALATION_NUMBER.get(cid, ""),
                         "expected_revision": REVISION}
                 if fn == "health":
                     item["health"] = scenario
@@ -1140,6 +1179,13 @@ class DemoDeployChecksAgainstFakeGcloud(unittest.TestCase):
                     self.assertEqual(len(permission), 1, argv)
                     asked.append((argv[3], permission[0][len("--permission="):]))
                 self.assertEqual(sorted(asked), sorted(escalation_matrix()))
+                secret_questions = [r for r, _p in asked
+                                    if r.startswith("//secretmanager.googleapis.com/")]
+                self.assertEqual(len(secret_questions), 2 * len(PRODUCTION))
+                for resource in secret_questions:
+                    self.assertTrue(resource.startswith(
+                        "//secretmanager.googleapis.com/projects/%s/secrets/" % PROJECT_NUMBER),
+                        resource)
                 # Eight questions for each guarded account; none about the demo
                 # identity itself or this project's Google service agents.
                 self.assertFalse([r for r, _p in asked if DEMO_SA in r])
@@ -1148,6 +1194,16 @@ class DemoDeployChecksAgainstFakeGcloud(unittest.TestCase):
                 for email in (PROD_SA, COMPUTE_SA):
                     self.assertEqual(len([1 for r, _p in asked if r == sa_resource(email)]),
                                      len(SA_PERMISSIONS))
+
+    def test_the_escalation_list_names_secrets_by_project_number(self):
+        for shell, (_proc, seen, _cases) in self.results.items():
+            with self.subTest(shell=shell):
+                resource = secret_resource("woundai-admin-password")
+                self.assertEqual(seen.get("escalation_names_secrets_by_project_number"),
+                                 "PASS %s::secretmanager.versions.access "
+                                 "%s::secretmanager.secrets.setIamPolicy "
+                                 "%s::resourcemanager.projects.setIamPolicy"
+                                 % (resource, resource, PROJECT_RESOURCE))
 
     def test_the_project_as_inventoried_is_asked_exactly_the_right_questions(self):
         # 2026-09-27: three production secrets exist, one account can reach

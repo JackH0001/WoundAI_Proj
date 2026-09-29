@@ -324,6 +324,8 @@ class DemoKeysAreNotProductionKeys(unittest.TestCase):
         code = code_only(text(DEMO))
         checks = function_body(code, "Get-DemoEscalationChecks")
         for piece in ("'secretmanager.versions.access'", "'secretmanager.secrets.setIamPolicy'",
+                      '"//secretmanager.googleapis.com/projects/$ProjectNumber/secrets/$name"',
+                      "if ($ProjectNumber -notmatch '^[0-9]{6,20}$') {",
                       '"//cloudresourcemanager.googleapis.com/projects/$ProjectId"',
                       "'resourcemanager.projects.setIamPolicy'",
                       '"//iam.googleapis.com/projects/-/serviceAccounts/$account"',
@@ -334,6 +336,9 @@ class DemoKeysAreNotProductionKeys(unittest.TestCase):
                       "foreach ($name in @($Secrets)) {"):
             with self.subTest(piece=piece):
                 self.assertIn(piece, checks)
+        # The real Policy Troubleshooter rejects a secret named by project ID
+        # (INVALID_ARGUMENT, 2026-09-29); only the project number is accepted.
+        self.assertNotIn("projects/$ProjectId/secrets", checks)
         accounts = function_body(code, "Get-DemoGuardedServiceAccounts")
         for piece in ("projects describe $ProjectId", "iam service-accounts list",
                       "projects get-ancestors-iam-policy $ProjectId",
@@ -342,6 +347,7 @@ class DemoKeysAreNotProductionKeys(unittest.TestCase):
                       "if ($r.Exit -ne 0 -and $r.Stderr -match 'NOT_FOUND') { $missing += $name; continue }",
                       "$present += $name",
                       "Secrets        = @($present)",
+                      "ProjectNumber  = $number",
                       "@($ProductionIdentity.Trim().ToLowerInvariant())",
                       "if ($listed -ccontains $email) { continue }",
                       "if (Test-ThisProjectServiceAgent $email $number) { $agents += $email; continue }",
@@ -354,6 +360,7 @@ class DemoKeysAreNotProductionKeys(unittest.TestCase):
         eff = function_body(code, "Assert-DemoIdentityEffectivelyDenied")
         self.assertIn("Get-DemoEscalationChecks -Secrets @($accounts.Secrets) -ServiceAccounts $guarded",
                       eff)
+        self.assertIn("-ProjectNumber $accounts.ProjectNumber)", eff)
 
     def test_only_this_projects_google_service_agents_go_unasked(self):
         """Reported by the review partner on 2026-09-27 against ea82c57: an
@@ -419,9 +426,14 @@ class DemoKeysAreNotProductionKeys(unittest.TestCase):
                                       "cloudbuild.gserviceaccount.com",
                                       "-match 'NOT_FOUND'", "foreach ($n in $present) {",
                                       "$agentEmails -ccontains $_",
-                                      "'CAN_ACCESS'", "'CANNOT_ACCESS'"]:
+                                      "'CAN_ACCESS'", "'CANNOT_ACCESS'",
+                                      '"//secretmanager.googleapis.com/projects/$number/secrets/$n"']:
             with self.subTest(piece=piece):
                 self.assertIn(piece, block)
+        # Secrets by project number, read before the first question is built.
+        self.assertNotIn("projects/$proj/secrets", block)
+        self.assertLess(block.index("$number = gcloud projects describe"),
+                        block.index("projects/$number/secrets"))
 
     def test_the_read_back_conditions_are_present(self):
         # Conditions, not messages: replacing a condition with $false leaves

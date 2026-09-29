@@ -356,6 +356,11 @@ Remove-Variable pw, values, rng, b
      專案的服務代理、本專案之後啟用的服務的代理——都照樣問，問不出結果就拒絕部署；在文件
      確認是 Google 服務代理後，經審查加進 `Get-GoogleServiceAgentDomains` 與下面的驗證區塊
      （兩份由測試比對）。
+   - 密文的資源全名必須用**專案編號**：`//secretmanager.googleapis.com/projects/<專案編號>/secrets/<名稱>`。
+     2026-09-29 對本專案實測，用專案 ID 時 Troubleshooter 與 `gcloud iam list-testable-permissions`
+     不論問哪個權限都回 `INVALID_ARGUMENT`——那是請求被拒，不是存取判定——換成專案編號才有答案。
+     專案（`//cloudresourcemanager.googleapis.com/projects/<專案 ID>`）與服務帳號
+     （`//iam.googleapis.com/projects/-/serviceAccounts/<email>`）同日實測都接受。
    - 不存在的正式密文不問：沒有內容可讀、沒有政策可改，Troubleshooter 也無從評估不存在的
      資源（2026-09-27 盤點時 `woundai-care-receipt-secret` 尚未建立）。建立之後自動回到
      檢查範圍。示範身分也建立不了它：建立密文要專案層級的權限，而第 1 項確認示範身分在
@@ -415,16 +420,18 @@ Remove-Variable pw, values, rng, b
     $bad
 
     # 2. 每一項都應為 CANNOT_ACCESS；3. 示範密文應為 CAN_ACCESS
+    # 密文要用專案編號命名：用專案 ID，Troubleshooter 會回 INVALID_ARGUMENT（2026-09-29 實測）
+    $number = gcloud projects describe $proj --format='value(projectNumber)'
+    if ($number -notmatch '^[0-9]{6,20}$') { throw "讀不到專案編號：$number" }
     $checks = @()
     foreach ($n in $present) {
         foreach ($p in 'secretmanager.versions.access', 'secretmanager.secrets.setIamPolicy') {
-            $checks += [pscustomobject]@{ R = "//secretmanager.googleapis.com/projects/$proj/secrets/$n"
+            $checks += [pscustomobject]@{ R = "//secretmanager.googleapis.com/projects/$number/secrets/$n"
                                           P = $p; Want = 'CANNOT_ACCESS' }
         }
     }
     $checks += [pscustomobject]@{ R = "//cloudresourcemanager.googleapis.com/projects/$proj"
                                   P = 'resourcemanager.projects.setIamPolicy'; Want = 'CANNOT_ACCESS' }
-    $number = gcloud projects describe $proj --format='value(projectNumber)'
     $prodSa = gcloud run services describe woundai-backend --project $proj --region asia-east1 `
         --format='value(spec.template.spec.serviceAccountName)'
     $listed = gcloud iam service-accounts list --project $proj --format=json | ConvertFrom-Json
@@ -446,7 +453,7 @@ Remove-Variable pw, values, rng, b
     }
     foreach ($n in 'woundai-demo-password', 'woundai-demo-jwt-secret', 'woundai-demo-flask-secret',
                    'woundai-demo-care-receipt-secret') {
-        $checks += [pscustomobject]@{ R = "//secretmanager.googleapis.com/projects/$proj/secrets/$n"
+        $checks += [pscustomobject]@{ R = "//secretmanager.googleapis.com/projects/$number/secrets/$n"
                                       P = 'secretmanager.versions.access'; Want = 'CAN_ACCESS' }
     }
     $wrong = 0
