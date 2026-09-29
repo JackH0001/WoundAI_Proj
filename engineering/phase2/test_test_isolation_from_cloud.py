@@ -155,6 +155,12 @@ class TestIsolationFromCloudStorage(unittest.TestCase):
         self.assertIn("WOUNDAI_FLYWHEEL_DIR", captured[0])
         self.assertIn("no-google-credentials.json",
                       captured[0]["GOOGLE_APPLICATION_CREDENTIALS"])
+        # Windows PowerShell 5.1 otherwise writes ModuleAnalysisCache relative
+        # to the working directory -- the repository -- under this sandbox.
+        cache = Path(captured[0]["PSModuleAnalysisCachePath"])
+        self.assertEqual(cache.name, "ModuleAnalysisCache")
+        self.assertEqual(cache.parent.parent, Path(captured[0]["USERPROFILE"]))
+        self.assertTrue(cache.is_absolute())
         self.assertFalse(any(k == "WOUNDAI_STORE" or k.startswith("WOUNDAI_GCS_")
                              or k == "WOUNDAI_AUDIT_BUCKET" for k in captured[0]))
 
