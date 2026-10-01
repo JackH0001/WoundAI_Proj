@@ -217,7 +217,8 @@ struct ReviewView: View {
         guard let m = app.reviewRecord else { return }
         cur = m
         loading = true
-        let img = m.imagePath.isEmpty ? nil : app.imageStore.loadFull(m.imagePath)
+        let img = await ImageLoadQueue.shared.fullImage(store: app.imageStore, name: m.imagePath)
+        guard !Task.isCancelled else { return }
         bmp = img
         spaceMismatch = {
             guard let img, let w = m.imageW, let h = m.imageH else { return nil }

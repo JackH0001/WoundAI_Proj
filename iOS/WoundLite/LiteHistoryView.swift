@@ -114,7 +114,7 @@ struct LiteHistoryView: View {
  該處註解甚至寫著「清單捲幾列就 OOM」。這裡把 Lite 拉回同一套：
 
  · `.task(id:)` → 每列只在出現／換資料時載一次，不隨重繪重跑
- · `Task.detached` → 解密與解碼不佔主執行緒
+ · `ImageLoadQueue` → 跨列序列化解密，取消的列不再啟動解碼
  · `maxPixel: 160` → 46pt @3x ≈ 138px，載 256px 是白白多 4 倍像素
  */
 private struct LiteThumb: View {
@@ -134,12 +134,11 @@ private struct LiteThumb: View {
         .clipped()
         .cornerRadius(6)
         .task(id: name) {
-            guard !name.isEmpty, img == nil else { return }
-            let s = store.images
-            let n = name
-            img = await Task.detached(priority: .utility) {
-                s.loadThumbnail(n, maxPixel: 160)
-            }.value
+            img = nil
+            guard !name.isEmpty else { return }
+            let result = await ImageLoadQueue.shared.thumbnail(store: store.images, name: name, maxPixel: 160)
+            guard !Task.isCancelled else { return }
+            img = result.image
         }
     }
 }
@@ -247,7 +246,9 @@ struct LiteRecordDetailView: View {
         }
         let s = store.images
         let n = r.imageName
-        image = await Task.detached(priority: .userInitiated) { s.loadFull(n) }.value
+        let loaded = await ImageLoadQueue.shared.fullImage(store: s, name: n)
+        guard !Task.isCancelled else { return }
+        image = loaded
     }
 
     /// 重新圈選完成：讀回深度側檔 → 背景重算 → 品質過閘才覆寫紀錄。

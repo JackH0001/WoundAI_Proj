@@ -34,15 +34,22 @@ enum LitePrefs {
     private static let d = UserDefaults.standard
     /// nil＝還沒問過（首啟要問）；true/false＝使用者的選擇，設定頁可改。
     static var researchConsent: Bool? {
-        get { d.object(forKey: "lite_research_consent") as? Bool }
-        set { d.set(newValue, forKey: "lite_research_consent") }
+        get {
+            // An old acceptance must not silently authorize the revised disclosure.
+            guard d.string(forKey: "lite_consent_version") == consentVersion else { return nil }
+            return d.object(forKey: "lite_research_consent") as? Bool
+        }
+        set {
+            d.set(newValue, forKey: "lite_research_consent")
+            d.set(newValue == nil ? nil : consentVersion, forKey: "lite_consent_version")
+        }
     }
     /// 同意文案版本。**改了同意頁的實質內容就要遞增**——每筆上傳都帶著它，
     /// 日後治理要能回答「這筆是在哪一版文案下同意的」。
-    static let consentVersion = "2026-08-19.1"
+    static let consentVersion = "2026-10-01.1"
 
-    /// 裝置匿名代碼：首用隨機生成、不連結任何身分。它是 lite/segment 的
-    /// **限流鍵與撤回鍵**（`DELETE /api/v1/lite/data/<anon_id>`），不是識別碼。
+    /// 安裝層級的假名代碼：不是 Apple ID，但可串聯同一安裝的上傳資料。
+    /// 用作限流鍵與撤回鍵；隱私宣告列為 DeviceID 並標示資料有關聯。
     /// ⚠ 上架前要換成 App Attest 裝置證明（後端契約已載明，限流擋不住有意濫用）。
     static var anonId: String {
         if let v = d.string(forKey: "lite_anon_id"), !v.isEmpty { return v }

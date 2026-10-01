@@ -55,13 +55,14 @@ final class LocalImageStore {
 
     /// 清單縮圖。這裡**可以**降採樣——縮圖不參與座標運算。
     func loadThumbnail(_ name: String, maxPixel: Int = 256) -> UIImage? {
-        guard let raw = rawBytes(name) else { return nil }
+        guard maxPixel > 0, let raw = rawBytes(name) else { return nil }
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceThumbnailMaxPixelSize: maxPixel,
             kCGImageSourceCreateThumbnailWithTransform: true
         ]
-        guard let src = CGImageSourceCreateWithData(raw as CFData, nil),
+        guard let src = CGImageSourceCreateWithData(raw as CFData,
+              [kCGImageSourceShouldCache: false] as CFDictionary),
               let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
         return UIImage(cgImage: cg)
     }

@@ -178,15 +178,14 @@ struct TimelineThumb: View {
         .frame(width: 64, height: 64)
         .clipped()
         .cornerRadius(6)
-        .task(id: m.id) {
+        .task(id: m.imagePath) {
+            state = .loading
             guard !m.imagePath.isEmpty else { state = .none; return }
             let path = m.imagePath
             let s = store
             // 解密＋降採樣走背景；不快取全圖（清單捲幾列就 OOM）。
-            let result: (Bool, UIImage?) = await Task.detached {
-                let exists = s.exists(path)
-                return (exists, exists ? s.loadThumbnail(path, maxPixel: 200) : nil)
-            }.value
+            let result = await ImageLoadQueue.shared.thumbnail(store: s, name: path, maxPixel: 200)
+            guard !Task.isCancelled else { return }
             if let img = result.1 { state = .ok(img) }
             else if result.0 { state = .undecryptable }   // 檔案在但解不開＝金鑰換新
             else { state = .purged }                      // 檔案不在＝保存期限已清除

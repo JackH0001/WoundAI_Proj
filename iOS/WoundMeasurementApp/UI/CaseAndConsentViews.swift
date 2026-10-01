@@ -577,7 +577,7 @@ struct BackendSettingsView: View {
                             opening = true
                             Task {
                                 let code = await client?.oneTimeCode()
-                                if let target = client?.consoleURL(oneTimeCode: code) {
+                                if let target = await client?.consoleURL(oneTimeCode: code) {
                                     openURL(target)
                                 }
                                 if code == nil { status = "ℹ 取不到一次性登入碼，已開啟主控台但需手動登入。" }
@@ -617,7 +617,7 @@ struct BackendSettingsView: View {
             let ok = (try? await c.login(username: AppSettings.backendUser(),
                                          password: AppSettings.backendPassword())) ?? false
             lines.append(ok ? "登入成功" : "登入失敗（帳號或密碼錯誤）")
-            me = ok ? c.currentIdentity() : nil
+            me = ok ? await c.currentIdentity() : nil
             client = ok ? c : nil
             if ok {
                 let (_, text, _) = await c.flywheelStats(source: nil)

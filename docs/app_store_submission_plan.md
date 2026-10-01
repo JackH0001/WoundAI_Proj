@@ -1,5 +1,72 @@
 # 上架計畫：醫療版 TestFlight ＋ 民眾版 App Store（2026-08-20 起草）
 
+## 目前執行基準（2026-10-01）
+
+本節取代下方歷史清單的狀態判定。基準為 main `17e0b07`；本次在
+`codex/ios-release-assets-20261001` 的獨立副本實作，未變更原 Developer checkout。
+
+| E 項目 | 本輪成果 | 尚待驗收 |
+|---|---|---|
+| Icon | 使用者核定兩版重製圖；醫療版十字／鏡頭／傷口、民眾版十字／鏡頭／機械手。1024 PNG 已掛各 target | 實機主畫面視覺確認 |
+| PrivacyInfo ×2 | 原本已存在並進 Resources；本輪修正 Lite 的 linked、DeviceID、Health，醫療深度歸健康資料 | ASC 問卷同步與營運方確認 |
+| Release | 兩版 Release 建置；檢查成品 DEBUG、圖示、ATS 與 manifest | demo URL 尚未提供，預設仍是正式 Cloud Run URL，不代表已驗過候選服務 |
+| App Attest | 決策：在雙端契約成立後才接入雲端請求，見下方契約 | 後端 challenge／驗證／持久化、客戶端實作、真機測試 |
+| 隱私政策 | `site/privacy/` 中英草稿依當前資料流重寫 | 聯絡窗口、IRB、保存期限、雲端日誌、法規覆核；未發布 |
+| jetsam（歷史 task #40） | 共用序列載圖 actor、取消檢查、解碼池釋放、禁止原圖快取；修邊保留原座標 | LiDAR 實機壓力／記憶體峰值與 jetsam log，尚未結案 |
+
+### 關鍵修正與證據界線
+
+- 無帳號不代表匿名：`anon_id` 串聯同一安裝的資料，Lite 上傳標為 linked，無廣告追蹤。
+- 醫療雲端量測本身會傳影像；②訓練同意是研究用途閘門，不能宣稱無②即不上雲。
+- 政策移除概括 WORM、全資料 AES、原始 IP 絕不留存及已具一鍵撤回等不實保證。
+- Lite 同意版本改為 `2026-10-01.1`；舊版選擇需重新閱讀，未取得新版同意時不走研究上傳。
+- App Attest 是本專案公開匿名 API 的安全前提，不是所有 iOS App 一律必裝的 Apple 規定。
+- demo01 應使用 nurse 最小流程角色，密碼由 Jack 保管；帳號可重建不等於資料持久化。
+- TestFlight／Beta Review 不代表 IRB 核准，本階段只用 synthetic／phantom 資料。
+
+### App Attest 雙端實作契約（待後端協作覆核，尚未實作）
+
+1. 後端提供限時一次性 challenge（隨機 nonce、用途、過期時間），以及 register／assertion 驗證端點。challenge 與 key／counter 必須跨實例持久化，消費需原子化。
+2. iOS 以 DCAppAttestService 建 key、對 challenge 雜湊做 attest；後端驗 Apple 憑證鏈、nonce、App ID prefix/bundle、環境及 credential ID。正式服務不得接受測試環境證明。
+3. 每個受保護請求用版本化且兩端一致的編碼綁定 challenge、HTTP method、path、實際 request body 的 SHA-256。後端驗 assertion 與單調 counter，再執行操作，拒絕重放與重排。
+4. 圈選上傳與資料撤回也要綁同一已登記 key／安裝身分；不能只保護 segment，或把 anon_id 當作任何人都能指定的刪除憑證。
+5. 客戶端每個 key 的 assertion／發送序列化；環境不支援、key 遺失或驗證失敗時保留離線量測，不以未驗證匿名請求降級。裝置證明不取代使用者研究同意。
+6. 驗收涵蓋 challenge 過期／重用、錯 bundle、錯環境、body/path 篡改、counter 重放、重新安裝、多實例及 key 撤銷；真機成功才宣稱完成。
+
+Apple 依據：[App privacy details](https://developer.apple.com/app-store/app-privacy-details/)、
+[Establishing app integrity](https://developer.apple.com/documentation/devicecheck/establishing-your-app-s-integrity)、
+[Server validation](https://developer.apple.com/documentation/devicecheck/validating-apps-that-connect-to-your-server)。
+
+### jetsam 實機驗收程序
+
+以合成影像建立 100 筆本機紀錄；連續快速捲動與開關詳情 50 次、拍攝／圈選／取消 20 次，
+再做前背景切換。以 Instruments Allocations／VM Tracker 記錄初始、峰值、靜置後 resident memory，
+確認沒有持續累積或 JetsamEvent，並核對修邊前後像素座標與量測結果一致。
+需歸檔裝置型號、iOS、build SHA、測試資料量、峰值及診斷 log；模擬器單元測試不替代此驗收。
+
+### 2026-10-01 本機驗證結果
+
+- 醫療版與民眾版 Release Simulator build 均成功；bundle 分別 com.woundai.app / com.woundai.lite。
+- Release XCTest 51/51（4 支新增影像測試）；測試獨立開 ENABLE_TESTABILITY，ad-hoc 模擬器簽章。
+- 首次測試因 Release 未開 @testable、未簽章 Keychain 與 Documents Finder metadata 失敗；改以 /private/tmp 的測試產物完成，正式設定未降低。
+- 成品核對：兩份 manifest 與來源一致、AppIcon 名稱與 1024 無 alpha PNG 正確、無指定 DEBUG 診斷與 localhost 預設字串、ATS 禁止任意明文。
+- 修正 CaseAndConsentViews 的兩個 actor 呼叫缺 await；本輪未再出現 Swift 6 isolation 警告。
+- 未宣告 parity 落差 0；Mac owner_guard 通過。這些結果不等於雲端 IAM、簽名 Archive、實機 jetsam 或 Beta Review 已通過。
+- build 仍是 22，這是本機驗證候選；下一次上傳需由正式發布流程分配更高 build number。
+
+### 接續順序
+
+1. 本機測試與 owner_guard → 可覆核 patch／PR；本輪不併入尚待 Windows 驗證的 PR #15。
+2. demo 後端完成 IAM／固定 URL／nurse 帳號驗證後，另做候選 Release 設定與實機端到端測試。
+3. 確認隱私政策責任人及保存期限，核可後發布現有 GitHub Pages、同步 ASC 問卷。
+4. 實機 jetsam 回歸及測試者名單／Apple 登入完成後，再送醫療版 Beta Review。
+5. 民眾版對外雲端測試等待 App Attest、撤回流程與研究／法規前提完成。
+
+---
+
+以下為歷史規劃與紀錄，不代表上述項目已通過現行版本驗收。
+
+
 兩條路線分開走，**不互相等待**：
 
 | | 醫療版 WoundMeasurementApp | 民眾版 WoundLite |
@@ -127,7 +194,7 @@ App Store Connect 必填。內容至少涵蓋：蒐集什麼、為何蒐集（�
 ### C2. 醫療版 TestFlight 專屬
 
 - [ ] **示範帳號**（Beta App Review 需要能登入）：建一個 `demo01`
-      角色 physician、綁測試組織，資料與臨床區隔。⚠ 密碼由你設定並填入
+      角色 nurse、綁示範組織，只用合成／模擬資料。⚠ 密碼由你設定並填入
       App Store Connect，我不經手。
 - [ ] 測試資訊：「本 App 為臨床研究用傷口量測工具，僅供受邀醫護人員測試」
 - [ ] 外部測試組：臨床測試者 email 清單
