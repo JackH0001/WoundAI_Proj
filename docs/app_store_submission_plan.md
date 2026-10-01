@@ -54,6 +54,15 @@ Apple 依據：[App privacy details](https://developer.apple.com/app-store/app-p
 - 未宣告 parity 落差 0；Mac owner_guard 通過。這些結果不等於雲端 IAM、簽名 Archive、實機 jetsam 或 Beta Review 已通過。
 - build 仍是 22，這是本機驗證候選；下一次上傳需由正式發布流程分配更高 build number。
 
+### nurse 送審流程補驗證（2026-10-01）
+
+原 `25b5b7f` 的五項 CI 檢查已成功，遠端 XCTest 51/51。其後準備 nurse 審查步驟時，
+另發現快速量測與紀錄複核將任意修邊直接設成 doctorVerified=true。
+本輪補上伺服器回傳的 gt.verify／annotation.submit 權限判斷；nurse 仍可修邊與保存，
+但不會標成醫師確認，重修舊輪廓也會清除原先確認狀態。訓練／深度送件按鈕依權限停用，
+送件前重新登入查身分，伺服器仍是權限最終判定端。離線本機修邊不額外等待網路。
+新增 5 支權限測試（完整 XCTest 56 項），新 head 需重新取得 CI，不能沿用舊 head 綠燈。
+
 ### 接續順序
 
 1. 本機測試與 owner_guard → 可覆核 patch／PR；本輪不併入尚待 Windows 驗證的 PR #15。

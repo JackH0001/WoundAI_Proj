@@ -44,6 +44,9 @@ struct LoginIdentity: Equatable {
     let perms: Set<String>
 
     func can(_ perm: String) -> Bool { return perms.contains(perm) }
+    // Use server-issued capabilities, never infer clinical authority from the role label.
+    var canVerifyClinicalEdits: Bool { can("gt.verify") }
+    var canSubmitClinicalTraining: Bool { can("gt.verify") && can("annotation.submit") }
 
     /// 標題列顯示用。共用裝置時最常見的錯誤是用上一個人的登入做事——看得到才會發現。
     func label() -> String { return "\(displayName ?? user)（\(roleZh)）" }
