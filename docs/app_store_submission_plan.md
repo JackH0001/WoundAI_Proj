@@ -1,15 +1,16 @@
 # 上架計畫：醫療版 TestFlight ＋ 民眾版 App Store（2026-08-20 起草）
 
-## 目前執行基準（2026-10-01）
+## 目前執行基準（2026-10-02）
 
-本節取代下方歷史清單的狀態判定。基準為 main `17e0b07`；本次在
+本節取代下方歷史清單的狀態判定。iOS PR #16 原基準為 `17e0b07`；
+後端 PR #15 已合併至 main `4005f392` 並部署 demo。iOS 在
 `codex/ios-release-assets-20261001` 的獨立副本實作，未變更原 Developer checkout。
 
 | E 項目 | 本輪成果 | 尚待驗收 |
 |---|---|---|
 | Icon | 使用者核定兩版重製圖；醫療版十字／鏡頭／傷口、民眾版十字／鏡頭／機械手。1024 PNG 已掛各 target | 實機主畫面視覺確認 |
 | PrivacyInfo ×2 | 原本已存在並進 Resources；本輪修正 Lite 的 linked、DeviceID、Health，醫療深度歸健康資料 | ASC 問卷同步與營運方確認 |
-| Release | 兩版 Release 建置；檢查成品 DEBUG、圖示、ATS 與 manifest | demo URL 尚未提供，預設仍是正式 Cloud Run URL，不代表已驗過候選服務 |
+| Release | 兩版 Release 建置；檢查成品 DEBUG、圖示、ATS 與 manifest；demo URL 已驗證 | App 預設仍是正式 URL，須在設定頁明確切換 demo；iOS 雲端端到端尚待驗收 |
 | App Attest | 決策：在雙端契約成立後才接入雲端請求，見下方契約 | 後端 challenge／驗證／持久化、客戶端實作、真機測試 |
 | 隱私政策 | `site/privacy/` 中英草稿依當前資料流重寫 | 聯絡窗口、IRB、保存期限、雲端日誌、法規覆核；未發布 |
 | jetsam（歷史 task #40） | 共用序列載圖 actor、取消檢查、解碼池釋放、禁止原圖快取；修邊保留原座標 | LiDAR 實機壓力／記憶體峰值與 jetsam log，尚未結案 |
@@ -63,10 +64,37 @@ Apple 依據：[App privacy details](https://developer.apple.com/app-store/app-p
 送件前重新登入查身分，伺服器仍是權限最終判定端。離線本機修邊不額外等待網路。
 新增 5 支權限測試（完整 XCTest 56 項），新 head 需重新取得 CI，不能沿用舊 head 綠燈。
 
+### 2026-10-02 demo 與實機記憶體進度
+
+- PR #15 已合併為 `4005f392a5e77159ee44a140b86ca80af8fe0cdc`；正式服務未變更。
+- demo revision：`woundai-backend-demo-demo-4005f392-pw2-10020537`，100% 流量。
+  demo 密碼固定引用 Secret Manager 第 2 版，未讀取或記錄密碼內容。
+- Jack 回報登入成功；另以瀏覽器唯讀驗證 `default:demo01` 顯示護理師、Dashboard 載入、0 筆資料，
+  store 為 `local:/app/flywheel`。這不等於 iOS 登入或反覆冷啟動驗收完成。
+- iOS `d8eb0a0` 的 CI 5/5 已通過；本輪新增 `ImageMemoryStressTests` 後，
+  iPhone 16 Pro Max / iOS 27.0.1 的 Release XCTest **57/57** 通過。
+- 新測試：100 張加密 4032×3024 合成影像、500 次縮圖、50 次完整解碼。
+  physical footprint 初始 58.3 MiB、抽樣峰值 160.6 MiB、最後一輪 112.8 MiB；
+  暖機後增量 7.7 MiB（五輪約 105.1、109.5、113.3、112.5、112.8 MiB）。
+  這是元件層測試，並非持續採樣峰值；未涵蓋相機、LiDAR、SwiftUI 列表或前背景操作，jetsam 不結案。
+- 新測試只刪除自己建立的 UUID 影像；不清空既有病例、照片或帳號。
+
+### iPhone 示範環境驗收（未完成）
+
+1. 開啟設定，在「後端連線」填入
+   `https://woundai-backend-demo-z4kgfkob4a-de.a.run.app`；使用 `demo01`，
+   密碼由 Jack 在裝置上直接輸入，按「儲存並測試連線」。記錄登入成功／nurse 身分。
+   不可把一般 Release 的正式預設 URL 當成 demo；送審說明必須包含此設定步驟。
+2. 僅使用新建虛構個案、合成影像或印刷模擬圖，完成量測 → nurse 修邊 → 本機保存 → 重開紀錄。
+   不提交既有真實病例，不啟用研究送件。nurse 修邊不得標為醫師確認。
+3. 依上方 jetsam 程序完成畫面／相機／LiDAR 壓力測試，歸檔 Instruments 與診斷結果。
+4. 完成審查聯絡電話、測試者名單、隱私政策責任人及保存期限確認，再進行外部送審。
+   2026-10-02 瀏覽器所見外部群組為 0 位測試者／0 個建置版本；切換建置列表時 Apple 要求重新登入。
+
 ### 接續順序
 
-1. 本機測試與 owner_guard → 可覆核 patch／PR；本輪不併入尚待 Windows 驗證的 PR #15。
-2. demo 後端完成 IAM／固定 URL／nurse 帳號驗證後，另做候選 Release 設定與實機端到端測試。
+1. 新增實機壓力測試與進度文件更新送回 PR #16；以新 head 的 CI 為準。
+2. demo 已完成部署、固定 URL、IAM 與瀏覽器 nurse 登入；接續 iPhone 示範環境验收與簽署 Archive。
 3. 確認隱私政策責任人及保存期限，核可後發布現有 GitHub Pages、同步 ASC 問卷。
 4. 實機 jetsam 回歸及測試者名單／Apple 登入完成後，再送醫療版 Beta Review。
 5. 民眾版對外雲端測試等待 App Attest、撤回流程與研究／法規前提完成。
