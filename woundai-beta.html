@@ -1,0 +1,50 @@
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>WoundAI 示範測試版隱私說明</title><style>
+  :root { color-scheme: light dark; }
+  body { max-width: 44rem; margin: 0 auto; padding: 2rem 1.25rem 5rem;
+         font: 16px/1.75 -apple-system, "Segoe UI", "Noto Sans TC", sans-serif; }
+  h1 { font-size: 1.6rem; margin-bottom: .25rem; }
+  h2 { font-size: 1.15rem; margin-top: 2.25rem; border-bottom: 1px solid #8884; padding-bottom: .3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  .sub { color: #888; margin-top: 0; }
+  .key { background: #0a84ff14; border-left: 3px solid #0a84ff; padding: .75rem 1rem; margin: 1rem 0; }
+  .warn { background: #ff950014; border-left: 3px solid #ff9500; padding: .75rem 1rem; margin: 1rem 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .93rem; }
+  th, td { border: 1px solid #8884; padding: .5rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #8881; }
+  code { background: #8882; padding: .1rem .3rem; border-radius: 3px; font-size: .9em; }
+  .en { border-top: 2px solid #8884; margin-top: 3rem; padding-top: 1rem; }
+  footer { margin-top: 3rem; color: #888; font-size: .9rem; }
+  a { color: #0a84ff; }
+</style></head><body><h1>WoundAI 示範測試版隱私說明</h1>
+<p>版本：2026-10-02。適用於 WoundAI 1.0 的 TestFlight 示範測試，以及指定的 woundai-backend-demo 服務。</p>
+<div class="warn"><strong>僅使用合成影像、印刷模擬圖、測試物件與虛構個案。請勿輸入真實病患資料。本測試並非臨床收案、診斷或治療服務，亦不表示已取得研究或醫療器材核准。</strong></div>
+<h2>聯絡窗口與你的選擇</h2>
+<p>測試聯絡與資料請求窗口：Jack Hou，<a href="mailto:jack.hou@gmail.com">jack.hou@gmail.com</a>。可來信詢問資料存取、更正、刪除或停止參與。請只提供必要的測試帳號、日期與問題描述，不要寄送傷口照片、密碼或病患身分資料；需要其他資料時，先與窗口確認處理方式。你可停止使用雲端功能或停止參與測試。</p>
+<h2>裝置上的資料</h2>
+<p>App 可儲存照片、輪廓、量測值、時間、個案代碼、同意紀錄與選填欄位；支援裝置另可產生深度資料。姓名、病歷號與簽名欄位在本機加密，照片及深度側檔使用 AES-GCM，金鑰存於裝置 Keychain。量測與部分索引依 App 沙箱及系統資料保護保存，並非整個資料庫均有應用層加密。測試時這些欄位也只能填虛構資料。</p>
+<p>本機資料保留至使用者或 App 的清理流程移除。程式包含結案 90 天後的影像清理流程，需由 App 執行；進行中個案、量測索引及系統備份不適用同一影像期限。系統備份與裝置設定由使用者管理，移除本機資料不代表所有系統備份同步消失。</p>
+<h2>何時傳至伺服器</h2>
+<p>雲端量測會將選取的影像及分析參數透過 HTTPS 傳至指定示範服務，即使未同意研究訓練亦然。伺服器處理登入帳號、角色、個案代碼、量測結果及操作紀錄；照護同意流程可能涉及影像保存與 receipt。一般量測請求不包含本機姓名及病歷號欄位，但影像或自由文字仍可能含識別資訊。個案代碼可串聯紀錄，不能視為完全匿名。</p>
+<p>測試帳號為護理師角色，可測試量測與紀錄流程；不授予醫師確認、研究標註送件或帳號管理權限。本階段不以測試資料進行正式臨床收案。正式研究及其他服務環境需另行確認核准、同意與資料治理，不能套用本說明推論已開放。</p>
+<h2>雲端儲存、日誌與處理者</h2>
+<p>示範服務由 Google Cloud Run 在 asia-east1 執行。App 資料存於容器暫存儲存，可能保留至執行個體重建或管理員處理；未提供固定時點刪除或持久保存保證。重啟後影像、receipt 與應用稽核資料可能消失，帳號可重建不代表其他資料也會還原。</p>
+<p>Google Cloud 基礎設施可能記錄來源網路位址、請求路徑、時間、狀態及服務診斷資訊。2026-10-02 核對的專案日誌設定為：一般日誌桶保留 30 天，Google Cloud 必要稽核日誌桶保留 400 天；日誌桶位置標示為 global，不能宣稱所有日誌都僅存於台灣。這些日誌不是 App 的影像儲存，也不代表示範病例或應用稽核具有 WORM 保證。</p>
+<p>資料用於執行功能、排除錯誤及維護安全，不用於廣告或跨 App 追蹤。Google Cloud 處理後端資料；Apple 處理 TestFlight 的安裝、測試與回饋資訊，依其服務及隱私規則運作。測試者另行寄來的回饋由聯絡窗口處理；停止測試或刪除 App 不會自動刪除已送出的回饋及雲端安全日誌。</p>
+<h2>變更</h2>
+<p>若開放真實臨床資料、研究用途、更換處理環境或變更保存方式，將先更新適用說明及必要的同意流程。請依測試通知確認版本。</p>
+<section class="en" lang="en"><h1>WoundAI Demo Test Privacy Notice</h1>
+<p>Version: 2026-10-02. Applies to the WoundAI 1.0 TestFlight demonstration and the designated woundai-backend-demo service.</p>
+<p><strong>Use only synthetic images, printed phantoms, test objects and fictional cases. Do not enter patient data. This beta is not a clinical enrollment, diagnosis or treatment service, nor a claim of research or medical-device approval.</strong></p>
+<h2>Contact and choices</h2>
+<p>Test and data-request contact: Jack Hou, <a href="mailto:jack.hou@gmail.com">jack.hou@gmail.com</a>. Contact us about access, correction, deletion or leaving the test. Provide only necessary test-account details, dates and a problem description; do not email wound photos, passwords or patient identifiers. Agree on a suitable handling method before supplying additional data. You can stop using cloud features or leave the test.</p>
+<h2>On-device information</h2>
+<p>The app can retain photos, outlines, measurements, timestamps, case codes, consent records and optional fields; supported hardware can also produce depth data. Name, medical-record-number and signature fields are encrypted locally. Photos and depth sidecars use AES-GCM with device Keychain keys. Some indexes and measurements rely on the app sandbox and system data protection; this is not whole-database application encryption. Enter fictional values only.</p>
+<p>Local information remains until removed by the user or app cleanup. A cleanup routine covers images for cases closed for 90 days and must execute to remove them. Active cases, measurement indexes and system backups do not follow that same image period. Users manage device/backup settings; removing local data does not mean all system backups disappear.</p>
+<h2>Cloud processing</h2>
+<p>Cloud measurement sends selected images and analysis parameters over HTTPS even without research-training consent. The server processes login identity, role, case codes, results and operational records. Care-consent flows may involve image retention and receipts. Normal measurement requests exclude local name and medical-record-number fields, but images or free text may themselves identify someone. Case codes link records and are pseudonymous, not fully anonymous.</p>
+<p>The nurse test account supports measurement and record workflows, without physician verification, research annotation submission or account administration. Formal enrollment is not enabled by this test. Research and other environments require separate approval, consent and data-governance checks.</p>
+<h2>Storage, logs and service providers</h2>
+<p>The demo runs on Google Cloud Run in asia-east1. Application data uses ephemeral container storage and may remain until instance replacement or administrative handling, without a fixed deletion deadline or durability guarantee. Restart may remove images, receipts and application-audit records. Recreating the login account does not recover other records.</p>
+<p>Google Cloud infrastructure may log source network addresses, request paths, timestamps, status and diagnostics. Project settings checked on 2026-10-02 retain general logs for 30 days and required Google Cloud audit logs for 400 days. The log buckets are marked global; this is not a promise that all logs stay in Taiwan. These buckets are distinct from image storage and do not establish WORM protection for demo cases or application-audit records.</p>
+<p>Information supports app functions, troubleshooting and security, not advertising or cross-app tracking. Google Cloud processes backend information. Apple handles TestFlight installation, testing and feedback under its own service/privacy rules. Separately emailed feedback is handled by the contact person; leaving the test or deleting the app does not automatically remove prior feedback or cloud security logs.</p>
+<h2>Changes</h2><p>Real clinical data, research use, changes of processing environment or retention require updated notices and any necessary consent before use. Check the version in test communications.</p></section></body></html>
