@@ -567,16 +567,26 @@ function Get-DemoGuardedServiceAccounts([string]$ProductionIdentity) {
         Agents         = @($agents | Sort-Object -Unique)
         Secrets        = @($present)
         MissingSecrets = @($missing)
+        ProjectNumber  = $number
     }
 }
 
-function Get-DemoEscalationChecks([string[]]$Secrets, [string[]]$ServiceAccounts) {
+function Get-DemoEscalationChecks([string[]]$Secrets, [string[]]$ServiceAccounts, [string]$ProjectNumber) {
     # 每一項都是示範身分拿到正式密文的一條路：直接讀、把密文授權給自己、改專案 IAM、
     # 冒用某個服務帳號或替它簽發憑證。只看「現在讀不讀得到」會漏掉後面三條。
     # $Secrets 是存在的正式密文（見 Get-DemoGuardedServiceAccounts）。
+    #
+    # 密文的資源全名必須用專案「編號」。2026-09-29 對 woundai-jackh001 實測：
+    # projects/<專案 ID>/secrets/... 不論問哪個權限，Troubleshooter 與
+    # iam list-testable-permissions 一律回 INVALID_ARGUMENT（請求被拒，不是存取判定），
+    # 換成 projects/<專案編號>/secrets/... 才有答案。專案資源用專案 ID、服務帳號用
+    # projects/-，兩者同日實測都接受。編號不對就停下來，不猜。
+    if ($ProjectNumber -notmatch '^[0-9]{6,20}$') {
+        throw "cannot name production secrets for the Policy Troubleshooter without the project number of [$ProjectId]"
+    }
     $checks = @()
     foreach ($name in @($Secrets)) {
-        $resource = "//secretmanager.googleapis.com/projects/$ProjectId/secrets/$name"
+        $resource = "//secretmanager.googleapis.com/projects/$ProjectNumber/secrets/$name"
         $checks += [pscustomobject]@{ Resource = $resource; Permission = 'secretmanager.versions.access'
                                       What = "read production secret [$name]" }
         $checks += [pscustomobject]@{ Resource = $resource; Permission = 'secretmanager.secrets.setIamPolicy'
@@ -617,7 +627,8 @@ function Assert-DemoIdentityEffectivelyDenied([string]$ProductionIdentity) {
     }
     $accounts = Get-DemoGuardedServiceAccounts $ProductionIdentity
     $guarded = @($accounts.Guarded)
-    $checks = @(Get-DemoEscalationChecks -Secrets @($accounts.Secrets) -ServiceAccounts $guarded)
+    $checks = @(Get-DemoEscalationChecks -Secrets @($accounts.Secrets) -ServiceAccounts $guarded `
+                    -ProjectNumber $accounts.ProjectNumber)
     foreach ($check in $checks) {
         $r = Invoke-GCloudCaptured policy-intelligence troubleshoot-policy iam $check.Resource `
             "--principal-email=$RuntimeServiceAccount" "--permission=$($check.Permission)" `
@@ -626,6 +637,8 @@ function Assert-DemoIdentityEffectivelyDenied([string]$ProductionIdentity) {
             $hint = ''
             if ($r.Stderr -match 'SERVICE_DISABLED|has not been used|is disabled|not enabled') {
                 $hint = ' Enable the Policy Troubleshooter API once: gcloud services enable policytroubleshooter.googleapis.com (docs/admin_operations.md §6).'
+            } elseif ($r.Stderr -match 'INVALID_ARGUMENT') {
+                $hint = ' The Policy Troubleshooter rejected the request itself; that is not an access verdict. Check the resource name format against docs/admin_operations.md §6.'
             }
             throw "cannot evaluate whether the demo identity can $($check.What) (gcloud exit $($r.Exit)).$hint $($r.Stderr)"
         }
