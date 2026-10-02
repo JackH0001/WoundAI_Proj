@@ -12,7 +12,7 @@
 | PrivacyInfo ×2 | 原本已存在並進 Resources；本輪修正 Lite 的 linked、DeviceID、Health，醫療深度歸健康資料 | ASC 問卷同步與營運方確認 |
 | Release | 兩版 Release 建置；檢查成品 DEBUG、圖示、ATS 與 manifest；demo URL 已驗證 | App 預設仍是正式 URL，須在設定頁明確切換 demo；iOS 雲端端到端尚待驗收 |
 | App Attest | 決策：在雙端契約成立後才接入雲端請求，見下方契約 | 後端 challenge／驗證／持久化、客戶端實作、真機測試 |
-| 隱私政策 | `site/privacy/` 中英草稿依當前資料流重寫 | 聯絡窗口、IRB、保存期限、雲端日誌、法規覆核；未發布 |
+| 隱私政策 | 示範測試版中英說明經 Jack 核准，已發布於既有 GitHub Pages，並儲存至 TestFlight | `site/privacy/` 的正式／民眾版草稿仍待營運與法規覆核；測試版說明不涵蓋正式臨床收案 |
 | jetsam（歷史 task #40） | 共用序列載圖 actor、取消檢查、解碼池釋放、禁止原圖快取；修邊保留原座標 | LiDAR 實機壓力／記憶體峰值與 jetsam log，尚未結案 |
 
 ### 關鍵修正與證據界線
@@ -88,15 +88,24 @@ Apple 依據：[App privacy details](https://developer.apple.com/app-store/app-p
 2. 僅使用新建虛構個案、合成影像或印刷模擬圖，完成量測 → nurse 修邊 → 本機保存 → 重開紀錄。
    不提交既有真實病例，不啟用研究送件。nurse 修邊不得標為醫師確認。
 3. 依上方 jetsam 程序完成畫面／相機／LiDAR 壓力測試，歸檔 Instruments 與診斷結果。
-4. 完成審查聯絡電話、測試者名單、隱私政策責任人及保存期限確認，再進行外部送審。
-   2026-10-02 瀏覽器所見外部群組為 0 位測試者／0 個建置版本；切換建置列表時 Apple 要求重新登入。
+4. 審查聯絡資料、測試者與測試版隱私說明已完成設定；仍需完成上述實機驗收再送外部審查。
+
+### TestFlight Build 23 現況（2026-10-02 晚間）
+
+- Archive／IPA 來自 `4cb25de`，版本 `1.0 (23)`；簽章、隱私 manifest 與匯出後 38 個 Mach-O sections 均已核對。Apple 處理完成，狀態為「準備提交」。
+- iPhone Release 測試 57/57、該 head 的 CI 測試 57/57 通過；記憶體測試仍僅證明元件層，不取代前述 UI／相機／LiDAR 驗收。
+- Build 23 已加入 WoundAI Internal QA。內部與外部群組各有一名經指定的測試者，狀態「已邀請」；尚未驗證接受邀請與實機安裝。
+- 外部群組仍為零個建置版本。審查流程可前進至「提交以供審查」且按鈕可用，但尚未提交；表單通過不等於審查帳號登入驗收通過。
+- 審查聯絡資料、登入需求、測試內容與隱私 URL 已保存。密碼由 Jack 直接在 Apple 表單處理，不讀取或寫入版控；私人電話不記錄於本文件。
+- 經核准的[示範測試版隱私說明](https://jackh0001.github.io/WoundAI_Proj/woundai-beta.html)位於 `gh-pages` commit `605ec2b`；公開 HTML 與核准檔逐位元組相同。一般／必要雲端日誌的 30／400 天設定已唯讀核對，不代表示範病例持久化或 WORM。
+- Mac 可列出已配對 iPhone，但實際 CoreDevice 連線重設，首次 iPhone 鏡像設定亦逾時。Jack 已同意鏡像操作測試，仍待手機端完成解鎖與連線。
 
 ### 接續順序
 
-1. 新增實機壓力測試與進度文件更新送回 PR #16；以新 head 的 CI 為準。
-2. demo 已完成部署、固定 URL、IAM 與瀏覽器 nurse 登入；接續 iPhone 示範環境验收與簽署 Archive。
-3. 確認隱私政策責任人及保存期限，核可後發布現有 GitHub Pages、同步 ASC 問卷。
-4. 實機 jetsam 回歸及測試者名單／Apple 登入完成後，再送醫療版 Beta Review。
+1. 完成 iPhone 連線、接受內部測試邀請並確認安裝 `1.0 (23)`。
+2. demo 已完成部署、固定 URL、IAM 與瀏覽器 nurse 登入；接續 iPhone 示範環境端到端及 UI／相機／LiDAR 記憶體驗收。
+3. 正式版 ASC 隱私問卷與民眾版政策另依實際開放功能處理，不把本次測試版政策發布當成完成。
+4. 實機驗收後提交醫療版 Beta Review；審查核准後核對外部群組版本與測試者可安裝狀態。
 5. 民眾版對外雲端測試等待 App Attest、撤回流程與研究／法規前提完成。
 
 ---
