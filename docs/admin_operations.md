@@ -421,8 +421,8 @@ Remove-Variable pw, values, rng, b
 
     # 2. 每一項都應為 CANNOT_ACCESS；3. 示範密文應為 CAN_ACCESS
     # 密文要用專案編號命名：用專案 ID，Troubleshooter 會回 INVALID_ARGUMENT（2026-09-29 實測）
-    $number = gcloud projects describe $proj --format='value(projectNumber)'
-    if ($number -notmatch '^[0-9]{6,20}$') { throw "讀不到專案編號：$number" }
+    [string]$number = gcloud projects describe $proj --format='value(projectNumber)'
+    if ($LASTEXITCODE -ne 0 -or $number -notmatch '^[0-9]{6,20}$') { throw "讀不到專案編號：$number" }
     $checks = @()
     foreach ($n in $present) {
         foreach ($p in 'secretmanager.versions.access', 'secretmanager.secrets.setIamPolicy') {

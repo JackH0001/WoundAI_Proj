@@ -29,6 +29,7 @@ PowerShell available (Windows PowerShell 5.1 and pwsh on Windows; pwsh in CI).
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -133,6 +134,11 @@ foreach ($name in @('Ok', 'Warn', 'Invoke-GCloudCaptured', 'ConvertFrom-GCloudJs
 # Every gcloud call goes through Invoke-GCloud; replace it with a real child
 # process so stderr and exit codes behave like the real CLI.
 function Invoke-GCloud { & $env:WOUNDAI_FAKE_PYTHON $env:WOUNDAI_FAKE_GCLOUD @args }
+# The documentation calls gcloud directly. Never let those calls reach a cloud.
+function gcloud {
+    & $env:WOUNDAI_FAKE_PYTHON $env:WOUNDAI_FAKE_GCLOUD @args
+    $global:LASTEXITCODE = $LASTEXITCODE
+}
 
 $ProjectId = 'woundai-jackh001'
 $Region = 'asia-east1'
@@ -193,6 +199,10 @@ foreach ($c in $cases) {
                     -Attempts 3 -IntervalSec 0 | Out-Null
             }
             'vendor'   { Copy-EngineeringVendor -FlaskDir ([string]$c.flask) | Out-Null }
+            'docs' {
+                $block = Get-Content -Raw -Encoding UTF8 -LiteralPath $env:WOUNDAI_DEMO_DOC_BLOCK
+                & ([scriptblock]::Create($block)) | Out-Null
+            }
             'escalation' {
                 $rows = @(Get-DemoEscalationChecks -Secrets @('woundai-admin-password') `
                     -ServiceAccounts @() -ProjectNumber ([string]$c.project_number))
@@ -491,6 +501,35 @@ def real_project(states=None):
                                         "woundai-jwt-secret": ["serviceAccount:" + COMPUTE_SA],
                                         "woundai-flask-secret": []},
                         missing=REAL_MISSING, production=COMPUTE_SA)
+
+
+def documentation_cases():
+    """Run the published commands, including empty native-process output.
+
+    Do not duplicate the number guard here: extracting the Markdown block is
+    what catches a fix present in the deploy script but missing in the runbook.
+    """
+    cases = {}
+    variants = {
+        "valid": ({"stdout": PROJECT_NUMBER + "\n"}, None),
+        "failed_empty": ({"exit": 1, "stderr": "ERROR: PERMISSION_DENIED\n"}, ""),
+        "successful_empty": ({"stdout": ""}, ""),
+        "project_id": ({"stdout": "woundai-jackh001\n"}, ""),
+        "two_lines": ({"stdout": PROJECT_NUMBER + "\n999999999999\n"}, ""),
+        "failed_with_number": ({"exit": 1, "stdout": PROJECT_NUMBER + "\n",
+                                "stderr": "ERROR: metadata lookup failed\n"}, ""),
+    }
+    for label, (number_reply, expected) in variants.items():
+        scenario = real_project()
+        scenario["services enable policytroubleshooter.googleapis.com"] = {"stdout": ""}
+        scenario["projects describe woundai-jackh001"] = number_reply
+        scenario["run services describe woundai-backend"] = {"stdout": COMPUTE_SA + "\n"}
+        for name in DEMO_MAP.values():
+            key = ("policy-intelligence troubleshoot-policy iam %s "
+                   "--permission=secretmanager.versions.access") % secret_resource(name)
+            scenario[key] = {"stdout": json.dumps({"overallAccessState": "CAN_ACCESS"})}
+        cases["docs_number_" + label] = ("docs", DEMO_SA, scenario, expected)
+    return cases
 
 
 # The project number handed to Get-DemoEscalationChecks directly.
@@ -1060,6 +1099,14 @@ class DemoDeployChecksAgainstFakeGcloud(unittest.TestCase):
         harness.write_text(HARNESS, encoding="utf-8-sig")
 
         cases = dict(CASES)
+        cases.update(documentation_cases())
+        doc = (ROOT / "docs" / "admin_operations.md").read_text(encoding="utf-8")
+        section = doc[doc.index("### 驗證示範身分的「有效」權限"):doc.index("### 部署示範服務")]
+        blocks = re.findall(r"```powershell\n(.*?)```", section, re.S)
+        if len(blocks) != 1:
+            raise AssertionError("expected exactly one published verification block")
+        doc_block = tmp / "verification.ps1"
+        doc_block.write_text(blocks[0], encoding="utf-8-sig")
         cls.layouts = {}
         cls.results = {}
         cls.states = {}
@@ -1101,6 +1148,7 @@ class DemoDeployChecksAgainstFakeGcloud(unittest.TestCase):
             cls.states[shell] = state
             env = os.environ.copy()
             env.update({"WOUNDAI_DEMO_CHECK_SOURCE": str(DEMO),
+                        "WOUNDAI_DEMO_DOC_BLOCK": str(doc_block),
                         "WOUNDAI_DEMO_CHECK_CASES": str(case_file),
                         "WOUNDAI_DEMO_CHECK_STATE": str(state),
                         "WOUNDAI_FAKE_PYTHON": sys.executable,
@@ -1154,6 +1202,32 @@ class DemoDeployChecksAgainstFakeGcloud(unittest.TestCase):
     def calls(self, shell, case):
         path = Path(self.states[shell]) / case / "calls.jsonl"
         return [json.loads(l) for l in path.read_text().splitlines()]
+
+    def test_documented_number_failures_stop_before_any_question(self):
+        for shell in self.results:
+            for cid in documentation_cases():
+                if cid.endswith("_valid"):
+                    continue
+                with self.subTest(shell=shell, case=cid):
+                    calls = self.calls(shell, cid)
+                    self.assertEqual(calls[-1][:3], ["projects", "describe", "woundai-jackh001"])
+                    self.assertFalse([c for c in calls if c[:1] == ["policy-intelligence"]])
+
+    def test_documented_valid_number_asks_the_complete_matrix(self):
+        present = [n for n in PRODUCTION if n not in REAL_MISSING]
+        expected = escalation_matrix([COMPUTE_SA], present)
+        expected += [(secret_resource(n), "secretmanager.versions.access") for n in DEMO_MAP.values()]
+        self.assertEqual(len(expected), 19)
+        for shell in self.results:
+            asked = []
+            for argv in self.calls(shell, "docs_number_valid"):
+                if argv[:1] != ["policy-intelligence"]:
+                    continue
+                self.assertIn("--principal-email=" + DEMO_SA, argv)
+                permission = [a for a in argv if a.startswith("--permission=")]
+                self.assertEqual(len(permission), 1)
+                asked.append((argv[3], permission[0].split("=", 1)[1]))
+            self.assertEqual(sorted(asked), sorted(expected))
 
     def test_the_troubleshooter_is_asked_every_question_about_the_right_principal(self):
         # The fake's routing key drops most --flags, so read what was actually sent.
