@@ -566,9 +566,19 @@ struct BackendSettingsView: View {
 
     private var busy: Bool { progress != nil || opening }
 
+    private var versionLabel: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "未知"
+        return "\(version)（\(build)）"
+    }
+
     var body: some View {
         NavigationStack {
             Form {
+                Section("App 資訊") {
+                    LabeledContent("版本（建置號）", value: versionLabel)
+                        .textSelection(.enabled)
+                }
                 Section("後端連線") {
                     TextField("位址", text: $url)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
