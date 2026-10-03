@@ -15,6 +15,7 @@ struct ReviewView: View {
     @State private var spaceMismatch: String?
     @State private var trainOk = false
     @State private var loggedIn = false
+    @State private var identity: LoginIdentity?
     @State private var loading = true
     @State private var editing = false
     @State private var confirmSubmit = false
@@ -78,7 +79,7 @@ struct ReviewView: View {
                 .font(.footnote).foregroundStyle(.red)
         }
 
-        Button("重新修邊（載回原影像與輪廓）") { editing = true }
+        Button(identity?.canVerifyClinicalEdits == true ? "重新修邊（醫師確認）" : "調整輪廓（不作醫師確認）") { editing = true }
             .buttonStyle(.borderedProminent)
             .disabled(bmp == nil || spaceMismatch != nil)
 
@@ -109,6 +110,9 @@ struct ReviewView: View {
             if entry["uploaded"] == "1" {
                 Text("✓ 此筆深度已補傳雲端（float32 公尺原樣，供 3D 重建研究）。")
                     .font(.footnote).foregroundStyle(.blue)
+            } else if identity?.can("annotation.submit") != true {
+                Text("目前帳號無深度上傳權限；本機深度資料仍可檢視。")
+                    .font(.footnote).foregroundStyle(.secondary)
             } else if !m.annotationSubmitted {
                 Text("此筆有本機深度側檔。請**先補送訓練標註**——後端不收沒有標註綁定的深度（孤兒資料防護）。")
                     .font(.footnote).foregroundStyle(.secondary)
@@ -126,6 +130,10 @@ struct ReviewView: View {
 
     @MainActor
     private func uploadDepth(_ m: Measurement) async {
+        guard await refreshIdentity(), identity?.can("annotation.submit") == true else {
+            msg = "⚠️ 目前帳號無深度上傳權限，未送出資料。"
+            return
+        }
         guard let backend, let imageId = m.imageId,
               let side = DepthStore.load(imagePath: m.imagePath, store: app.imageStore) else {
             msg = "⚠️ 深度側檔讀取失敗（可能已隨影像保存政策清除）"
@@ -147,9 +155,13 @@ struct ReviewView: View {
     private func canSubmit(_ m: Measurement) -> Bool {
         return !m.annotationSubmitted && m.gtPolygon != nil && m.imageId != nil
             && m.wdCode != nil && m.doctorVerified && trainOk && loggedIn
+            && identity?.canSubmitClinicalTraining == true
     }
 
     private func submitHint(_ m: Measurement) -> String {
+        if identity?.canSubmitClinicalTraining != true {
+            return "目前帳號無醫師確認／訓練標註權限；可調整輪廓與儲存量測。"
+        }
         if m.annotationSubmitted { return "此筆已送出過訓練標註。重新修邊後可再送（雲端視為醫師修訂版）。" }
         if m.gtPolygon == nil { return "⚠ 此筆沒有 GT 輪廓，不能補送（請先重新修邊）。" }
         if m.imageId == nil { return "⚠ 此筆沒有後端影像綁定，不能補送。" }
@@ -217,7 +229,8 @@ struct ReviewView: View {
         guard let m = app.reviewRecord else { return }
         cur = m
         loading = true
-        let img = m.imagePath.isEmpty ? nil : app.imageStore.loadFull(m.imagePath)
+        let img = await ImageLoadQueue.shared.fullImage(store: app.imageStore, name: m.imagePath)
+        guard !Task.isCancelled else { return }
         bmp = img
         spaceMismatch = {
             guard let img, let w = m.imageW, let h = m.imageH else { return nil }
@@ -246,6 +259,7 @@ struct ReviewView: View {
             loggedIn = (try? await c.login(username: u, password: p)) == true
         }
         backend = c
+        identity = loggedIn ? await c.currentIdentity() : nil
         loading = false
     }
 
@@ -258,8 +272,9 @@ struct ReviewView: View {
         let finalArea = newArea ?? m.estimatedArea
         u.estimatedArea = finalArea
         u.hasWound = (finalArea ?? 0) > 0 || m.hasWound
-        // 走到這裡代表醫師按了「完成修邊」（取消不會呼叫 onDone）。
-        u.doctorVerified = true
+        // An edit is a physician verification only with an authenticated capability.
+        // A nurse re-edit clears an earlier verification of different geometry.
+        u.doctorVerified = identity?.canVerifyClinicalEdits == true
         // ⚠ correctionIou **刻意不覆寫**：它的定義是「與 AI 原始遮罩的 IoU」。從本畫面進來
         //   的起點是已修過的 GT，覆寫會讓指標系統性趨近 1.0——失真的自我評分。
         //   本次相對前版的 IoU 記在 notes。
@@ -299,11 +314,28 @@ struct ReviewView: View {
         resumeRaster = raster
         msg = "✅ 已更新此筆紀錄的輪廓與面積。"
             + (rasterSaveFailed ? "\n⚠️ 但組織分區未能存檔，下次進來會退回 AI 的猜測。" : "")
-            + "\n輪廓已變更，此筆需**重新送出**才會讓雲端拿到新的 GT。"
+            + (u.doctorVerified
+               ? "\n輪廓已變更，此筆需重新送出才會更新雲端 GT。"
+               : "\n此筆未標記為醫師確認，未送出訓練標註。")
+    }
+
+    @MainActor
+    private func refreshIdentity() async -> Bool {
+        identity = nil
+        loggedIn = false
+        guard let backend else { return false }
+        loggedIn = (try? await backend.login(username: AppSettings.backendUser(),
+                                             password: AppSettings.backendPassword())) == true
+        if loggedIn { identity = await backend.currentIdentity() }
+        return loggedIn
     }
 
     @MainActor
     private func submit(_ m: Measurement) async {
+        guard await refreshIdentity(), identity?.canSubmitClinicalTraining == true else {
+            msg = "⚠️ 目前帳號無醫師確認／訓練標註權限，未送出資料。"
+            return
+        }
         // ⚠ 同意真值在按下的當下重讀，不可用進畫面時的快照——醫師可能剛撤回。
         if let cid = m.caseId, let c = await app.repo.getCase(id: cid) {
             let fresh = await app.repo.activeConsent(patientId: c.patientId)?.trainEffective == true

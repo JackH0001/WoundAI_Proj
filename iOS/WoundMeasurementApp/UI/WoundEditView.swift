@@ -946,7 +946,7 @@ struct WoundEditView: View {
         // 不動筆刷不是錯，只是這一筆不會成為組織訓練樣本——醫師有權說「AI 分得對」，
         // 但要讓他知道這個選擇的意義（未修正的遮罩是 AI 自己的輸出，拿去訓練是自我確認）。
         if m.st.maskCount > 0, m.st.editedCount == 0 {
-            Text("ℹ 尚未修正任何組織分區。面積與邊界照常送出；但組織遮罩會標記為「未經醫師修正」，**不會進入組織分割訓練集**。")
+            Text("ℹ 尚未修正任何組織分區。完成後會回到量測頁；訓練標註需另取得權限與同意。未修正的組織遮罩不會作為組織分割訓練標註。")
                 .font(.caption).foregroundStyle(.secondary)
         }
         if m.st.maskCount == 0 {

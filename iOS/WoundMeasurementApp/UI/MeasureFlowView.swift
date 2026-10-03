@@ -43,11 +43,15 @@ final class MeasureViewModel: ObservableObject {
     @Published var editing = false
     /// 送訓練標註的狀態。✅／ℹ️／⚠️ 開頭的會被彈窗攔下強制確認（一行綠字實測會被錯過）。
     @Published var submitStatus: String?
+    @Published var identity: LoginIdentity?
+    var canVerifyEdits: Bool { identity?.canVerifyClinicalEdits == true }
 
     private var backend: BackendClient?
     private var boundCareCode: String?
 
     func ensureLogin() async -> Bool {
+        identity = nil
+        backend = nil
         let user = AppSettings.backendUser(), pass = AppSettings.backendPassword()
         guard !user.isEmpty, !pass.isEmpty else {
             error = "尚未設定後端帳號密碼，請先到「設定」填寫。"
@@ -59,6 +63,7 @@ final class MeasureViewModel: ObservableObject {
             return false
         }
         backend = c
+        identity = await c.currentIdentity()
         return true
     }
 
@@ -239,8 +244,15 @@ final class MeasureViewModel: ObservableObject {
     static func advisories(_ r: ClassifyResult, clinical: Bool) -> [String] {
         var out: [String] = []
         if r.imageId == nil {
-            out.append("⚠ 這張影像未取得 image_id（可能已撤回訓練同意，或後端存檔失敗）。"
-                     + "本次量測可以存入病歷，但**不能**送出訓練標註。")
+            out.append("⚠ 後端未確認此影像已保存，未取得有效 image_id。"
+                     + "本次量測可存入手機時間軸，但目前不能送出訓練標註。")
+            if r.persistenceReason == "care_receipt_required" {
+                out.append("未取得照護同意憑證；請確認個案的照護同意，以及設定中的後端網址。")
+            } else if r.persistenceReason == nil {
+                out.append("後端未提供保存狀態；可能連到舊版平台，請核對設定中的後端網址。")
+            } else if r.persistenceReason == "staging_unavailable" {
+                out.append("後端影像暫存目前無法使用，請稍後重試。")
+            }
         }
         if r.imageReused && clinical {
             // 真實回診照片不可能與上次逐位元相同——出現這個幾乎必然是重複選了同一張示範圖，
@@ -276,7 +288,7 @@ final class MeasureViewModel: ObservableObject {
             ? (polygon.count >= 3 ? [polygon] : nil)
             : all
         self.correctionIou = iou
-        self.doctorVerified = true
+        self.doctorVerified = canVerifyEdits
         if var r = result {
             let area = newArea ?? r.areaCm2
             r.areaCm2 = area
@@ -449,6 +461,9 @@ final class MeasureViewModel: ObservableObject {
 
     /// 送出條件。任何一項不成立都不該讓按鈕可按——而且要說得出是哪一項。
     var submitBlockedReason: String? {
+        guard identity?.canSubmitClinicalTraining == true else {
+            return "目前帳號無醫師確認／訓練標註權限；可調整輪廓與儲存量測。"
+        }
         guard let r = result else { return "尚未完成量測" }
         if r.imageId == nil { return "缺 image_id，無法綁定影像（見上方提示）" }
         if exudate == nil { return "請先輸入滲液量（0–3）" }
@@ -492,6 +507,10 @@ final class MeasureViewModel: ObservableObject {
         }
         guard await ensureLogin(), let backend else {
             submitStatus = "⚠️ " + (error ?? "後端未連線"); return
+        }
+        guard identity?.canSubmitClinicalTraining == true else {
+            submitStatus = "⚠️ 目前帳號無醫師確認／訓練標註權限，未送出資料。"
+            return
         }
         // 臨床用個案的**穩定** wdCode（回診沿用同一組）；範例／模擬圖沒有個案才另發。
         guard let code = boundCareCode, !clinicalMode || woundCase?.wdCode == code else {
@@ -726,16 +745,16 @@ struct MeasureFlowView: View {
                         // 醫師修邊確認狀態。**取消不算確認**——存檔仍允許（合法的 AI 初步
                         // 量測紀錄），但送訓練標註必須擋下，且要讓醫師看得出現在是什麼狀態。
                         if vm.doctorVerified {
-                            Text("✓ 已完成醫師修邊確認 — 可送訓練標註")
+                            Text("✓ 已完成醫師修邊確認；送出仍需符合下方條件。")
                                 .font(.footnote).foregroundStyle(.blue)
                         } else {
-                            Text("尚未完成醫師修邊確認：此結果為 AI 原始輸出。"
-                                 + "可存入時間軸作為初步量測，但**不得送訓練標註**——"
-                                 + "訓練集的 GT 必須來自人的判斷。請按「醫師確認・修邊」並完成（按取消不算）。")
+                            Text(vm.canVerifyEdits
+                                 ? "尚未完成醫師修邊確認；可先存入時間軸。請完成「醫師確認・修邊」後再送訓練標註。"
+                                 : "目前帳號可調整輪廓與儲存量測，但不會標記為醫師確認，也不能送訓練標註。")
                                 .font(.footnote).foregroundStyle(.red)
                         }
 
-                        Button("醫師確認・修邊") { vm.editing = true }
+                        Button(vm.canVerifyEdits ? "醫師確認・修邊" : "調整輪廓（不作醫師確認）") { vm.editing = true }
                             .buttonStyle(.borderedProminent)
                             .disabled(needExudate)
 
@@ -907,6 +926,9 @@ struct MeasureFlowView: View {
             if clinicalMode && app.chosenCase != nil && !trainOkHint {
                 Text("⚠ 此病患未勾選②訓練同意（或已撤回），不得送出訓練標註")
                     .font(.footnote).foregroundStyle(.red)
+            }
+            if let reason = vm.submitBlockedReason {
+                Text(reason).font(.footnote).foregroundStyle(.secondary)
             }
             if let s = vm.submitStatus {
                 // 狀態放按鈕**上方**，按下即可見。

@@ -9,8 +9,8 @@
 #
 # Code signing
 # ------------
-# CI uses xcodebuild CODE_SIGNING_ALLOWED=NO
-# to skip signing during unit-test builds. Distribution signing (for
+# App builds are unsigned. Simulator tests use local ad-hoc signing so Keychain
+# encryption tests have an application identity. Distribution signing (for
 # TestFlight / App Store) requires separate secrets and a provisioning
 # profile — see the commented-out "archive" step at the bottom.
 name: ios-client
@@ -117,8 +117,9 @@ jobs:
           xcodebuild test \
               -project WoundMeasurementApp.xcodeproj \
               -scheme WoundMeasurementApp \
+              -configuration Release \
               -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
-              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- ENABLE_TESTABILITY=YES \
               -resultBundlePath TestResults.xcresult \
               2>&1 | tee test-results.log
 
