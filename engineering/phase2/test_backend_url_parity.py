@@ -1,22 +1,11 @@
 #!/usr/bin/env python3
-"""The default backend address must agree across iOS, Android and the runbook.
+"""Pin each shipping profile to its documented backend, including demo isolation.
 
-On 2026-08-08 the iOS release build pointed at a deployment that no longer
-existed (wound-ai-867037876992) while Android and docs/admin_operations.md
-pointed at woundai-backend-421209514056. Nothing failed loudly: the only symptom
-was "backend not connected" on every screen, which a tester reports as "the app
-is broken", not as "the address is wrong". Today the three copies are held
-together by a comment asking the next editor to remember all three. A comment is
-not a gate.
-
-These tests make the three copies one fact, and pin the shape of the iOS
-compile-time switch, because the failure that shape prevents -- a release build
-resolving to localhost -- is invisible until someone installs the build on a
-real phone.
-
-Every extractor below raises when it finds nothing. A parser that silently
-matches zero lines and lets the suite pass would be the same fail-open class
-this file exists to close.
+Medical TestFlight uses the isolated demo service. Lite and Android retain the
+existing service until their separate release gates change. A single universal
+URL assertion would reject this intentional split; dropping parity altogether
+would allow an unnoticed wrong-environment release. Parse the explicit profile
+switch fail-closed and compare each profile with a named runbook entry.
 """
 from pathlib import Path
 import re
@@ -78,31 +67,27 @@ def ios_default_url_body() -> str:
     raise AssertionError("unbalanced braces in defaultURL")
 
 
-def ios_branches():
-    """Return (condition, debug_branch, release_branch, text_outside_the_switch)."""
+def ios_profile_urls():
+    # Full-match the small switch: unexpected conditions, nested branches, early
+    # returns, extra statements or a different profile order must fail closed.
     body = without_line_comments(ios_default_url_body(), "//")
-    ifs = re.findall(r"^[ \t]*#if\b", body, re.M)
-    if len(ifs) != 1:
-        raise AssertionError(
-            "defaultURL must contain exactly one #if; found %d. Without one, a release "
-            "build returns whatever comes first in the function." % len(ifs))
-    cond = re.search(r"^[ \t]*#if[ \t]+(?P<cond>.+)$", body, re.M)
-    els = re.search(r"^[ \t]*#else[ \t]*$", body, re.M)
-    end = re.search(r"^[ \t]*#endif[ \t]*$", body, re.M)
-    if not (cond and els and end):
-        raise AssertionError("defaultURL must have #if / #else / #endif")
-    return (cond.group("cond").strip(),
-            body[cond.end():els.start()],
-            body[els.end():end.start()],
-            body[:cond.start()] + body[end.end():])
-
-
-def sole_returned_string(part: str, what: str) -> str:
-    found = re.findall(r'return\s+"([^"]*)"', part)
-    if len(found) != 1:
-        raise AssertionError(
-            "expected exactly one returned string literal in %s, found %d" % (what, len(found)))
-    return found[0]
+    match = re.fullmatch(
+        r'\s*#if DEBUG && targetEnvironment\(simulator\)\s+'
+        r'return "(?P<debug>[^"\n]+)"\s+'
+        r'#elseif WOUND_LITE\s+return legacyURL\s+'
+        r'#else\s+return demoURL\s+#endif\s*', body)
+    if not match:
+        raise AssertionError("unrecognized defaultURL profile switch; inspect all shipping profiles")
+    src = without_line_comments(text(IOS), "//")
+    urls = {"debug": match.group("debug")}
+    for constant, profile in (("legacyURL", "ios-lite"), ("demoURL", "ios-medical-testflight")):
+        values = re.findall(
+            r'^[ \t]*(?:private )?static let ' + constant + r' = "([^"\n]+)"[ \t]*$',
+            src, re.M)
+        if len(values) != 1:
+            raise AssertionError("expected one literal declaration for " + constant)
+        urls[profile] = values[0]
+    return urls
 
 
 # ------------------------------------------------------------ Android
@@ -145,13 +130,18 @@ def android_backend_urls():
 
 # ------------------------------------------------------------ runbook
 
-def runbook_origins():
-    origins = sorted(set(RUN_APP.findall(text(RUNBOOK))))
-    if not origins:
-        raise AssertionError(
-            "docs/admin_operations.md no longer names a *.run.app backend; the runbook "
-            "is one of the three places that must agree")
-    return origins
+def runbook_profiles():
+    src = text(RUNBOOK)
+    pairs = re.findall(
+        r'^\| `(ios-medical-testflight|ios-lite|android-release)` \| `(https://[^`]+)` \|$',
+        src, re.M)
+    profiles = dict(pairs)
+    expected = {"ios-medical-testflight", "ios-lite", "android-release"}
+    if len(pairs) != 3 or set(profiles) != expected:
+        raise AssertionError("runbook must name each shipping profile exactly once")
+    if set(RUN_APP.findall(src)) != set(profiles.values()):
+        raise AssertionError("runbook contains an undocumented or missing backend origin")
+    return profiles
 
 
 # ----------------------------------------------------------- workflow
@@ -184,30 +174,18 @@ def workflow_trigger_paths(event: str):
 
 class BackendUrlParityTests(unittest.TestCase):
 
-    # -- iOS shape -----------------------------------------------------
+    def test_ios_profile_switch_is_explicit(self):
+        self.assertEqual(set(ios_profile_urls()),
+                         {"debug", "ios-lite", "ios-medical-testflight"})
 
-    def test_ios_switch_is_compile_time_and_keyed_on_debug(self):
-        cond, _, _, outside = ios_branches()
-        self.assertIn(
-            "DEBUG", cond,
-            "the defaultURL switch must be keyed on DEBUG; [%s] would send release "
-            "builds down the development path" % cond)
-        self.assertNotIn(
-            "return", outside,
-            "defaultURL returns outside its #if/#endif. An early return makes the "
-            "release branch unreachable -- the exact shape this file replaced.")
-
-    def test_ios_debug_branch_is_a_loopback_and_release_branch_is_not(self):
-        _, debug_part, release_part, _ = ios_branches()
-        debug_url = sole_returned_string(debug_part, "the iOS #if (debug) branch")
-        release_url = sole_returned_string(release_part, "the iOS #else (release) branch")
-        self.assertTrue(is_loopback(debug_url), "iOS debug default should be a loopback")
-        self.assertFalse(
-            is_loopback(release_url),
-            "iOS release resolves to [%s]. A release build pointing at a loopback "
-            "shows only 'backend not connected' on a tester's phone." % release_url)
-        self.assertTrue(release_url.startswith("https://"),
-                        "the release backend must be https, got [%s]" % release_url)
+    def test_ios_debug_is_loopback_and_both_shipping_profiles_are_https(self):
+        urls = ios_profile_urls()
+        self.assertEqual(urls["debug"], "http://localhost:5000")
+        for profile in ("ios-lite", "ios-medical-testflight"):
+            self.assertFalse(is_loopback(urls[profile]), profile)
+            self.assertIsNotNone(RUN_APP.fullmatch(urls[profile]), profile)
+        self.assertNotEqual(urls["ios-lite"], urls["ios-medical-testflight"],
+                            "demo and existing service must remain isolated")
 
     # -- Android shape -------------------------------------------------
 
@@ -223,28 +201,22 @@ class BackendUrlParityTests(unittest.TestCase):
         # An iOS simulator's localhost is the Mac; Android's emulator loopback to the
         # host is 10.0.2.2. Copying either value across platforms silently breaks the
         # development loop on the other one.
-        _, debug_part, _, _ = ios_branches()
-        ios_debug = sole_returned_string(debug_part, "the iOS #if (debug) branch")
+        ios_debug = ios_profile_urls()["debug"]
         android_debug = android_backend_urls()["debug"]
         self.assertIn("localhost", ios_debug)
         self.assertIn("10.0.2.2", android_debug)
         self.assertNotEqual(ios_debug, android_debug)
 
-    # -- the one fact --------------------------------------------------
-
-    def test_release_address_is_identical_in_all_three_places(self):
-        _, _, release_part, _ = ios_branches()
-        ios_release = sole_returned_string(release_part, "the iOS #else (release) branch")
-        android_release = android_backend_urls()["release"]
-        origins = runbook_origins()
-        self.assertEqual(
-            ios_release, android_release,
-            "iOS release is [%s] but Android release is [%s]. One of the two builds is "
-            "talking to the wrong deployment." % (ios_release, android_release))
-        self.assertEqual(
-            origins, [ios_release],
-            "docs/admin_operations.md names %s but the apps ship [%s]; the runbook "
-            "would send an operator to the wrong service." % (origins, ios_release))
+    def test_each_shipping_profile_matches_the_runbook(self):
+        ios = ios_profile_urls()
+        shipped = {
+            "ios-medical-testflight": ios["ios-medical-testflight"],
+            "ios-lite": ios["ios-lite"],
+            "android-release": android_backend_urls()["release"],
+        }
+        self.assertEqual(shipped, runbook_profiles())
+        self.assertEqual(shipped["ios-lite"], shipped["android-release"],
+                         "Lite and Android still share the existing service")
 
     # -- the guard must actually run -----------------------------------
 
