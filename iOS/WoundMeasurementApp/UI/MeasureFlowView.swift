@@ -244,8 +244,15 @@ final class MeasureViewModel: ObservableObject {
     static func advisories(_ r: ClassifyResult, clinical: Bool) -> [String] {
         var out: [String] = []
         if r.imageId == nil {
-            out.append("⚠ 這張影像未取得 image_id（可能已撤回訓練同意，或後端存檔失敗）。"
-                     + "本次量測可以存入病歷，但**不能**送出訓練標註。")
+            out.append("⚠ 後端未確認此影像已保存，未取得有效 image_id。"
+                     + "本次量測可存入手機時間軸，但目前不能送出訓練標註。")
+            if r.persistenceReason == "care_receipt_required" {
+                out.append("未取得照護同意憑證；請確認個案的照護同意，以及設定中的後端網址。")
+            } else if r.persistenceReason == nil {
+                out.append("後端未提供保存狀態；可能連到舊版平台，請核對設定中的後端網址。")
+            } else if r.persistenceReason == "staging_unavailable" {
+                out.append("後端影像暫存目前無法使用，請稍後重試。")
+            }
         }
         if r.imageReused && clinical {
             // 真實回診照片不可能與上次逐位元相同——出現這個幾乎必然是重複選了同一張示範圖，
@@ -738,7 +745,7 @@ struct MeasureFlowView: View {
                         // 醫師修邊確認狀態。**取消不算確認**——存檔仍允許（合法的 AI 初步
                         // 量測紀錄），但送訓練標註必須擋下，且要讓醫師看得出現在是什麼狀態。
                         if vm.doctorVerified {
-                            Text("✓ 已完成醫師修邊確認 — 可送訓練標註")
+                            Text("✓ 已完成醫師修邊確認；送出仍需符合下方條件。")
                                 .font(.footnote).foregroundStyle(.blue)
                         } else {
                             Text(vm.canVerifyEdits
