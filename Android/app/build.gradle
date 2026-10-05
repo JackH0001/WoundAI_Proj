@@ -13,12 +13,28 @@ if (versionFile.exists()) { versionFile.withInputStream { versionProps.load(it) 
 
 android {
     namespace 'com.woundmeasurement.app'
-    compileSdk 34
+    compileSdk 36
 
     defaultConfig {
-        applicationId "com.woundmeasurement.app"
+        // ⚠ **applicationId 與 namespace 是兩件事，這裡刻意只改前者。**
+        //
+        // applicationId = 商店與系統認得的身分（Play 上架後永久固定，改不了）。
+        //   對齊 iOS 的 PRODUCT_BUNDLE_IDENTIFIER（iOS/project.yml: com.woundai.app），
+        //   讓兩個平台的套件名可互相對照——排錯時第一個問題永遠是「你裝的是哪一個」。
+        // namespace  = Kotlin 的 package 與 R／BuildConfig 的生成位置，維持
+        //   com.woundmeasurement.app。全專案有數十處 `com.woundmeasurement.app.XXX`
+        //   的完整限定名（含 BuildConfig），動它等於全樹改 import，而那對商店身分毫無幫助。
+        //
+        // 換 applicationId 的代價，已逐項查證：
+        //   - 無 Firebase／google-services.json → 沒有東西把舊套件名釘死。
+        //   - FileProvider authority 宣告為 `${applicationId}.fileprovider` → 自動跟著改。
+        //   - 只有 MAIN/LAUNCHER intent-filter，沒有以套件名為鍵的深層連結。
+        //   - AndroidKeyStore 的金鑰綁 app 身分 → 舊側載機上已加密的 PHI 會讀不回來。
+        //     但那些機器因為換了新的簽章金鑰，本來就得先 `adb uninstall` 才裝得上，
+        //     所以沒有額外損失。正式環境從未發布過，無既有使用者受影響。
+        applicationId "com.woundai.app"
         minSdk 24
-        targetSdk 34
+        targetSdk 36
         versionCode Integer.parseInt(versionProps.getProperty('versionCode', '1'))
         versionName versionProps.getProperty('versionName', '1.0')
 
@@ -27,9 +43,15 @@ android {
             useSupportLibrary true
         }
         
-        // 啟用ARCore支援
         ndk {
-            abiFilters 'arm64-v8a', 'armeabi-v7a'
+            // **只出 64 位元。** armeabi-v7a 的原生庫在這個專案佔 34.8 MB
+            // （OpenCV 4.14 + ONNX 1.26 都很大），而它換不到任何目標使用者：
+            //   - Play 自 2019 起強制 64 位元支援；
+            //   - 16 KB page size 的規範本身只管 64 位元 ABI（32 位元裝置沒有 16 KB page）；
+            //   - minSdk 24 範圍內還只有 32 位元的機型是 2017 年前的產品，
+            //     不是 Pixel 7+ 這類驗證對象。
+            // 要加回來的話記得：加回去的那顆 .so 不受 16 KB 規範，但會讓 APK 多 35 MB。
+            abiFilters 'arm64-v8a'
         }
     }
 
@@ -71,6 +93,9 @@ android {
             // ONNX Runtime 與 OpenCV 大量走 JNI / 反射，R8 會把它們用得到的類別剝掉，
             // 症狀是**只有 release 版才閃退**，而且堆疊指向被混淆過的名字。
             // 要開的話必須先補 proguard-rules 並在真機完整跑過一輪量測，不是改一行就好。
+            // 臨床影像**不得**寫入共用相簿。見 data/store/GalleryExport.kt 的理由表。
+            // 正式版永遠是 false；要開啟只能用 internalTest build type（見下方）。
+            buildConfigField "boolean", "ALLOW_CLINICAL_GALLERY_EXPORT", "false"
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             // 有金鑰才簽；沒有的話 assembleRelease 會產生 unsigned APK（裝不起來，但至少建得過）
@@ -87,6 +112,25 @@ android {
             // 所以：debug 版只給範例／模擬圖驗證用，真實個案一律用 release 版。
             applicationIdSuffix ".debug"
             versionNameSuffix "-debug"
+            buildConfigField "boolean", "ALLOW_CLINICAL_GALLERY_EXPORT", "false"
+        }
+
+        // 內測專用建置：**唯一**會開啟「臨床影像可匯出共用相簿」的建置。
+        //
+        // 為什麼是獨立 build type，而不是在 release 裡加一個旗標：
+        // 旗標只要預設值寫錯一次，臨床影像就會流進正式版使用者的共用相簿——而那是
+        // **不可逆**的（已被 Google 相簿同步上雲的影像，病患撤回同意時我們刪不掉）。
+        // 獨立 build type 讓「開啟」必須是一個刻意的動作：要打 bundleInternalTest 才拿得到，
+        // 平常的 bundleRelease / assembleRelease 永遠是關的，不依賴任何人記得改旗標。
+        //
+        // 其餘設定（後端網址、簽章、minifyEnabled=false）全部繼承 release，
+        // 這樣內測驗的才是跟正式版同一條建置路徑，而不是另一個東西。
+        internalTest {
+            initWith release
+            matchingFallbacks = ['release']
+            buildConfigField "boolean", "ALLOW_CLINICAL_GALLERY_EXPORT", "true"
+            // 讓測試者在「關於」頁一眼看出手上是內測版，不會把內測結果當正式版回報。
+            versionNameSuffix "-internal"
         }
     }
     
@@ -133,30 +177,44 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.foundation:foundation")
     
-    // CameraX
-    implementation("androidx.camera:camera-core:1.3.1")
-    implementation("androidx.camera:camera-camera2:1.3.1")
-    implementation("androidx.camera:camera-lifecycle:1.3.1")
-    implementation("androidx.camera:camera-view:1.3.1")
-    implementation("androidx.camera:camera-extensions:1.3.1")
+    // CameraX — **停在 1.4.2，不是最新版**。
+    //
+    // 16 KB page size 的修正在 1.4.0 就進去了（CameraX 討論區 Scott Nien 確認
+    // 1.4.0-rc01 已支援），所以 1.4.2 已經滿足 Play 的要求。
+    //
+    // 升到 1.5.x / 1.6.x 會壞：那些版本的 AAR 是用 Kotlin 2.1 編的，
+    // metadata binary version 2.1.0，而本專案的 Kotlin 是 1.9.22（expected 1.9.0），
+    // kspKotlin 會直接以「incompatible version of Kotlin」失敗，而且會把
+    // kotlin-stdlib 2.1.20 一起拉進來。要用 1.5+ 必須先把整個專案升到 Kotlin 2.x
+    // （連帶 Compose compiler 從 kotlinCompilerExtensionVersion 改成
+    // org.jetbrains.kotlin.plugin.compose、KSP 版本、以及 K2 的嚴格度），
+    // 那是另一件事，不應該綁在 16 KB 這條線上。
+    implementation("androidx.camera:camera-core:1.4.2")
+    implementation("androidx.camera:camera-camera2:1.4.2")
+    implementation("androidx.camera:camera-lifecycle:1.4.2")
+    implementation("androidx.camera:camera-view:1.4.2")
+    implementation("androidx.camera:camera-extensions:1.4.2")
     
     // ARCore (深度感測) - 暫時註解
     // implementation("com.google.ar:core:1.40.0")
     
-    // OpenCV Android SDK
-    // org.opencv:opencv-android 不存在於 mavenCentral；改用社群維護的 quickbirdeng
-    // 透過 jitpack（settings.gradle 已含 https://jitpack.io）
-    // 若需升 4.8+ 版可改用 org.opencv:opencv:4.9.0（mavenCentral 從 4.9 開始 publish）
-    implementation("com.quickbirdstudios:opencv:4.5.3.0")
+    // OpenCV Android SDK（官方 mavenCentral 發佈，4.9.0 起可用）
+    // 從社群 quickbirdstudios 4.5.3.0 換成官方 4.14.0，三個理由：
+    //   1. 16 KB page size：4.5.3.0 的 libopencv_java4.so p_align=0x1000，官方 4.13+ 為 0x4000。
+    //   2. 原生 ArUco：4.7 起 aruco 核心進 main repo 的 org.opencv.objdetect.ArucoDetector，
+    //      pipeline/ArucoDetector.kt 的 stub 可以改回真實偵測（12 mm marker）。
+    //   3. quickbirdstudios 自 2021 起未更新；官方版有安全性與 NDK 更新。
+    implementation("org.opencv:opencv:4.14.0")
     
-    // TensorFlow Lite (kept for legacy compatibility)
-    implementation("org.tensorflow:tensorflow-lite:2.14.0")
-    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
-    implementation("org.tensorflow:tensorflow-lite-metadata:0.4.4")
+    // TensorFlow Lite：已移除（2026-10）。
+    // DepthEstimationModule.kt 是唯一引用者，但它沒有任何呼叫者，
+    // 且所需的 assets/models/midas_fp16.tflite 不在 repo 內 → 執行期不可能運作。
+    // 該檔已依本專案慣例改名為 .disabled；要復活時一併恢復本相依與模型檔。
+    // 移除同時解掉 libtensorflowlite_jni.so 的 16 KB 違規（-3.7 MB）。
 
     // ONNX Runtime Mobile (Sprint T3) — wsm.onnx direct inference
     // wsm.onnx: NHWC [1,256,256,3] input, [-1,1] norm, logit output, threshold=0.30
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.26.0")
     
     // Room Database (KSP 取代 KAPT)
     implementation("androidx.room:room-runtime:2.6.1")
