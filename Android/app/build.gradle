@@ -129,6 +129,23 @@ android {
             initWith release
             matchingFallbacks = ['release']
             buildConfigField "boolean", "ALLOW_CLINICAL_GALLERY_EXPORT", "true"
+
+            // **預設打 demo 後端，不打正式機。**
+            //
+            // initWith release 會把 release 的正式網址一起繼承過來，結果是內測者裝完
+            // App 的第一次量測就送進正式環境的飛輪與儲存。而這個 build type 恰恰是
+            // 唯一開放臨床影像匯出共用相簿的那一個——兩件事疊在一起，意思是
+            // 「最寬鬆的隱私設定」配上「正式資料庫」，那是反過來的。
+            //
+            // demo 環境是為這類驗收部署的（固定 URL、IAM 已隔離、demo01 為 nurse 角色，
+            // 見 docs/app_store_submission_plan.md）。要打正式機的測試者仍可在
+            // 設定頁覆寫（存進 SharedPreferences），而「關於」頁會顯示目前連到哪裡。
+            //
+            // ⚠ 這是刻意與 release 不同的值。iOS 端把「預設仍是正式 URL」列為待驗收
+            //    項目（同一份文件），Android 這邊直接在建置層解掉。
+            buildConfigField "String", "DEFAULT_BACKEND_URL",
+                '"https://woundai-backend-demo-z4kgfkob4a-de.a.run.app"'
+
             // 讓測試者在「關於」頁一眼看出手上是內測版，不會把內測結果當正式版回報。
             versionNameSuffix "-internal"
         }
