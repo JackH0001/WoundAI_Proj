@@ -104,6 +104,20 @@ android {
             }
         }
         debug {
+            // **debug 多出 x86_64，release / internalTest 不要。**
+            //
+            // CI 的 instrumentation-test 跑在 ubuntu runner 上的 x86_64 模擬器
+            // （.github/workflows/android.yml：arch: x86_64, api-level: 29），而 API 29 的
+            // x86_64 系統映像沒有 arm64 轉譯。APK 裡沒有 x86_64 的 .so 時，Android 仍然
+            // 裝得起來——它只是不掛任何原生庫——然後 OpenCV／ONNX 的呼叫丟
+            // UnsatisfiedLinkError，而 OpenCVProcessor 正好會把它接住並降級
+            // （見該檔的 catch (e: UnsatisfiedLinkError) -> fallbackResult）。
+            // 結果是測試「通過」，但原生那條路從來沒被執行過——最糟的那種綠燈。
+            //
+            // debug 不出貨給使用者，所以多一個 ABI 不影響任何人的下載量；
+            // 而 release / internalTest 維持 defaultConfig 的 arm64-only。
+            ndk { abiFilters 'arm64-v8a', 'x86_64' }
+
             // debug 走模擬器 loopback：開發與 CI 都在模擬器上跑，
             // 指向雲端會讓每次改後端都得先部署才測得到。
             buildConfigField "String", "DEFAULT_BACKEND_URL", '"http://10.0.2.2:5000"'
