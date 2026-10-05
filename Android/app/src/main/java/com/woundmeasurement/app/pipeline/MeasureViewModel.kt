@@ -64,6 +64,16 @@ class MeasureViewModel(
      */
     @Volatile var lastDoctorVerified: Boolean = false
         private set
+    /**
+     * 這一輪有沒有真的改過輪廓（按下「完成修邊」）。
+     *
+     * 需要它，是因為 lastDoctorVerified 一個布林值答不了兩個不同的問題：
+     * 「有人修過邊嗎」與「修邊的人有權背書嗎」。沒有這個旗標時，存檔路徑分不出
+     * 「沒再修邊的純重存」與「被無權限者重修過」，而這兩者對既有的
+     * doctorVerified 應該做相反的事。
+     */
+    @Volatile var lastPolygonEdited: Boolean = false
+        private set
     // 同一次影像去重存檔:影像雜湊 + 已存的 row id(同影像重存→更新同筆,不新增)
     @Volatile private var lastImageHash: Int? = null
     @Volatile private var lastSavedId: Long? = null
@@ -141,6 +151,7 @@ class MeasureViewModel(
         lastImageId = null; lastImageW = 0; lastImageH = 0
         lastRoute = null; lastSegModel = null; lastPhantomHint = false; lastImageReused = false
         lastDoctorVerified = false   // 新影像＝尚未經醫師確認,不可沿用上一張的驗證狀態
+        lastPolygonEdited = false    // 同上：新影像＝這一輪還沒修過邊
         // 分析失敗時也要丟掉上一張的原圖,否則修邊入口可能開到「上一位病人」的影像
         if (alsoBitmap) {
             lastBitmap = null; lastImageHash = null; lastSavedId = null; editRaster = null
@@ -307,6 +318,7 @@ class MeasureViewModel(
                 }
                 lastCorrectionIou = null   // 新分析→重置修邊修正量
                 lastDoctorVerified = false // 新分析→醫師尚未確認
+                lastPolygonEdited = false // 新分析＝這一輪還沒修過邊
                 lastMmPerPx = mmCap
                 lastMarkerQuad = quadCap; lastCalibMethod = calibCap; lastWbGains = wbCap
                 lastImageId = idCap; lastImageW = wCap; lastImageH = hCap
@@ -348,8 +360,13 @@ class MeasureViewModel(
         // 後端也會擋（doctor_verified=false → 400），但在這裡就擋下才給得出有用的訊息。
         if (!lastDoctorVerified) {
             _state.value = _state.value.copy(
-                submitStatus = "⚠️ 尚未完成醫師修邊確認,不得送訓練標註。\n" +
-                               "請按「醫師確認・修邊」並完成後再送(按取消不算確認)。"); return
+                submitStatus = if (!lastPolygonEdited)
+                    "⚠️ 尚未完成醫師修邊確認,不得送訓練標註。\n" +
+                    "請按「醫師確認・修邊」並完成後再送(按取消不算確認)。"
+                else
+                    "⚠️ 這一輪修邊的登入身分沒有 gt.verify 權限,不會產生「醫師已驗證」,\n" +
+                    "因此不得送訓練標註——訓練集的 GT 必須由醫師背書。\n" +
+                    "修邊結果仍可存入時間軸作為紀錄。請以具該權限的帳號登入後重新修邊。"); return
         }
         // 端上模式(未經後端 classify)沒有 image_id → 送了也只是孤兒 GT,先擋
         if (lastImageId.isNullOrEmpty()) {
@@ -407,14 +424,26 @@ class MeasureViewModel(
         edited: List<List<Int>>, correctionIou: Double?, newArea: Double?, exudate: Int?,
         tissue: Map<String, Double>? = null,
         /** 所有輪廓。null＝呼叫端還沒支援多傷口，退回單一輪廓。 */
-        allPolygons: List<List<List<Int>>>? = null
+        allPolygons: List<List<List<Int>>>? = null,
+        /**
+         * 這次修邊的操作者是否具 `gt.verify` 權限（＝後端認定可以背書 GT 的角色）。
+         *
+         * **刻意不給預設值。** 給 false 會讓未來的呼叫端靜默地產生「未驗證」，
+         * 給 true 會讓它靜默地偽造醫師背書——兩者都是靜默的，而這是臨床閘門。
+         * 沒有預設值，新的呼叫端就一定得先想清楚它手上的身分是誰。
+         */
+        canVerify: Boolean
     ) {
         lastPolygon = edited
         lastPolygons = allPolygons?.takeIf { it.isNotEmpty() }
             ?: (if (edited.size >= 3) listOf(edited) else emptyList())
         lastCorrectionIou = correctionIou
         // 只有走到這裡（按下「完成修邊」）才算醫師確認過。取消不會呼叫本函式。
-        lastDoctorVerified = true
+        // 走到這裡代表按下了「完成修邊」（取消不會呼叫本函式）。但「有人修了邊」
+        // 不等於「醫師背書了這個 GT」——canVerify 由呼叫端帶入登入身分的 gt.verify 權限。
+        // 護理師修邊仍然有效、仍可存入時間軸，只是不產生醫師驗證。
+        lastPolygonEdited = true
+        lastDoctorVerified = canVerify
         val r = _state.value.result
         val updated = if (r != null) {
             val frac = tissue ?: r.tissueFrac
@@ -491,7 +520,18 @@ class MeasureViewModel(
                             exudate = exudate ?: exist.exudate,
                             correctionIou = lastCorrectionIou ?: exist.correctionIou,
                             // 只增不減:同一筆若曾經確認過,重存(未再修邊)不應把它退回未確認
-                            doctorVerified = lastDoctorVerified || exist.doctorVerified,
+                            // ⚠ **不是「只增不減」。**
+                            //
+                            // 原本是 `lastDoctorVerified || exist.doctorVerified`，理由寫「同一筆若曾
+                            // 確認過，重存(未再修邊)不應退回未確認」——那個理由本身對，但這個寫法把
+                            // 兩種情況混成一種：
+                            //   (a) 沒再修邊的純重存 → 確實該保留原狀態；
+                            //   (b) 這一輪**改過輪廓** → 舊的醫師背書是背書在**舊輪廓**上的，新輪廓
+                            //       沒有人背書。護理師重修一次就會繼承醫師的確認，而時間軸上
+                            //       看起來仍是「醫師已驗證」——那是一筆假陽性的病歷。
+                            // 所以用 lastPolygonEdited 把兩者分開。
+                            doctorVerified = if (lastPolygonEdited) lastDoctorVerified
+                                             else exist.doctorVerified,
                             // ⚠ 影像**一律以本次畫布重存**,絕不沿用舊檔。
                             //
                             // 舊作法是「已有檔就沿用、刪掉剛存的」,看起來省事,但同一張照片先走端上

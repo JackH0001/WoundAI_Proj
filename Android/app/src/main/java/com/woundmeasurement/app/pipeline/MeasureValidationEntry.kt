@@ -181,7 +181,10 @@ fun MeasureValidationEntry(
                 vm.editRaster = raster
                 // allPolys 一定要傳。只傳 poly 的話多處傷口只會送出最大的那一個，
                 // 其餘被標成背景——而畫面上醫師明明兩個都標了。
-                vm.applyEditedPolygon(poly, iou, newA, exudate, tis, allPolys); editing = false
+                // canVerify 必須帶**現在這個登入身分**的權限，不是「有沒有登入」。
+                // me 為 null（未登入／離線）時一律 false：證明不了是醫師背書的，就不能標。
+                vm.applyEditedPolygon(poly, iou, newA, exudate, tis, allPolys,
+                    canVerify = me?.can("gt.verify") == true); editing = false
             }
         )
     } else {
@@ -263,14 +266,28 @@ fun MeasureValidationEntry(
             // 當成人工 GT。存檔仍允許（那是一筆合法的 AI 初步量測紀錄），
             // 但**送訓練標註必須擋下**，並且要讓醫師看得出現在是什麼狀態。
             if (st.result != null) {
-                if (vm.lastDoctorVerified) {
-                    Text("✓ 已完成醫師修邊確認 — 可送訓練標註",
+                // 三種狀態分開講，因為各自該採取的行動不同：
+                //   有權限且已修邊 → 可送訓練標註
+                //   已修邊但無權限 → 修邊有效、可存病歷，但 GT 要醫師背書
+                //   還沒修邊       → 這是 AI 原始輸出，還沒有人看過
+                when {
+                    vm.lastDoctorVerified -> Text(
+                        "✓ 已完成醫師修邊確認 — 可送訓練標註",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.primary)
-                } else {
-                    Text("尚未完成醫師修邊確認：此結果為 AI 原始輸出。" +
-                         "可存入時間軸作為初步量測，但**不得送訓練標註**——" +
-                         "訓練集的 GT 必須來自人的判斷。請按「醫師確認・修邊」並完成（按取消不算）。",
+
+                    vm.lastPolygonEdited -> Text(
+                        "已完成修邊，但**此身分不產生「醫師已驗證」**（缺 gt.verify 權限" +
+                        (if (me == null) "：目前未登入" else "") + "）。" +
+                        "修邊結果有效、可存入時間軸作為紀錄，但**不得送訓練標註**——" +
+                        "訓練集的 GT 必須由醫師背書。這與後端的判定一致，換帳號才會改變。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+                    else -> Text(
+                        "尚未完成醫師修邊確認：此結果為 AI 原始輸出。" +
+                        "可存入時間軸作為初步量測，但**不得送訓練標註**——" +
+                        "訓練集的 GT 必須來自人的判斷。請按「醫師確認・修邊」並完成（按取消不算）。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error)
                 }
