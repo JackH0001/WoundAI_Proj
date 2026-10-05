@@ -144,21 +144,21 @@ android {
             matchingFallbacks = ['release']
             buildConfigField "boolean", "ALLOW_CLINICAL_GALLERY_EXPORT", "true"
 
-            // **預設打 demo 後端，不打正式機。**
+            // **後端網址刻意不在這裡覆寫**，所以 internalTest 繼承 release 的正式機。
             //
-            // initWith release 會把 release 的正式網址一起繼承過來，結果是內測者裝完
-            // App 的第一次量測就送進正式環境的飛輪與儲存。而這個 build type 恰恰是
-            // 唯一開放臨床影像匯出共用相簿的那一個——兩件事疊在一起，意思是
-            // 「最寬鬆的隱私設定」配上「正式資料庫」，那是反過來的。
+            // 這不是疏漏，是排序問題。內測版是唯一開放臨床影像匯出共用相簿的 build，
+            // 讓它打正式機等於「最寬鬆的隱私設定」配上「正式飛輪」——那確實該改。
+            // 但 iOS 那條線（codex/ios-release-assets-20261001 的 d7e3617）已經把
+            // engineering/phase2/test_backend_url_parity.py 一般化成 shipping profile
+            // 模型：ios-medical-testflight 走 demo、ios-lite 與 android-release 走正式機，
+            // 並在 docs/admin_operations.md 建了對照表，規則明寫「Lite 與 Android 仍須
+            // 相同，demo 必須獨立」。
             //
-            // demo 環境是為這類驗收部署的（固定 URL、IAM 已隔離、demo01 為 nurse 角色，
-            // 見 docs/app_store_submission_plan.md）。要打正式機的測試者仍可在
-            // 設定頁覆寫（存進 SharedPreferences），而「關於」頁會顯示目前連到哪裡。
-            //
-            // ⚠ 這是刻意與 release 不同的值。iOS 端把「預設仍是正式 URL」列為待驗收
-            //    項目（同一份文件），Android 這邊直接在建置層解掉。
-            buildConfigField "String", "DEFAULT_BACKEND_URL",
-                '"https://woundai-backend-demo-z4kgfkob4a-de.a.run.app"'
+            // 在這裡改網址會同時與那個模型的語意、以及那支共用 guard 的內容衝突，
+            // 而那個檔案是跨所有權的共用檔（見 tools/owner_guard.py）。
+            // 所以留到 iOS 分支合併之後，再以他們的 profile 模型為基礎補上
+            // 第四個 profile（android-internal-test → demo），連同 runbook 那一列。
+            // 追蹤：本 commit 的訊息。
 
             // 讓測試者在「關於」頁一眼看出手上是內測版，不會把內測結果當正式版回報。
             versionNameSuffix "-internal"

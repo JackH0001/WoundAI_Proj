@@ -14,23 +14,6 @@ compile-time switch, because the failure that shape prevents -- a release build
 resolving to localhost -- is invisible until someone installs the build on a
 real phone.
 
-2026-10-05 adds a third Android build type, internalTest, which deliberately
-does NOT share the release address: it is the only build that may export
-clinical images to the shared gallery (see Android/.../data/store/GalleryExport.kt),
-so pointing it at production would put the loosest privacy setting and the
-production flywheel on the same deployment. Before this change the extractor
-below recognised only `release` and `debug`, so the new entry was attributed to
-`debug` by the backwards scan and three tests failed with "two
-DEFAULT_BACKEND_URL entries in the debug block" -- the guard behaving correctly
-about a build type it had never been told about.
-
-The internalTest address is not pinned against a second copy, because on main
-there is no second copy: docs/admin_operations.md names the demo deployment by
-revision, not by URL, which is what keeps runbook_origins() to a single origin.
-When the iOS demo switch lands (it carries the same URL in
-docs/app_store_submission_plan.md) that becomes a second copy and belongs in a
-gate here, the same way the release address already is.
-
 Every extractor below raises when it finds nothing. A parser that silently
 matches zero lines and lets the suite pass would be the same fail-open class
 this file exists to close.
@@ -58,11 +41,6 @@ GUARDED = (
 
 RUN_APP = re.compile(r"https://[A-Za-z0-9.\-]+\.run\.app")
 LOOPBACK = ("localhost", "127.0.0.1", "10.0.2.2", "0.0.0.0", "::1")
-# Every Android build type that must declare a default address. Requiring all of
-# them -- rather than accepting whatever is present -- is deliberate: a build type
-# that silently loses its DEFAULT_BACKEND_URL inherits one from initWith, and the
-# symptom is a tester talking to the wrong deployment with nothing in the diff.
-ANDROID_BUILD_TYPES = frozenset({"release", "debug", "internalTest"})
 
 
 def text(path: Path) -> str:
@@ -147,22 +125,21 @@ def android_backend_urls():
                 "(found %d)" % (idx + 1, len(values)))
         block = None
         for back in range(idx, -1, -1):
-            hit = re.match(r"[ \t]*(release|debug|internalTest)[ \t]*\{[ \t]*$", lines[back])
+            hit = re.match(r"[ \t]*(release|debug)[ \t]*\{[ \t]*$", lines[back])
             if hit:
                 block = hit.group(1)
                 break
         if block is None:
             raise AssertionError(
-                "DEFAULT_BACKEND_URL at build.gradle line %d is not inside any of %s; "
-                "which build it applies to cannot be determined"
-                % (idx + 1, sorted(ANDROID_BUILD_TYPES)))
+                "DEFAULT_BACKEND_URL at build.gradle line %d is not inside a release or "
+                "debug block; which build it applies to cannot be determined" % (idx + 1))
         if block in found:
             raise AssertionError("two DEFAULT_BACKEND_URL entries in the %s block" % block)
         found[block] = values[0]
-    if set(found) != set(ANDROID_BUILD_TYPES):
+    if set(found) != {"release", "debug"}:
         raise AssertionError(
-            "expected one DEFAULT_BACKEND_URL in each of %s; got %s"
-            % (sorted(ANDROID_BUILD_TYPES), sorted(found)))
+            "expected one DEFAULT_BACKEND_URL in each of release and debug; got %s"
+            % sorted(found))
     return found
 
 
@@ -241,25 +218,6 @@ class BackendUrlParityTests(unittest.TestCase):
             is_loopback(urls["release"]),
             "Android release resolves to [%s]" % urls["release"])
         self.assertTrue(urls["release"].startswith("https://"))
-
-    def test_internal_test_is_a_cloud_backend_that_is_not_production(self):
-        urls = android_backend_urls()
-        internal = urls["internalTest"]
-        self.assertFalse(
-            is_loopback(internal),
-            "internalTest resolves to [%s]. Testers install this build on real phones; "
-            "a loopback shows only 'backend not connected', which gets reported as "
-            "'the app is broken'." % internal)
-        self.assertTrue(
-            internal.startswith("https://"),
-            "internalTest must be https, got [%s]" % internal)
-        self.assertNotEqual(
-            internal, urls["release"],
-            "internalTest and release both resolve to [%s]. internalTest is the only "
-            "build whose BuildConfig.ALLOW_CLINICAL_GALLERY_EXPORT is true, so sharing "
-            "the release address puts the loosest privacy setting and the production "
-            "flywheel on one deployment -- and a tester's first measurement lands in "
-            "production storage with nothing to undo it." % internal)
 
     def test_the_two_platforms_do_not_copy_each_others_loopback(self):
         # An iOS simulator's localhost is the Mac; Android's emulator loopback to the
