@@ -72,6 +72,11 @@ fun MeasureValidationEntry(
     var managingCase by remember { mutableStateOf(false) }
     /** 最近一次寫進共用相簿的相對路徑（快速量測才會有值）。 */
     var galleryPath by remember { mutableStateOf<String?>(null) }
+    /** 最近一次寫進共用相簿的**疊圖**相對路徑。 */
+    var overlayPath by remember { mutableStateOf<String?>(null) }
+    /** 疊圖沒產生時的理由。空手而回不解釋，使用者只會以為功能壞了。 */
+    var overlayNote by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(baseUrl) {
         // ⚠ 憑證改由「設定」頁存在本機(Keystore 加密),**不再硬編碼**。
@@ -310,6 +315,18 @@ fun MeasureValidationEntry(
                     color = MaterialTheme.colorScheme.error)
             }
 
+            // 疊圖的提示兩種模式都要顯示——臨床模式的原圖提示在拍攝當下由
+            // SamplePickerScreen 給，但疊圖是存檔當下才產生的，這裡是唯一會看到它的地方。
+            overlayPath?.let {
+                Text("🖼 量測結果疊圖已存入相簿：$it",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary)
+            }
+            overlayNote?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+
             if (!clinicalMode) {
                 galleryPath?.let {
                     Text("🖼 原始影像已存入相簿：$it",
@@ -346,6 +363,54 @@ fun MeasureValidationEntry(
                             val rel = com.woundmeasurement.app.data.store.GalleryExport
                                 .saveForQuickMeasure(ctx, bmp, source)
                             if (rel != null) galleryPath = rel
+                        }
+                    }
+                    // 量測結果疊圖：原圖 ＋ **醫師確認的**組織分區 ＋ 輪廓 ＋ ArUco 校正框
+                    // ＋ 影像下方的結果標註帶。
+                    //
+                    // 組織層一律取自 vm.editRaster（醫師按「完成修邊」當下那份），不是
+                    // AnalysisPreview 的色彩啟發式——後者會當場重跑分類，醫師改過的分區
+                    // 不在裡面，匯出的圖就會跟存進病歷的百分比對不上。
+                    //
+                    // 政策判斷在 GalleryExport：臨床影像只有 internalTest 建置會真的寫入。
+                    // 這裡不重複判斷，只負責把圖畫出來。
+                    //
+                    // 放進背景執行緒：疊圖是整張畫布的逐像素合成（2048² 量級），
+                    // 在主執行緒做會讓「存檔」那一下明顯卡住。
+                    vm.lastBitmap?.let { bmp ->
+                        val polys = vm.lastPolygons.ifEmpty {
+                            if (vm.lastPolygon.size >= 3) listOf(vm.lastPolygon) else emptyList()
+                        }
+                        val info = WoundOverlayRenderer.Info(
+                            wdCode = case?.wdCode,
+                            source = source,
+                            areaCm2 = st.result?.areaCm2,
+                            pushPartial = st.result?.push?.partial,
+                            pushFull = st.result?.push?.full,
+                            exudate = exudate,
+                            tissueFrac = st.result?.tissueFrac ?: emptyMap(),
+                            mmPerPx = vm.lastMmPerPx,
+                            calibMethod = vm.lastCalibMethod,
+                            route = vm.lastRoute,
+                            confidence = st.result?.confidence,
+                            doctorVerified = vm.lastDoctorVerified,
+                            tissueEdited = vm.editRaster?.tissueEdited == true,
+                        )
+                        val raster = vm.editRaster
+                        val quad = vm.lastMarkerQuad
+                        scope.launch {
+                            val rel = withContext(Dispatchers.Default) {
+                                val img = WoundOverlayRenderer.render(bmp, raster, polys, quad, info)
+                                img?.let {
+                                    val r = com.woundmeasurement.app.data.store.GalleryExport
+                                        .saveOverlay(ctx, it, source)
+                                    it.recycle(); r
+                                }
+                            }
+                            if (rel != null) overlayPath = rel
+                            else overlayNote = if (raster == null)
+                                "ℹ 未產生疊圖：這一筆沒有經過修邊，沒有可匯出的組織分區。"
+                            else "ℹ 未產生疊圖：此來源或此建置不允許寫入共用相簿。"
                         }
                     }
                     // 存檔同樣受①照護同意管:載入影像後才去撤回同意的話,
@@ -395,6 +460,9 @@ fun MeasureValidationEntry(
                             // 與結果欄同一組增益。不傳的話參照圖會用灰世界，
                             // 而數字用色卡——同一畫面上兩個答案。
                             wbGains = vm.lastWbGains,
+                            // 醫師修邊後的柵格。不傳的話參照圖會重跑色彩啟發式，
+                            // 於是「百分比更新了、圖沒更新」（2026-10-06 回報）。
+                            editRaster = vm.editRaster,
                             modifier = Modifier.fillMaxWidth()
                         )
                     }

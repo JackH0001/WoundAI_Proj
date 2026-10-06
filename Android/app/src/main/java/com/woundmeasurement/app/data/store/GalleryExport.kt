@@ -91,6 +91,26 @@ object GalleryExport {
     fun saveForQuickMeasure(ctx: Context, bitmap: Bitmap, source: String?): String? =
         saveCapture(ctx, bitmap, source)
 
+    /**
+     * 匯出**量測結果疊圖**（原圖＋醫師確認的組織分區＋輪廓＋校正框＋結果標註帶）。
+     *
+     * 政策與 [saveCapture] 完全共用——疊圖含有與原圖相同的臨床影像內容，
+     * 不能因為它「多畫了幾條線」就套比較寬的規則。檔名加 `_overlay` 後綴，
+     * 讓測試者在相簿裡一眼分得出哪張是原圖、哪張是判讀結果。
+     *
+     * 疊圖本身由 [com.woundmeasurement.app.pipeline.WoundOverlayRenderer] 產生；
+     * 這裡只負責政策與 I/O。
+     */
+    fun saveOverlay(ctx: Context, bitmap: Bitmap, source: String?): String? {
+        val album = when {
+            source == null -> return null
+            source in ALLOWED_SOURCES -> ALBUM
+            source == "clinical" && clinicalExportAllowed -> ALBUM_CLINICAL
+            else -> return null
+        }
+        return write(ctx, bitmap, "${source}_overlay", album)
+    }
+
     /** 實際寫入。政策已在 [saveCapture] 判完，這裡只負責 I/O。 */
     private fun write(ctx: Context, bitmap: Bitmap, source: String, album: String): String? {
         return try {
