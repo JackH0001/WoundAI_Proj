@@ -150,7 +150,8 @@ Android 已在 `BackendClient.health()`、`BackendWarmup.degradedBanner()` 補�
 | 修邊：底稿 `seedAuto` 不卡主執行緒 | ❌ | ✅ | iOS `25cbff7` 註明**實測 >10 秒白凍**，改背景 `runSeed` ＋鎖畫布提示。Android `WoundEditScreen.kt` 的 `seedAuto` 仍在 `remember { }`（＝組合／主執行緒）。<br>諷刺的是 Android 自己在 `stamp()` 裡已寫明 seedAuto「在 2200² 上是近千萬次寫入，跑在筆畫進行中的主執行緒上」並為此限定只在 B_PAINT 呼叫——**但開畫面那一次仍是同步的** |
 | 結果頁：組織圖層 | ✅ | ❌ | Android 參照圖三層（輪廓／組織／校正框）且等比全寬；iOS `AnalysisPreview` 固定 `frame(height: 300)`、僅輪廓＋校正框兩個開關。**此列 Android 領先** |
 | 結果頁：組織層取自醫師修邊柵格 | ✅ | ❌ | Android 2026-10-06 起優先用 `EditRaster`（修改前無條件重跑色彩啟發式 → 百分比更新了圖沒更新）。iOS 無組織層，不適用 |
-| 結果頁：雙指縮放平移檢視細節 | ❌ | ❌ | **兩端都待補。** 兩端的 Magnification／雙指都只存在於修邊畫面。<br>⚠ 要做請**同一輪兩端一起做**——分開做就是下一列 PARITY 落差 |
+| 結果頁：雙指縮放平移檢視細節 | ❌ | ✅（**未提交**） | **2026-10-06 當日更正。** 本列第一版寫「兩端都待補」是錯的：iOS 已實作於 `iOS/WoundMeasurementApp/UI/WoundImagePreview.swift`（`WoundZoomPreview`，UIScrollView 1–6×，`panGestureRecognizer` 限定雙指，單指滑動留給結果頁），`AnalysisPreview` 已改用它。<br>⚠ 這份工作**尚未提交**，只存在於 `~/Documents/Codex/2026-06-28/woundai-ios-release-20261001` 的工作目錄。<br>錯在哪：盤點時 grep 的是 SwiftUI 的 `MagnificationGesture`／`MagnifyGesture`，而它是 UIKit scroll-view 縮放，名稱完全不同。**拿實作手法的關鍵字去找功能，找不到不代表沒有**——判斷「有沒有這個功能」要看畫面或看 diff |
+| 紀錄檢視（時間軸）：疊加已存輪廓 | ❌ | ✅（**未提交**） | 同一支 `WoundImagePreview`；`ReviewView` 疊上該筆存下的輪廓，並在 `imageW/imageH` 與實際影像尺寸不符時**只顯示原圖**並說明原因——與 Android 當天在 `AnalysisPreview` 採用的判準相同（寧可不畫，也不要畫在錯的位置）。Android 的時間軸檢視沒有對應預覽 |
 | 結果頁：圖層開關的狀態編碼 | ❌ | ✅ | iOS 實心＝顯示／空心＝隱藏，底色對應圖上框色，再加眼睛圖示（雙重編碼，強光下仍可辨）。Android 為 Material `FilterChip`，只有深淺差 |
 | 校正框顏色 | 綠 `0xFF39FF6A` | 黃 | ⚠ 同一個安全檢查，兩個 App 教使用者看**兩種顏色**（文案也各自寫「綠框」／「黃框」）。同院同時發兩個平台時，換機就會認錯。<br>**2026-10-06 決議：統一為綠**——黃在黃色膠帶、反光與膚色上辨識度較差，且綠已在 Android 實機驗過。**iOS 待改**（顏色＋「黃框」文案；`iOS/` 歸 mac 機器所有，由 Mac 端執行） |
 | 匯出量測結果疊圖到共用相簿 | ✅ | ❌ | Android 2026-10-06 特殊內測版：原圖＋**醫師修邊的**組織層＋輪廓＋ArUco 框＋下方結果標註帶（面積／PUSH／組織％／尺度／驗證狀態／免責）。<br>綁 `ALLOW_CLINICAL_GALLERY_EXPORT`，只有 internalTest 建置會寫入臨床相簿。<br>iOS 是否要跟上，取決於特殊合作部門的流程需求——**尚未決定，不是實作落後** |
@@ -169,12 +170,16 @@ Android 已在 `BackendClient.health()`、`BackendWarmup.degradedBanner()` 補�
    值得注意的是：守門程式**一直都有在叫**，紅的不是沒被偵測到，是沒有人處理。
    一個長期紅著的守門等同於沒有守門——下一個真正的落差出現時，它會被當成同一則舊噪音。
 
-   規則要二選一，不要讓它繼續對不上：
-   - **(a)** 改成「**功能版**對齊、平台修訂各自跳號」——兩端只在功能同步時對齊整數位
-   - **(b)** 維持嚴格對齊，iOS 下次直接跳到 25
+   ⚠ **當日更正（2026-10-06）**：上一版這裡寫「規則要二選一」，那也是錯的——選擇
+   已經做了，只是沒有提交。Codex 在 `woundai-ios-release-20261001` 的工作目錄裡已寫好一套
+   **具名例外登記**：PARITY.md 內一段 `<!-- release-version-exception -->` 的 JSON（版號、
+   理由、`alignment_trigger`），搭配 `tools/parity_check.py` 的對應修改讓守門讀它，並規定
+   「缺理由、缺對齊條件、任一版號改變、重複登記，一律拒絕」。
 
-   在做出選擇之前，**不要再引用這條規則當作已生效的檢查**——一條沒人遵守的規則
-   比沒有規則更糟，它會讓後來的人以為版號已經被誰看過了。
+   那份登記寫的是 `android: 22`，而 Android 現在是 25——依它自己的規則，這筆登記在提交時
+   就已失效、必須更新。合併時要一併處理，**不要原樣提交**。
+
+   在那份工作提交之前，這條規則的狀態是「已設計、未生效」，不要當成已生效的檢查引用。
 
 4. 使用者看得到的行為改動（畫面、手勢、提示、顏色、等待時間），在同一輪更新上面
    那張人工表。`parity_check.py` 是**契約層**（端點／JSON 鍵／網址／版號），
