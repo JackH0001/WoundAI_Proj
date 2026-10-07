@@ -57,7 +57,7 @@ jobs:
       - name: Generate Xcode project (XcodeGen)
         run: |
           brew install xcodegen
-          xcodegen generate
+          xcodegen generate --spec project.institution.yml
 
       - name: Show SDK / Simulator list
         run: |
@@ -74,10 +74,10 @@ jobs:
               -scheme WoundMeasurementApp \
               CODE_SIGNING_ALLOWED=NO
 
-      - name: Build both apps (Release, no signing)
+      - name: Build medical, Lite and institution apps (Release, no signing)
         run: |
           set -euo pipefail
-          for SCHEME in WoundMeasurementApp WoundLite; do
+          for SCHEME in WoundMeasurementApp WoundLite WoundAIInstitution; do
             xcodebuild build \
               -project WoundMeasurementApp.xcodeproj \
               -scheme "$SCHEME" \
