@@ -54,6 +54,12 @@ on:
       - 'engineering/phase2/fixtures/app_attest/**'
       - 'tools/lite_rgbd_preflight.py'
       - 'tools/test_lite_rgbd_preflight.py'
+      - 'tools/provision_mmh_foundation.py'
+      - 'tools/test_provision_mmh_foundation.py'
+      - 'tools/restrict_mmh_bucket_iam.py'
+      - 'tools/test_restrict_mmh_bucket_iam.py'
+      - 'tools/test_mmh_institution.py'
+      - 'tools/test_mmh_app_boundary.py'
       - 'engineering/phase2/verify_audit_chain.py'
       - 'engineering/phase2/Assert-CIGreen.ps1'
       - 'engineering/phase2/test_ci_gate_static.py'
@@ -133,6 +139,12 @@ on:
       - 'engineering/phase2/fixtures/app_attest/**'
       - 'tools/lite_rgbd_preflight.py'
       - 'tools/test_lite_rgbd_preflight.py'
+      - 'tools/provision_mmh_foundation.py'
+      - 'tools/test_provision_mmh_foundation.py'
+      - 'tools/restrict_mmh_bucket_iam.py'
+      - 'tools/test_restrict_mmh_bucket_iam.py'
+      - 'tools/test_mmh_institution.py'
+      - 'tools/test_mmh_app_boundary.py'
       - 'engineering/phase2/verify_audit_chain.py'
       - 'engineering/phase2/Assert-CIGreen.ps1'
       - 'engineering/phase2/test_ci_gate_static.py'
@@ -246,6 +258,10 @@ jobs:
           python -B engineering/phase2/test_lite_fenced_manifest.py
           python -B engineering/phase2/test_lite_fenced_http.py
           python -B tools/test_lite_rgbd_preflight.py
+          python -B tools/test_provision_mmh_foundation.py
+          python -B tools/test_restrict_mmh_bucket_iam.py
+          python -B tools/test_mmh_institution.py
+          python -B tools/test_mmh_app_boundary.py
           python -B engineering/phase2/test_p0_4_staging.py
           python -B engineering/phase2/test_runtime_golden_contract.py
 

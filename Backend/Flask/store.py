@@ -551,7 +551,7 @@ class GcsStore(Store):
     # 實際上稽核紀錄還是寫在刪得掉的主桶裡。
     # （`AUDIT_KEYS` 已移到基底 `Store`，兩種後端共用同一份清單。）
 
-    def __init__(self, bucket: str, prefix: str = "flywheel", audit_bucket: str = None):
+    def __init__(self, bucket: str, prefix: str = "flywheel", audit_bucket: str = None, security_bucket: str = None):
         # Guard before even importing the SDK: Client() may discover live ADC.
         _refuse_cloud_in_test_process()
         from google.cloud import storage  # noqa: 延後 import，見 docstring
@@ -562,6 +562,8 @@ class GcsStore(Store):
         self.prefix = prefix.strip("/")
         self._audit_bucket_name = audit_bucket or None
         self._audit_bucket = self._client.bucket(audit_bucket) if audit_bucket else None
+        self._security_bucket_name = security_bucket or None
+        self._security_bucket = self._client.bucket(security_bucket) if security_bucket else None
         # append-only 鍵的增量快取：{(bucket, base): {"names": [...], "lines": [...]}}
         #
         # 為什麼需要：每一次 append 是一個獨立物件（見 append_line 的理由），
@@ -586,6 +588,8 @@ class GcsStore(Store):
             if self._audit_bucket is None:
                 raise RuntimeError("protected storage requires WOUNDAI_AUDIT_BUCKET")
             return self._audit_bucket, self._audit_bucket_name
+        if key.strip("/").split("/")[0] == "users.jsonl" and getattr(self, "_security_bucket", None) is not None:
+            return self._security_bucket, self._security_bucket_name
         return self._bucket, self._bucket_name
 
     def _k(self, key: str) -> str:
@@ -1016,6 +1020,9 @@ class GcsStore(Store):
         # 稽核鍵不該被 move；真的發生就是有人想搬走軌跡，讓它明確失敗而不是靜默照做。
         if self._is_audit(src) or self._is_audit(dst):
             raise PermissionError("稽核軌跡不可搬移")
+        if (src.strip("/").split("/")[0] == "users.jsonl"
+                or dst.strip("/").split("/")[0] == "users.jsonl"):
+            raise PermissionError("account history cannot be moved")
         s = self._bucket.blob(self._k(src))
         if not s.exists():
             return False
@@ -1069,9 +1076,14 @@ def get_store(root: str = None) -> Store:
         bucket = os.environ.get("WOUNDAI_GCS_BUCKET")
         if not bucket:
             raise RuntimeError("WOUNDAI_STORE=gcs 但缺 WOUNDAI_GCS_BUCKET")
+        from institution_context import BOUND_ORG
+        security = os.environ.get("WOUNDAI_SECURITY_BUCKET") or None
+        audit = os.environ.get("WOUNDAI_AUDIT_BUCKET") or None
+        if BOUND_ORG is not None and (not security or not audit or len({bucket, security, audit}) != 3):
+            raise RuntimeError("institution storage requires distinct media, security and audit buckets")
         # Protected-key access refuses a missing audit bucket in _target().
         _ACTIVE = GcsStore(bucket, os.environ.get("WOUNDAI_GCS_PREFIX", "flywheel"),
-                           os.environ.get("WOUNDAI_AUDIT_BUCKET") or None)
+                           audit, security_bucket=security)
     else:
         _ACTIVE = LocalStore(root or os.environ.get("WOUNDAI_FLYWHEEL_DIR") or "flywheel")
     return _ACTIVE

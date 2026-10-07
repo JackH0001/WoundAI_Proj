@@ -1,6 +1,6 @@
 # MMHPS20261007 機構版：環境、登入與帳號交付說明
 
-核對日期：2026-10-07。狀態：**尚未佈建／未開放登入**。本文涵蓋 WoundAI 醫療端 iOS／Android 機構特殊版，不包含 WoundLite 民眾版。
+核對日期：2026-10-07。狀態：**已建立三個空桶與執行身分；隔離及部署未完成／未開放登入**。本文涵蓋 WoundAI 醫療端 iOS／Android 機構特殊版，不包含 WoundLite 民眾版。
 
 ## 目前已確認與尚未建立的項目
 
@@ -12,14 +12,14 @@
 | 帳號 org（規劃） | `mmhps20261007`；後端只接受小寫英數／連字號 |
 | MMH API／服務 origin | **未建立，無可用網址** |
 | MMH 瀏覽器登入網址 | **未建立**；驗收後為實際 origin 加 `/console` |
-| MMH 媒體／安全狀態／稽核桶 | **未建立** |
+| MMH 媒體／安全狀態／稽核桶 | **三桶已建立，尚無應用資料；稽核未鎖定** |
 | MMH 範例帳號 | **未建立**；下表是命名及權限規劃，不是已核發帳號 |
 | iOS 專用 target | `WoundAIInstitution`，bundle `com.woundai.app.mmhps20261007` |
 | iOS 後端設定 | `InstitutionInfo.plist` 的 `WoundAIInstitutionBackendURL` 為空；拒絕沿用其他環境 |
 | iOS 本機匯出 | App「檔案」中的 `MMHPS20261007/Exports`；目前不含深度、不代表已上傳雲端 |
 | Android | internalTest 尚待接入機構專用後端，不能把舊後端當 MMH |
 
-以上服務查核限指定 project 的 asia-east1；桶清單為該 project 全部位置。2026-10-07 讀回沒有 MMH 命名的 service／bucket，且機構版設定未填入 URL；不可據此推測其他專案是否有院方自建資源。
+以上服務查核限指定 project 的 asia-east1；桶清單為該 project 全部位置。2026-10-07 已建立下列三個桶與專用執行身分；尚未部署 MMH service，機構版設定未填入 URL。建置與有效 IAM 反例見 [MMH 第一階段驗證](mmh_foundation_validation_20261007.md)。
 
 既有平台用途不同，**不是 MMH 新環境**：
 
@@ -27,19 +27,19 @@
 - demo：`https://woundai-backend-demo-z4kgfkob4a-de.a.run.app`，限合成／模擬資料測試。demo 帳號、密碼及資料不會自動同步到 MMH。
 - 不應拿舊平台或 demo 的 `/console` 為 MMH 建帳號。
 
-## 待佈建的資源清單
+## 資源清單與目前狀態
 
-以下名稱僅為具名方案，**尚未建立、未保留全球唯一名稱，也不是登入連結**：
+以下三個桶與 SA 已建立；Cloud Run 名稱仍是方案，**不是已可登入服務**：
 
 | 用途 | 建議名稱 | 交付前必須讀回 |
 |---|---|---|
 | Cloud Run 醫療 API＋console | `woundai-backend-mmhps20261007` | 真實 HTTPS origin、revision、映像 digest、流量分配 |
-| 專用執行身分 | `woundai-mmhps20261007-runtime` | 實際 SA email、限定資源 IAM、無其他環境有效權限 |
-| 媒體／標註／深度 | `woundai-mmhps20261007-media-421209514056` | location、禁止公開、uniform IAM、版本／完整性策略 |
-| 帳號及安全狀態 | `woundai-mmhps20261007-security-421209514056` | 密碼只存雜湊、跨實例持久化、IAM、備份與恢復 |
-| 稽核 | `woundai-mmhps20261007-audit-421209514056` | 實際保留與鎖定狀態；保留不等於已不可逆鎖定 |
+| 專用執行身分（已建立，未加執行權限） | `woundai-mmhps20261007-runtime` | 實際 SA email、限定資源 IAM、無其他環境有效權限 |
+| 媒體／標註／深度（空桶已建立） | `woundai-mmhps20261007-media-421209514056` | location、禁止公開、uniform IAM、版本／完整性策略 |
+| 帳號及安全狀態（空桶已建立） | `woundai-mmhps20261007-security-421209514056` | 密碼只存雜湊、跨實例持久化、IAM、備份與恢復 |
+| 稽核（空桶已建立，未鎖定） | `woundai-mmhps20261007-audit-421209514056` | 實際保留與鎖定狀態；保留不等於已不可逆鎖定 |
 
-用途拆桶不是現有部署腳本已完成的事實；需先完成 store 路由與部署配置驗證。手機只呼叫 HTTPS API，不能填入 `gs://` 當後端位址，也不能持有儲存桶金鑰。不得沿用寬權限預設 Compute 身分。新稽核桶的不可逆鎖定另行確認，不因本文出現桶名就視為已授權鎖定。
+候選程式已將 users.jsonl 路由至 WOUNDAI_SECURITY_BUCKET，機構 GCS 設定要求三桶不同。本機測試通過，線上 IAM、稽核及部署配置尚待驗收。三桶為 ASIA-EAST1／STANDARD／uniform IAM／禁止公開；無 retention、lifecycle、versioning 或 soft delete。已移除新桶的 projectEditor／projectViewer 預設授權、保留 Owner；專案層舊執行身分的刪桶權限仍未解決，不能稱完成隔離。手機只呼叫 HTTPS API，不能填入 `gs://` 當後端位址，也不能持有儲存桶金鑰。不得沿用寬權限預設 Compute 身分。新稽核桶的不可逆鎖定另行確認，不因本文出現桶名就視為已授權鎖定。
 
 ## 各權限範例帳號（全部待建立）
 
@@ -76,7 +76,7 @@
 
 1. 先讀回部署結果取得真正 MMH origin，更新 iOS 專用設定與 Android internalTest 機構設定，驗兩端皆未落回舊正式／demo。
 2. 在該環境初始化管理者，確認帳號持久化及稽核寫入成立，再建立其餘帳號。POST `/api/v1/users` 必須明確指定 `org: mmhps20261007`、user、role；使用 `generate_password: true` 可由伺服器產生一次性顯示的隨機密碼。密碼不寫入 Git、手冊、PR 或聊天室。
-3. **現有 console 的「新增帳號」未送 org，會落到 `default`。** 現有 bootstrap 也使用 default。不可直接照舊介面建立後宣稱是機構帳號；需先把專用服務的 org 綁定、bootstrap、建帳號及跨 org 拒絕路徑一併實作／測試，或使用經驗證的管理 API 明確指定 org。僅在名稱前加機構代碼不是隔離措施。
+3. **本次候選修正**：WOUNDAI_INSTITUTION_ORG=mmhps20261007 由服務啟動設定綁定。省略 org 的 console 建帳號及 bootstrap 會使用該機構；外部 org 被拒絕。bootstrap 的實際帳號為 `mmhps20261007:admin`，不是 admin01；後續可建立具名管理者並停用 bootstrap。以上尚未部署，舊平台仍維持原行為。
 4. 瀏覽器在驗收後提供的 `MMH origin/console` 登入。App 設定中的後端位址填 **origin 本身**（不加 `/console`、不加 `/api`）；帳號填完整 `mmhps20261007:dr01` 等身分。原本已登入其他環境者先登出，不能沿用舊 token／網址。
 5. 專用 iOS 版的位址可能由發行設定鎖定；若仍顯示未設定，須由新版 App 配置修正，不能把一般醫療 App 的改址當成 MMH 專用版驗收。
 6. 驗收時比對登入回應 identity／org／role／perms。帳號已建立、能登入、權限拒絕正確、冷啟動仍存在，四項分開記錄。帳號停用後不得只測新登入；還要驗舊 token 的失效行為。
