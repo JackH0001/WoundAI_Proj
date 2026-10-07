@@ -60,6 +60,10 @@ on:
       - 'tools/test_restrict_mmh_bucket_iam.py'
       - 'tools/test_mmh_institution.py'
       - 'tools/test_mmh_app_boundary.py'
+      - 'tools/protect_mmh_buckets.py'
+      - 'tools/test_protect_mmh_buckets.py'
+      - 'tools/verify_mmh_effective_iam.py'
+      - 'tools/test_verify_mmh_effective_iam.py'
       - 'engineering/phase2/verify_audit_chain.py'
       - 'engineering/phase2/Assert-CIGreen.ps1'
       - 'engineering/phase2/test_ci_gate_static.py'
@@ -145,6 +149,10 @@ on:
       - 'tools/test_restrict_mmh_bucket_iam.py'
       - 'tools/test_mmh_institution.py'
       - 'tools/test_mmh_app_boundary.py'
+      - 'tools/protect_mmh_buckets.py'
+      - 'tools/test_protect_mmh_buckets.py'
+      - 'tools/verify_mmh_effective_iam.py'
+      - 'tools/test_verify_mmh_effective_iam.py'
       - 'engineering/phase2/verify_audit_chain.py'
       - 'engineering/phase2/Assert-CIGreen.ps1'
       - 'engineering/phase2/test_ci_gate_static.py'
@@ -262,6 +270,8 @@ jobs:
           python -B tools/test_restrict_mmh_bucket_iam.py
           python -B tools/test_mmh_institution.py
           python -B tools/test_mmh_app_boundary.py
+          python -B tools/test_protect_mmh_buckets.py
+          python -B tools/test_verify_mmh_effective_iam.py
           python -B engineering/phase2/test_p0_4_staging.py
           python -B engineering/phase2/test_runtime_golden_contract.py
 
