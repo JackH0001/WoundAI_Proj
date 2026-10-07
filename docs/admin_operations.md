@@ -5,6 +5,12 @@
 
 > 既有後端：`https://woundai-backend-421209514056.asia-east1.run.app/console`
 
+### MMHPS20261007 機構專用版
+
+截至 2026-10-07，指定 GCP project 的讀回結果尚無 MMH 專用服務／桶，**沒有可用的 MMH 登入網址或已核發帳號清單**。上面的既有後端與下方 demo 都不是 MMH 新環境，請勿用它們替 MMH 建帳號。
+
+完整資源交付欄位、前後台登入方式、各角色範例及尚未完成的隔離驗收，見 [MMH 環境與帳號說明](mmhps20261007_environment_and_accounts.md)。其中範例均標為待建立，不含密碼。現有 console 新增帳號未傳 org，會使用 `default`；機構部署前必須先完成專用 org 綁定及建帳號驗證。
+
 ### App 新安裝的預設環境（醫療 TestFlight build 25 起）
 
 | 發布設定 | 後端 origin |

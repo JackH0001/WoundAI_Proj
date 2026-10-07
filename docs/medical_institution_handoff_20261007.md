@@ -4,6 +4,8 @@
 
 後續 commit／母庫回收／完整 Mac Python 與 HTTP 驗證見 [2026-10-07 兩庫對齊紀錄](repo_commit_alignment_20261007.md)。
 
+2026-10-07 補充：實際雲端資源與角色權限再次核對，MMH 服務／桶仍未建立。新 [MMH 環境、登入與帳號交付說明](mmhps20261007_environment_and_accounts.md) 區分現況、具名方案及未核發的範例帳號；正式網址須待部署讀回，不以舊平台代替。
+
 ## 已保全與整合
 
 - 原 Android：`/Users/Jack.Hou/Developer/WoundAI_Proj`，`claude/android-16kb-rbac-20261005`，`03bc72d`；原工作目錄未修改。
