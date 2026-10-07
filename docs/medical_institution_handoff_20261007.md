@@ -2,6 +2,8 @@
 
 日期：2026-10-07（台北）。範圍只包含醫療端 WoundAI；WoundLite 不是本機構特殊版。
 
+後續 commit／母庫回收／完整 Mac Python 與 HTTP 驗證見 [2026-10-07 兩庫對齊紀錄](repo_commit_alignment_20261007.md)。
+
 ## 已保全與整合
 
 - 原 Android：`/Users/Jack.Hou/Developer/WoundAI_Proj`，`claude/android-16kb-rbac-20261005`，`03bc72d`；原工作目錄未修改。
