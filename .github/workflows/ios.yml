@@ -21,10 +21,14 @@ on:
     paths:
       - 'iOS/**'
       - '.github/workflows/ios.yml'
+      - 'tools/verify_xctest_results.py'
+      - 'tools/test_verify_xctest_results.py'
   pull_request:
     paths:
       - 'iOS/**'
       - '.github/workflows/ios.yml'
+      - 'tools/verify_xctest_results.py'
+      - 'tools/test_verify_xctest_results.py'
   workflow_dispatch:
 
 jobs:
@@ -127,14 +131,9 @@ jobs:
         run: |
           xcrun xcresulttool get test-results summary \
             --path TestResults.xcresult > test-summary.json
-          python3 - <<'PYTEST'
-          import json
-          with open('test-summary.json') as source:
-              summary = json.load(source)
-          print(json.dumps(summary, indent=2))
-          if summary.get('passedTests', 0) <= 0 or summary.get('failedTests', -1) != 0:
-              raise SystemExit('Expected at least one passing test and zero failures')
-          PYTEST
+          xcrun xcresulttool get test-results tests --path TestResults.xcresult > test-tree.json
+          python3 ../tools/test_verify_xctest_results.py
+          python3 ../tools/verify_xctest_results.py test-summary.json test-tree.json
 
       - name: Run WoundLite XCTest tests
         env:
@@ -154,14 +153,11 @@ jobs:
         run: |
           xcrun xcresulttool get test-results summary \
             --path LiteTestResults.xcresult > lite-test-summary.json
-          python3 - <<'PYTEST'
-          import json
-          with open('lite-test-summary.json') as source:
-              summary = json.load(source)
-          print(json.dumps(summary, indent=2))
-          if summary.get('passedTests', 0) <= 0 or summary.get('failedTests', -1) != 0 or summary.get('skippedTests', -1) != 0:
-              raise SystemExit('Expected WoundLite passing tests with zero failures and zero skips')
-          PYTEST
+          xcrun xcresulttool get test-results tests --path LiteTestResults.xcresult > lite-test-tree.json
+          # A simulator may not expose the file-protection class. Match the exact
+          # test, reason and platform; all other skips still fail. Device acceptance remains required.
+          python3 ../tools/verify_xctest_results.py lite-test-summary.json lite-test-tree.json \
+            --allow-simulator-protection-skip
 
       - name: Upload test results
         if: always()
@@ -172,10 +168,12 @@ jobs:
             iOS/TestResults.xcresult
             iOS/test-results.log
             iOS/test-summary.json
+            iOS/test-tree.json
             iOS/build-*.log
             iOS/LiteTestResults.xcresult
             iOS/lite-test-results.log
             iOS/lite-test-summary.json
+            iOS/lite-test-tree.json
           if-no-files-found: warn
 
       # ── Distribution build (uncomment when code signing is configured) ──
