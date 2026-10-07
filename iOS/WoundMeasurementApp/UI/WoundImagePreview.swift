@@ -51,7 +51,7 @@ final class WoundZoomPreviewView: UIView, UIScrollViewDelegate {
         contourLayer.lineJoin = .round
         contentView.layer.addSublayer(contourLayer)
         markerLayer.fillColor = UIColor.clear.cgColor
-        markerLayer.strokeColor = UIColor.yellow.cgColor
+        markerLayer.strokeColor = UIColor.green.cgColor
         markerLayer.lineJoin = .round
         contentView.layer.addSublayer(markerLayer)
         isAccessibilityElement = true

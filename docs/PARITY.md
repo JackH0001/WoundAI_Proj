@@ -158,19 +158,19 @@ Android 已在 `BackendClient.health()`、`BackendWarmup.degradedBanner()` 補�
 
 | 功能 | Android | iOS | 備註 |
 |---|---|---|---|
-| 拍攝：對焦狀態引導 | ❌ | ✅ | iOS `25cbff7`：中央 AF 框（黃＝對焦中／綠＝完成）＋ POI 置中連續對焦；訊號源刻意雙重（`isAdjustingFocus` 在 LiDAR 相機不觸發 → 併用 `lensPosition` 變動＋0.45s 靜止）。Android `CameraCaptureScreen.kt` **未設定任何對焦**，亦無狀態顯示。<br>⚠ 嚴重度最高：近距特寫沒鎖焦就是糊的，而糊照的 ArUco 角點誤差會**直接變成面積誤差**，後端照回 200。<br>移植路徑：CameraX 無公開的 AF 狀態觀察點，需 `Camera2Interop.Extender.setSessionCaptureCallback` 讀 `CaptureResult.CONTROL_AF_STATE` |
+| 拍攝：對焦狀態引導 | ❌ | ✅ | iOS `25cbff7`：中央 AF 框（黃＝對焦中／綠＝完成）＋ POI 置中連續對焦；訊號源刻意雙重（`isAdjustingFocus` 在 LiDAR 相機不觸發 → 併用 `lensPosition` 變動＋0.45s 靜止）。Android `CameraCaptureScreen.kt` 沒有相同的 AF 狀態引導；CameraX 預設自動對焦是否成功仍需實機驗證，不能从未寫顯式 AF 控制推論「完全沒有對焦」。<br>⚠ 嚴重度最高：近距特寫沒鎖焦就是糊的，而糊照的 ArUco 角點誤差會**直接變成面積誤差**，後端照回 200。<br>移植路徑：CameraX 無公開的 AF 狀態觀察點，需 `Camera2Interop.Extender.setSessionCaptureCallback` 讀 `CaptureResult.CONTROL_AF_STATE` |
 | 拍攝：取景提示含「約佔畫面 1/6」與後果 | ❌ | ✅ | Android 只寫「與傷口同框、盡量平貼」。1/6 規則在 Android 其實存在——但寫在 ArUco **失敗之後**的錯誤訊息裡，而提示要在拍之前才有用 |
 | 拍攝：提示文字有半透明底 | ❌ | ✅ | Android 是裸 `Text` 疊在即時預覽上，亮膚色／反光構圖下讀不到；iOS 用 `black.opacity(0.45)` 圓角底 |
 | 拍攝：圓形快門鍵 | ❌ | ✅ | iOS 72pt 圓形（相機的標準操作語彙）；Android 是文字按鈕「拍攝」。純外觀，列入備查 |
 | 修邊：組織按鈕色塊實心可辨 | ❌ | ✅ | `fda4c8a`（Android）先做，iOS 抄過去後**實機回報「α115 再乘 0.4 淡到像空心按鈕」**，改為不透明底色（選中 0.95／可用 0.65／停用 0.35）。Android 仍是 `Color(T_COLORS[c])` 半透明 α≈0.45、停用 α≈0.18——正是 iOS 回報的那個值。<br>這一列是**反向 backport**：差異的來源是 iOS 多做了一輪實機修正 |
 | 修邊：底稿 `seedAuto` 不卡主執行緒 | ❌ | ✅ | iOS `25cbff7` 註明**實測 >10 秒白凍**，改背景 `runSeed` ＋鎖畫布提示。Android `WoundEditScreen.kt` 的 `seedAuto` 仍在 `remember { }`（＝組合／主執行緒）。<br>諷刺的是 Android 自己在 `stamp()` 裡已寫明 seedAuto「在 2200² 上是近千萬次寫入，跑在筆畫進行中的主執行緒上」並為此限定只在 B_PAINT 呼叫——**但開畫面那一次仍是同步的** |
-| 結果頁：組織圖層 | ✅ | ❌ | Android 參照圖三層（輪廓／組織／校正框）且等比全寬；iOS `AnalysisPreview` 固定 `frame(height: 300)`、僅輪廓＋校正框兩個開關。**此列 Android 領先** |
+| 結果頁：組織圖層 | ✅ | ❌ | Android 參照圖三層（輪廓／組織／校正框）且等比全寬；iOS `AnalysisPreview` 使用可雙指操作的 `WoundImagePreview`、僅輪廓＋校正框兩個開關。**此列 Android 領先** |
 | 結果頁：組織層取自醫師修邊柵格 | ✅ | ❌ | Android 2026-10-06 起優先用 `EditRaster`（修改前無條件重跑色彩啟發式 → 百分比更新了圖沒更新）。iOS 無組織層，不適用 |
 | 結果頁：雙指縮放平移檢視細節 | ❌ | ✅（本機保全 commit） | **2026-10-06 當日更正。** 本列第一版寫「兩端都待補」是錯的：iOS 已實作於 `iOS/WoundMeasurementApp/UI/WoundImagePreview.swift`（`WoundZoomPreview`，UIScrollView 1–6×，`panGestureRecognizer` 限定雙指，單指滑動留給結果頁），`AnalysisPreview` 已改用它。<br>⚠ 這份工作已保全於本機 `a162b1c`，原始開發目錄為 `~/Documents/Codex/2026-06-28/woundai-ios-release-20261001` 的工作目錄。<br>錯在哪：盤點時 grep 的是 SwiftUI 的 `MagnificationGesture`／`MagnifyGesture`，而它是 UIKit scroll-view 縮放，名稱完全不同。**拿實作手法的關鍵字去找功能，找不到不代表沒有**——判斷「有沒有這個功能」要看畫面或看 diff |
 | 紀錄檢視（時間軸）：疊加已存輪廓 | ❌ | ✅（本機保全 commit） | 已保全於本機 `a162b1c`。同一支 `WoundImagePreview`；`ReviewView` 疊上該筆存下的輪廓，並在 `imageW/imageH` 與實際影像尺寸不符時**只顯示原圖**並說明原因——與 Android 當天在 `AnalysisPreview` 採用的判準相同（寧可不畫，也不要畫在錯的位置）。Android 的時間軸檢視沒有對應預覽 |
 | 結果頁：圖層開關的狀態編碼 | ❌ | ✅ | iOS 實心＝顯示／空心＝隱藏，底色對應圖上框色，再加眼睛圖示（雙重編碼，強光下仍可辨）。Android 為 Material `FilterChip`，只有深淺差 |
-| 校正框顏色 | 綠 `0xFF39FF6A` | 黃 | ⚠ 同一個安全檢查，兩個 App 教使用者看**兩種顏色**（文案也各自寫「綠框」／「黃框」）。同院同時發兩個平台時，換機就會認錯。<br>**2026-10-06 決議：統一為綠**——黃在黃色膠帶、反光與膚色上辨識度較差，且綠已在 Android 實機驗過。**iOS 待改**（顏色＋「黃框」文案；`iOS/` 歸 mac 機器所有，由 Mac 端執行） |
-| 匯出量測結果疊圖到共用相簿 | ✅ | ❌ | Android 2026-10-06 特殊內測版：原圖＋**醫師修邊的**組織層＋輪廓＋ArUco 框＋下方結果標註帶（面積／PUSH／組織％／尺度／驗證狀態／免責）。<br>綁 `ALLOW_CLINICAL_GALLERY_EXPORT`，只有 internalTest 建置會寫入臨床相簿。<br>iOS 是否要跟上，取決於特殊合作部門的流程需求——**尚未決定，不是實作落後** |
+| 校正框顏色 | 綠 `0xFF39FF6A` | 綠 | ⚠ 同一個安全檢查，兩個 App 教使用者看**兩種顏色**（文案也各自寫「綠框」／「黃框」）。同院同時發兩個平台時，換機就會認錯。<br>**2026-10-06 決議：統一為綠**——黃在黃色膠帶、反光與膚色上辨識度較差，且綠已在 Android 實機驗過。**iOS 已改為綠框與一致文案**（2026-10-07 本機候選；尚未發行） |
+| 匯出量測結果疊圖到共用相簿 | ✅ | ❌ | Android 2026-10-06 特殊內測版：原圖＋**醫師修邊的**組織層＋輪廓＋ArUco 框＋下方結果標註帶（面積／PUSH／組織％／尺度／驗證狀態／免責）。<br>綁 `ALLOW_CLINICAL_GALLERY_EXPORT`，只有 internalTest 建置會寫入臨床相簿。<br>iOS 已依 Jack 指定新增 MMHPS20261007 專用 target，改輸出至 App「檔案」資料夾，不寫系統相簿；尚待專用後端與實機端到端驗收 |
 
 
 ## 加新功能時的流程

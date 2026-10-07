@@ -1,0 +1,53 @@
+include:
+  - project.yml
+
+# Dedicated medical test product. Backend remains unconfigured until isolated service acceptance.
+targets:
+  WoundAIInstitution:
+    type: application
+    platform: iOS
+    sources:
+      # 只收新架構。**不要**加 Modules/ Views/ Services/ Analysis/ Utils/ Models/，
+      # 理由見檔頭。
+      - path: WoundMeasurementApp/Generated
+      - path: WoundMeasurementApp/Core
+      - path: WoundMeasurementApp/Pipeline
+      - path: WoundMeasurementApp/UI
+      - path: WoundMeasurementApp/Assets.xcassets
+        type: folder.assetcatalog
+        buildPhase: resources
+      # 使用手冊：與 Android assets/manual.html 同一份檔（兩端共用，內容才不會分岔）。
+      - path: WoundMeasurementApp/Resources/manual.html
+        buildPhase: resources
+      # 隱私宣告（2024-05 起 App Store 強制）。**必須進 resources**——
+      # 放進 build 卻沒被打包，上傳時才會收到 ITMS-91053 而那時已經在等審查了。
+      - path: WoundMeasurementApp/PrivacyInfo.xcprivacy
+        buildPhase: resources
+      - path: WoundMeasurementApp/Info.plist
+        buildPhase: none
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.woundai.app.mmhps20261007
+        INFOPLIST_FILE: WoundMeasurementApp/InstitutionInfo.plist
+        # ⚠ 不可同時開 GENERATE_INFOPLIST_FILE 與 INFOPLIST_FILE：舊專案兩者都設，
+        #   而 build setting 裡的 NSCameraUsageDescription 與 Info.plist 裡的字串不一致，
+        #   實際上架時哪一份生效要看合併結果。這裡只留 Info.plist 一個來源。
+        GENERATE_INFOPLIST_FILE: NO
+        # opencv2.xcframework 不在 repo 裡，端上 ArUco 因此不可用（與 Android 相同：
+        # ArucoDetector 是 stub，ArUco 一律在後端做）。要啟用端上 ArUco 時，把
+        # framework 放進 WoundMeasurementApp/ 並在此加回連結設定與 OpenCV/ 來源目錄。
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WOUND_INSTITUTION"
+      configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WOUND_INSTITUTION DEBUG"
+
+
+schemes:
+  WoundAIInstitution:
+    build:
+      targets:
+        WoundAIInstitution: all
+    run:
+      config: Debug
+    archive:
+      config: Release

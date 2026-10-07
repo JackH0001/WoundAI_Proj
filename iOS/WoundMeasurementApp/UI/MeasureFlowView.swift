@@ -346,6 +346,9 @@ final class MeasureViewModel: ObservableObject {
     @discardableResult
     func saveToTimeline(repo: CaseRepository, imageStore: LocalImageStore,
                         woundCase: WoundCase?) async -> Bool {
+        guard !saving else { return false }
+        saving = true
+        defer { saving = false }
         guard let r = result, let img = image else {
             saveNote = "尚未完成量測，沒有可存的結果。"
             return false
@@ -354,8 +357,23 @@ final class MeasureViewModel: ObservableObject {
             saveNote = "量測後個案已切換，不得把舊影像存入另一個案；請重新量測"
             return false
         }
-        saving = true
-        defer { saving = false }
+        if InstitutionExport.enabled {
+            if source == "clinical" {
+                guard identity?.can("record.save") == true, let woundCase,
+                      let consent = await repo.activeConsent(patientId: woundCase.patientId),
+                      consent.consentCare, consent.withdrawnAt == nil else {
+                    saveNote = "機構匯出需要有效照護同意與儲存權限。"
+                    return false
+                }
+            } else if source != "sample" && source != "phantom" {
+                saveNote = "來源不明，不能產生機構驗證副本。"
+                return false
+            }
+        }
+        let exportRaster = raster
+        let exportPolygons = effectivePolygons
+        let exportVerified = doctorVerified
+        let exportExudate = exudate
 
         // (1) 影像重存。失敗時 imagePath 留空字串而非中止——量測數字本身仍有病歷價值，
         //     沒有照片的紀錄比沒有紀錄好。
@@ -444,6 +462,9 @@ final class MeasureViewModel: ObservableObject {
             }
             if let op = old.rasterPath, op != m.rasterPath { imageStore.delete(op) }
             saveNote = "已更新這一筆時間軸紀錄。"
+            await exportInstitutionCopy(id: id, image: img, raster: exportRaster,
+                polygons: exportPolygons, marker: r.markerQuad,
+                verified: exportVerified, exudate: exportExudate)
             return true
         }
 
@@ -456,7 +477,31 @@ final class MeasureViewModel: ObservableObject {
         }
         lastSavedId = newId
         saveNote = "已存入時間軸。" + depthNote
+        await exportInstitutionCopy(id: newId, image: img, raster: exportRaster,
+            polygons: exportPolygons, marker: r.markerQuad,
+            verified: exportVerified, exudate: exportExudate)
         return true
+    }
+
+    private func exportInstitutionCopy(id: Int64, image: UIImage, raster: EditRaster?,
+                                       polygons: [[[Int]]], marker: [[Int]]?, verified: Bool, exudate: Int?) async {
+        guard InstitutionExport.enabled else { return }
+        guard let raster else {
+            saveNote = (saveNote ?? "") + " 尚未完成修邊，未匯出機構遮罩副本。"
+            return
+        }
+        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MMHPS20261007/Exports", isDirectory: true)
+        let note = await Task.detached(priority: .utility) { () -> String in
+            do {
+                _ = try InstitutionExport.write(image: image, raster: raster, polygons: polygons,
+                    marker: marker, measurementID: id, doctorVerified: verified, exudate: exudate, directory: directory)
+                return " 已輸出至「檔案」／WoundAI MMHPS／MMHPS20261007／Exports。此為本機副本，未表示雲端已收到。"
+            } catch {
+                return " 機構圖像匯出失敗（座標、遮罩或檔案檢查未通過），時間軸紀錄已保留。"
+            }
+        }.value
+        saveNote = (saveNote ?? "") + note
     }
 
     /// 送出條件。任何一項不成立都不該讓按鈕可按——而且要說得出是哪一項。
@@ -673,6 +718,10 @@ struct MeasureFlowView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    if InstitutionExport.enabled {
+                        Text("MMHPS20261007 機構驗證版 · 本機輸出至「檔案」；專用雲端尚未設定時不會使用其他後端。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
                     if clinicalMode, let c = app.chosenCase {
                         Text("個案：\(c.bodySite)・\(c.woundType)　\(c.wdCode)")
                             .font(.footnote).foregroundStyle(.secondary)
@@ -1014,14 +1063,14 @@ struct AnalysisPreview: View {
                 markerPolygons: showMarker ? (result.markerQuad.map { $0.count == 4 ? [$0] : [] } ?? []) : [])
 
             // 圖層開關：**實心＝顯示中、空心＝已隱藏**，顏色對應圖上的框色
-            // （青＝傷口輪廓、黃＝校正框），眼睛圖示雙重編碼——只靠深淺在強光下看不出狀態。
+            // （青＝傷口輪廓、綠＝校正框），眼睛圖示雙重編碼——只靠深淺在強光下看不出狀態。
             HStack(spacing: 8) {
                 overlayToggle("傷口輪廓", tint: .cyan, isOn: $showWound)
-                overlayToggle("校正框", tint: .yellow, isOn: $showMarker)
+                overlayToggle("校正框", tint: .green, isOn: $showMarker)
             }
 
             if result.markerQuad != nil {
-                Text("請確認**黃框**確實套在校正貼紙上。框錯了的話面積會整筆錯，而系統無法自行察覺。")
+                Text("請確認**綠框**確實套在校正貼紙上。框錯了的話面積會整筆錯，而系統無法自行察覺。")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

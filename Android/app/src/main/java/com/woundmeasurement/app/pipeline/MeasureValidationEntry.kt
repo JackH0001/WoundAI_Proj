@@ -404,6 +404,11 @@ fun MeasureValidationEntry(
                         val raster = vm.editRaster
                         val quad = vm.lastMarkerQuad
                         scope.launch {
+                            val currentConsent = case?.let { repo.activeConsent(it.patientId) }
+                            if (clinicalMode && (currentConsent?.consentCare != true || currentConsent.withdrawnAt != null)) {
+                                overlayNote = "⚠ 照護同意已失效，未匯出量測疊圖。"
+                                return@launch
+                            }
                             val rel = withContext(Dispatchers.Default) {
                                 val img = WoundOverlayRenderer.render(bmp, raster, polys, quad, info)
                                 img?.let {

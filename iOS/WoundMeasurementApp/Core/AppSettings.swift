@@ -55,12 +55,22 @@ enum AppSettings {
     // MARK: - 後端連線
 
     static func backendURL() -> String {
+        #if WOUND_INSTITUTION
+        // Dedicated product cannot reuse a saved production/demo endpoint.
+        return (Bundle.main.object(forInfoDictionaryKey: "WoundAIInstitutionBackendURL") as? String).flatMap { value in
+            guard let url = URL(string: value), url.scheme == "https",
+                  url.host?.hasSuffix(".run.app") == true, url.user == nil, url.password == nil,
+                  value != demoURL, value != legacyURL else { return nil as String? }
+            return value
+        } ?? "https://mmhps20261007.invalid"
+        #else
         let s = (d.string(forKey: K.baseUrl) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if !s.isEmpty { return normalize(s) }
         // 升級不能把既有帳密默默送往另一個平台。舊版若留下帳號但沒有網址，
         // 保留原服務，讓使用者在設定中明確登出並切換。
         if defaultURL == demoURL && !backendUser().isEmpty { return legacyURL }
         return defaultURL
+        #endif
     }
 
     static func setBackendURL(_ raw: String) {

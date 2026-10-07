@@ -16,6 +16,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.woundmeasurement.app.data.store.GalleryExport
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
 
 /**
  * 模擬驗證入口(Compose)：從相簿選範例圖 / 拍照 → 端上管線或後端 classify → 顯示 [MeasureScreen]。
@@ -48,6 +50,7 @@ fun SamplePickerScreen(
     preview: @Composable () -> Unit = {}
 ) {
     val ctx = LocalContext.current
+    val captureScope = rememberCoroutineScope()
     // 模式:false=端上、true=後端。有後端時預設走後端(端上 ONNX 原生庫在模擬器可能不相容)
     var useBackend by remember { mutableStateOf(backend != null) }
 
@@ -87,11 +90,19 @@ fun SamplePickerScreen(
             onCaptured = { bmp ->
                 showCamera = false
                 val mp = bmp.width.toLong() * bmp.height / 1_000_000.0
-                // 匯出政策由 GalleryExport 單點決定；這裡不自己判斷能不能存。
-                val rel = GalleryExport.saveCapture(ctx, bmp, source)
-                captureInfo = "已擷取 ${bmp.width}×${bmp.height}（%.1f MP）".format(mp) +
-                    if (rel != null) " · 已存入相簿 $rel" else " · 未存入相簿（此來源或此建置不允許）"
-                dispatch(bmp)
+                captureScope.launch {
+                    // Re-read consent after returning from the camera, before a shared copy exists.
+                    val consentAllowsCapture = source != "clinical" ||
+                        runCatching { careCodeProvider() }.getOrNull() != null
+                    if (!measureEnabled || !consentAllowsCapture) {
+                        captureInfo = "⚠ 照護同意已失效或無法確認，未匯出影像或啟動量測。"
+                        return@launch
+                    }
+                    val rel = GalleryExport.saveCapture(ctx, bmp, source)
+                    captureInfo = "已擷取 ${bmp.width}×${bmp.height}（%.1f MP）".format(mp) +
+                        if (rel != null) " · 已存入相簿 $rel" else " · 未存入相簿（此來源或此建置不允許）"
+                    dispatch(bmp)
+                }
             },
             onCancel = { showCamera = false },
             onError = { msg -> showCamera = false; captureInfo = "⚠️ $msg" },
