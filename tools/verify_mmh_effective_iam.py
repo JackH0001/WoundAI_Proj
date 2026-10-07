@@ -17,7 +17,9 @@ OLD_RUNTIME = NUMBER + '-compute@developer.gserviceaccount.com'
 CONTROL_BUCKET = 'woundai-flywheel-jackh001'
 
 
-def cases():
+def cases(profile='bucket-deny'):
+    if profile not in ('bucket-deny', 'least-privilege'):
+        raise ValueError('unknown verification profile')
     rows = []
     for b in BUCKETS:
         for p in ('objects.get','objects.list','objects.create','objects.delete',
@@ -26,12 +28,24 @@ def cases():
             rows.append((OLD_RUNTIME, resource(b), 'storage.' + p, False))
         rows.append((ADMIN, resource(b), 'storage.buckets.delete', True))
     for p in ('storage.buckets.delete', 'storage.objects.list'):
-        rows.append((OLD_RUNTIME, resource(CONTROL_BUCKET), p, True))
+        expected = not (profile == 'least-privilege' and p == 'storage.buckets.delete')
+        rows.append((OLD_RUNTIME, resource(CONTROL_BUCKET), p, expected))
     sa_resource = '//iam.googleapis.com/projects/' + PROJECT + '/serviceAccounts/' + SA
     for p in ('iam.serviceAccounts.actAs','iam.serviceAccounts.getAccessToken','iam.serviceAccounts.getOpenIdToken',
               'iam.serviceAccounts.implicitDelegation','iam.serviceAccounts.signBlob','iam.serviceAccounts.signJwt',
               'iam.serviceAccountKeys.create','iam.serviceAccounts.setIamPolicy'):
         rows.append((OLD_RUNTIME, sa_resource, p, False))
+    if profile == 'least-privilege':
+        for p in ('iam.serviceAccounts.delete', 'iam.serviceAccounts.disable', 'iam.serviceAccounts.update'):
+            rows.append((OLD_RUNTIME, sa_resource, p, False))
+        # Keep legacy runtime data access working while removing control-plane power.
+        for p in ('storage.objects.get', 'storage.objects.create', 'storage.objects.delete'):
+            rows.append((OLD_RUNTIME, resource(CONTROL_BUCKET), p, True))
+        for p in ('storage.objects.get', 'storage.objects.list', 'storage.objects.create'):
+            rows.append((OLD_RUNTIME, resource(CONTROL_BUCKET + '-audit'), p, True))
+        for secret in ('woundai-admin-password', 'woundai-jwt-secret'):
+            target = '//secretmanager.googleapis.com/projects/' + NUMBER + '/secrets/' + secret
+            rows.append((OLD_RUNTIME, target, 'secretmanager.versions.access', True))
     return rows
 
 
@@ -74,23 +88,24 @@ def verify_deny_authority():
     return assess(result,ADMIN,target,permission,True)['passed']
 
 
-def verify(report):
+def verify(report, profile='bucket-deny'):
     # Invalidate a previous green report even when credential discovery fails.
-    report.write_text(json.dumps({'complete':False,'state':'in_progress'})+'\n')
+    report.write_text(json.dumps({'complete':False,'state':'in_progress','profile':profile})+'\n')
     evaluated=[]
     try:
+        matrix=cases(profile)
         credential=access_token()
-        for index,case in enumerate(cases()):
+        for index,case in enumerate(matrix):
             if index: time.sleep(7)  # Avoid quota bursts; never cache authorization.
             principal,target,permission,expected=case
             result=request_v3(principal,target,permission,credential)
             evaluated.append((assess(result,*case),result))
     except Exception as error:
-        failure={'complete':False,'state':'failed','completed':[r for r,_ in evaluated],
+        failure={'complete':False,'state':'failed','profile':profile,'completed':[r for r,_ in evaluated],
                  'error_type':type(error).__name__,'http_status':getattr(error,'code',None)}
         report.write_text(json.dumps(failure,indent=2)+'\n')
         raise
-    summary={'api':'v3','complete':True,'cases':[r for r,_ in evaluated],
+    summary={'api':'v3','profile':profile,'complete':True,'cases':[r for r,_ in evaluated],
              'passed':sum(r['passed'] for r,_ in evaluated), 'total':len(evaluated),
              'scope':'direct permissions for named principals; not a complete impersonation-chain proof'}
     report.write_text(json.dumps(summary,indent=2)+'\n')
@@ -102,4 +117,5 @@ def verify(report):
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--report',type=Path,required=True)
-    args=parser.parse_args();raise SystemExit(0 if verify(args.report) else 1)
+    parser.add_argument('--profile',choices=('bucket-deny','least-privilege'),default='bucket-deny')
+    args=parser.parse_args();raise SystemExit(0 if verify(args.report,args.profile) else 1)

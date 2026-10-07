@@ -59,5 +59,30 @@ class V3Tests(unittest.TestCase):
         rows=cases();self.assertEqual(len(rows),40);self.assertEqual(len(set(rows)),40)
         self.assertEqual(sum(c[-1] for c in rows),5)
         self.assertTrue(any(c[2]=='iam.serviceAccountKeys.create' for c in rows))
+    def test_least_privilege_rejects_legacy_bucket_deletion(self):
+        rows=cases('least-privilege')
+        targets=[r for r in rows if r[2]=='storage.buckets.delete' and 'flywheel-jackh001' in r[1]]
+        self.assertEqual(len(targets),1)
+        self.assertFalse(targets[0][-1])
+        self.assertEqual(len(rows),51);self.assertEqual(len(set(rows)),51)
+    def test_legacy_data_and_secrets_remain_required(self):
+        rows=cases('least-privilege')
+        for permission in ('storage.objects.get','storage.objects.list','storage.objects.create','storage.objects.delete'):
+            self.assertTrue(any(r[2]==permission and r[-1] and r[1].endswith('/woundai-flywheel-jackh001') for r in rows))
+        secrets=[r for r in rows if r[2]=='secretmanager.versions.access']
+        self.assertEqual(len(secrets),2)
+        self.assertTrue(all('/projects/421209514056/secrets/' in r[1] and r[-1] for r in secrets))
+    def test_least_privilege_keeps_all_mmh_refusals(self):
+        required={r for r in cases() if not r[-1]}
+        self.assertTrue(required.issubset(set(cases('least-privilege'))))
+        for permission in ('iam.serviceAccounts.delete','iam.serviceAccounts.disable','iam.serviceAccounts.update'):
+            self.assertTrue(any(r[2]==permission and not r[-1] for r in cases('least-privilege')))
+    def test_unknown_profile_invalidates_old_evidence_before_auth(self):
+        with tempfile.TemporaryDirectory() as td:
+            report=Path(td)/'report.json';report.write_text('{"complete":true}')
+            with patch('verify_mmh_effective_iam.access_token') as token:
+                with self.assertRaises(ValueError):verify(report,'typo')
+                token.assert_not_called()
+            self.assertFalse(json.loads(report.read_text())['complete'])
 
 if __name__=='__main__':unittest.main(verbosity=2)

@@ -102,3 +102,5 @@ gcloud projects get-iam-policy woundai-jackh001 --format=json
 本機證據：`mmh-lease-grant-before.json`、`mmh-lease-failed-grant-readback.json`、`mmh-deny-role-grantable.json`、`mmh-project-current.json`、`mmh-deny-admin-lease.json`。這些 IAM 原始證據留在本機，不提交公開 repository。
 
 官方參照：[Deny access／Required roles](https://docs.cloud.google.com/iam/docs/deny-access)。政策可以附掛 project，不等於 denyAdmin 角色可以授予在 project；兩個層級必須分開核對。
+
+進一步唯讀盤點與可覆核的執行／回復方案見 [舊執行身分遷移](mmh_runtime_migration_plan_20261007.md)。使用者已授權繼續執行；仍需先完成安全遷移的功能證據，不能因已授權而略過驗收。
