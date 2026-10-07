@@ -40,7 +40,10 @@ def verify(summary, tree, allow_simulator_protection_skip=False):
         if any(d.get('device', {}).get('platform') != 'iOS Simulator' for d in devices):
             raise ValueError('File protection must be checked on a physical device')
         case = omitted[0]
-        reasons = [c.get('name') for c in case.get('children', []) if c.get('nodeType') == 'Skip Message']
+        # xcresulttool may render XCTest's skip explanation as a Failure Message.
+        # The case must still be Skipped and the exact explanation must match.
+        reasons = [c.get('name') for c in case.get('children', [])
+                   if c.get('nodeType') in ('Skip Message', 'Failure Message')]
         if case.get('nodeIdentifier') != PROTECTION_TEST or reasons != [PROTECTION_REASON]:
             raise ValueError('Skip identity or reason is not the documented simulator limitation')
     return {'passed': passed, 'failed': failed, 'skipped': skipped,

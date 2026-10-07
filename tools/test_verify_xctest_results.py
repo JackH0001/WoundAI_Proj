@@ -14,6 +14,17 @@ class XCTestEvidenceTests(unittest.TestCase):
         self.assertTrue(verify(*self.fixture(), True)['physical_file_protection_validation_pending'])
     def test_skip_is_not_allowed_by_default(self):
         with self.assertRaises(ValueError): verify(*self.fixture())
+    def test_xcode_failure_message_label_does_not_change_skipped_outcome(self):
+        s,t=self.fixture()
+        t[1]['children'][0]['nodeType']='Failure Message'
+        self.assertTrue(verify(s,t,True)['physical_file_protection_validation_pending'])
+        t[1]['result']='Failed'
+        with self.assertRaises(ValueError):verify(s,t,True)
+    def test_extra_or_unknown_explanation_is_not_allowed(self):
+        for message in ('Another failure', PROTECTION_REASON):
+            s,t=self.fixture()
+            t[1]['children'].append({'nodeType':'Failure Message','name':message})
+            with self.assertRaises(ValueError):verify(s,t,True)
     def test_physical_device_or_missing_device_evidence_rejected(self):
         for devices in ([], [{'device':{'platform':'iOS'}}], [{}]):
             s,t=self.fixture();s['devicesAndConfigurations']=devices
