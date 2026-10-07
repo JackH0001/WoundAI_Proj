@@ -1,8 +1,8 @@
 # WoundAI iOS — 建置與發布
 
-> **前提：需要一台 macOS 機器。** iOS 的編譯與簽章只能在 macOS 上做（Xcode 工具鏈是
-> 封閉的，沒有 Windows 或 Linux 版）。這份程式碼是在 Linux 沙箱裡寫的，**尚未經過任何
-> 編譯器驗證**——已做的驗證見文末「已驗證 / 未驗證」。
+> **更新：2026-10-05。** 醫療版 1.0 (26) 已成功上傳，App Store Connect 外部測試群組讀回「正在測試」。
+> 1.0 (27) 已上傳且內外部群組皆 IN_BETA_TESTING，包含拍攝導引與修邊手勢修復；尚未確認實機安裝。
+> Lite 公開服務與研究收案配套仍未完成。
 
 ## 1. 一次性設定
 
@@ -30,11 +30,10 @@ open WoundMeasurementApp.xcodeproj
   ⚠ Android 套件名維持 `com.woundmeasurement.app` 不動——換掉會斷開 Play 商店的既有版本鏈。
   ⚠ `PhiCrypto` 的 Keychain service 字串也維持舊值，理由見該檔註解。
 - 部署目標：iOS 17.0
-- `CURRENT_PROJECT_VERSION`：目前 **19**，與 Android `version.properties` 的
-  `versionCode` 對齊。
+- `project.yml` 的醫療版預設 build 為 **27**，WoundLite 為 **33**；以該檔為準。
+- Build 26 曾以命令列覆寫封存並已上傳。本輪已核對 ASC 最新版為 26，將 project.yml 與 docs/PARITY.md 更新至候選 27。
 
-⚠ **每次發布都必須遞增 build number。** 兩個平台的版號要能互相對照——排錯時的第一個
-問題永遠是「你裝的是哪一版」，而兩邊版號各走各的話這題答不出來。
+**每次上傳使用新的 build number。** Android 與 iOS 是獨立發版；差異必須在 docs/PARITY.md 指定確切版本、理由與對齊條件，不以升號冒充功能相同。
 
 ## 3. 建置
 
@@ -43,7 +42,8 @@ open WoundMeasurementApp.xcodeproj
 xcodebuild test \
   -project WoundMeasurementApp.xcodeproj \
   -scheme WoundMeasurementApp \
-  -destination 'platform=iOS Simulator,name=iPhone 15'
+  -configuration Release ENABLE_TESTABILITY=YES \
+  -destination 'platform=iOS Simulator,id=<本機可用 simulator UUID>'
 
 # 封存與匯出
 xcodebuild archive \
@@ -52,8 +52,7 @@ xcodebuild archive \
   -archivePath build/WoundAI.xcarchive
 ```
 
-**第一次編譯必然會有錯。** 這份程式碼沒有經過編譯器，型別推導、SwiftUI 的
-`some View` 推斷、`actor` 的隔離規則都可能有需要調整的地方。把錯誤貼回來即可逐項修。
+封存後需另以 `method=app-store-connect`、`destination=export` 匯出 IPA，核對最終 Distribution 簽章後才可上傳。網站登入與 Xcode → Settings → Accounts 是不同登入狀態。若匯出回報 No Accounts／missing Xcode-Username，先恢復 Xcode 帳號，再重試既有 archive；不要把開發簽章 archive 當作可直接發布的 IPA。
 
 ## 4. 目前的功能邊界（誠實清單）
 
@@ -68,15 +67,16 @@ xcodebuild archive \
 - PUSH 計分、組織分型（金標逐值驗證通過）
 - 加密影像儲存、SQLite 病歷庫（schema 對齊 Android Room v6）
 
-### 尚未實作
+### 已實作、但仍需依角色與同意驗收
 
-- **修邊畫面（筆刷塗抹）**。因此 `doctor_verified` 永遠是 `false`，
-  「送出訓練標註」按鈕維持停用並顯示原因。這是**刻意的 fail-closed**：
-  一筆從未被人看過的 AI 輸出不該以「醫師已驗證」進入訓練集。
-  這是 iOS 進入飛輪收案的最後一塊。
+- 修邊畫面、組織筆刷、復原／重做、時間軸與圖表、紀錄重修及補送標註。是否能作醫師確認／訓練送出仍受帳號角色、同意與影像身分限制；不能因本機按過修邊就繞過伺服器閘門。
+- 個案的醒目時間軸按鈕、結果／紀錄圖片雙指縮放與移動。
+
+### 尚待配套或驗收
+
 - 端上分割（`UNet256.mlmodel` 不在 repo 裡）與端上 ArUco
   （`opencv2.xcframework` 不在 repo 裡）。兩者與 Android 現況相同：一律走後端。
-- 時間軸趨勢圖、我的送件清單、App 內使用說明書。
+- 本次候選對實際後台的完整回歸、實機手勢驗收、App Store Connect 隱私問卷／審查資料對齊及外測啟用仍需逐項確認。
 
 ### 已隔離的舊程式碼
 
@@ -97,12 +97,18 @@ target 內找出 **58 個頂層符號重複宣告**（`CloudAPIService` 宣告�
 | 未終結區塊註解 | 同上 | ✅ 0 個 |
 | 引用不存在的符號 | 同上 | ✅ 0 個 |
 | `project.yml` 路徑與語法 | 逐路徑存在性 + YAML 解析 | ✅ 通過 |
-| **Swift 編譯 / 型別檢查** | — | ❌ **未做**（沙箱無 macOS） |
-| **SwiftUI 執行期行為** | — | ❌ 未做 |
-| **與真實後端的端到端** | — | ❌ 未做 |
+| 醫療版 Release XCTest | 2026-10-05 Build 27 | 79/79 通過，0 失敗 |
+| 醫療版 Release archive | 1.0 (26)，com.woundai.app | 成功；簽章驗證通過，隱私 manifest 與來源一致 |
+| Distribution IPA 匯出／外測 | Build 26，2026-10-05 | 匯出、上傳成功；外部群組正在測試 |
+| Lite Release XCTest | 2026-10-04 | 141/141 通過，0 跳過 |
+| 實機／真實後台／TestFlight | 需對應實際候選版本 | 本輪未完成，不以單元測試取代 |
 
 驗證腳本：`tools/verify_logic.py`、`tools/swift_audit.py`（皆可離線重跑）。
 
 這兩支腳本抓到過三個真實缺陷：`WoundAnalyzer` 引用已刪除的型別、文件註解裡的
 `/*` 讓整個 `BackendClient.swift` 673 行被 Swift 的巢狀註解吞掉、以及舊 target 那
 58 組命名衝突。它們不能取代編譯器，但它們抓的正是編譯器要到 Mac 上才會告訴你的事。
+
+本輪原始證據：repo 外 `woundai-competitive-review-20261003/medical-release26-final-20261004/validation.json`、`archive.log`、`export.log`、`medical-summary.json`；完整上架追蹤見 `docs/app_store_submission_plan.md`。
+
+最新 Build 27 證據與待實機項目見 [發布驗證](../docs/medical_release27_validation_20261005.md)。

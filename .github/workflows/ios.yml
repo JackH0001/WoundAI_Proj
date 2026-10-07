@@ -1,6 +1,6 @@
 # .github/workflows/ios.yml
 #
-# Builds both iOS apps and tests the WoundMeasurementApp project on every push / PR
+# Builds and tests both iOS apps on every push / PR
 # that touches the iOS directory.
 #
 # Runner: macos-15 (Apple Silicon, newest installed Xcode)
@@ -136,6 +136,33 @@ jobs:
               raise SystemExit('Expected at least one passing test and zero failures')
           PYTEST
 
+      - name: Run WoundLite XCTest tests
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+              -project WoundMeasurementApp.xcodeproj \
+              -scheme WoundLite \
+              -configuration Release \
+              -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+              CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- ENABLE_TESTABILITY=YES \
+              -resultBundlePath LiteTestResults.xcresult \
+              2>&1 | tee lite-test-results.log
+
+      - name: Verify WoundLite tests actually ran
+        run: |
+          xcrun xcresulttool get test-results summary \
+            --path LiteTestResults.xcresult > lite-test-summary.json
+          python3 - <<'PYTEST'
+          import json
+          with open('lite-test-summary.json') as source:
+              summary = json.load(source)
+          print(json.dumps(summary, indent=2))
+          if summary.get('passedTests', 0) <= 0 or summary.get('failedTests', -1) != 0 or summary.get('skippedTests', -1) != 0:
+              raise SystemExit('Expected WoundLite passing tests with zero failures and zero skips')
+          PYTEST
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
@@ -146,6 +173,9 @@ jobs:
             iOS/test-results.log
             iOS/test-summary.json
             iOS/build-*.log
+            iOS/LiteTestResults.xcresult
+            iOS/lite-test-results.log
+            iOS/lite-test-summary.json
           if-no-files-found: warn
 
       # ── Distribution build (uncomment when code signing is configured) ──

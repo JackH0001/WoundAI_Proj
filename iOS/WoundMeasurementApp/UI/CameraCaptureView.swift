@@ -214,7 +214,9 @@ extension CameraModel: AVCapturePhotoCaptureDelegate {
             return
         }
         // 深度在背景緒轉出（320×240 f32 拷貝，毫秒級），失敗不影響照片本身。
-        let depth = photo.depthData.flatMap { DepthCapture.from($0) }
+        let depth = photo.depthData.flatMap {
+            DepthCapture.fromPhoto($0, imageOrientation: img.imageOrientation)
+        }
         Task { @MainActor in
             self.completion?(img, depth)
             self.completion = nil

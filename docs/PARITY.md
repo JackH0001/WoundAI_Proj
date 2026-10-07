@@ -28,8 +28,24 @@
 # 格式：<檢查項>: <識別子>  # 理由
 allow:
   annotation_field_missing_android: [depth_map_png, depth_conf_png, depth_format, depth_scale, camera_intrinsics]
-  endpoint_missing_android: [/api/v1/depth, /api/v1/lite/segment, /api/v1/lite/annotation]
+  endpoint_missing_android: [/api/v1/depth, /api/v1/lite/segment, /api/v1/lite/annotation, /api/v1/lite/annotation/revision]
 ```
+
+### 醫療版發布版號差異（2026-10-05，方案 B）
+
+<!-- release-version-exception -->
+```json
+{
+  "android": 22,
+  "ios_medical": 27,
+  "reason": "iOS 27 延續隔離示範服務、登入 UX、量測圖片縮放及修邊工具，新增臨床拍攝導引與多指／ROI 修復；Android 22 尚未交付相同功能，不以單純升號宣稱功能一致。",
+  "alignment_trigger": "下一次 Android 正式 release 交付對應示範連線與登入 UX 並通過 Windows 驗證時，核對當時兩端 build，移除或重新明確登記此差異。任何一端先升號均使本登記失效。"
+}
+```
+
+此登記只允許 **Android 22 對醫療 iOS 27**。缺理由、缺對齊條件、任一版號改變、重複登記或兩端已同號但未刪除登記，一律拒絕。WoundLite 是不同產品，build 28 不作 Android 醫療版的比較值。這是目前可覆核候選，尚未推送或宣稱 Windows 驗證通過。
+
+`/api/v1/lite/annotation/revision` 是 Lite 28 的修訂回執端點，仍屬 iOS Lite 產品邊界；Android Lite 若日後建立，必須撤銷相應宣告並實作同一契約。
 
 ### iOS-only 端點（2026-08-21 宣告）
 
@@ -132,4 +148,4 @@ Android 已在 `BackendClient.health()`、`BackendWarmup.degradedBanner()` 補�
 
 1. 一端做完後，**先跑 `parity_check.py`**——契約層面的漏接會當場被抓到
 2. 另一端跟上；跟不上的話，在上面的表裡寫一列，註明原因與預計時程
-3. 兩端版號一起遞增（`Android/version.properties` 與 `iOS/project.yml`）
+3. 核對兩端發布版號；有意不同步時，在上方登記精確版號、原因與對齊條件，不能默默跳過檢查。

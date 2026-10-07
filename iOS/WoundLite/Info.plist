@@ -23,6 +23,9 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 
+	<!-- Must equal WOUNDAI_LITE_ATTEST_AUDIENCE on the independently deployed candidate. -->
+	<key>LiteAttestAudience</key>
+	<string>woundlite-research-v1</string>
 	<key>CFBundleDisplayName</key>
 	<string>WoundLite</string>
 
@@ -39,7 +42,7 @@
 	<true/>
 
 	<!-- App Store 無法用 capability 篩 LiDAR 機型，上架採 App 內閘門
-	     （LiteApp 啟動偵測 builtInLiDARDepthCamera，無則顯示機型需求頁）。 -->
+	     （LiteApp 啟動偵測 builtInLiDARDepthCamera；無則只停用新拍攝，保留紀錄與設定）。 -->
 	<key>UIRequiredDeviceCapabilities</key>
 	<array>
 		<string>arm64</string>

@@ -80,31 +80,42 @@ struct CaseSelectView: View {
 
                     Section("傷口個案") {
                         ForEach(cases) { c in
-                            // 同一列兩個獨立的點擊區。List 裡預設整列共用一個按鈕動作，
-                            // 所以兩顆都要 `.borderless`——否則點哪裡都會觸發第一顆。
-                            HStack {
+                            // Keep the two actions independent in List, with a full-width timeline button.
+                            VStack(alignment: .leading, spacing: 12) {
                                 Button {
                                     app.chosenCase = c
                                     app.backTo = .cases
                                     app.screen = .measure
                                 } label: {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("\(c.bodySite)・\(c.woundType)")
-                                        Text(c.wdCode).font(.caption).foregroundStyle(.secondary)
-                                        // 決策資訊：負＝縮小＝在癒合。±10% 變色與 Android 同閾值。
-                                        Text(Self.summaryLine(summaries[c.id]))
-                                            .font(.caption2)
-                                            .foregroundStyle({ () -> Color in
-                                                guard let p = summaries[c.id]?.changePct else { return .secondary }
-                                                if p < -10 { return .blue }
-                                                if p > 10 { return .red }
-                                                return .secondary
-                                            }())
+                                    HStack(spacing: 12) {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("\(c.bodySite)・\(c.woundType)")
+                                            Text(c.wdCode).font(.caption).foregroundStyle(.secondary)
+                                            // 決策資訊：負＝縮小＝在癒合。±10% 變色與 Android 同閾值。
+                                            Text(Self.summaryLine(summaries[c.id]))
+                                                .font(.caption2)
+                                                .foregroundStyle({ () -> Color in
+                                                    guard let p = summaries[c.id]?.changePct else { return .secondary }
+                                                    if p < -10 { return .blue }
+                                                    if p > 10 { return .red }
+                                                    return .secondary
+                                                }())
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .contentShape(Rectangle())
+                                        VStack(spacing: 4) {
+                                            Image(systemName: "camera.fill")
+                                            Text("臨床拍攝").font(.caption.weight(.semibold))
+                                        }
+                                        Image(systemName: "arrow.right.circle.fill").font(.title2)
                                     }
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(12)
+                                    .frame(maxWidth: .infinity, minHeight: 64)
+                                    .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
                                     .contentShape(Rectangle())
                                 }
-                                .buttonStyle(.borderless)
+                                .buttonStyle(.plain)
+                                .accessibilityHint("進入此傷口的臨床量測，可拍攝新影像")
                                 .disabled(!(consent?.consentCare ?? false))
                                 // 長按個案列：結案（有紀錄的正途）／刪除（僅限空個案）。
                                 .contextMenu {
@@ -135,10 +146,21 @@ struct CaseSelectView: View {
                                     app.backTo = .cases
                                     app.screen = .timeline
                                 } label: {
-                                    Label("時間軸", systemImage: "chart.xyaxis.line")
-                                        .labelStyle(.iconOnly)
+                                    HStack {
+                                        Label("查看傷口時間軸", systemImage: "chart.xyaxis.line")
+                                        Spacer(minLength: 8)
+                                        Image(systemName: "chevron.right")
+                                    }
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(Color.accentColor)
+                                    .padding(.horizontal, 12)
+                                    .frame(maxWidth: .infinity, minHeight: 48)
+                                    .background(Color.accentColor.opacity(0.14),
+                                                in: RoundedRectangle(cornerRadius: 10))
+                                    .contentShape(Rectangle())
                                 }
-                                .buttonStyle(.borderless)
+                                .buttonStyle(.plain)
+                                .accessibilityHint("查看此傷口的量測紀錄與變化趨勢")
                             }
                         }
                         if !(consent?.consentCare ?? false) {

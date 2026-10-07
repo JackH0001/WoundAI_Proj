@@ -685,7 +685,7 @@ struct MeasureFlowView: View {
                     // 再觸發動作（isPressed 過場）。「拍照」是預選項——框線加粗＋淡底標示，
                     // 但不再用常駐實心（實心被實測誤讀為「正在進行中」的狀態）。
                     HStack(spacing: 8) {
-                        Button("拍照") { showCamera = true }
+                        Button(vm.image == nil ? "拍照" : "重新拍照") { showCamera = true }
                             .buttonStyle(OutlinePressButtonStyle(preselected: true))
                         PhotosPicker("相簿", selection: $pick, matching: .images)
                             .buttonStyle(OutlinePressButtonStyle())
@@ -1005,52 +1005,13 @@ struct AnalysisPreview: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            GeometryReader { geo in
-                // 影像座標 → 顯示座標的等比縮放。用 min 是因為 .fit 會留白，
-                // 兩軸各自縮放會讓框歪掉，而歪掉的框看起來就像偵測錯誤。
-                let iw = CGFloat(max(result.imageW, 1))
-                let ih = CGFloat(max(result.imageH, 1))
-                let s = min(geo.size.width / iw, geo.size.height / ih)
-                let ox = (geo.size.width - iw * s) / 2
-                let oy = (geo.size.height - ih * s) / 2
-
-                ZStack(alignment: .topLeading) {
-                    Image(uiImage: image)
-                        .resizable().scaledToFit()
-                        .frame(width: geo.size.width, height: geo.size.height)
-
-                    // 多處傷口要**全部**畫出來。只畫最大的那一個，醫師會以為第二個傷口
-                    // 沒被偵測到（Android 2026-08-07 實測回報「畫面沒更新」）。
-                    if showWound {
-                        let polys = result.woundPolygons.isEmpty
-                            ? (result.woundPolygon.count >= 3 ? [result.woundPolygon] : [])
-                            : result.woundPolygons
-                        Path { p in
-                            for poly in polys where poly.count >= 3 {
-                                let pts = poly.map {
-                                    CGPoint(x: ox + CGFloat($0[0]) * s, y: oy + CGFloat($0[1]) * s)
-                                }
-                                p.move(to: pts[0])
-                                p.addLines(pts)
-                                p.closeSubpath()
-                            }
-                        }
-                        .stroke(Color.cyan, lineWidth: 2)
-                    }
-
-                    if showMarker, let q = result.markerQuad, q.count == 4 {
-                        Path { p in
-                            let pts = q.map {
-                                CGPoint(x: ox + CGFloat($0[0]) * s, y: oy + CGFloat($0[1]) * s)
-                            }
-                            p.addLines(pts); p.closeSubpath()
-                        }
-                        .stroke(Color.yellow, lineWidth: 3)
-                    }
-                }
-            }
-            .frame(height: 300)
-            .background(Color.black.opacity(0.05))
+            WoundImagePreview(
+                image: image,
+                polygons: showWound ? (result.woundPolygons.isEmpty
+                    ? (result.woundPolygon.count >= 3 ? [result.woundPolygon] : [])
+                    : result.woundPolygons) : [],
+                imageW: result.imageW, imageH: result.imageH,
+                markerPolygons: showMarker ? (result.markerQuad.map { $0.count == 4 ? [$0] : [] } ?? []) : [])
 
             // 圖層開關：**實心＝顯示中、空心＝已隱藏**，顏色對應圖上的框色
             // （青＝傷口輪廓、黃＝校正框），眼睛圖示雙重編碼——只靠深淺在強光下看不出狀態。

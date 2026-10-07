@@ -35,6 +35,7 @@ enum LitePrefs {
     /// nil＝還沒問過（首啟要問）；true/false＝使用者的選擇，設定頁可改。
     static var researchConsent: Bool? {
         get {
+            guard !LiteWithdrawalJournal.standard.blocksUploads else { return false }
             // An old acceptance must not silently authorize the revised disclosure.
             guard d.string(forKey: "lite_consent_version") == consentVersion else { return nil }
             return d.object(forKey: "lite_research_consent") as? Bool
@@ -46,11 +47,10 @@ enum LitePrefs {
     }
     /// 同意文案版本。**改了同意頁的實質內容就要遞增**——每筆上傳都帶著它，
     /// 日後治理要能回答「這筆是在哪一版文案下同意的」。
-    static let consentVersion = "2026-10-01.1"
+    static let consentVersion = "2026-10-04.1"
 
-    /// 安裝層級的假名代碼：不是 Apple ID，但可串聯同一安裝的上傳資料。
-    /// 用作限流鍵與撤回鍵；隱私宣告列為 DeviceID 並標示資料有關聯。
-    /// ⚠ 上架前要換成 App Attest 裝置證明（後端契約已載明，限流擋不住有意濫用）。
+    /// Legacy anonymous UUID, retained for old records/support only.
+    /// New uploads use the server-assigned App Attest installation; never overwrite old bindings.
     static var anonId: String {
         if let v = d.string(forKey: "lite_anon_id"), !v.isEmpty { return v }
         let v = UUID().uuidString.lowercased()
@@ -59,27 +59,34 @@ enum LitePrefs {
     }
 }
 
+enum LiteRootTab: Hashable { case measure, history, settings }
+
 struct LiteRootView: View {
     @StateObject private var store = LiteStore()
     @State private var askConsent = false
-    /// LiDAR 硬體閘門。App Store 沒有 LiDAR capability key 可以篩機型，只能 App 內把關。
-    private let lidarOK = AVCaptureDevice.default(.builtInLiDARDepthCamera,
-                                                  for: .video, position: .back) != nil
+    @State private var selectedTab: LiteRootTab = .measure
+    /// Hardware gates new capture only; records and privacy controls stay accessible.
+    let lidarOK: Bool
+
+    init(lidarAvailable: Bool = AVCaptureDevice.default(.builtInLiDARDepthCamera,
+                                                       for: .video, position: .back) != nil) {
+        lidarOK = lidarAvailable
+    }
 
     var body: some View {
-        Group {
-            if lidarOK {
-                TabView {
-                    LiteMeasureView(store: store)
-                        .tabItem { Label("量測", systemImage: "camera.metering.center.weighted") }
-                    LiteHistoryView(store: store)
-                        .tabItem { Label("紀錄", systemImage: "chart.line.uptrend.xyaxis") }
-                    LiteSettingsView()
-                        .tabItem { Label("設定", systemImage: "gearshape") }
-                }
-            } else {
-                lidarGate
+        TabView(selection: $selectedTab) {
+            Group {
+                if lidarOK { LiteMeasureView(store: store) }
+                else { lidarGate }
             }
+            .tag(LiteRootTab.measure)
+            .tabItem { Label("量測", systemImage: "camera.metering.center.weighted") }
+            LiteHistoryView(store: store)
+                .tag(LiteRootTab.history)
+                .tabItem { Label("紀錄", systemImage: "chart.line.uptrend.xyaxis") }
+            LiteSettingsView()
+                .tag(LiteRootTab.settings)
+                .tabItem { Label("設定", systemImage: "gearshape") }
         }
         .onAppear { if lidarOK, LitePrefs.researchConsent == nil { askConsent = true } }
         .fullScreenCover(isPresented: $askConsent) {
@@ -91,15 +98,31 @@ struct LiteRootView: View {
     }
 
     private var lidarGate: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "camera.metering.unknown").font(.system(size: 48))
-                .foregroundStyle(.secondary)
-            Text("此裝置不支援免貼紙量測").font(.headline)
-            Text("WoundLite 以 LiDAR 深度取得真實尺度，需要配備 LiDAR 的 iPhone"
-                 + "（iPhone 12 Pro 之後的 Pro 系列機型）。")
-                .font(.subheadline).foregroundStyle(.secondary)
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 18) {
+                    Image(systemName: "camera.metering.unknown")
+                        .font(.system(size: 48)).foregroundStyle(.secondary)
+                    Text("此裝置無法拍攝深度量測").font(.title3.bold())
+                    Text("本裝置未偵測到可用的 LiDAR 深度相機，無法拍攝新的傷口面積量測。")
+                        .foregroundStyle(.secondary)
+                    Text("您仍可查看此裝置已有的紀錄、設定、隱私說明與資料撤回。")
+                    Button { selectedTab = .history } label: {
+                        Label("查看既有紀錄", systemImage: "chart.line.uptrend.xyaxis")
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Button { selectedTab = .settings } label: {
+                        Label("設定與資料撤回", systemImage: "gearshape")
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.bordered)
+                    NavigationLink("量測精確度與限制") { LiteMeasurementInfoView() }
+                }
                 .multilineTextAlignment(.center)
+                .padding(24)
+            }
+            .navigationTitle("量測")
         }
-        .padding(32)
     }
 }

@@ -183,6 +183,7 @@ actor BackendClient {
     private(set) var identity: LoginIdentity?
 
     private let session: URLSession
+    private let liteTransport: (any LiteAuthenticatedTransport)?
 
     /**
      - Parameter baseUrl: 例如 `https://wound-ai-…run.app`，尾端斜線會被去掉。
@@ -193,15 +194,21 @@ actor BackendClient {
        而那正是醫師第一次按下去的時刻。
      - `timeoutIntervalForResource = 120s` — 對應 OkHttp 的 callTimeout。
      */
-    init(baseUrl: String, jwt: String = "") {
+    init(baseUrl: String, jwt: String = "", session: URLSession? = nil,
+         liteTransport: (any LiteAuthenticatedTransport)? = nil) {
         self.baseUrl = BackendClient.normalize(baseUrl)
         self.jwt = jwt
+        #if WOUND_LITE
+        self.liteTransport = liteTransport ?? LiteSignedCloudTransport(baseURL: BackendClient.normalize(baseUrl))
+        #else
+        self.liteTransport = liteTransport
+        #endif
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 90
         cfg.timeoutIntervalForResource = 120
         cfg.waitsForConnectivity = false
         cfg.httpAdditionalHeaders = ["Accept": "application/json"]
-        self.session = URLSession(configuration: cfg)
+        self.session = session ?? URLSession(configuration: cfg)
     }
 
     static func normalize(_ raw: String) -> String {
@@ -237,6 +244,18 @@ actor BackendClient {
         let (data, resp) = try await session.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
         return (code, data)
+    }
+
+    /// Registration returns the server-assigned installation. Never substitute the legacy UUID.
+    func liteInstallation() async throws -> String {
+        guard let liteTransport else { throw BackendError.badResponse("缺少裝置驗證設定") }
+        return try await liteTransport.installation()
+    }
+
+    private func sendLite(_ request: URLRequest, installation: String) async throws -> (Int, Data) {
+        guard let liteTransport else { throw BackendError.badResponse("缺少裝置驗證設定") }
+        let (data, response) = try await liteTransport.send(request, installation: installation)
+        return (response.statusCode, data)
     }
 
     /**
@@ -479,6 +498,8 @@ actor BackendClient {
         /// 後端回傳的輪廓「原始個數」（解析前）。與 `polygons.count` 不一致＝
         /// **客戶端解析問題**，一致且為 0＝後端真的空手——兩種病要分得開。
         var rawPolyCount: Int
+        var quota: LiteCloudQuota? = nil
+        var storageReceipt: LiteStorageReceipt? = nil
     }
 
     /**
@@ -486,7 +507,7 @@ actor BackendClient {
 
      - 只有研究同意時才可呼叫（App 端規則）；同意時附深度 png16_mm——與
        `/api/v1/annotation` 完全同一個驗證器，兩條路徑判準不分岔。
-     - `anonId`：裝置匿名代碼（撤回鍵＋限流鍵）。
+     - `anonId`：伺服器驗證後核發的安裝代碼（撤回鍵＋限流鍵）。
      - 429／人臉退件不拋錯誤：回空輪廓＋`userMessage`，呼叫端退手動圈選。
     */
     func liteSegment(jpeg: Data, anonId: String,
@@ -494,7 +515,8 @@ actor BackendClient {
                      depthMapPngBase64: String? = nil,
                      depthConfPngBase64: String? = nil,
                      cameraIntrinsics: [String: Double]? = nil,
-                     measured: [String: Double]? = nil) async throws -> LiteSegmentResult {
+                     measured: [String: Double]? = nil,
+                     rawCapture: LiteRawDepthPacket? = nil) async throws -> LiteSegmentResult {
         var fields: [String: String] = [
             "anon_id": anonId,
             "client": "woundlite-ios",
@@ -518,17 +540,24 @@ actor BackendClient {
         var r = try request("POST", "/api/v1/lite/segment", auth: false)
         let boundary = "----WoundAI\(UUID().uuidString)"
         r.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        r.httpBody = Self.multipartBody(boundary: boundary, fields: fields,
-                                        fileField: "image", fileName: "wound.jpg",
-                                        mime: "image/jpeg", fileData: jpeg)
-        let (code, data) = try await send(r)
+        if let rawCapture {
+            guard rawCapture.jpeg == jpeg, depthMapPngBase64 == nil, depthConfPngBase64 == nil,
+                  cameraIntrinsics == nil, measured == nil else { throw LiteRawDepthPacket.Failure.invalidMetadata }
+            r.httpBody = try rawCapture.multipart(boundary: boundary, fields: fields)
+        } else {
+            r.httpBody = Self.multipartBody(boundary: boundary, fields: fields,
+                                            fileField: "image", fileName: "wound.jpg",
+                                            mime: "image/jpeg", fileData: jpeg)
+        }
+        let (code, data) = try await sendLite(r, installation: anonId)
         let jOpt = JSONAny(data: data)
         if code == 429 || (code == 400 && jOpt?["error"].string == "face_detected") {
             let msg = jOpt?["message"].string ?? ""
             return LiteSegmentResult(polygons: [], imageW: 0, imageH: 0, confidence: 0,
                                      stored: false, imageId: nil,
                                      userMessage: msg.isEmpty ? "自動辨識暫不可用，請手動圈選。" : msg,
-                                     route: jOpt?["route"].string, rawPolyCount: 0)
+                                     route: jOpt?["route"].string, rawPolyCount: 0,
+                                     quota: LiteCloudQuota.parse(jOpt?["quota"].raw))
         }
         guard code == 200, let j = jOpt else {
             throw BackendError.http(status: code, message: summarize(data))
@@ -562,7 +591,10 @@ actor BackendClient {
                                  imageId: (iid?.isEmpty == false) ? iid : nil,
                                  userMessage: nil,
                                  route: j["route"].string,
-                                 rawPolyCount: rawCount)
+                                 rawPolyCount: rawCount,
+                                 quota: LiteCloudQuota.parse(j["quota"].raw),
+                                 storageReceipt: LiteStorageReceipt.parse(j["storage_receipt"].raw, rawPacket: rawCapture,
+                                     installationID: anonId, captureID: iid))
     }
 
     /**
@@ -573,6 +605,29 @@ actor BackendClient {
      retrain_queue）——民眾邊界是臨床偏差不是雜訊，不與醫師 GT 混用。
      前提：該影像已經由 lite/segment 以 consent=true 落地（有 image_id）。
      */
+    /// v2 replies must echo the exact revision and payload digest before we acknowledge locally.
+    func liteRevision(bindingAnonID: String, imageID: String, revision: Int,
+                      payloadJSON: String, digest: String) async throws {
+        var r = try request("POST", "/api/v1/lite/annotation/revision", auth: false)
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.httpBody = try JSONSerialization.data(withJSONObject: [
+            "anon_id": bindingAnonID, "image_id": imageID, "revision": revision,
+            "payload_json": payloadJSON, "research_consent": true
+        ])
+        let (code, data) = try await sendLite(r, installation: bindingAnonID)
+        struct Receipt: Decodable {
+            let status: String
+            let image_id: String
+            let revision: Int
+            let payload_sha256: String
+        }
+        guard code == 200, let response = try? JSONDecoder().decode(Receipt.self, from: data),
+              response.status == "stored", response.image_id == imageID,
+              response.revision == revision, response.payload_sha256 == digest else {
+            throw BackendError.http(status: code, message: "修訂尚未取得相符回執")
+        }
+    }
+
     func liteAnnotation(anonId: String, imageId: String,
                         polygons: [[[Int]]], imageW: Int, imageH: Int,
                         source: String, consentVersion: String) async throws {
@@ -586,7 +641,7 @@ actor BackendClient {
             "source": source,
         ]
         r.httpBody = try JSONSerialization.data(withJSONObject: obj)
-        let (code, data) = try await send(r)
+        let (code, data) = try await sendLite(r, installation: anonId)
         guard code == 200, let j = JSONAny(data: data),
               j["status"].string("") == "stored" else {
             throw BackendError.http(status: code, message: summarize(data))

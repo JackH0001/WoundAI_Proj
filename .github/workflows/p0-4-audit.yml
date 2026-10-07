@@ -15,6 +15,45 @@ on:
       - 'engineering/phase2/test_p0_4_staging.py'
       - 'engineering/phase2/test_runtime_golden_contract.py'
       - 'engineering/phase2/test_store_abstraction.py'
+      - 'engineering/phase2/test_lite_segment.py'
+      - 'engineering/phase2/test_lite_quota.py'
+      - 'engineering/phase2/test_lite_revision.py'
+      - 'engineering/phase2/test_lite_storage_receipt.py'
+      - 'engineering/phase2/test_lite_withdrawal_admission.py'
+      - 'engineering/phase2/test_lite_withdrawal_budget.py'
+      - 'engineering/phase2/test_lite_withdrawal_readers.py'
+      - 'engineering/phase2/test_lite_http_lifecycle.py'
+      - 'engineering/phase2/test_lite_raw_depth_contract.py'
+      - 'engineering/phase2/test_lite_raw_depth_store.py'
+      - 'engineering/phase2/test_lite_raw_depth_http.py'
+      - 'engineering/phase2/test_packaged_preprocessing.py'
+      - 'engineering/phase2/test_lite_build_context.py'
+      - 'tools/stage_lite_candidate.py'
+      - 'tools/plan_lite_cloud_build.py'
+      - 'engineering/phase2/test_lite_build_plan.py'
+      - 'engineering/phase2/test_lite_candidate_deploy_plan.py'
+      - 'tools/plan_lite_candidate_deploy.py'
+      - 'engineering/phase2/probe_lite_container.py'
+      - 'engineering/phase2/test_lite_attest_request.py'
+      - 'engineering/phase2/test_lite_attest_assertion.py'
+      - 'engineering/phase2/test_lite_attest_registration.py'
+      - 'engineering/phase2/test_lite_attest_state.py'
+      - 'engineering/phase2/test_lite_attest_receipt.py'
+      - 'engineering/phase2/test_lite_attest_enrollment.py'
+      - 'engineering/phase2/test_lite_attest_http.py'
+      - 'engineering/phase2/test_lite_privacy_state.py'
+      - 'engineering/phase2/test_lite_withdrawal_fence.py'
+      - 'engineering/phase2/test_lite_ledger_purge.py'
+      - 'engineering/phase2/test_lite_bucket_policy.py'
+      - 'engineering/phase2/test_lite_service_profile.py'
+      - 'engineering/phase2/test_lite_face_privacy.py'
+      - 'engineering/phase2/test_lite_fenced_objects.py'
+      - 'engineering/phase2/test_lite_fenced_manifest.py'
+      - 'engineering/phase2/test_lite_fenced_http.py'
+      - 'engineering/phase2/check_lite_candidate_buckets.py'
+      - 'engineering/phase2/fixtures/app_attest/**'
+      - 'tools/lite_rgbd_preflight.py'
+      - 'tools/test_lite_rgbd_preflight.py'
       - 'engineering/phase2/verify_audit_chain.py'
       - 'engineering/phase2/Assert-CIGreen.ps1'
       - 'engineering/phase2/test_ci_gate_static.py'
@@ -55,6 +94,45 @@ on:
       - 'engineering/phase2/test_p0_4_staging.py'
       - 'engineering/phase2/test_runtime_golden_contract.py'
       - 'engineering/phase2/test_store_abstraction.py'
+      - 'engineering/phase2/test_lite_segment.py'
+      - 'engineering/phase2/test_lite_quota.py'
+      - 'engineering/phase2/test_lite_revision.py'
+      - 'engineering/phase2/test_lite_storage_receipt.py'
+      - 'engineering/phase2/test_lite_withdrawal_admission.py'
+      - 'engineering/phase2/test_lite_withdrawal_budget.py'
+      - 'engineering/phase2/test_lite_withdrawal_readers.py'
+      - 'engineering/phase2/test_lite_http_lifecycle.py'
+      - 'engineering/phase2/test_lite_raw_depth_contract.py'
+      - 'engineering/phase2/test_lite_raw_depth_store.py'
+      - 'engineering/phase2/test_lite_raw_depth_http.py'
+      - 'engineering/phase2/test_packaged_preprocessing.py'
+      - 'engineering/phase2/test_lite_build_context.py'
+      - 'tools/stage_lite_candidate.py'
+      - 'tools/plan_lite_cloud_build.py'
+      - 'engineering/phase2/test_lite_build_plan.py'
+      - 'engineering/phase2/test_lite_candidate_deploy_plan.py'
+      - 'tools/plan_lite_candidate_deploy.py'
+      - 'engineering/phase2/probe_lite_container.py'
+      - 'engineering/phase2/test_lite_attest_request.py'
+      - 'engineering/phase2/test_lite_attest_assertion.py'
+      - 'engineering/phase2/test_lite_attest_registration.py'
+      - 'engineering/phase2/test_lite_attest_state.py'
+      - 'engineering/phase2/test_lite_attest_receipt.py'
+      - 'engineering/phase2/test_lite_attest_enrollment.py'
+      - 'engineering/phase2/test_lite_attest_http.py'
+      - 'engineering/phase2/test_lite_privacy_state.py'
+      - 'engineering/phase2/test_lite_withdrawal_fence.py'
+      - 'engineering/phase2/test_lite_ledger_purge.py'
+      - 'engineering/phase2/test_lite_bucket_policy.py'
+      - 'engineering/phase2/test_lite_service_profile.py'
+      - 'engineering/phase2/test_lite_face_privacy.py'
+      - 'engineering/phase2/test_lite_fenced_objects.py'
+      - 'engineering/phase2/test_lite_fenced_manifest.py'
+      - 'engineering/phase2/test_lite_fenced_http.py'
+      - 'engineering/phase2/check_lite_candidate_buckets.py'
+      - 'engineering/phase2/fixtures/app_attest/**'
+      - 'tools/lite_rgbd_preflight.py'
+      - 'tools/test_lite_rgbd_preflight.py'
       - 'engineering/phase2/verify_audit_chain.py'
       - 'engineering/phase2/Assert-CIGreen.ps1'
       - 'engineering/phase2/test_ci_gate_static.py'
@@ -136,6 +214,38 @@ jobs:
           python -B engineering/phase2/test_demo_deploy_isolation.py
           python -B engineering/phase2/test_demo_deploy_checks.py
           python -B engineering/phase2/test_store_abstraction.py
+          python -B engineering/phase2/test_lite_segment.py
+          python -B engineering/phase2/test_lite_quota.py
+          python -B engineering/phase2/test_lite_revision.py
+          python -B engineering/phase2/test_lite_storage_receipt.py
+          python -B engineering/phase2/test_lite_withdrawal_admission.py
+          python -B engineering/phase2/test_lite_withdrawal_budget.py
+          python -B engineering/phase2/test_lite_withdrawal_readers.py
+          python -B engineering/phase2/test_lite_http_lifecycle.py
+          python -B engineering/phase2/test_lite_raw_depth_contract.py
+          python -B engineering/phase2/test_lite_raw_depth_store.py
+          python -B engineering/phase2/test_lite_raw_depth_http.py
+          python -B engineering/phase2/test_packaged_preprocessing.py
+          python -B engineering/phase2/test_lite_build_context.py
+          python -B engineering/phase2/test_lite_build_plan.py
+          python -B engineering/phase2/test_lite_candidate_deploy_plan.py
+          python -B engineering/phase2/test_lite_attest_request.py
+          python -B engineering/phase2/test_lite_attest_assertion.py
+          python -B engineering/phase2/test_lite_attest_registration.py
+          python -B engineering/phase2/test_lite_attest_state.py
+          python -B engineering/phase2/test_lite_attest_receipt.py
+          python -B engineering/phase2/test_lite_attest_enrollment.py
+          python -B engineering/phase2/test_lite_attest_http.py
+          python -B engineering/phase2/test_lite_privacy_state.py
+          python -B engineering/phase2/test_lite_withdrawal_fence.py
+          python -B engineering/phase2/test_lite_ledger_purge.py
+          python -B engineering/phase2/test_lite_bucket_policy.py
+          python -B engineering/phase2/test_lite_service_profile.py
+          python -B engineering/phase2/test_lite_face_privacy.py
+          python -B engineering/phase2/test_lite_fenced_objects.py
+          python -B engineering/phase2/test_lite_fenced_manifest.py
+          python -B engineering/phase2/test_lite_fenced_http.py
+          python -B tools/test_lite_rgbd_preflight.py
           python -B engineering/phase2/test_p0_4_staging.py
           python -B engineering/phase2/test_runtime_golden_contract.py
 

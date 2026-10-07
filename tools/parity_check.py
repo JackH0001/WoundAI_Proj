@@ -186,26 +186,22 @@ for k in sorted(put_sw - put_kt):
     note('annotation_field_missing_android', k)
 
 
-# ── D. 預設後端網址 ───────────────────────────────────────────────────────
-g = os.path.join(ROOT, 'Android/app/build.gradle')
-ios_url = re.search(r'return "(https://[^"]+run\.app)"',
-                    read(os.path.join(ROOT, 'iOS/WoundMeasurementApp/Core/AppSettings.swift')))
-and_url = re.search(r'DEFAULT_BACKEND_URL",\s*\n?\s*\'"(https://[^"]+run\.app)"\'', read(g)) if os.path.exists(g) else None
-if ios_url and and_url and ios_url.group(1) != and_url.group(1):
-    problems.append({'kind': 'backend_url_mismatch',
-                     'detail': f'iOS={ios_url.group(1)} Android={and_url.group(1)}'})
+# ── D. Default backend: explicit profiles, never silently skip a parse failure ──
+from mobile_release_contract import backend_profiles, version_pair, version_exception
+profiles_ok, profile_report = backend_profiles(ROOT)
+if not profiles_ok:
+    problems.append({'kind': 'backend_profile_invalid', 'detail': profile_report})
 
-
-# ── E. 版本號 ─────────────────────────────────────────────────────────────
-vp = os.path.join(ROOT, 'Android/version.properties')
-py = os.path.join(ROOT, 'iOS/project.yml')
-av = re.search(r'^versionCode=(\d+)', read(vp), re.M) if os.path.exists(vp) else None
-iv = re.search(r'CURRENT_PROJECT_VERSION:\s*"?(\d+)"?', read(py)) if os.path.exists(py) else None
-if av and iv and av.group(1) != iv.group(1):
-    problems.append({'kind': 'version_mismatch',
-                     'detail': f'Android versionCode={av.group(1)} vs iOS CURRENT_PROJECT_VERSION={iv.group(1)}',
-                     'why': '排錯的第一個問題永遠是「你裝的是哪一版」，兩邊版號要能互相對照'})
-
+# ── E. Exact medical release version exception; Lite has an independent lifecycle ──
+try:
+    av, iv = version_pair(read(os.path.join(ROOT, 'Android/version.properties'), strip=False),
+                          read(os.path.join(ROOT, 'iOS/project.yml'), strip=False))
+    exception = version_exception(read(os.path.join(ROOT, 'docs/PARITY.md'), strip=False), av, iv)
+    if exception:
+        declared.append({'kind': 'version_mismatch',
+                         'detail': f'Android={av}, iOS medical={iv}: ' + exception['reason']})
+except ValueError as exc:
+    problems.append({'kind': 'version_contract_invalid', 'detail': str(exc)})
 
 # ── 輸出 ──────────────────────────────────────────────────────────────────
 by_kind = {}

@@ -33,7 +33,8 @@ struct ReviewView: View {
                 }
                 .padding()
             }
-            .navigationTitle("紀錄檢視／補送標註")
+            .navigationTitle("紀錄檢視／重修補送標註")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("返回時間軸") {
@@ -65,6 +66,19 @@ struct ReviewView: View {
             .font(.subheadline)
         if let s = msg { Text(s).font(.footnote).foregroundStyle(.blue) }
         if loading { Text("載入影像中…").font(.footnote).foregroundStyle(.secondary) }
+
+        if let image = bmp {
+            // Only draw saved coordinates when their canvas is known to match the photo.
+            let width = image.cgImage?.width ?? Int(image.size.width * image.scale)
+            let height = image.cgImage?.height ?? Int(image.size.height * image.scale)
+            let matches = m.imageW == width && m.imageH == height
+            WoundImagePreview(image: image, polygons: matches ? m.polygons : [],
+                              imageW: width, imageH: height)
+            if !matches {
+                Text("僅顯示原圖：此筆輪廓座標尺寸缺漏或不符，未疊加邊界。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
 
         if !loading && bmp == nil {
             Text("⚠ 此筆沒有本機影像（可能是舊紀錄，或已逾保存期限清理）。無法重新修邊；"

@@ -671,11 +671,15 @@ def validate_depth_payload(raw: bytes, meta: dict):
     （它只存在於拍攝當下）。所以寧可在這裡退件，也不要收下一份不能用的檔案：
     退件會被看見並重傳，收下不能用的則會安靜地變成假庫存。
     """
+    import math
     import struct
     issues = []
 
+    if not isinstance(meta, dict):
+        return False, ["meta 必須是 JSON 物件"]
+
     w, h = meta.get("width"), meta.get("height")
-    if not isinstance(w, int) or not isinstance(h, int) or w <= 0 or h <= 0:
+    if type(w) is not int or type(h) is not int or w <= 0 or h <= 0:
         return False, ["meta 缺 width/height（正整數）；沒有尺寸就無法驗證完整性"]
 
     # 唯一抓得到截斷的檢查。少了它，一個傳到一半斷線的檔案會被當成正常收下。
@@ -687,20 +691,45 @@ def validate_depth_payload(raw: bytes, meta: dict):
     if want > 64 * 1024 * 1024:
         return False, ["深度圖超過 64MB"]
 
-    fmt = (meta.get("format") or "f32_le_meters").lower()
+    fmt = meta.get("format")
+    if not isinstance(fmt, str):
+        return False, ["format 必須明確宣告為 f32_le_meters 或 raw_f32_m"]
+    fmt = fmt.lower()
     if fmt not in ("f32_le_meters", "raw_f32_m"):
         issues.append("format 只接受 f32_le_meters（實際：%s）。"
                       "本端點不做單位或位元組序轉換——猜錯了不會有任何錯誤訊息" % fmt)
 
-    ci = meta.get("camera_intrinsics") or {}
-    miss = [k for k in ("fx", "fy", "cx", "cy") if not isinstance(ci.get(k), (int, float))]
+    ci = meta.get("camera_intrinsics")
+    if not isinstance(ci, dict):
+        return False, ["camera_intrinsics 必須是含校準值與參考解析度的物件"]
+
+    def finite_number(value):
+        # bool is an int subclass; huge JSON integers may overflow float conversion.
+        if type(value) not in (int, float):
+            return False
+        try:
+            return math.isfinite(value)
+        except OverflowError:
+            return False
+
+    miss = [k for k in ("fx", "fy", "cx", "cy") if not finite_number(ci.get(k))]
     if miss:
-        issues.append("camera_intrinsics 缺 %s。沒有內參就反投影不了（X=(u−cx)·Z/fx），"
+        issues.append("camera_intrinsics 缺有效有限數值 %s。沒有內參就反投影不了（X=(u−cx)·Z/fx），"
                       "深度圖存下來也建不了模，而那些值事後查不到" % "、".join(miss))
+    for k in ("fx", "fy"):
+        if finite_number(ci.get(k)) and ci[k] <= 0:
+            issues.append("camera_intrinsics.%s 必須大於 0" % k)
     # 內參的參考解析度若與深度圖不同，反投影要先縮放；沒宣告就無從得知該不該縮。
     rw, rh = ci.get("ref_width"), ci.get("ref_height")
-    if isinstance(rw, int) and isinstance(rh, int) and (rw <= 0 or rh <= 0):
+    if type(rw) is not int or type(rh) is not int or rw <= 0 or rh <= 0:
         issues.append("camera_intrinsics.ref_width/ref_height 必須是正整數")
+    else:
+        for k, bound in (("cx", rw), ("cy", rh)):
+            if finite_number(ci.get(k)) and not 0 <= ci[k] < bound:
+                issues.append("camera_intrinsics.%s 必須位於宣告的參考影像範圍內" % k)
+
+    if issues:
+        return False, issues
 
     # ⚠ 這個函式**不可以拋例外**。呼叫端（端點）雖然有 try/except 兜著，
     # 但那樣一來退件理由會從「截斷或尺寸宣告錯誤」變成
@@ -724,10 +753,14 @@ def validate_depth_payload(raw: bytes, meta: dict):
             hint = "；前 1000 個值全為 0，看起來像是未寫入的緩衝區"
         issues.append("有效深度覆蓋率只有 %.1f%%（%g–%g m 之內），低於 5%%%s"
                       % (cov * 100, DEPTH_MIN_M, DEPTH_MAX_M, hint))
-    meta.setdefault("coverage", round(cov, 4))
+    # These describe the uploaded bytes, never client assertions about a different map.
+    meta["coverage"] = round(cov, 4)
     if valid:
-        meta.setdefault("min_m", round(min(valid), 4))
-        meta.setdefault("max_m", round(max(valid), 4))
+        meta["min_m"] = round(min(valid), 4)
+        meta["max_m"] = round(max(valid), 4)
+    else:
+        meta.pop("min_m", None)
+        meta.pop("max_m", None)
     return (not issues), issues
 
 

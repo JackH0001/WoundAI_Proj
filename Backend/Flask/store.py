@@ -359,8 +359,16 @@ class LocalStore(Store):
         d = os.path.dirname(p)
         if d:
             os.makedirs(d, exist_ok=True)
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(line.rstrip("\n") + "\n")
+        from lite_ledger_purge import LEDGERS, record_file_lock
+        if self._protected_identity(key) in LEDGERS:
+            # Purge and both append paths must serialize across processes.
+            with record_file_lock(p):
+                with open(p, "a", encoding="utf-8") as f:
+                    f.write(line.rstrip("\n") + "\n")
+                    f.flush(); os.fsync(f.fileno())
+        else:
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(line.rstrip("\n") + "\n")
 
     def read_lines(self, key: str):
         p = self._p(key)
@@ -473,35 +481,17 @@ class LocalStore(Store):
             raise ValueError("queue receipt mismatch")
         p = self._p(key)
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        # The lock file is separate so existing JSONL readers see only records.
-        with open(p + ".lock", "a+b") as lock:
-            lock.seek(0, os.SEEK_END)
-            if lock.tell() == 0:
-                lock.write(b"0")
-                lock.flush()
-            lock.seek(0)
-            if os.name == "nt":
-                import msvcrt
-                msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(lock, fcntl.LOCK_EX)
-            try:
-                for line in self.read_lines(key):
-                    row = json.loads(line)
-                    if row.get("annotation_receipt_id") == receipt_id:
-                        return False
-                with open(p, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
-                    f.flush()
-                    os.fsync(f.fileno())
-                return True
-            finally:
-                lock.seek(0)
-                if os.name == "nt":
-                    msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    fcntl.flock(lock, fcntl.LOCK_UN)
+        from lite_ledger_purge import record_file_lock
+        with record_file_lock(p):
+            for line in self.read_lines(key):
+                row = json.loads(line)
+                if row.get("annotation_receipt_id") == receipt_id:
+                    return False
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            return True
 
     def get_blob(self, key: str):
         p = self._p(key)

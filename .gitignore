@@ -31,6 +31,11 @@ test_images/
 .env
 .env.*
 *.pem
+# Reviewed public Apple certificates only; private PEM keys remain ignored.
+!Backend/Flask/certificates/Apple_App_Attestation_Root_CA.pem
+!Backend/Flask/certificates/AppleRootCA-G3.pem
+!engineering/phase2/fixtures/app_attest/apple_guide_leaf.pem
+!engineering/phase2/fixtures/app_attest/apple_guide_intermediate.pem
 *.key
 *.keystore
 *.jks
