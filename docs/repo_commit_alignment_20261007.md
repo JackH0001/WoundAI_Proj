@@ -2,6 +2,8 @@
 
 2026-10-07（台北）。本輪產品範圍為機構特殊內測的 **WoundAI 醫療端**；不是 WoundLite 發布。下列遠端狀態由 GitHub 即時唯讀查詢核對，並非沿用舊 remote tracking ref。
 
+最新補驗：母庫已實際跑到 73/73，並另補 CI 閘門，候選前進至 `1a80a2e`。詳見 [母庫自身驗證及 PR 拆分檢查](mother_runtime_validation_20261007.md)；下表保留前階段的 commit 快照。
+
 ## 版本位置
 
 | 位置 | commit | 判定 |
