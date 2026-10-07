@@ -8,7 +8,9 @@
 - 建立 `tagKeys/281482074135552`（woundai-mmhps20261007-protection）、`tagValues/281476794278770`（enabled），只直接綁定三個 MMH 桶。
 - 掃描目前同專案桶的直接標籤，確認此值未綁到其他桶；也未綁到專案。不是日後所有跨專案資源的持續監控保證。
 - **Deny 政策尚未建立**：Google API 拒絕 iam.denypolicies.create。Owner 的現有角色不足以執行這個動作；不是密碼過期，不需要重新登入。
-- 未自行為使用者提高權限。已請 Jack 確認：只對自己的帳號增加限時一小時 roles/iam.denyAdmin，完成本次政策設定後立即移除。此授權與不可逆稽核鎖定分開。
+- Jack 已明確授權在本專案內，僅為自己的帳號增加限時一小時 roles/iam.denyAdmin。實際授予被 Google 拒絕：`INVALID_ARGUMENT: Role roles/iam.denyAdmin is not supported for this resource.` 權限沒有授予成功。
+- 隨後重新讀回專案 IAM，與操作前完整 JSON 比對相同（包括 etag），且不存在 denyAdmin binding；不需要等待一小時到期，也沒有待移除的權限。租約證據狀態為 `grant_rejected_verified_absent`。
+- 此專案的 grantable roles 查詢對 denyAdmin 回空陣列，projects describe 沒有 parent。Google 文件要求 Deny Admin 在組織層授予；先前「在專案內加這個角色即可完成」的建議不可行，予以更正。未改用其他角色、自訂角色或組織層授權繞過本次範圍。
 
 ## 可覆核方案
 
@@ -69,7 +71,7 @@ python -B tools/protect_mmh_buckets.py --report /private/tmp/mmh-plan.json
 python -B tools/verify_mmh_effective_iam.py --report /private/tmp/mmh-iam-v3.json
 ```
 
-`--apply` 需先完成有效權限確認；不以授權問題尚未回覆視為同意。
+`--apply` 需先完成有效權限確認。使用者已同意本次專案範圍的一小時授權，但 API 不支援該授予；人為授權不代表 Google 有效權限已成立。
 
 ## 參照
 
@@ -78,3 +80,25 @@ python -B tools/verify_mmh_effective_iam.py --report /private/tmp/mmh-iam-v3.jso
 - [Policy Troubleshooter v3](https://docs.cloud.google.com/policy-intelligence/docs/reference/policytroubleshooter/rest/v3/iam/troubleshoot)：回應契約。
 - [第一階段建置](mmh_foundation_validation_20261007.md)、[MMH 環境與帳號](mmhps20261007_environment_and_accounts.md)。
 - 本機證據目錄：`/Users/Jack.Hou/Documents/Codex/2026-06-28/woundai-institution-evidence-20261007/`；mmh-protection-ready-plan.json、mmh-protection-apply-after-api-propagation.log、mmh-stage2-mutations.json、test_*-stage2.log、mmh-iam-v3-matrix.*。
+
+## 本次授權執行結果與後續路徑
+
+- 程式碼驗證版本 `23427ff871e4568beca5ee39a76dded17d8c1fd1`：PR #19 維持 Draft，7 項 GitHub checks 全部 SUCCESS。本次只有證據／文件更正，沒有再次執行或宣稱新的 40 項隔離全綠。
+- MMH 三桶標籤仍在，但政策未建立；最新實測仍為 35/40 符合預期。三項舊 runtime 刪桶能力，以及對 MMH runtime 的 actAs、serviceAccountKeys.create 兩項能力尚未排除。標籤本身不是防護。
+- 暫不給 MMH runtime 任何資料存取權、不建立臨床帳號、不部署或鎖定稽核桶。既有服務與 project Editor binding 未改動。
+
+下一步建議先準備舊 runtime 最小權限遷移方案：盤點所有使用預設 Compute 身分的服務、工作與建置，列出其實際必要資源及權限；建立專用身分並做合成資料驗收後，才移除舊身分的 Editor 與多餘授權，重跑隔離矩陣。只更換 Cloud Run 身分而保留舊帳號 Editor 仍不能解決此問題。這條路會改變現有服務權限，需要先有可覆核的資源清單、回復方案和另外的具體授權，不能從本次 denyAdmin 授權推論。
+
+若機構需要獨立管理邊界，可另行評估機構管理的 GCP project／組織。不得擅自搬遷既有 project 或擴大到組織層授權。本次尚未執行上述兩條路徑。
+
+可重現的唯讀查核：
+
+```sh
+gcloud projects describe woundai-jackh001 --format=json
+gcloud iam list-grantable-roles //cloudresourcemanager.googleapis.com/projects/woundai-jackh001 --filter='name:roles/iam.denyAdmin' --format=json
+gcloud projects get-iam-policy woundai-jackh001 --format=json
+```
+
+本機證據：`mmh-lease-grant-before.json`、`mmh-lease-failed-grant-readback.json`、`mmh-deny-role-grantable.json`、`mmh-project-current.json`、`mmh-deny-admin-lease.json`。這些 IAM 原始證據留在本機，不提交公開 repository。
+
+官方參照：[Deny access／Required roles](https://docs.cloud.google.com/iam/docs/deny-access)。政策可以附掛 project，不等於 denyAdmin 角色可以授予在 project；兩個層級必須分開核對。
