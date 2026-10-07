@@ -12,9 +12,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class MobileReleaseContractTests(unittest.TestCase):
     def setUp(self):
-        self.android = (ROOT / 'Android/version.properties').read_text(encoding='utf-8')
-        self.project = (ROOT / 'iOS/project.yml').read_text(encoding='utf-8')
-        self.doc = (ROOT / 'docs/PARITY.md').read_text(encoding='utf-8')
+        # Fixed parser fixtures: a real build-number bump must not turn a
+        # mutation into a no-op. The live repo has a separate integration case.
+        self.android = 'versionCode=22\n'
+        self.project = ('settings:\n  base:\n    CURRENT_PROJECT_VERSION: "25"\n'
+                        'targets:\n  WoundMeasurementApp:\n    type: application\n'
+                        '  WoundLite:\n    settings:\n      base:\n        CURRENT_PROJECT_VERSION: "28"\n')
+        self.doc = '<!-- release-version-exception -->\n```json\n' + json.dumps({
+            'android':22, 'ios_medical':25, 'reason':'Independent release schedules',
+            'alignment_trigger':'Recheck both exact versions at next release'}) + '\n```'
+
+    def test_current_repository_has_a_valid_explicit_pair(self):
+        pair = version_pair((ROOT/'Android/version.properties').read_text(),
+                            (ROOT/'iOS/project.yml').read_text())
+        version_exception((ROOT/'docs/PARITY.md').read_text(), *pair)
 
     def test_exact_declared_pair_is_accepted(self):
         pair = version_pair(self.android, self.project)

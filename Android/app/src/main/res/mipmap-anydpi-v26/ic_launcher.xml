@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive icon（API 26+）。啟動器用自己的遮罩裁 108dp 畫布，只有內圈 66dp
+     保證可見，所以兩層的分工是刻意的：
+
+       background = 圖稿**自己的**背景色（取邊框像素中位數，見
+                    Android/tools/make_android_icons.py），填滿整個畫布
+       foreground = 裁切到主體 bbox 的那一塊，縮到安全區、置中於透明畫布
+
+     兩層同色，主體周圍那圈背景色會無縫融進背景層 → 視覺上是滿版圖示，而主體
+     維持正常大小且沒有任何像素被遮罩裁掉。
+
+     前景層的尺寸是 76/108 = 70.37%，不是文件上那個 66/108。原因是這張圖稿
+     本身已經留了邊（青磚只佔原圖 82.8%），用 66/108 匯出後桌面上明顯偏小，
+     變成「圖示裡面還有一個圖示」——2026-10-05 以遮罩預覽實際比對過三個版本。
+     70.37% 是幾何上限：正方形四角到中心為 (f/2)·√2，圓形遮罩半徑 0.5，
+     不被裁的條件是 f ≤ 1/√2 = 70.71%。
+
+     未加 <monochrome>（API 33+ 主題化圖示）：那需要一張單色剪影，等於重畫構圖，
+     而這張圖稿是經使用者核定的（iOS/IconSources/provenance.json）。 -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_fg" />
+</adaptive-icon>

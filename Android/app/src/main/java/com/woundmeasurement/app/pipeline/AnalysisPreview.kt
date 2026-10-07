@@ -94,6 +94,49 @@ private fun buildTissueOverlay(
     }.getOrNull()
 }
 
+/**
+ * 把醫師修邊後的柵格畫成與 [preview] 同尺寸的疊圖。
+ *
+ * ## 為什麼參照圖必須優先用柵格
+ *
+ * 2026-10-06 回報：在修邊畫面把一塊改成壞死、按「完成修邊」回到結果頁，**百分比更新了，
+ * 圖沒有更新**。原因是這一頁無條件重跑 [buildTissueOverlay] 的色彩啟發式，醫師的筆畫
+ * 根本不在那份計算裡。於是同一個畫面上「文字說一套、圖畫另一套」——而那正是本專案
+ * 最危險的失敗形狀：沒有錯誤訊息，只有兩個互相矛盾的答案並列，看圖的人無從判斷信哪個。
+ *
+ * [EditRaster] 就是算出那些百分比的那一份，也是匯出疊圖（[WoundOverlayRenderer]）與
+ * 送出 GT 用的那一份。有它就用它，三處才會是同一張圖。
+ */
+private fun rasterTissueOverlay(r: EditRaster, src: Bitmap, preview: Bitmap): Bitmap? {
+    if (r.mw <= 0 || r.mh <= 0) return null
+    // 柵格座標是相對於**產生它的那張畫布**算的。尺寸不合就整份作廢，不要硬畫——
+    // 錯位的疊圖看起來只是「標得有點歪」，不會有任何錯誤訊息。
+    if (r.canvasW != src.width || r.canvasH != src.height) return null
+    return runCatching {
+        val px = IntArray(r.mw * r.mh)
+        for (i in px.indices) {
+            val inMask = r.mask.getOrNull(i)?.toInt() ?: 0
+            val t = r.tissue.getOrNull(i)?.toInt() ?: 0
+            px[i] = if (inMask != 0 && t in 1..T_MAX) T_COLORS[t] else 0
+        }
+        val tint = Bitmap.createBitmap(r.mw, r.mh, Bitmap.Config.ARGB_8888)
+        tint.setPixels(px, 0, r.mw, 0, 0, r.mw, r.mh)
+        val full = Bitmap.createBitmap(preview.width, preview.height, Bitmap.Config.ARGB_8888)
+        // 柵格 → 影像座標：x = rx0 + rasterX / mScale（見 WoundEditScreen.seedAuto）；
+        // 再乘 k 換到 preview 座標。
+        val k = preview.width.toFloat() / src.width
+        android.graphics.Canvas(full).drawBitmap(tint, null,
+            android.graphics.RectF(r.rx0 * k, r.ry0 * k,
+                (r.rx0 + r.mw / r.mScale) * k, (r.ry0 + r.mh / r.mScale) * k),
+            android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
+        tint.recycle()
+        full
+    }.getOrNull()
+}
+
+/** 組織圖層與它的**來源**。來源要帶著走：畫面底下那句話得說對是誰畫的。 */
+private class TissueLayer(val bmp: Bitmap?, val fromRaster: Boolean)
+
 @Composable
 fun AnalysisPreview(
     bitmap: Bitmap,
@@ -106,6 +149,18 @@ fun AnalysisPreview(
     calibMethod: String?,
     /** 後端色卡白平衡增益 [R,G,B]；與結果欄、修邊底稿必須是同一組。 */
     wbGains: DoubleArray? = null,
+    /**
+     * 醫師修邊後的柵格。非 null 時**組織層一律取自它**，不重跑色彩啟發式。
+     *
+     * 預設 null 是為了相容既有呼叫端（時間軸回顧沒有柵格可拿）。⚠ 但新的呼叫端只要
+     * 手上有柵格就一定要傳：忘記傳不會有任何錯誤，只會讓畫面退回啟發式而數字來自柵格，
+     * 同一頁兩個答案（見 [rasterTissueOverlay]）。
+     *
+     * 重組靠的不是這個參數本身（`vm.editRaster` 是普通 var，Compose 看不到它的變化），
+     * 而是 `applyEditedPolygon` 一定會發佈新的 `_state`：結果頁因 `st` 改變而重組，
+     * 這裡才讀到新的柵格。之後 produceState 以柵格的**實例**為 key 重算圖層。
+     */
+    editRaster: EditRaster? = null,
     modifier: Modifier = Modifier
 ) {
     var layers by remember { mutableStateOf(Layers()) }
@@ -130,13 +185,17 @@ fun AnalysisPreview(
             if (polygon.size >= 3) listOf(polygon) else emptyList()
         }
     }
-    val tissue by produceState<Bitmap?>(initialValue = null, bitmap, drawPolys, wbGains) {
+    // editRaster 要列進 key。漏掉的話修邊回來這一頁會停在修邊前的圖，
+    // 而同一畫面的百分比已經是修邊後的——2026-10-06 回報的就是這個。
+    val layer by produceState<TissueLayer?>(null, bitmap, drawPolys, wbGains, editRaster) {
+        val r = editRaster
         value = withContext(Dispatchers.Default) {
-            buildTissueOverlay(bitmap, preview, drawPolys, wbGains)
+            if (r != null) TissueLayer(rasterTissueOverlay(r, bitmap, preview), true)
+            else TissueLayer(buildTissueOverlay(bitmap, preview, drawPolys, wbGains), false)
         }
     }
     val img = remember(preview) { preview.asImageBitmap() }
-    val tImg = remember(tissue) { tissue?.asImageBitmap() }
+    val tImg = remember(layer) { layer?.bmp?.asImageBitmap() }
 
     Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = modifier) {
         Text("辨識參照圖", style = MaterialTheme.typography.titleSmall)
@@ -204,7 +263,22 @@ fun AnalysisPreview(
                  "。貼紙要完整入鏡、不反光、與傷口大致同一平面。",
                 fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Text("組織分區為色彩啟發式（與後端同一套規則），**非模型輸出、非診斷**；以醫師修邊為準。",
-            fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // 這句話必須跟著實際畫出來的那一層走。寫死「色彩啟發式」的話，醫師修完邊回來
+        // 看到的是自己的筆畫，字卻說那是演算法輸出——說明與畫面不一致比沒有說明更糟。
+        val l = layer
+        when {
+            l == null -> Text("組織分區計算中…",
+                fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            l.fromRaster && l.bmp != null -> Text(
+                "組織分區＝**醫師修邊結果**（與匯出疊圖、送出的標註同一份）。輔助、非診斷。",
+                fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
+            l.fromRaster -> Text(
+                "⚠ 修邊柵格與目前影像尺寸不符，已**不顯示**組織層（寧可不畫，也不要畫在錯的位置）。" +
+                "請重新進入修邊。",
+                fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+            else -> Text(
+                "組織分區為色彩啟發式（與後端同一套規則），**非模型輸出、非診斷**；以醫師修邊為準。",
+                fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }

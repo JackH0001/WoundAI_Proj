@@ -1,3 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 傳統圓形圖示：已預先套圓形遮罩的點陣圖（圓外透明），啟動器原樣繪製。
+     同樣不可以用 <vector> 當 src，理由見 ic_launcher.xml。 -->
 <bitmap xmlns:android="http://schemas.android.com/apk/res/android"
-    android:src="@drawable/ic_launcher_foreground" /> 
+    android:src="@mipmap/ic_launcher_round_sq" />

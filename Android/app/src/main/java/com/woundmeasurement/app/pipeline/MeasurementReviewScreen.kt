@@ -69,6 +69,7 @@ fun MeasurementReviewScreen(
     var cur by remember { mutableStateOf(record) }
     var trainOk by remember { mutableStateOf(false) }
     var loggedIn by remember { mutableStateOf(false) }
+    var me by remember { mutableStateOf<LoginIdentity?>(null) }
     /** 送出前的人工確認彈窗。資料離開手機是不可逆動作，不採「按了就送」。 */
     var confirmSubmit by remember { mutableStateOf(false) }
 
@@ -126,6 +127,9 @@ fun MeasurementReviewScreen(
         loggedIn = if (u.isBlank() || p.isBlank()) false else withContext(Dispatchers.IO) {
             runCatching { backend.login(u, p) }.getOrDefault(false)
         }
+        // 權限要跟著這次登入一起取。只有 loggedIn 這個布林值的話，分不出
+        // 「醫師登入」與「護理師登入」——而那正是 doctorVerified 該不該成立的分界。
+        me = if (loggedIn) backend.identity else null
         loading = false
     }
 
@@ -214,7 +218,11 @@ fun MeasurementReviewScreen(
                         // AI 空手、醫師從零畫出傷口的情形:hasWound 原本會停在 false
                         hasWound = (finalArea ?: 0.0) > 0.0 || cur.hasWound,
                         // 走到這裡代表醫師按了「完成修邊」（取消不會呼叫 onDone）
-                        doctorVerified = true,
+                        // 從時間軸回頭修邊時同樣要看身分。原本硬寫 true，
+                        // 註解寫「走到這裡代表醫師按了完成修邊」——那個假設在共用手機上不成立。
+                        // 另外這裡**刻意不做 `|| cur.doctorVerified`**：輪廓已經換了，
+                        // 舊的背書是針對舊輪廓的，不該自動延用到新輪廓上。
+                        doctorVerified = me?.can("gt.verify") == true,
                         // ⚠ correctionIou **刻意不覆寫**。它的定義是「與 AI 原始遮罩的 IoU」,
                         // 是評估模型修正幅度的指標並會送進飛輪(BackendClient correction_iou)。
                         // 從本畫面進來時,修邊的起點是**已經修過的 GT** 而非 AI 原圖遮罩,
@@ -301,6 +309,12 @@ fun MeasurementReviewScreen(
                 cur.annotationSubmitted -> "此筆已送出過訓練標註。重新修邊後可再送（雲端會視為醫師修訂版）。"
                 cur.gtPolygon == null -> "⚠ 此筆沒有 GT 輪廓，不能補送（請先重新修邊）。"
                 cur.imageId == null -> "⚠ 此筆沒有後端影像綁定（當初可能走端上模式），不能補送。"
+                // 這一條要排在 !cur.doctorVerified 之前。對一個沒有 gt.verify 權限的人說
+                // 「請先按重新修邊」是**誤導**——他按了也不會變成已驗證。先講真正的原因。
+                loggedIn && me?.can("gt.verify") != true ->
+                    "⚠ 目前的登入身分沒有 gt.verify 權限：可以重新修邊與存檔，但不會產生" +
+                    "「醫師已驗證」，因此不得送訓練標註。GT 的背書須由醫師完成" +
+                    "——這是後端強制的，換帳號才會改變。"
                 !cur.doctorVerified -> "⚠ 此筆未經醫師完成修邊確認，不得送訓練標註。\n" +
                     "請先按「重新修邊」並完成（按取消不算確認）。舊版紀錄一律視為未確認。"
                 !trainOk -> "⚠ 此病患未取得②訓練同意（或已撤回），不得送出。"

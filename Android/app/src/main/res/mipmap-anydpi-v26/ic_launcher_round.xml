@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 圓形變體。adaptive icon 的遮罩由啟動器決定，所以兩個變體指向同一組圖層；
+     分開宣告只是因為 manifest 同時宣告了 android:icon 與 android:roundIcon。 -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_fg" />
+</adaptive-icon>
