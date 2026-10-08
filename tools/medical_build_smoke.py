@@ -51,7 +51,7 @@ def prepare(output, git_head):
     sha=hashlib.sha256(PROOF).hexdigest()
     script=f"set -eu\nprintf '%s  proof.txt\\n' '{sha}' | sha256sum -c -\ndocker build -t '{image}' .\ncontainer=$(docker create '{image}' /unused)\ndocker cp \"$container:/proof.txt\" /workspace/readback.txt\ndocker rm \"$container\"\ncmp proof.txt readback.txt\necho MEDICAL_BUILD_SYNTHETIC_VERIFIED\n"
     config={'serviceAccount':f'projects/{PROJECT}/serviceAccounts/{EMAIL}',
-            'timeout':'300s','options':{'logging':'CLOUD_LOGGING_ONLY','machineType':'E2_STANDARD_2'},
+            'timeout':'300s','options':{'logging':'CLOUD_LOGGING_ONLY'},
             'tags':['medical-build-isolation-smoke'],
             'steps':[{'name':'gcr.io/cloud-builders/docker','entrypoint':'sh','args':['-c',script]}],
             'images':[image]}

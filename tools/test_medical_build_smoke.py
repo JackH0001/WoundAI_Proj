@@ -7,7 +7,7 @@ class Tests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as td:
    r=prepare(Path(td)/'context','a'*40);c=r['config']
    self.assertEqual(c['serviceAccount'],f'projects/{PROJECT}/serviceAccounts/{EMAIL}')
-   self.assertEqual(c['timeout'],'300s');self.assertEqual(c['options']['logging'],'CLOUD_LOGGING_ONLY')
+   self.assertEqual(c['timeout'],'300s');self.assertEqual(c['options'],{'logging':'CLOUD_LOGGING_ONLY'})
    self.assertEqual(set(r['source_files']),{'proof.txt','Dockerfile','cloudbuild.json','.gcloudignore'})
    self.assertIn('/woundai-medical-build/smoke:',c['images'][0]);self.assertNotIn('availableSecrets',c)
    self.assertIn('cmp proof.txt readback.txt',c['steps'][0]['args'][1])
