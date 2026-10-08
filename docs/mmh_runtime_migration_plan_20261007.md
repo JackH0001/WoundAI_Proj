@@ -86,3 +86,16 @@ REST v3 全部 51 項取得回應，42 項符合預期、9 項不符合，程序
 42/51 與上一階段 35/40 使用不同 profile，不能用兩個比例比較改善程度。本次未做 IAM 變更，新增四項未通過只是驗證範圍擴大。覆核後仍保持停止部署。
 
 再次讀回 project IAM 與盤點起點完全一致，無 denyAdmin binding；證據 mmh-migration-iam-unchanged.json。
+
+
+## 2026-10-08 台北 13:14–13:20 合成讀寫 smoke
+
+Jack 依要求完成一次幾何模擬圖快速量測。唯讀日誌核對：13:14:26 登入 200；13:14:27 classify 200，處理約 0.94 秒；新 care/attest 仍為 404。請求使用舊 revision `woundai-backend-00039-xdk`／程式 505ff2e。同時間窗舊媒體桶新增一個 759,646 bytes JPEG，精確 generation 的中繼資料再讀回一致；沒有下載這張影像，也沒有與手機原始位元組比對，關聯證據只到時間窗。
+
+Jack 在瀏覽器重新登入後，透過送件審閱開啟一筆既有 phantom 模擬送件。原圖與 preview.svg GET 都為 200；原圖在瀏覽器成功解碼為 192×256。疊圖 HTTP 成功不等於瀏覽器疊圖呈現已驗證，本輪沒有將它列為 UI 通過。
+
+**這是新模擬圖寫入＋既有模擬送件讀取的基本 smoke，不是同一筆完整往返。** 舊原圖端點只允許讀已存在於訓練送件佇列的影像；快速量測未送標註不能直接以此路徑讀回。不為了驗收而新增虛構醫師確認／臨床送件，也不繞過權限或同意檢查。舊服務預覽會依既有行為留下檢視稽核；沒有改 IAM、部署、刪除或讀取密碼。
+
+補查其他執行身分依賴時，Compute Engine API 與 Cloud Asset API 均回 SERVICE_DISABLED。失敗清單已明確記為 incomplete，而非空清單；因此尚未證明 VM／GKE／Cloud Functions／App Engine 沒有依賴，Editor 仍保留。Cloud Asset API 啟用已提出精確範圍確認，尚未執行。
+
+本機證據：`legacy-synthetic-baseline-20261008-summary.json`、對應 request 與 object metadata、`legacy-synthetic-readback-20261008-requests.json`。公開文件僅保留數量／大小／狀態，不含假名代碼或影像。
