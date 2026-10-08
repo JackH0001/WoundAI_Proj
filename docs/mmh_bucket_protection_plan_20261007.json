@@ -1,0 +1,26 @@
+{
+  "displayName": "MMHPS20261007 bucket control-plane protection",
+  "rules": [
+    {
+      "description": "Protect only directly tagged MMH buckets; owner operator remains able to administer.",
+      "denyRule": {
+        "deniedPrincipals": [
+          "principalSet://goog/public:all"
+        ],
+        "exceptionPrincipals": [
+          "principal://goog/subject/jack.hou@gmail.com"
+        ],
+        "deniedPermissions": [
+          "storage.googleapis.com/buckets.delete",
+          "storage.googleapis.com/buckets.setIamPolicy",
+          "storage.googleapis.com/buckets.update",
+          "storage.googleapis.com/buckets.createTagBinding",
+          "storage.googleapis.com/buckets.deleteTagBinding"
+        ],
+        "denialCondition": {
+          "expression": "resource.matchTagId('tagKeys/281482074135552', 'tagValues/281476794278770')"
+        }
+      }
+    }
+  ]
+}

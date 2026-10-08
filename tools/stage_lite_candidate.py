@@ -15,7 +15,7 @@ import tempfile
 FLASK_FILES = (
     'Dockerfile', '.dockerignore', '.gcloudignore', 'requirements.txt', 'requirements.lock',
     'app.py', 'model_preprocessing.py', 'runtime_golden.py', 'image_canonical.py', 'runtime_secrets.py',
-    'api_lite.py', 'api_flywheel.py', 'api_users.py', 'api_console.py', 'auth_users.py',
+    'api_lite.py', 'api_flywheel.py', 'api_users.py', 'api_console.py', 'auth_users.py', 'institution_context.py',
     'store.py', 'audit_chain_contract.py', 'consent_staging.py',
     'lite_attest_assertion.py', 'lite_attest_budget.py', 'lite_attest_config.py',
     'lite_attest_enrollment.py', 'lite_attest_http.py', 'lite_attest_receipt.py',

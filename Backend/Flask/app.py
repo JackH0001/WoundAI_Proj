@@ -26,6 +26,7 @@ import hashlib
 
 # Signing keys are configuration, not source. See runtime_secrets for why there
 # is no literal fallback here any more.
+from institution_context import BOUND_ORG, token_matches_institution
 from runtime_secrets import resolve_secret
 from model_preprocessing import load_preprocessing
 from lite_service_profile import service_profile, install_lite_perimeter, health_response as lite_health_response
@@ -159,7 +160,8 @@ def _reject_otc_on_normal_endpoints(jwt_header, jwt_data):
     於是那 60 秒內它能打任何端點。加了型別檢查之後，它唯一能去的地方是
     /api/auth/exchange（那支自己解碼，不走 jwt_required）。
     """
-    return jwt_data.get('typ') != 'otc'
+    return (jwt_data.get('typ') != 'otc'
+            and token_matches_institution(jwt_data, lambda org, user: auth_users.get_user(org, user)))
 
 
 @jwt.token_verification_failed_loader
@@ -167,7 +169,7 @@ def _otc_rejected(jwt_header, jwt_data):
     """驗證失敗的預設狀態碼是 **400**，那會讓客戶端把「憑證問題」誤判成「參數錯誤」——
     然後去檢查請求主體，而真正的問題在 Authorization 標頭。改回 401 並說清楚。"""
     return jsonify({'error': '這個憑證不能用於一般端點',
-                    'issues': ['一次性登入碼只能拿去 /api/auth/exchange 換取正式 token。']}), 401
+                    'issues': ['一次性登入碼、機構不符或帳號權限已變更，請重新登入。']}), 401
 
 # 飛輪 HTTP 端點(/api/v1/annotation, /api/v1/consent/withdraw)
 if not LITE_SERVICE:
@@ -224,8 +226,10 @@ if not LITE_SERVICE:
         import auth_users
         _boot = auth_users.bootstrap_from_env()
         if _boot:
-            print("已由環境變數建立初始管理者 default:admin（後續請用帳號管理端點新增使用者）")
+            print("已由環境變數建立初始管理者 %s:admin（後續請用帳號管理端點新增使用者）" % auth_users.DEFAULT_ORG)
     except Exception as _ae:
+        if BOUND_ORG is not None:
+            raise RuntimeError("Institution account initialization failed") from _ae
         auth_users = None
         print(f"⚠ 帳號模組載入失敗，所有登入都會失敗: {_ae}")
 
@@ -553,7 +557,8 @@ def exchange_onetime_code():
         # 過期與偽造回同一句：分開講等於告訴攻擊者「這個簽章是對的，只是過期了」。
         logger.warning('otc 解碼失敗: %s', e)
         return jsonify({'error': '登入碼無效或已過期'}), 401
-    if data.get('typ') != 'otc':
+    if data.get('typ') != 'otc' or not token_matches_institution(
+            data, lambda org, user: auth_users.get_user(org, user)):
         return jsonify({'error': '登入碼無效或已過期'}), 401
 
     ident = data.get('sub') or 'unknown'

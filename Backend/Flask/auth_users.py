@@ -33,6 +33,7 @@ import os
 import re
 import secrets
 import time
+from institution_context import BOUND_ORG
 
 # 角色。id 用英文（進 JWT 與稽核），顯示名另存。
 ROLES = {
@@ -86,7 +87,7 @@ PERMS = {
 }
 
 USERS_KEY = "users.jsonl"
-DEFAULT_ORG = "default"
+DEFAULT_ORG = BOUND_ORG or "default"
 PBKDF2_ITERS = 200_000
 
 # 使用者名稱會進識別碼、稽核與 JWT，限制字元避免注入與難以辨識的同形字
@@ -134,6 +135,8 @@ def _read_all():
         except Exception:
             continue
         if isinstance(r, dict) and r.get("org") and r.get("user"):
+            if BOUND_ORG is not None and r["org"] != BOUND_ORG:
+                raise RuntimeError("Foreign institution account found in dedicated store")
             out[identity(r["org"], r["user"])] = r
     return out
 
@@ -155,6 +158,8 @@ def list_users(include_disabled: bool = True):
 
 
 def get_user(org: str, user: str):
+    if BOUND_ORG is not None and org != BOUND_ORG:
+        return None
     return _read_all().get(identity(org, user))
 
 
@@ -164,9 +169,11 @@ def validate_upsert_user(org: str, user: str, role: str, password: str = None):
     API 必須在寫入不可變 audit intent 之前先拒絕格式錯誤。驗證規則集中在這裡，
     避免路由與真正寫入路徑各自維護一份、日後悄悄漂移。
     """
-    if not isinstance(org, str) or not ORG_RE.match(org):
+    if BOUND_ORG is not None and org != BOUND_ORG:
+        raise ValueError("Dedicated service refuses a different institution")
+    if not isinstance(org, str) or not ORG_RE.fullmatch(org):
         raise ValueError("org 格式不合（小寫英數與連字號，2-21 字）")
-    if not isinstance(user, str) or not USER_RE.match(user):
+    if not isinstance(user, str) or not USER_RE.fullmatch(user):
         raise ValueError("user 格式不合（小寫英數起始，可含 . _ -，2-31 字）")
     if not isinstance(role, str) or role not in ROLES:
         raise ValueError("role 須為 %s" % "/".join(ROLES))
@@ -233,9 +240,15 @@ def bootstrap_from_env():
     if not pw:
         return None
     try:
+        if BOUND_ORG is not None:
+            import api_flywheel as fw
+            fw.audit_intent("bootstrap", "user_bootstrap", identity(DEFAULT_ORG, "admin"),
+                            "admin", DEFAULT_ORG, {"institution": DEFAULT_ORG})
         return upsert_user(DEFAULT_ORG, "admin", "admin", pw,
                            display_name="系統管理者(bootstrap)", actor="bootstrap")
     except Exception:
+        if BOUND_ORG is not None:
+            raise
         return None
 
 

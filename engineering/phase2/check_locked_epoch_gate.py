@@ -37,13 +37,23 @@ def main(argv=None) -> int:
     main_bucket = os.environ.get("WOUNDAI_GCS_BUCKET", "")
     audit_bucket = os.environ.get("WOUNDAI_AUDIT_BUCKET", "")
     lowered = audit_bucket.lower()
+    # The approved MMH foundation predates this gate and uses an exact dedicated
+    # name without the literal "epoch". Admit only the complete reviewed tuple;
+    # retention, project/location, production gate and emptiness remain required.
+    mmh = (args.project_number == "421209514056"
+           and args.location.lower() == "asia-east1"
+           and os.environ.get("WOUNDAI_SERVICE_PROFILE") == "medical"
+           and os.environ.get("WOUNDAI_INSTITUTION_ORG") == "mmhps20261007"
+           and main_bucket == "woundai-mmhps20261007-media-421209514056"
+           and audit_bucket == "woundai-mmhps20261007-audit-421209514056"
+           and os.environ.get("WOUNDAI_SECURITY_BUCKET") == "woundai-mmhps20261007-security-421209514056")
     if audit_bucket != args.audit_bucket or not main_bucket or main_bucket == audit_bucket:
         print("REFUSE: explicit audit/main bucket identity mismatch")
         return 2
     if os.environ.get("WOUNDAI_GCS_PREFIX") != "flywheel":
         print("REFUSE: WOUNDAI_GCS_PREFIX must be explicitly set to flywheel")
         return 2
-    if "epoch" not in lowered or any(
+    if ("epoch" not in lowered and not mmh) or any(
         token in lowered for token in ("smoke", "test", "tmp", "temp", "dev", "sandbox")
     ):
         print(f"REFUSE: WOUNDAI_AUDIT_BUCKET is not a formal epoch bucket: {audit_bucket!r}")
@@ -60,6 +70,8 @@ def main(argv=None) -> int:
         store._bucket_name != main_bucket
         or store._audit_bucket_name != audit_bucket
         or store.prefix != "flywheel"
+        or (mmh and getattr(store, "_security_bucket_name", None)
+            != os.environ["WOUNDAI_SECURITY_BUCKET"])
     ):
         print("REFUSE: constructed GcsStore identity does not match explicit inputs")
         return 2
