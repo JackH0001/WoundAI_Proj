@@ -69,6 +69,8 @@ on:
       - 'tools/medical_image_build.py'
       - 'tools/resolve_medical_image.ps1'
       - 'tools/test_medical_image_build.py'
+      - 'tools/plan_mmh_runtime.py'
+      - 'tools/test_plan_mmh_runtime.py'
       - 'engineering/phase2/verify_audit_chain.py'
       - 'engineering/phase2/Assert-CIGreen.ps1'
       - 'engineering/phase2/test_ci_gate_static.py'
@@ -163,6 +165,8 @@ on:
       - 'tools/medical_image_build.py'
       - 'tools/resolve_medical_image.ps1'
       - 'tools/test_medical_image_build.py'
+      - 'tools/plan_mmh_runtime.py'
+      - 'tools/test_plan_mmh_runtime.py'
       - 'engineering/phase2/verify_audit_chain.py'
       - 'engineering/phase2/Assert-CIGreen.ps1'
       - 'engineering/phase2/test_ci_gate_static.py'
@@ -284,6 +288,7 @@ jobs:
           python -B tools/test_verify_mmh_effective_iam.py
           python -B tools/test_medical_build_smoke.py
           python -B tools/test_medical_image_build.py
+          python -B tools/test_plan_mmh_runtime.py
           python -B engineering/phase2/test_p0_4_staging.py
           python -B engineering/phase2/test_runtime_golden_contract.py
 
