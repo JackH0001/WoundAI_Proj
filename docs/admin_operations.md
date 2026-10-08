@@ -3,7 +3,25 @@
 管理入口是 **`<後端網址>/console`**，側欄四頁籤，登入後依角色自動展開。
 管理者不需要另一個網址、不需要 App、不需要 GCP 帳號。
 
-> 目前後端：`https://woundai-backend-421209514056.asia-east1.run.app/console`
+> 既有後端：`https://woundai-backend-421209514056.asia-east1.run.app/console`
+
+### MMHPS20261007 機構專用版
+
+截至 2026-10-07，指定 GCP project 的讀回結果尚無 MMH 專用服務／桶，**沒有可用的 MMH 登入網址或已核發帳號清單**。上面的既有後端與下方 demo 都不是 MMH 新環境，請勿用它們替 MMH 建帳號。
+
+完整資源交付欄位、前後台登入方式、各角色範例及尚未完成的隔離驗收，見 [MMH 環境與帳號說明](mmhps20261007_environment_and_accounts.md)。其中範例均標為待建立，不含密碼。現有 console 新增帳號未傳 org，會使用 `default`；機構部署前必須先完成專用 org 綁定及建帳號驗證。
+
+### App 新安裝的預設環境（醫療 TestFlight build 25 起）
+
+| 發布設定 | 後端 origin |
+|---|---|
+| `ios-medical-testflight` | `https://woundai-backend-demo-z4kgfkob4a-de.a.run.app` |
+| `ios-lite` | `https://woundai-backend-421209514056.asia-east1.run.app` |
+| `android-release` | `https://woundai-backend-421209514056.asia-east1.run.app` |
+
+此表由 `test_backend_url_parity.py` 逐設定核對。醫療版的 demo 分流不代表 Lite／Android 已完成雲端發布驗收。Debug 模擬器仍使用本機服務。
+
+已安裝 App 的使用者設定優先於預設值。切換示範環境時，先在 App 設定登出，再填 demo 網址並使用 demo01 登入；不沿用舊平台的 dr01 帳密。示範服務僅供合成／模擬資料測試，LocalStore 不保證跨實例保存，demo01 的 nurse 權限亦不包含醫師训练標註。正式收案仍走獨立審核與部署閘門。
 
 App 內的入口：主畫面 →「設定」→ 連線測試成功後，
 「目前身分」下方會出現**開啟管理主控台**按鈕（只有管理者看得到）。

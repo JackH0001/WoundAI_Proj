@@ -43,6 +43,9 @@ struct DepthCapture {
     /// 對應的 RGB 影像尺寸（上傳後端前的 work 影像座標空間）。
     var rgbWidth: Int = 0
     var rgbHeight: Int = 0
+    /// EXIF transform applied to both map and calibration before RGB normalization.
+    /// nil means legacy/unknown, not proven upright.
+    var sourceExifOrientation: Int? = nil
 
     /// 摘要統計（進 meta，供不解檔快篩：例如「深度覆蓋率過低的樣本先排除」）。
     func coverage() -> (valid: Double, minM: Double, maxM: Double) {

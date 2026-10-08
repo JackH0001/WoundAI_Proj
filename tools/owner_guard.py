@@ -46,7 +46,24 @@ OWNERS = [
     (".github/workflows/ios.yml", "mac"),
     (".github/workflows/android.yml", "windows"),
     ("iOS/", "mac"),
-    ("Android/", "windows"),
+    # 2026-10-06：Android 由 windows 改為 both，經 Jack 授權。
+    #
+    # 原本的分工（2026-08-09）真正論證過的只有一個方向：**Swift 只有 Mac 編得起來**，
+    # 所以 Windows 寫 iOS 永遠是沒編譯過的猜測。Android→windows 是那個分工的對稱面，
+    # 是工作量分配，不是獨立的技術約束——而這條守門防的是「沒編譯驗證過的改動
+    # 安靜地蓋掉驗證過的成果」，Android 在 Mac 上編得起來，那個風險不成立。
+    #
+    # 改之前核對過三件事，而不是憑感覺：
+    #   1. 2026-10-05～06 的 Android 改動在 Mac 上反覆 assemble/bundle 成功；
+    #   2. windows 最後一次動 Android/ 是 2026-09-01（a47fc81），五週無活動；
+    #   3. 本機分支落後 origin/main 的三個 commit（#13/#14/#15）**零筆**觸及 Android/。
+    #      也就是沒有「對方推了新東西而我沒拉」的情況。
+    #
+    # ⚠ Backend/ 與 engineering/ **刻意維持 windows**。「兩邊能力相當」在 Android 上
+    # 已經驗證，在這兩個目錄沒有：部署與驗證走的是 PowerShell（deploy_cloudrun.ps1、
+    # harden_bucket.ps1、Run-WindowsValidation.ps1），Mac 跑不完整。把沒驗證過的
+    # 東西一起放寬，就是這條守門存在的理由本身。
+    ("Android/", "both"),
     ("Backend/", "windows"),
     ("engineering/", "windows"),
     ("Windows/", "windows"),
@@ -67,6 +84,34 @@ SYNC_REFS = {"iOS/": "origin/main"}
 def sh(args):
     r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace")
     return r.returncode, (r.stdout or ""), (r.stderr or "")
+
+
+def ignored_paths(paths):
+    """這些路徑裡，哪些是 git 會忽略的。
+
+    `--sync` 的「多出來」原本是直接掃檔案系統比對 ref 的樹，於是本機的建置產物
+    也被算進去。2026-10-06 實測：iOS/ 報「5 個多出來」，五個全是
+    `iOS/*.xcodeproj/` 底下由 XcodeGen 產生、且 `.gitignore:123` 明文忽略的檔案
+    （含 `UserInterfaceState.xcuserstate` 這種純個人 UI 狀態）。
+
+    那是誤報，而且是**每次在 Mac 上開過 Xcode 就會重現**的誤報。本檔自己的註解
+    已經寫過結論：「一支會誤報的守門程式，用不了幾次就會被當成雜訊略過，
+    那比沒有更糟。」
+
+    被忽略的檔案永遠不會被 commit，所以它不可能造成這段要防的那種跨機器倒退
+    （那個情境是一個**看起來像正牌原始碼**的檔案被 checkout 留下來）。
+
+    判斷不了的時候回空集合——寧可照舊誤報，也不要靜靜地少報。
+    """
+    if not paths:
+        return set()
+    r = subprocess.run(["git", "check-ignore", "-z", "--stdin"],
+                       input="\0".join(paths) + "\0",
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    # rc 0＝有命中；1＝全部都沒被忽略。其他才是真的出錯。
+    if r.returncode not in (0, 1):
+        return set()
+    return {q for q in (r.stdout or "").split("\0") if q}
 
 
 def sh_z(args):
@@ -236,6 +281,9 @@ def check_sync():
                 p = os.path.join(root, f).replace("\\", "/")
                 if p not in known and not p.endswith((".DS_Store", ".pyc")):
                     extra.append(p)
+        # 被 gitignore 的建置產物不是「多出來的原始碼」。見 ignored_paths 的說明。
+        skip = ignored_paths(extra)
+        extra = [p for p in extra if p not in skip]
 
         if not diff and not miss and not extra:
             print("  ✓ %s 與 %s 完全一致（%d 檔）" % (prefix, ref, total))

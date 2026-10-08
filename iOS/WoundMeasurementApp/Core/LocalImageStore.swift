@@ -8,18 +8,19 @@ import UIKit
  本機影像儲存。**檔案內容一律加密**（對等 Android `data/store/LocalImageStore.kt`）。
 
  傷口照片是 PHI。放在 App 沙箱裡看似安全，但沙箱內容會進 iTunes／iCloud 備份，
- 而備份可能落在使用者的電腦上。加密之後，備份裡的是密文，而金鑰標記
+ 而備份可能落在使用者的電腦上。目錄與新檔案設定排除系統備份；這不清除舊備份。
+ 加密之後，備份裡的是密文，而金鑰標記
  `ThisDeviceOnly` 不隨 iCloud Keychain 同步——所以備份檔搬到別台機器也解不開。
  */
 final class LocalImageStore {
 
     private let dir: URL
 
-    init() {
+    init(directory: URL? = nil) {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        dir = base.appendingPathComponent("wound_images", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
-            attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
+        dir = directory ?? base.appendingPathComponent("wound_images", isDirectory: true)
+        // Existing installations keep the same paths; writes retry and fail closed.
+        try? HealthDataFiles.prepareDirectory(dir)
     }
 
     private func url(_ name: String) -> URL { return dir.appendingPathComponent(name) }
@@ -29,7 +30,7 @@ final class LocalImageStore {
         guard let enc = try? PhiCrypto.encryptBytes(jpeg) else { return nil }
         let name = "img_\(UUID().uuidString).enc"
         do {
-            try enc.write(to: url(name), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            try HealthDataFiles.write(enc, to: url(name))
             return name
         } catch {
             return nil
@@ -55,13 +56,14 @@ final class LocalImageStore {
 
     /// 清單縮圖。這裡**可以**降採樣——縮圖不參與座標運算。
     func loadThumbnail(_ name: String, maxPixel: Int = 256) -> UIImage? {
-        guard let raw = rawBytes(name) else { return nil }
+        guard maxPixel > 0, let raw = rawBytes(name) else { return nil }
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceThumbnailMaxPixelSize: maxPixel,
             kCGImageSourceCreateThumbnailWithTransform: true
         ]
-        guard let src = CGImageSourceCreateWithData(raw as CFData, nil),
+        guard let src = CGImageSourceCreateWithData(raw as CFData,
+              [kCGImageSourceShouldCache: false] as CFDictionary),
               let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
         return UIImage(cgImage: cg)
     }
@@ -70,7 +72,12 @@ final class LocalImageStore {
     /// 解密後的原始位元組。柵格 PNG 用這個——走 `UIImage` 會經過色彩管理，
     /// 而我們存在 RGB 通道裡的是**類別碼**，被轉換過就再也還原不回來。
     func rawBytes(_ name: String) -> Data? {
-        guard !name.isEmpty, let enc = try? Data(contentsOf: url(name)) else { return nil }
+        guard !name.isEmpty else { return nil }
+        do {
+            try HealthDataFiles.prepareDirectory(dir)
+            try HealthDataFiles.excludeExistingFile(url(name))
+        } catch { return nil }
+        guard let enc = try? Data(contentsOf: url(name)) else { return nil }
         return PhiCrypto.decryptBytes(enc)
     }
 
@@ -78,7 +85,7 @@ final class LocalImageStore {
         guard let enc = try? PhiCrypto.encryptBytes(bytes) else { return nil }
         let name = "ras_\(UUID().uuidString).enc"
         do {
-            try enc.write(to: url(name), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            try HealthDataFiles.write(enc, to: url(name))
             return name
         } catch {
             return nil

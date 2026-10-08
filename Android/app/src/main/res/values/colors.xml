@@ -7,4 +7,9 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <!-- 啟動器 adaptive icon 的背景層。此值取自核定圖稿
+         iOS/IconSources/medical.png 的邊框像素中位數，由
+         Android/tools/make_android_icons.py 量出——改圖稿要一起改這裡，
+         否則前景層的主體周圍會出現一圈色差。 -->
+    <color name="ic_launcher_background">#E0FDF6</color>
 </resources> 

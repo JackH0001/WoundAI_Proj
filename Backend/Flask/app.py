@@ -27,6 +27,11 @@ import hashlib
 # Signing keys are configuration, not source. See runtime_secrets for why there
 # is no literal fallback here any more.
 from runtime_secrets import resolve_secret
+from model_preprocessing import load_preprocessing
+from lite_service_profile import service_profile, install_lite_perimeter, health_response as lite_health_response
+
+SERVICE_PROFILE = service_profile(os.environ)
+LITE_SERVICE = SERVICE_PROFILE == "lite"
 
 # ImageJ和深度學習相關
 try:
@@ -82,6 +87,8 @@ LITE_API_ENABLED = os.environ.get("WOUNDAI_ENABLE_LITE_API", "0").strip().lower(
 )
 
 app = Flask(__name__)
+if LITE_SERVICE:
+    install_lite_perimeter(app)
 CORS(app)
 
 # 配置
@@ -98,8 +105,8 @@ app.config.update(
     UPLOAD_FOLDER=_runtime_path('uploads'),
     PROCESSED_FOLDER=_runtime_path('processed'),
     MODEL_FOLDER=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models'),
-    SECRET_KEY=resolve_secret('FLASK_SECRET_KEY', 'Flask session and itsdangerous signing'),
-    JWT_SECRET_KEY=resolve_secret('JWT_SECRET_KEY', 'access tokens issued to the apps and console'),
+    SECRET_KEY=None if LITE_SERVICE else resolve_secret('FLASK_SECRET_KEY', 'Flask session and itsdangerous signing'),
+    JWT_SECRET_KEY=None if LITE_SERVICE else resolve_secret('JWT_SECRET_KEY', 'access tokens issued to the apps and console'),
     JWT_ACCESS_TOKEN_EXPIRES=timedelta(hours=24),
     DATABASE=_runtime_path('wound_analysis.db')
 )
@@ -163,31 +170,32 @@ def _otc_rejected(jwt_header, jwt_data):
                     'issues': ['一次性登入碼只能拿去 /api/auth/exchange 換取正式 token。']}), 401
 
 # 飛輪 HTTP 端點(/api/v1/annotation, /api/v1/consent/withdraw)
-try:
-    from api_flywheel import flywheel_bp
-    if flywheel_bp is not None:
-        app.register_blueprint(flywheel_bp)
-except Exception as _fe:
-    # 原本是 `except Exception: pass`——**連日誌都沒有**。
-    # 飛輪端點沒掛上的話，App 送標註會 404，而後端看起來完全健康。
-    BLUEPRINT_FAILURES.append(("flywheel", "%s: %s" % (type(_fe).__name__, _fe)))
-    print(f"飛輪端點未載入: {_fe}")
+if not LITE_SERVICE:
+    try:
+        from api_flywheel import flywheel_bp
+        if flywheel_bp is not None:
+            app.register_blueprint(flywheel_bp)
+    except Exception as _fe:
+        # 原本是 `except Exception: pass`——**連日誌都沒有**。
+        # 飛輪端點沒掛上的話，App 送標註會 404，而後端看起來完全健康。
+        BLUEPRINT_FAILURES.append(("flywheel", "%s: %s" % (type(_fe).__name__, _fe)))
+        print(f"飛輪端點未載入: {_fe}")
 
-# C0 唯讀主控台(/console)。掛在同一個 Flask，不另外部署——
-# 多一個服務就多一套權限、憑證與稽核要對，而這一版只是把既有的 stats 端點畫成一頁。
-try:
-    from api_users import users_bp
-    app.register_blueprint(users_bp)
-except Exception as _ue:
-    BLUEPRINT_FAILURES.append(("users", "%s: %s" % (type(_ue).__name__, _ue)))
-    print(f"帳號管理端點未載入: {_ue}")
+    # C0 唯讀主控台(/console)。掛在同一個 Flask，不另外部署——
+    # 多一個服務就多一套權限、憑證與稽核要對，而這一版只是把既有的 stats 端點畫成一頁。
+    try:
+        from api_users import users_bp
+        app.register_blueprint(users_bp)
+    except Exception as _ue:
+        BLUEPRINT_FAILURES.append(("users", "%s: %s" % (type(_ue).__name__, _ue)))
+        print(f"帳號管理端點未載入: {_ue}")
 
-try:
-    from api_console import console_bp
-    app.register_blueprint(console_bp)
-except Exception as _ce:
-    BLUEPRINT_FAILURES.append(("console", "%s: %s" % (type(_ce).__name__, _ce)))
-    print(f"主控台未載入: {_ce}")
+    try:
+        from api_console import console_bp
+        app.register_blueprint(console_bp)
+    except Exception as _ce:
+        BLUEPRINT_FAILURES.append(("console", "%s: %s" % (type(_ce).__name__, _ce)))
+        print(f"主控台未載入: {_ce}")
 
 # ── WoundLite 民眾版的**匿名**端點 ────────────────────────────────────
 #
@@ -210,14 +218,16 @@ except Exception as _ce:
 # 環境變數只保留 **bootstrap** 用途：全新部署時沒有任何帳號，而帳號管理端點
 # 本身需要 admin 才能用——沒有這個出口就是雞生蛋。
 # 一旦帳號檔裡有任何帳號，環境變數就完全不再生效（否則它會變成永久後門）。
-try:
-    import auth_users
-    _boot = auth_users.bootstrap_from_env()
-    if _boot:
-        print("已由環境變數建立初始管理者 default:admin（後續請用帳號管理端點新增使用者）")
-except Exception as _ae:
-    auth_users = None
-    print(f"⚠ 帳號模組載入失敗，所有登入都會失敗: {_ae}")
+auth_users = None
+if not LITE_SERVICE:
+    try:
+        import auth_users
+        _boot = auth_users.bootstrap_from_env()
+        if _boot:
+            print("已由環境變數建立初始管理者 default:admin（後續請用帳號管理端點新增使用者）")
+    except Exception as _ae:
+        auth_users = None
+        print(f"⚠ 帳號模組載入失敗，所有登入都會失敗: {_ae}")
 
 # demo 送審帳號的開機種子（條件見 `auth_users.seed_demo_from_env`）。
 # **刻意用自己的 try/except，且在上面那塊之外**：種子失敗絕不能
@@ -278,9 +288,11 @@ class WoundAnalysisService:
     """核心傷口分析服務類"""
     
     def __init__(self):
-        self.setup_database()
+        if not LITE_SERVICE:
+            self.setup_database()
         self.load_models()
-        self.setup_imagej()
+        if not LITE_SERVICE:
+            self.setup_imagej()
         
     def setup_database(self):
         """初始化數據庫"""
@@ -363,29 +375,26 @@ class WoundAnalysisService:
                     # 優先 GPU，回退 CPU
                     providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
                     session = ort.InferenceSession(onnx_path, sess_options, providers=providers)
+                    # The packaged image carries SSOT in vendor/, not ../../engineering.
+                    # Validate before publishing the session: a warning is not enough
+                    # when a missing config changes the model's input normalization.
+                    ssot = load_preprocessing(os.path.dirname(os.path.abspath(__file__)))
+                    model_key = next((k for k in ("student", "wsm", "deepskin", "fusegnet", "smp")
+                                      if k in os.path.basename(onnx_path).lower()), None)
+                    config = ssot["models"].get(model_key)
+                    if config is None:
+                        raise ValueError("active ONNX model has no preprocessing contract")
+                    inp = session.get_inputs()[0]
+                    height, width = config["input_size"]
+                    expected = [3, height, width] if config["layout"] == "NCHW" else [height, width, 3]
+                    if len(inp.shape) != 4 or list(inp.shape[1:]) != expected:
+                        raise ValueError("ONNX input shape disagrees with preprocessing contract")
                     wound_segmentation_model = session
                     self._onnx_model_path = onnx_path
                     self._model_backend = 'onnxruntime'
-                    active_providers = session.get_providers()
                     logger.info(f"成功加載 ONNX 傷口分割模型: {onnx_path}")
-                    logger.info(f"ONNX 執行提供者: {active_providers}")
-                    # 記錄模型輸入/輸出資訊以利除錯
-                    inp = session.get_inputs()[0]
-                    logger.info(f"ONNX 模型輸入: name={inp.name}, shape={inp.shape}, type={inp.type}")
-                    # M2: 載入時對齊 SSOT input shape(防止靜默用錯前處理)
-                    try:
-                        import json as _j
-                        _sp = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),"..","..","engineering","phase0","preprocessing.json"))
-                        _ss = _j.load(open(_sp, encoding="utf-8")) if os.path.exists(_sp) else {}
-                        _key = next((k for k in ("student","wsm","deepskin","fusegnet","smp") if k in os.path.basename(onnx_path).lower()), None)
-                        _exp = ((_ss.get("models",{}) or {}).get(_key or "",{}) or {}).get("input_size")
-                        _got = [d for d in inp.shape if isinstance(d,int) and d>3]
-                        if _exp and len(_got)>=2 and (int(_exp[0]),int(_exp[1])) != (int(_got[0]),int(_got[1])):
-                            logger.warning(f"⚠ SSOT 對齊失敗: 模型 {_key} input {_got} ≠ SSOT {_exp};前處理恐錯,請使 preprocessing.json 與模型一致")
-                        else:
-                            logger.info(f"SSOT 對齊檢查通過: {_key} input {_got}")
-                    except Exception as _e:
-                        logger.warning(f"SSOT 對齊檢查略過: {_e}")
+                    logger.info(f"ONNX 執行提供者: {session.get_providers()}")
+                    logger.info(f"SSOT 對齊檢查通過: {model_key} input {inp.shape}")
                     return  # 成功，不需繼續
                 except Exception as e:
                     logger.error(f"ONNX 模型加載失敗 ({onnx_path}): {e}")
@@ -591,6 +600,8 @@ def health_check():
 
     所以：模型沒載到就回 `status: degraded`，並明說影響。監控與主控台都看得到。
     """
+    if LITE_SERVICE:
+        return lite_health_response(app, model_ready=wound_segmentation_model is not None)
     model_ready = wound_segmentation_model is not None
     # 色準校正模組。缺了 classify **不會壞**（呼叫端有 try/except），
     # 而是安靜退回 gray-world 白平衡：紅色被壓抑 ×0.78、肉芽被低估，
@@ -663,6 +674,8 @@ def health_check():
             # 欄位名字要跟證據對齊：叫它 au_ensemble 會被讀成「集成可用」。
             'au_ensemble_files_present': au_ensemble_files_present,
             'lite_public_api_enabled': LITE_API_ENABLED,
+            # Configuration only, not a remote state/Apple readiness probe.
+            'lite_attest_configured': app.extensions.get('lite_attest_http', {}).get('service') is not None,
             'database': True
         },
         # 哪一個沒掛上、以及原始例外。沒有這個，看到 endpoints_registered=false
@@ -1189,13 +1202,7 @@ _SSOT_CACHE = None
 def _load_ssot():
     global _SSOT_CACHE
     if _SSOT_CACHE is None:
-        p = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                          "..", "..", "engineering", "phase0", "preprocessing.json"))
-        try:
-            _SSOT_CACHE = _json.load(open(p, encoding="utf-8"))
-        except Exception as e:
-            logger.warning(f"無法讀取 SSOT preprocessing.json: {e}; 退回 [0,1] RGB")
-            _SSOT_CACHE = {}
+        _SSOT_CACHE = load_preprocessing(os.path.dirname(os.path.abspath(__file__)))
     return _SSOT_CACHE
 
 def _active_model_key():
@@ -1456,10 +1463,23 @@ def segment_for_lite(image_rgb):
 # 也讓它在沒有 ONNX 模型的環境下 import 得起來（契約測試因此不必載入模型）。
 if LITE_API_ENABLED:
     try:
+        from lite_attest_http import install_lite_attest
+        from lite_attest_config import build_lite_security
+        try:
+            _lite_security, _lite_budget, _lite_privacy = build_lite_security(os.environ)
+        except Exception:
+            if LITE_SERVICE:
+                raise RuntimeError("Lite security/storage configuration unavailable") from None
+            # Fail closed without printing configuration, credentials or paths.
+            _lite_security, _lite_budget, _lite_privacy = None, None, None
+            BLUEPRINT_FAILURES.append(("lite_attest", "security configuration unavailable"))
+        install_lite_attest(app, service=_lite_security, budget=_lite_budget, privacy=_lite_privacy)
         from api_lite import lite_bp as _lite_bp, init_lite as _init_lite
         _init_lite(segment_for_lite)
         app.register_blueprint(_lite_bp)
     except Exception as _le:
+        if LITE_SERVICE:
+            raise RuntimeError("Lite service initialization failed") from None
         # 仍然不讓它擋住服務啟動（其他端點該照常運作），但**要留下痕跡**，
         # 而且那個痕跡必須出現在 /api/health——只印到 stdout 等於沒有人會看到。
         BLUEPRINT_FAILURES.append(("lite", "%s: %s" % (type(_le).__name__, _le)))

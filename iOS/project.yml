@@ -40,12 +40,12 @@ options:
 
 settings:
   base:
+    ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     SWIFT_VERSION: "5.0"
     DEVELOPMENT_TEAM: LY2F24ZM68
     MARKETING_VERSION: "1.0"
-    # 與 Android `version.properties` 的 versionCode 對齊。每次發布必須遞增——
-    # 兩邊的版號要能互相對照，排錯時第一個問題永遠是「你裝的是哪一版」。
-    CURRENT_PROJECT_VERSION: "22"
+    # iOS 獨立遞增；與 Android 的確切差異及對齊條件記錄於 docs/PARITY.md。
+    CURRENT_PROJECT_VERSION: "27"
     TARGETED_DEVICE_FAMILY: "1,2"
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     SWIFT_STRICT_CONCURRENCY: minimal
@@ -107,6 +107,7 @@ targets:
       # （boundaryOnly 模式＝民眾版圈選；雙指縮放平移/undo/亮青邊界線同一套）。
       - path: WoundMeasurementApp/UI/CameraCaptureView.swift
       - path: WoundMeasurementApp/UI/WoundEditView.swift
+      - path: WoundMeasurementApp/UI/WoundImagePreview.swift
       # ⚠ 目錄掃描要排除下面被「明確列出」的項目，否則同一個檔案進兩次
       #   build phase → "Multiple commands produce ..." 而錯誤訊息指向產物路徑，
       #   看不出是設定重複。
@@ -117,6 +118,7 @@ targets:
           - "Models"
           - "Models/**"
           - "Info.plist"
+          - "WoundLite.entitlements"
           - "PrivacyInfo.xcprivacy"
       # 地端分割模型保留槽：WoundSegLite.mlmodel 丟進 WoundLite/Models/ 後
       # 重跑 xcodegen 即編進 bundle、LiteLocalSeg.available 轉真（規格見 MODEL_SPEC.md）。
@@ -127,7 +129,7 @@ targets:
       # 2026-08-21 分家：Lite 有自己的資產目錄。**兩個 App 的圖示必須不同**
       # ——同帳號下外觀相近的 App 可能被以 Guideline 4.3（重複）質疑，
       # 而真正的風險是醫護人員兩個都裝、點錯進民眾版還以為數字能寫病歷。
-      # 圖示由 tools/make_app_icons.py 產生（該腳本是圖示的 SSOT）。
+      # 圖示來源為 iOS/IconSources 使用者核定圖；tools/make_app_icons.py 匯出規格。
       - path: WoundLite/Assets.xcassets
         type: folder.assetcatalog
         buildPhase: resources
@@ -138,6 +140,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.woundai.lite
+        CURRENT_PROJECT_VERSION: "33"
+        CODE_SIGN_ENTITLEMENTS: WoundLite/WoundLite.entitlements
         INFOPLIST_FILE: WoundLite/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WOUND_LITE"
@@ -145,11 +149,26 @@ targets:
         Debug:
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WOUND_LITE DEBUG"
 
+  WoundLiteTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: WoundLiteTests
+    dependencies:
+      - target: WoundLite
+    settings:
+      base:
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/WoundLite.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/WoundLite"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.woundai.lite.tests
+
   WoundMeasurementAppTests:
     type: bundle.unit-test
     platform: iOS
     sources:
       - path: WoundAITests
+      - path: WoundLiteTests/LiteZoomPreviewTests.swift
     dependencies:
       - target: WoundMeasurementApp
     settings:
@@ -164,6 +183,7 @@ targets:
         # GENERATE_INFOPLIST_FILE 是因為它有實體檔；這裡沒有，關掉會直接 build 失敗。
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.woundai.app.tests
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WOUND_MEDICAL_TESTS"
 
 ## `xcodebuild -scheme WoundMeasurementApp` 需要 scheme 存在。XcodeGen 預設**不會**
 ## 自動產生 scheme（除非在 target 下寫 `scheme:`），少了這一段，BUILD_RELEASE.md 的
@@ -192,8 +212,13 @@ schemes:
     build:
       targets:
         WoundLite: all
+        WoundLiteTests: [test]
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - WoundLiteTests
     profile:
       config: Release
     analyze:

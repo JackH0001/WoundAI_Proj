@@ -257,16 +257,16 @@ private func seedAutoSync(_ st: RasterState, src: CGImage, wbGains: [Double]?) {
 // MARK: - 模型（狀態＋手勢分流＋undo）
 
 @MainActor
-private final class EditCanvasModel: ObservableObject {
+final class EditCanvasModel: ObservableObject {
     /// 只用來觸發重繪。柵格內容都在 `st` 裡，逐像素塗抹不該經過 SwiftUI diff。
     @Published var version = 0
-    @Published var tool: EditTool = .bPaint
+    @Published fileprivate var tool: EditTool = .bPaint
     @Published var curTissue = 2
     /// 筆刷半徑（**點**，不是像素）。Android 的 36 是 px（≈420dpi 下約 12pt）；
     /// iOS 直接抄 36 會是三倍粗——實機回報「預設過粗」的根因。14pt ≈ Android 視覺同寬。
     @Published var brushScreen: CGFloat = 14
     @Published var cursor: CGPoint?
-    @Published var peeking = false
+    @Published private(set) var peeking = false
     @Published var viewScale: CGFloat = 1
     @Published var viewOffset = CGPoint.zero
     @Published var boxSize = CGSize.zero
@@ -276,7 +276,7 @@ private final class EditCanvasModel: ObservableObject {
     /// 底稿沒好之前塗抹會蓋在待覆寫的資料上，鎖住比事後解釋一致性簡單。
     @Published var seeding = false
 
-    let st: RasterState
+    fileprivate let st: RasterState
     let cg: CGImage?
     let bw: Int
     let bh: Int
@@ -295,6 +295,7 @@ private final class EditCanvasModel: ObservableObject {
 
     struct Snap {
         let m: [UInt8]; let t: [UInt8]
+        let orig: [UInt8]; let auto: [UInt8]
         let mw: Int; let mh: Int
         let rx0: Double; let ry0: Double
     }
@@ -303,6 +304,7 @@ private final class EditCanvasModel: ObservableObject {
 
     // 手勢分流狀態（對齊 Android awaitEachGesture 的迴圈區域變數）。
     private var strokeSnapshot: Snap?
+    private var gestureActive = false
     private var lastImg: CGPoint?
     private var multi = false
     private var prevPair: (CGPoint, CGPoint)?
@@ -415,7 +417,14 @@ private final class EditCanvasModel: ObservableObject {
         version += 1
     }
 
+    /// Viewing the original changes presentation only; it never rewrites the mask or tissue.
+    func setOriginalPreview(_ on: Bool) {
+        peeking = on
+        cursor = nil
+    }
+
     func overlayImage() -> CGImage? {
+        guard !peeking else { return nil }
         if overlayCacheVersion == version, let c = overlayCache { return c }
         let data = Data(st.overlay)
         guard let provider = CGDataProvider(data: data as CFData) else { return nil }
@@ -472,21 +481,21 @@ private final class EditCanvasModel: ObservableObject {
     // MARK: undo / redo（位元組預算）
 
     /**
-     undo 深度由**位元組預算**決定，不固定 8 筆。每筆快照＝mask＋tissue 兩份 `mw*mh`；
-     2200² 時單筆 9.7 MB，固定 8 筆就是 77 MB——大面積傷口正是最需要修邊的情境，
-     會當在最不該當的時候。固定 24 MB 預算＝小傷口 undo 很深、大傷口較淺但絕不 OOM；
-     下限 2（只剩 1 步可復原太難用）、上限 8（小遮罩不無限成長）。
+     undo 深度由**位元組預算**決定，不固定 8 筆。每筆快照＝mask／tissue／orig／auto 四份 `mw*mh`；
+     2200² 時單筆約 19 MB，不再假設擴張前後快照尺寸相同——大面積傷口正是最需要修邊的情境，
+     會當在最不該當的時候。以每個歷史堆疊 24 MiB 預算限制快照數量，大傷口保留較少步驟；
+     下限 1（大型 ROI 仍保留一筆完整可復原快照）、上限 8（小遮罩不無限成長）。
      */
     private let undoBudgetBytes = 24 * 1024 * 1024
-    private func maxUndoDepth() -> Int {
-        let perSnap = st.mw * st.mh * 2
-        if perSnap <= 0 { return 8 }
-        return min(8, max(2, undoBudgetBytes / perSnap))
-    }
     private func push(_ stack: inout [Snap], _ s: Snap) {
         stack.append(s)
-        let cap = maxUndoDepth()
-        while stack.count > cap { stack.removeFirst() }
+        func bytes(_ snapshot: Snap) -> Int {
+            snapshot.m.count + snapshot.t.count + snapshot.orig.count + snapshot.auto.count
+        }
+        var used = stack.reduce(0) { $0 + bytes($1) }
+        while stack.count > 1 && (stack.count > 8 || used > undoBudgetBytes) {
+            used -= bytes(stack.removeFirst())
+        }
     }
     /// 新的一筆編輯：進 undo，並讓 redo 失效（分岔後的未來已不成立）。
     private func pushUndo(_ s: Snap) {
@@ -495,12 +504,13 @@ private final class EditCanvasModel: ObservableObject {
         undoCount = undoStack.count; redoCount = 0
     }
     func snap() -> Snap {
-        return Snap(m: st.mask, t: st.tissue, mw: st.mw, mh: st.mh, rx0: st.rx0, ry0: st.ry0)
+        return Snap(m: st.mask, t: st.tissue, orig: st.orig, auto: st.auto, mw: st.mw, mh: st.mh, rx0: st.rx0, ry0: st.ry0)
     }
     @discardableResult
     private func restore(_ s: Snap) -> Bool {
-        guard s.mw == st.mw, s.mh == st.mh else { return false }   // 擴張後尺寸不同 → 無法還原
-        st.mask = s.m; st.tissue = s.t
+        st.mw = s.mw; st.mh = s.mh; st.rx0 = s.rx0; st.ry0 = s.ry0
+        st.mask = s.m; st.tissue = s.t; st.orig = s.orig; st.auto = s.auto
+        st.overlay = [UInt8](repeating: 0, count: s.mw * s.mh * 4)
         st.recount(); st.syncAll()
         return true
     }
@@ -528,10 +538,8 @@ private final class EditCanvasModel: ObservableObject {
         var cy = (Double(imgPt.y) - st.ry0) * st.mScale
         if tool == .bPaint || tool == .bErase || tool == .tissue {
             if st.expandIfNeeded(cxM: cx, cyM: cy, rM: rM) {
-                // 視窗擴張（內容無損）；undo 尺寸失效 → 清空。
-                undoStack.removeAll(); redoStack.removeAll()
-                undoCount = 0; redoCount = 0
-                strokeSnapshot = nil
+                // Keep the pre-stroke geometry and pixels: a second finger must be able
+                // to cancel the first stamp even when it expanded the raster.
                 // seedAuto **只有 B_PAINT 需要**（新遮罩像素要帶分類）。它在 2200² 上是
                 // 近千萬次寫入，跑在筆畫中的主執行緒——B_ERASE／組織🖌 不跑，
                 // 才不會「擴張時卡一下、手指帶過頭、邊界突然過標」。
@@ -619,6 +627,7 @@ private final class EditCanvasModel: ObservableObject {
     func touchesChanged(_ phase: UITouch.Phase, _ pts: [CGPoint]) {
         switch phase {
         case .began:
+            gestureActive = true
             if pts.count == 1 {
                 multi = false
                 prevPair = nil
@@ -635,6 +644,9 @@ private final class EditCanvasModel: ObservableObject {
                 enterMulti(pts)
             }
         case .moved:
+            // A touch may have begun while asynchronous tissue seeding blocked input.
+            // Never invent a paint stroke without its pre-stroke rollback snapshot.
+            guard gestureActive else { return }
             if pts.count >= 2 {
                 if !multi { enterMulti(pts) } else { pinch(pts) }
             } else if pts.count == 1, !multi {
@@ -655,9 +667,15 @@ private final class EditCanvasModel: ObservableObject {
                 }
                 prevSingle = p
             }
-        case .ended, .cancelled:
+        case .cancelled:
+            gestureActive = false
+            if let s = strokeSnapshot, restore(s) { bump() }
+            strokeSnapshot = nil; lastImg = nil; cursor = nil
+            multi = !pts.isEmpty; prevPair = nil; prevSingle = nil
+        case .ended:
             if pts.isEmpty {
-                if let s = strokeSnapshot, s.mw == st.mw, s.mh == st.mh { pushUndo(s) }
+                gestureActive = false
+                if let s = strokeSnapshot { pushUndo(s) }
                 strokeSnapshot = nil; lastImg = nil
                 multi = false; prevPair = nil; prevSingle = nil
                 cursor = nil          // @Published，自帶重繪；覆蓋圖內容沒變，不 bump
@@ -677,7 +695,7 @@ private final class EditCanvasModel: ObservableObject {
         multi = true
         // 第一指落下時已經畫了一筆。使用者的意圖是縮放不是畫圖——用既有快照把那一筆還原，
         // 否則每次縮放都會在傷口上留一個點，而那個點會直接進 GT。
-        if let s = strokeSnapshot, s.mw == st.mw, s.mh == st.mh, restore(s) {
+        if let s = strokeSnapshot, restore(s) {
             bump()   // 只有真的還原了內容才失效覆蓋圖快取
         }
         strokeSnapshot = nil; lastImg = nil; cursor = nil
@@ -696,15 +714,14 @@ private final class EditCanvasModel: ObservableObject {
         let c = mid(cur.0, cur.1)
         let pc = mid(prev.0, prev.1)
         let zoom = dist(cur.0, cur.1) / dist(prev.0, prev.1)
-        let pan = CGPoint(x: c.x - pc.x, y: c.y - pc.y)
-        // 以雙指中心為錨點縮放：螢幕點 p 對應影像點 p/k + off，
-        // 要讓錨點下的影像位置不動 → off' = ci - c/k' - pan/k'。
+        // The image point under the previous centroid must follow the new centroid.
+        // Using the new centroid twice introduces drift during combined zoom and pan.
         let kOld = k()
-        let ci = CGPoint(x: c.x / kOld + viewOffset.x, y: c.y / kOld + viewOffset.y)
+        let ci = CGPoint(x: pc.x / kOld + viewOffset.x, y: pc.y / kOld + viewOffset.y)
         if zoom != 1 { viewScale = min(24, max(0.5, viewScale * zoom)) }
         let kNew = k()
-        viewOffset = CGPoint(x: ci.x - c.x / kNew - pan.x / kNew,
-                             y: ci.y - c.y / kNew - pan.y / kNew)
+        viewOffset = CGPoint(x: ci.x - c.x / kNew,
+                             y: ci.y - c.y / kNew)
         prevPair = cur   // viewScale/viewOffset 是 @Published，自帶重繪，不 bump
     }
 
@@ -778,7 +795,7 @@ private final class TouchProxyUIView: UIView {
 
     private func active(_ event: UIEvent?) -> [CGPoint] {
         guard let all = event?.allTouches else { return [] }
-        return all.filter { $0.phase != .ended && $0.phase != .cancelled }
+        return all.filter { $0.view === self && $0.phase != .ended && $0.phase != .cancelled }
             .map { $0.location(in: self) }
     }
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -905,12 +922,13 @@ struct WoundEditView: View {
     @ViewBuilder
     private var liteHeader: some View {
         Text("圈選傷口範圍").font(.subheadline).bold()
-        Text("單指塗抹・雙指縮放與移動・畫錯用「擦除」或 ↺ 復原。亮青色線＝目前圈選的邊界。")
+        Text("單指塗抹・雙指縮放與移動・畫錯用「擦除」或「復原」。亮青色線＝目前圈選的邊界。")
             .font(.caption).foregroundStyle(.secondary)
-        if m.st.maskCount == 0 {
-            Text("請把整個傷口塗滿（不必沿邊描線，整片塗滿即可）")
-                .font(.caption).foregroundStyle(.red)
-        }
+        Text("請把整個傷口塗滿（不必沿邊描線，整片塗滿即可）")
+            .font(.caption).foregroundStyle(.red)
+            .lineLimit(2, reservesSpace: true)
+            .opacity(m.st.maskCount == 0 ? 1 : 0)
+            .accessibilityHidden(m.st.maskCount != 0)
     }
 
     @ViewBuilder
@@ -919,7 +937,7 @@ struct WoundEditView: View {
         // 型別檢查器組合爆炸（同 ResultCard 的教訓，錯誤還指不出是哪一行）。
         let pctI = { (v: Double?) -> Int in Int(((v ?? 0) * 100)) }
         let titleLine: String = {
-            var s = "修邊(=GT)  面積 \(liveArea.map { String(format: "%.2f", $0) } ?? "-") cm²"
+            var s = "面積 \(liveArea.map { String(format: "%.2f", $0) } ?? "-") cm²"
             s += " · PUSH \(livePush.map(String.init) ?? "-")"
             s += "  [尺度:\(mmPerPx != nil ? "ArUco✓" : "AI後備⚠")]"
             return s
@@ -932,27 +950,28 @@ struct WoundEditView: View {
             s += " · 其他\(pctI(lf["other"]))%  (框會隨筆刷自動擴張)"
             return s
         }()
+        Text("修邊標註").font(.headline)
         Text(titleLine)
             .font(.subheadline).foregroundStyle(.blue)
+            .monospacedDigit().lineLimit(2, reservesSpace: true)
         Text(tissueLine)
             .font(.caption).foregroundStyle(.secondary)
-        // 「其他」偏高時要說出來：它代表**分類器不知道那是什麼**（肌腱／異物／血水／反光），
-        // 正是最需要醫師看一眼的部分。硬歸到四類之一，訓練資料就會學到錯的東西。
-        if (lf["other"] ?? 0) > 0.10 {
-            let s = "ℹ 有 \(pctI(lf["other"]))% 判不出類別（肌腱／異物／血水／遮蔽物／反光）。"
-                  + "請用「組織🖌 → 其他」確認範圍，或改標成正確的組織——這一塊會照原樣進訓練集。"
-            Text(s).font(.caption).foregroundStyle(.orange)
-        }
-        // 不動筆刷不是錯，只是這一筆不會成為組織訓練樣本——醫師有權說「AI 分得對」，
-        // 但要讓他知道這個選擇的意義（未修正的遮罩是 AI 自己的輸出，拿去訓練是自我確認）。
-        if m.st.maskCount > 0, m.st.editedCount == 0 {
-            Text("ℹ 尚未修正任何組織分區。面積與邊界照常送出；但組織遮罩會標記為「未經醫師修正」，**不會進入組織分割訓練集**。")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-        if m.st.maskCount == 0 {
-            Text("⚠ AI 未偵測到傷口：請用「邊界＋」從零塗抹；ArUco 尺度仍有效，面積照常精確計算")
-                .font(.caption).foregroundStyle(.red)
-        }
+            .monospacedDigit().lineLimit(3, reservesSpace: true)
+        // Reserve one stable status block: changing percentages or edit state must
+        // not resize the canvas under the user's finger.
+        let notice: String = {
+            if m.st.maskCount == 0 { return "請用「邊界＋」塗滿傷口範圍，再確認圈選邊界。" }
+            if (lf["other"] ?? 0) > 0.10 {
+                return "有 \(pctI(lf["other"]))% 為其他組織，請確認範圍或修正分類。訓練標註需另取得權限與同意。"
+            }
+            if m.st.editedCount == 0 {
+                return "尚未修正組織分區；未修正的組織遮罩不會作為組織訓練標註。完成後回到量測頁。"
+            }
+            return "完成後回到量測頁；訓練標註需另取得權限與同意。"
+        }()
+        Text(notice).font(.caption).foregroundStyle(.secondary)
+            .monospacedDigit().lineLimit(3, reservesSpace: true)
+
     }
 
     private var canvasLayer: some View {
@@ -973,7 +992,7 @@ struct WoundEditView: View {
                 ctx.draw(Image(decorative: ov, scale: 1), in: rect)
                 ctx.stroke(Path(rect), with: .color(Color.gray.opacity(0.27)), lineWidth: 2)
             }
-            if let cur = m.cursor {
+            if !m.peeking, let cur = m.cursor {
                 let col: Color = {
                     switch m.tool {
                     case .bErase: return Color(red: 1, green: 0.31, blue: 0.31)
@@ -991,32 +1010,30 @@ struct WoundEditView: View {
 
     private var toolRow: some View {
         HStack(spacing: 6) {
-            chip(boundaryOnly ? "圈選＋" : "邊界＋", selected: m.tool == .bPaint) { m.tool = .bPaint }
-            chip(boundaryOnly ? "擦除" : "邊界－", selected: m.tool == .bErase) { m.tool = .bErase }
-            chip("移動", selected: m.tool == .pan) { m.tool = .pan }
-            if !boundaryOnly {
-                chip("組織🖌", selected: m.tool == .tissue) { m.tool = .tissue }
+            editorButton(boundaryOnly ? "圈選" : "邊界＋", symbol: "paintbrush.pointed",
+                         selected: !m.peeking && m.tool == .bPaint) {
+                m.setOriginalPreview(false); m.tool = .bPaint
             }
-            // 「按住才隱藏，放開就回來」：切換式有三個實測問題（版面跳動、關著仍可塗、
-            // 要按兩次）；peek 期間手指壓在鈕上本來就碰不到畫布，放開立刻回到組織圖層。
-            Text(m.peeking ? "原圖🚫" : "按住看原圖")
-                .font(.footnote)
-                .frame(maxWidth: .infinity, minHeight: 34)
-                .background(RoundedRectangle(cornerRadius: 8)
-                    .fill(m.peeking ? Color.blue.opacity(0.25) : Color.secondary.opacity(0.15)))
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { _ in if !m.peeking { setPeek(true) } }
-                        .onEnded { _ in setPeek(false) }
-                )
+            editorButton(boundaryOnly ? "擦除" : "邊界－", symbol: "eraser",
+                         selected: !m.peeking && m.tool == .bErase) {
+                m.setOriginalPreview(false); m.tool = .bErase
+            }
+            editorButton("移動", symbol: "hand.draw", selected: !m.peeking && m.tool == .pan) {
+                m.setOriginalPreview(false); m.tool = .pan
+            }
+            if !boundaryOnly {
+                editorButton("組織", symbol: "paintbrush", selected: !m.peeking && m.tool == .tissue) {
+                    m.setOriginalPreview(false); m.tool = .tissue
+                }
+            }
+            editorButton(m.peeking ? (boundaryOnly ? "回圈選" : "回修邊") : "看原圖",
+                         symbol: m.peeking ? "pencil.tip.crop.circle" : "photo", selected: m.peeking) {
+                m.setOriginalPreview(!m.peeking)
+            }
+            .accessibilityIdentifier("editor.originalPreview")
+            .accessibilityValue(m.peeking ? "原圖，暫停塗抹" : "顯示圈選結果")
+            .accessibilityHint("點一下切換原圖與圈選結果")
         }
-    }
-
-    private func setPeek(_ on: Bool) {
-        m.peeking = on
-        m.st.showTissue = !on
-        m.st.syncAll()
-        m.bump()
     }
 
     /// ⚠ 這一列**永遠顯示**，非組織筆刷時只是停用。條件顯示會讓畫布高度隨工具切換
@@ -1049,18 +1066,19 @@ struct WoundEditView: View {
         HStack(spacing: 6) {
             Text("筆刷").font(.caption)
             Slider(value: $m.brushScreen, in: 6...48)
+                .disabled(m.peeking || m.tool == .pan)
             Text("\(Int(m.brushScreen))").font(.caption).frame(width: 26)
         }
     }
 
     private var zoomRow: some View {
         HStack(spacing: 6) {
-            smallBtn("－") { m.zoomBy(1 / 1.3) }
-            smallBtn("＋") { m.zoomBy(1.3) }
-            smallBtn("ROI") { m.fitRoi() }
-            smallBtn("全圖") { m.fitFull() }
-            smallBtn("↺", enabled: m.undoCount > 0) { m.undo() }
-            smallBtn("↩", enabled: m.redoCount > 0) { m.redo() }
+            editorButton("縮小", symbol: "minus.magnifyingglass") { m.zoomBy(1 / 1.3) }
+            editorButton("放大", symbol: "plus.magnifyingglass") { m.zoomBy(1.3) }
+            editorButton("圈選區", symbol: "viewfinder") { m.fitRoi() }
+            editorButton("全圖", symbol: "arrow.up.left.and.arrow.down.right") { m.fitFull() }
+            editorButton("復原", symbol: "arrow.uturn.backward", enabled: !m.peeking && m.undoCount > 0) { m.undo() }
+            editorButton("重做", symbol: "arrow.uturn.forward", enabled: !m.peeking && m.redoCount > 0) { m.redo() }
         }
     }
 
@@ -1083,23 +1101,23 @@ struct WoundEditView: View {
 
     // MARK: 小元件
 
-    private func chip(_ label: String, selected: Bool, action: @escaping () -> Void) -> some View {
+    private func editorButton(_ title: String, symbol: String, selected: Bool = false,
+                              enabled: Bool = true, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(label)
-                .font(.footnote)
-                .frame(maxWidth: .infinity, minHeight: 34)
+            VStack(spacing: 3) {
+                Image(systemName: symbol).font(.system(size: 17, weight: .medium))
+                Text(title).font(.caption).lineLimit(1).minimumScaleFactor(0.8)
+            }
+            .frame(maxWidth: .infinity, minHeight: 48)
+            .contentShape(RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
-        .background(RoundedRectangle(cornerRadius: 8)
-            .fill(selected ? Color.blue.opacity(0.25) : Color.secondary.opacity(0.15)))
-    }
-
-    private func smallBtn(_ label: String, enabled: Bool = true,
-                          action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(label).font(.footnote).frame(maxWidth: .infinity, minHeight: 30)
-        }
-        .buttonStyle(.bordered)
+        .foregroundStyle(enabled ? (selected ? Color.blue : Color.primary) : Color.secondary)
+        .background(RoundedRectangle(cornerRadius: 10)
+            .fill(selected ? Color.blue.opacity(0.20) : Color.secondary.opacity(0.12)))
+        .overlay(RoundedRectangle(cornerRadius: 10)
+            .stroke(selected ? Color.blue : Color.clear, lineWidth: 1))
+        .accessibilityLabel(title)
         .disabled(!enabled)
     }
 }

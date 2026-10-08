@@ -1,6 +1,6 @@
 # .github/workflows/ios.yml
 #
-# Builds both iOS apps and tests the WoundMeasurementApp project on every push / PR
+# Builds and tests both iOS apps on every push / PR
 # that touches the iOS directory.
 #
 # Runner: macos-15 (Apple Silicon, newest installed Xcode)
@@ -9,8 +9,8 @@
 #
 # Code signing
 # ------------
-# CI uses xcodebuild CODE_SIGNING_ALLOWED=NO
-# to skip signing during unit-test builds. Distribution signing (for
+# App builds are unsigned. Simulator tests use local ad-hoc signing so Keychain
+# encryption tests have an application identity. Distribution signing (for
 # TestFlight / App Store) requires separate secrets and a provisioning
 # profile — see the commented-out "archive" step at the bottom.
 name: ios-client
@@ -21,10 +21,14 @@ on:
     paths:
       - 'iOS/**'
       - '.github/workflows/ios.yml'
+      - 'tools/verify_xctest_results.py'
+      - 'tools/test_verify_xctest_results.py'
   pull_request:
     paths:
       - 'iOS/**'
       - '.github/workflows/ios.yml'
+      - 'tools/verify_xctest_results.py'
+      - 'tools/test_verify_xctest_results.py'
   workflow_dispatch:
 
 jobs:
@@ -57,7 +61,7 @@ jobs:
       - name: Generate Xcode project (XcodeGen)
         run: |
           brew install xcodegen
-          xcodegen generate
+          xcodegen generate --spec project.institution.yml
 
       - name: Show SDK / Simulator list
         run: |
@@ -74,10 +78,10 @@ jobs:
               -scheme WoundMeasurementApp \
               CODE_SIGNING_ALLOWED=NO
 
-      - name: Build both apps (Release, no signing)
+      - name: Build medical, Lite and institution apps (Release, no signing)
         run: |
           set -euo pipefail
-          for SCHEME in WoundMeasurementApp WoundLite; do
+          for SCHEME in WoundMeasurementApp WoundLite WoundAIInstitution; do
             xcodebuild build \
               -project WoundMeasurementApp.xcodeproj \
               -scheme "$SCHEME" \
@@ -117,8 +121,9 @@ jobs:
           xcodebuild test \
               -project WoundMeasurementApp.xcodeproj \
               -scheme WoundMeasurementApp \
+              -configuration Release \
               -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
-              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- ENABLE_TESTABILITY=YES \
               -resultBundlePath TestResults.xcresult \
               2>&1 | tee test-results.log
 
@@ -126,14 +131,33 @@ jobs:
         run: |
           xcrun xcresulttool get test-results summary \
             --path TestResults.xcresult > test-summary.json
-          python3 - <<'PYTEST'
-          import json
-          with open('test-summary.json') as source:
-              summary = json.load(source)
-          print(json.dumps(summary, indent=2))
-          if summary.get('passedTests', 0) <= 0 or summary.get('failedTests', -1) != 0:
-              raise SystemExit('Expected at least one passing test and zero failures')
-          PYTEST
+          xcrun xcresulttool get test-results tests --path TestResults.xcresult > test-tree.json
+          python3 ../tools/test_verify_xctest_results.py
+          python3 ../tools/verify_xctest_results.py test-summary.json test-tree.json
+
+      - name: Run WoundLite XCTest tests
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+              -project WoundMeasurementApp.xcodeproj \
+              -scheme WoundLite \
+              -configuration Release \
+              -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+              CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- ENABLE_TESTABILITY=YES \
+              -resultBundlePath LiteTestResults.xcresult \
+              2>&1 | tee lite-test-results.log
+
+      - name: Verify WoundLite tests actually ran
+        run: |
+          xcrun xcresulttool get test-results summary \
+            --path LiteTestResults.xcresult > lite-test-summary.json
+          xcrun xcresulttool get test-results tests --path LiteTestResults.xcresult > lite-test-tree.json
+          # A simulator may not expose the file-protection class. Match the exact
+          # test, reason and platform; all other skips still fail. Device acceptance remains required.
+          python3 ../tools/verify_xctest_results.py lite-test-summary.json lite-test-tree.json \
+            --allow-simulator-protection-skip
 
       - name: Upload test results
         if: always()
@@ -144,7 +168,12 @@ jobs:
             iOS/TestResults.xcresult
             iOS/test-results.log
             iOS/test-summary.json
+            iOS/test-tree.json
             iOS/build-*.log
+            iOS/LiteTestResults.xcresult
+            iOS/lite-test-results.log
+            iOS/lite-test-summary.json
+            iOS/lite-test-tree.json
           if-no-files-found: warn
 
       # ── Distribution build (uncomment when code signing is configured) ──

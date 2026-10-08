@@ -1,0 +1,15 @@
+{
+  "approved_on": "2026-10-01",
+  "tool": "built-in imagegen",
+  "medical": {
+    "source": "medical.png",
+    "sha256": "1034f119c5c9c59926458adcd8292a49285088fe835fe9c9a95ee73947805a91",
+    "prompt_summary": "Preserve ivory medical cross, central camera lens and underlying wound schematic on teal scanner tile; improve clarity."
+  },
+  "lite": {
+    "source": "lite.png",
+    "sha256": "3ea0c4235a9b6b4bd9640537ee34d789808c3cb166658ab04fbb80563462e5d4",
+    "prompt_summary": "Preserve blue-turquoise cross and robotic hand; add camera lens at cross center, fingertip at lower-right lens rim; no wound."
+  },
+  "export": "python3 tools/make_app_icons.py; macOS sips, 1024x1024 opaque PNG, approved composition preserved"
+}

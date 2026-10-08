@@ -67,6 +67,39 @@ def meta(**over):
     return m
 
 
+def invalid_calibration_cases():
+    """Invalid metadata that must never replace a previously verified depth bundle."""
+    cases = []
+    for field in ("ref_width", "ref_height"):
+        for value in (None, "16", True, 0, -1, 16.0):
+            m = meta()
+            if value is None:
+                m["camera_intrinsics"].pop(field)
+            else:
+                m["camera_intrinsics"][field] = value
+            cases.append(("%s=%r" % (field, value), m))
+    for field in ("fx", "fy", "cx", "cy"):
+        for value in (True, float("nan"), float("inf"), 10 ** 400):
+            m = meta(); m["camera_intrinsics"][field] = value
+            cases.append(("%s invalid %s" % (field, type(value).__name__), m))
+    for field in ("fx", "fy"):
+        for value in (0, -1):
+            m = meta(); m["camera_intrinsics"][field] = value
+            cases.append(("%s=%s" % (field, value), m))
+    for field, value in (("cx", -1), ("cy", -1), ("cx", W), ("cy", H)):
+        m = meta(); m["camera_intrinsics"][field] = value
+        cases.append(("%s outside reference" % field, m))
+    for value in (None, [], "intrinsics"):
+        cases.append(("invalid intrinsics object %r" % value, meta(camera_intrinsics=value)))
+    for value in (None, "", [], 1):
+        cases.append(("invalid format %r" % value, meta(format=value)))
+    missing_format = meta(); missing_format.pop("format")
+    cases.append(("missing format", missing_format))
+    for field in ("width", "height"):
+        cases.append(("boolean %s" % field, meta(**{field: True})))
+    return cases
+
+
 def make_jpeg(salt=b""):
     from PIL import Image
     buf = io.BytesIO()
@@ -169,6 +202,34 @@ def main():
           m.get("coverage") == 1.0 and abs(m.get("min_m", 0) - 0.30) < 1e-3,
           "coverage=%s min=%s max=%s" % (m.get("coverage"), m.get("min_m"), m.get("max_m")))
 
+    for name, invalid in invalid_calibration_cases():
+        try:
+            ok, iss = fw.validate_depth_payload(depth_bytes(), invalid)
+            check("strict calibration: " + name, not ok and bool(iss))
+        except Exception as exc:
+            check("strict calibration: " + name, False, type(exc).__name__)
+    for invalid in (None, [], "metadata"):
+        try:
+            ok, iss = fw.validate_depth_payload(depth_bytes(), invalid)
+            check("non-object metadata rejected", not ok and bool(iss))
+        except Exception as exc:
+            check("non-object metadata rejected", False, type(exc).__name__)
+    for field in ("width", "height"):
+        m = meta(**{field: True})
+        # Match the claimed byte length so this tests type validation, not truncation.
+        raw = depth_bytes(n=H if field == "width" else W)
+        ok, iss = fw.validate_depth_payload(raw, m)
+        check("boolean dimension rejected even with matching byte count", not ok and bool(iss))
+    m = meta(coverage=0.01, min_m=-999, max_m=999)
+    ok, iss = fw.validate_depth_payload(depth_bytes(0.30), m)
+    check("server replaces untrusted depth statistics", ok and m["coverage"] == 1.0
+          and abs(m["min_m"] - .3) < 1e-3 and abs(m["max_m"] - .3) < 1e-3, iss)
+    # Calibration can refer to a higher resolution RGB image: do not assume depth dimensions.
+    m = meta(format="raw_f32_m")
+    m["camera_intrinsics"].update(ref_width=640, ref_height=480, cx=320, cy=240)
+    ok, iss = fw.validate_depth_payload(depth_bytes(), m)
+    check("explicit higher-resolution reference and legacy format alias accepted", ok, iss)
+
     # ── 2 端點 ────────────────────────────────────────────────
     print("\n── 2 端點 ──")
     r, iid = submit("WD-DEPTH1", b"d1")
@@ -183,6 +244,25 @@ def main():
     check("深度檔真的落盤", os.path.isfile(os.path.join(tmp, "depth_maps", iid + ".f32")))
     check("meta 也落盤（內參事後查不到，必須跟著存）",
           os.path.isfile(os.path.join(tmp, "depth_maps", iid + ".meta.json")))
+
+    def saved_depth_state():
+        names = [os.path.join(tmp, "depth_maps", iid + suffix)
+                 for suffix in (".f32", ".meta.json")]
+        names.append(os.path.join(tmp, "depth_index.jsonl"))
+        return [open(name, "rb").read() for name in names]
+
+    verified_state = saved_depth_state()
+    for name, invalid in invalid_calibration_cases():
+        rejected = upload(iid, depth_bytes(.45), invalid)
+        check("HTTP rejects without changing stored depth: " + name,
+              rejected.status_code == 400 and saved_depth_state() == verified_state,
+              rejected.status_code)
+
+    r_stats = upload(iid, depth_bytes(.30), meta(coverage=.01, min_m=-999, max_m=999))
+    stored_meta = json.load(open(os.path.join(tmp, "depth_maps", iid + ".meta.json")))
+    check("HTTP persists server-derived statistics", r_stats.status_code == 200
+          and stored_meta["coverage"] == 1.0 and abs(stored_meta["min_m"] - .30) < 1e-3
+          and abs(stored_meta["max_m"] - .30) < 1e-3)
 
     r2 = upload(iid, depth_bytes(), meta())
     check("同一份重傳：不算覆蓋（斷網重試是正常的）",

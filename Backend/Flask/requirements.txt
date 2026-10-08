@@ -8,6 +8,11 @@ requests==2.34.2
 werkzeug==3.1.8
 gunicorn==26.2.0
 
+# App Attest assertion parsing and P-256 verification (no HTTP admission yet).
+cbor2==6.1.5
+asn1crypto==1.5.1
+cryptography==50.0.1
+
 # 雲端物件儲存（WOUNDAI_STORE=gcs 時才用得到；本機模式不會 import）
 google-cloud-storage==3.13.1
 

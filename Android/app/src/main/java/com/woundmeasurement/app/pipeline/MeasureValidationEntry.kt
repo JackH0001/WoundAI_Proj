@@ -72,6 +72,11 @@ fun MeasureValidationEntry(
     var managingCase by remember { mutableStateOf(false) }
     /** 最近一次寫進共用相簿的相對路徑（快速量測才會有值）。 */
     var galleryPath by remember { mutableStateOf<String?>(null) }
+    /** 最近一次寫進共用相簿的**疊圖**相對路徑。 */
+    var overlayPath by remember { mutableStateOf<String?>(null) }
+    /** 疊圖沒產生時的理由。空手而回不解釋，使用者只會以為功能壞了。 */
+    var overlayNote by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(baseUrl) {
         // ⚠ 憑證改由「設定」頁存在本機(Keystore 加密),**不再硬編碼**。
@@ -181,7 +186,10 @@ fun MeasureValidationEntry(
                 vm.editRaster = raster
                 // allPolys 一定要傳。只傳 poly 的話多處傷口只會送出最大的那一個，
                 // 其餘被標成背景——而畫面上醫師明明兩個都標了。
-                vm.applyEditedPolygon(poly, iou, newA, exudate, tis, allPolys); editing = false
+                // canVerify 必須帶**現在這個登入身分**的權限，不是「有沒有登入」。
+                // me 為 null（未登入／離線）時一律 false：證明不了是醫師背書的，就不能標。
+                vm.applyEditedPolygon(poly, iou, newA, exudate, tis, allPolys,
+                    canVerify = me?.can("gt.verify") == true); editing = false
             }
         )
     } else {
@@ -263,14 +271,28 @@ fun MeasureValidationEntry(
             // 當成人工 GT。存檔仍允許（那是一筆合法的 AI 初步量測紀錄），
             // 但**送訓練標註必須擋下**，並且要讓醫師看得出現在是什麼狀態。
             if (st.result != null) {
-                if (vm.lastDoctorVerified) {
-                    Text("✓ 已完成醫師修邊確認 — 可送訓練標註",
+                // 三種狀態分開講，因為各自該採取的行動不同：
+                //   有權限且已修邊 → 可送訓練標註
+                //   已修邊但無權限 → 修邊有效、可存病歷，但 GT 要醫師背書
+                //   還沒修邊       → 這是 AI 原始輸出，還沒有人看過
+                when {
+                    vm.lastDoctorVerified -> Text(
+                        "✓ 已完成醫師修邊確認 — 可送訓練標註",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.primary)
-                } else {
-                    Text("尚未完成醫師修邊確認：此結果為 AI 原始輸出。" +
-                         "可存入時間軸作為初步量測，但**不得送訓練標註**——" +
-                         "訓練集的 GT 必須來自人的判斷。請按「醫師確認・修邊」並完成（按取消不算）。",
+
+                    vm.lastPolygonEdited -> Text(
+                        "已完成修邊，但**此身分不產生「醫師已驗證」**（缺 gt.verify 權限" +
+                        (if (me == null) "：目前未登入" else "") + "）。" +
+                        "修邊結果有效、可存入時間軸作為紀錄，但**不得送訓練標註**——" +
+                        "訓練集的 GT 必須由醫師背書。這與後端的判定一致，換帳號才會改變。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+                    else -> Text(
+                        "尚未完成醫師修邊確認：此結果為 AI 原始輸出。" +
+                        "可存入時間軸作為初步量測，但**不得送訓練標註**——" +
+                        "訓練集的 GT 必須來自人的判斷。請按「醫師確認・修邊」並完成（按取消不算）。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error)
                 }
@@ -291,6 +313,18 @@ fun MeasureValidationEntry(
                      "它會被計入臨床收案進度,也會讓這個傷口的癒合曲線變成兩張不同傷口相比。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.error)
+            }
+
+            // 疊圖的提示兩種模式都要顯示——臨床模式的原圖提示在拍攝當下由
+            // SamplePickerScreen 給，但疊圖是存檔當下才產生的，這裡是唯一會看到它的地方。
+            overlayPath?.let {
+                Text("🖼 量測結果疊圖已存入相簿：$it",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary)
+            }
+            overlayNote?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
 
             if (!clinicalMode) {
@@ -321,6 +355,11 @@ fun MeasureValidationEntry(
                             "請由護理師或醫師完成存檔（量測結果不會遺失）。")
                         return@SamplePickerScreen
                     }
+                    // 所有匯出都要先過照護同意；不能先寫共用相簿才拒絕存檔。
+                    if (clinicalMode && !careOk) {
+                        vm.reportSubmitBlocked("⚠️ 此病患未取得①照護同意(或已撤回),不得存入病歷或匯出影像")
+                        return@SamplePickerScreen
+                    }
                     // 快速量測：把原始影像另存一份到共用相簿，供事後比對或匯入個案。
                     // ⚠ **只有** sample/phantom 會真的寫入——GalleryExport 自己會拒絕其他來源，
                     // 因為共用相簿不受本 App 的加密、保存期限與撤回同意約束。
@@ -329,6 +368,59 @@ fun MeasureValidationEntry(
                             val rel = com.woundmeasurement.app.data.store.GalleryExport
                                 .saveForQuickMeasure(ctx, bmp, source)
                             if (rel != null) galleryPath = rel
+                        }
+                    }
+                    // 量測結果疊圖：原圖 ＋ **醫師確認的**組織分區 ＋ 輪廓 ＋ ArUco 校正框
+                    // ＋ 影像下方的結果標註帶。
+                    //
+                    // 組織層一律取自 vm.editRaster（醫師按「完成修邊」當下那份），不是
+                    // AnalysisPreview 的色彩啟發式——後者會當場重跑分類，醫師改過的分區
+                    // 不在裡面，匯出的圖就會跟存進病歷的百分比對不上。
+                    //
+                    // 政策判斷在 GalleryExport：臨床影像只有 internalTest 建置會真的寫入。
+                    // 這裡不重複判斷，只負責把圖畫出來。
+                    //
+                    // 放進背景執行緒：疊圖是整張畫布的逐像素合成（2048² 量級），
+                    // 在主執行緒做會讓「存檔」那一下明顯卡住。
+                    vm.lastBitmap?.let { bmp ->
+                        val polys = vm.lastPolygons.ifEmpty {
+                            if (vm.lastPolygon.size >= 3) listOf(vm.lastPolygon) else emptyList()
+                        }
+                        val info = WoundOverlayRenderer.Info(
+                            wdCode = case?.wdCode,
+                            source = source,
+                            areaCm2 = st.result?.areaCm2,
+                            pushPartial = st.result?.push?.partial,
+                            pushFull = st.result?.push?.full,
+                            exudate = exudate,
+                            tissueFrac = st.result?.tissueFrac ?: emptyMap(),
+                            mmPerPx = vm.lastMmPerPx,
+                            calibMethod = vm.lastCalibMethod,
+                            route = vm.lastRoute,
+                            confidence = st.result?.confidence,
+                            doctorVerified = vm.lastDoctorVerified,
+                            tissueEdited = vm.editRaster?.tissueEdited == true,
+                        )
+                        val raster = vm.editRaster
+                        val quad = vm.lastMarkerQuad
+                        scope.launch {
+                            val currentConsent = case?.let { repo.activeConsent(it.patientId) }
+                            if (clinicalMode && (currentConsent?.consentCare != true || currentConsent.withdrawnAt != null)) {
+                                overlayNote = "⚠ 照護同意已失效，未匯出量測疊圖。"
+                                return@launch
+                            }
+                            val rel = withContext(Dispatchers.Default) {
+                                val img = WoundOverlayRenderer.render(bmp, raster, polys, quad, info)
+                                img?.let {
+                                    val r = com.woundmeasurement.app.data.store.GalleryExport
+                                        .saveOverlay(ctx, it, source)
+                                    it.recycle(); r
+                                }
+                            }
+                            if (rel != null) overlayPath = rel
+                            else overlayNote = if (raster == null)
+                                "ℹ 未產生疊圖：這一筆沒有經過修邊，沒有可匯出的組織分區。"
+                            else "ℹ 未產生疊圖：此來源或此建置不允許寫入共用相簿。"
                         }
                     }
                     // 存檔同樣受①照護同意管:載入影像後才去撤回同意的話,
@@ -378,6 +470,9 @@ fun MeasureValidationEntry(
                             // 與結果欄同一組增益。不傳的話參照圖會用灰世界，
                             // 而數字用色卡——同一畫面上兩個答案。
                             wbGains = vm.lastWbGains,
+                            // 醫師修邊後的柵格。不傳的話參照圖會重跑色彩啟發式，
+                            // 於是「百分比更新了、圖沒更新」（2026-10-06 回報）。
+                            editRaster = vm.editRaster,
                             modifier = Modifier.fillMaxWidth()
                         )
                     }

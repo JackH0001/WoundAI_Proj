@@ -28,27 +28,17 @@ enum AppSettings {
         static let pendingRestore  = "pending_restores"
     }
 
-    /**
-     預設後端位址。
+    // 醫療 TestFlight 使用隔離示範服務；Lite 的雲端啟用另有發布閘門。
+    static let demoURL = "https://woundai-backend-demo-z4kgfkob4a-de.a.run.app"
+    private static let legacyURL = "https://woundai-backend-421209514056.asia-east1.run.app"
 
-     Release 走 Cloud Run（彰化區）；Debug 走 localhost，讓開發時不必動設定。
-     ⚠ iOS 模擬器的 `localhost` 就是 Mac 本機，**不是** Android 的 `10.0.2.2`——
-     兩邊的預設值不能互抄。
-     */
     static var defaultURL: String {
-        // ⚠ 分流條件是「模擬器 vs 實機」，不只是 Debug vs Release：
-        //   實機上的 localhost 指向**手機自己**，Debug 版裝上實機的第一個畫面就是
-        //   「後端未連線」，而測試者不會知道要去設定頁改網址。
-        //   模擬器的 localhost 才是 Mac 本機（開發迴圈用）。
         #if DEBUG && targetEnvironment(simulator)
         return "http://localhost:5000"
+        #elseif WOUND_LITE
+        return legacyURL
         #else
-        // ⚠ 必須與 Android release 的 DEFAULT_BACKEND_URL（app/build.gradle）**同一個字串**。
-        //   2026-08-08 發現這裡寫的是一個舊部署（wound-ai-867037876992），而 Android 與
-        //   docs/admin_operations.md 都指向 woundai-backend-421209514056——iOS release 裝上
-        //   就會連到不存在／過期的服務，畫面只會說「後端未連線」，看不出是網址錯。
-        //   換部署位址時，三處（這裡、build.gradle、admin docs）要一起改。
-        return "https://woundai-backend-421209514056.asia-east1.run.app"
+        return demoURL
         #endif
     }
 
@@ -65,8 +55,22 @@ enum AppSettings {
     // MARK: - 後端連線
 
     static func backendURL() -> String {
+        #if WOUND_INSTITUTION
+        // Dedicated product cannot reuse a saved production/demo endpoint.
+        return (Bundle.main.object(forInfoDictionaryKey: "WoundAIInstitutionBackendURL") as? String).flatMap { value in
+            guard let url = URL(string: value), url.scheme == "https",
+                  url.host?.hasSuffix(".run.app") == true, url.user == nil, url.password == nil,
+                  value != demoURL, value != legacyURL else { return nil as String? }
+            return value
+        } ?? "https://mmhps20261007.invalid"
+        #else
         let s = (d.string(forKey: K.baseUrl) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        return s.isEmpty ? defaultURL : normalize(s)
+        if !s.isEmpty { return normalize(s) }
+        // 升級不能把既有帳密默默送往另一個平台。舊版若留下帳號但沒有網址，
+        // 保留原服務，讓使用者在設定中明確登出並切換。
+        if defaultURL == demoURL && !backendUser().isEmpty { return legacyURL }
+        return defaultURL
+        #endif
     }
 
     static func setBackendURL(_ raw: String) {

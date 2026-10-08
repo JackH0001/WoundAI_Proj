@@ -1,10 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-Hant">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WoundLite 隱私權政策 / Privacy Policy</title>
-<style>
+<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>woundlite 隱私政策草稿 / Privacy draft</title><style>
   :root { color-scheme: light dark; }
   body { max-width: 44rem; margin: 0 auto; padding: 2rem 1.25rem 5rem;
          font: 16px/1.75 -apple-system, "Segoe UI", "Noto Sans TC", sans-serif; }
@@ -13,6 +8,7 @@
   h3 { font-size: 1rem; margin-top: 1.5rem; }
   .sub { color: #888; margin-top: 0; }
   .key { background: #0a84ff14; border-left: 3px solid #0a84ff; padding: .75rem 1rem; margin: 1rem 0; }
+  .warn { background: #ff950014; border-left: 3px solid #ff9500; padding: .75rem 1rem; margin: 1rem 0; }
   table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .93rem; }
   th, td { border: 1px solid #8884; padding: .5rem .6rem; text-align: left; vertical-align: top; }
   th { background: #8881; }
@@ -20,192 +16,61 @@
   .en { border-top: 2px solid #8884; margin-top: 3rem; padding-top: 1rem; }
   footer { margin-top: 3rem; color: #888; font-size: .9rem; }
   a { color: #0a84ff; }
-</style>
-</head>
-<body>
-
-<h1>WoundLite 隱私權政策</h1>
-<p class="sub">最後更新：2026-08-21　·　同意文案版本：2026-08-19.1</p>
-
-<div class="key">
-<strong>一句話版本：</strong>不同意研究上傳時，您的照片與深度資料<strong>完全不離開手機</strong>。
-即使同意，我們也不知道您是誰——WoundLite 沒有帳號、不需註冊、不收集姓名或聯絡方式。
-</div>
-
-<h2>1. 這個 App 做什麼</h2>
-<p>WoundLite 使用 iPhone 的 LiDAR 感測器量測傷口面積，供居家照護時追蹤變化。
-它是<strong>健康參考工具，不是醫療器材，也不提供診斷</strong>。傷口惡化、發燒或大量滲液請就醫。</p>
-
-<h2>2. 兩種使用模式，兩種資料處理方式</h2>
-<p>首次開啟時您會被詢問是否同意「研究上傳」。這個選擇決定了一切，
-且可隨時在「設定」中變更。</p>
-
-<table>
-<tr><th>　</th><th>不同意（預設可用）</th><th>同意研究上傳</th></tr>
-<tr><td>傷口輪廓怎麼來</td><td>您用手指圈選</td><td>雲端 AI 自動辨識，您可再修改</td></tr>
-<tr><td>照片</td><td><strong>只留在手機</strong>（加密儲存）</td><td>去識別後上傳供研究</td></tr>
-<tr><td>LiDAR 深度資料</td><td><strong>只留在手機</strong></td><td>上傳供 3D 量測精度研究</td></tr>
-<tr><td>量測數值</td><td>只留在手機</td><td>一併上傳</td></tr>
-<tr><td>您圈選的輪廓</td><td>只留在手機</td><td>若您修改過，會上傳供改進辨識</td></tr>
-</table>
-
-<h2>3. 同意研究上傳時，具體上傳什麼</h2>
+</style></head><body>
+<div class="warn"><strong>待審閱草稿 / Draft for review — 未發布，不取代現行公開政策。</strong><br>依 2026-10-05 本機候選實作修訂；新後台尚未部署，真實民眾研究尚未開放。部署、資料治理與研究倫理確認完成前，本稿不可用作已開放研究的聲明。</div>
+<h1>WoundLite 民眾版隱私權政策草稿</h1>
+<p class="sub">修訂：2026-10-05；對照 App 候選同意文案版本 2026-10-04.1。</p>
+<h2>1. 離線使用與雲端選擇</h2>
+<p>WoundLite 提供個人傷口照片紀錄、圈選與 LiDAR 輔助表面積估算。估算供紀錄參考，不提供診斷或治療建議；此說明不是醫療器材法規分類結論。</p>
+<p>不同意研究上傳時，量測流程在手機處理照片、深度與手動圈選，不呼叫雲端辨識。App 不要求建立姓名、電話或 email 帳號。雲端辨識目前規劃作為明示同意的研究參與功能；這項設計及完整研究同意仍須審查，不能由本稿推定已符合研究倫理或 App Store 要求。</p>
+<h2>2. 手機上的資料</h2>
+<p>照片與深度側檔以 AES-GCM 加密，金鑰保存在裝置 Keychain。量測值、日期、分組、位置與輪廓存於 App 沙箱 JSON，並非另以 AES 加密。刪除本機紀錄會處理該筆的本機媒體，不代表雲端副本也已刪除。移除 App 或遺失原安裝身分可能使舊資料無法由 App 自助撤回；請先聯絡支援。</p>
+<p>候選 App 對上述量測索引、照片及深度檔案設定排除系統備份，原子更新後亦保留該設定；此旗標不能保證所有備份均排除，也不清除過去已有的備份。換機、移除 App 或遺失裝置可能無法復原本機紀錄；研究上傳不是個人備份服務。</p>
+<h2>3. 同意後傳送與使用的資料</h2>
 <ul>
-<li><strong>傷口影像</strong>——重新編碼後上傳，過程中<strong>剝除全部 EXIF 中繼資料</strong>
-（拍攝時間、GPS 位置、裝置型號皆不隨附）。</li>
-<li><strong>LiDAR 深度圖與相機參數</strong>——純幾何資料，無法還原成可辨識個人的影像。</li>
-<li><strong>量測數值</strong>——面積、傾角、拍攝距離、深度覆蓋率等。</li>
-<li><strong>您手動圈選或修改的傷口範圍</strong>——僅在您實際動手修改時才上傳；
-若您完全採用 AI 的結果，不會回傳。</li>
-<li><strong>裝置匿名代碼</strong>（見第 4 節）與同意文案版本。</li>
+<li>傷口照片、有效的原始 LiDAR 深度數值、深度與照片尺寸、相機內參、方向及其他量測品質參數。</li>
+<li>AI 輪廓、您確認或修改後的輪廓、表面積及其他已有的量測估算、傷口分組代碼與側別／部位、同意版本。</li>
+<li>由驗證流程綁定的安裝假名代碼，以及請求／修訂識別資訊。未手動修改的 AI 結果也可能同步，並標示為未經人工修正的 AI 來源。</li>
 </ul>
-<p><strong>不會上傳</strong>：姓名、電話、email、生日、身分證號、GPS 位置、通訊錄、
-裝置識別碼（IDFA/IDFV）、其他 App 的使用紀錄。</p>
-
-<h3>拍攝時請注意</h3>
-<p>技術手段可以剝除中繼資料，<strong>但無法移除畫面裡的內容</strong>。
-請只拍攝傷口部位，避免臉部、證件、名牌或其他可辨識個人的物品入鏡。
-伺服器端另設有人臉偵測，偵測到清晰正面人臉會拒收該影像並提示您重拍——
-但那是輔助防線，不是保證。</p>
-
-<h2>4. 裝置匿名代碼（anon_id）</h2>
-<p>App 首次啟動時會在您的裝置上產生一組隨機碼（UUID）。它：</p>
-<ul>
-<li><strong>不連結任何身分</strong>——不是 Apple ID、不是裝置序號、不是廣告識別碼，
-無法用來辨識您本人或您的裝置。</li>
-<li>用途只有兩個：<strong>流量限制</strong>（防止濫用）與<strong>資料撤回</strong>（見第 7 節）。</li>
-<li>刪除並重新安裝 App 會產生新的一組，舊的資料將無法再由 App 撤回。</li>
-</ul>
-
-<h2>5. 我們如何限制濫用（以及這對您的意義）</h2>
-<p>自動辨識服務對任何人開放，因此需要防止濫用。我們記錄每次請求的
-<strong>來源 IP 位址的單向雜湊值</strong>（加鹽後的 SHA-256 摘要，無法還原成原始 IP），
-用於每日次數限制。<strong>原始 IP 位址不會被儲存。</strong></p>
-
-<h2>6. 資料保存與使用目的</h2>
-<ul>
-<li><strong>手機上的資料</strong>：照片、深度資料與量測紀錄以 AES-256-GCM 加密儲存於
-App 專屬空間。您在「紀錄」中刪除任一筆，該筆的影像與深度檔會一併刪除。
-移除 App 會刪除全部本機資料。</li>
-<li><strong>已上傳的研究資料</strong>：用於改進傷口辨識與 3D 量測精度的研究與模型訓練。
-<strong>不用於廣告、不販售、不與第三方分享、不做跨 App 追蹤。</strong></li>
-<li><strong>保存期限</strong>：研究資料保存至您撤回或研究計畫結束為止。
-具體期限依研究倫理審查核定之計畫書辦理。</li>
-</ul>
-
-<h2>7. 如何撤回</h2>
-<ol>
-<li><strong>停止未來上傳</strong>：「設定」→ 關閉研究上傳開關。立即生效。</li>
-<li><strong>刪除已上傳的資料</strong>：App 內的撤回功能會以您的裝置匿名代碼
-（第 4 節）向伺服器要求刪除該代碼名下的全部資料。</li>
-<li>亦可來信要求（第 9 節），但請注意：由於我們不收集任何身分資訊，
-<strong>除了裝置匿名代碼之外，我們沒有其他方式可以定位您的資料</strong>。</li>
-</ol>
-
-<h2>8. 兒童</h2>
-<p>本 App 非針對兒童設計，不會刻意向未滿 13 歲者收集資料。
-若由家長為兒童拍攝傷口並選擇上傳，請務必依第 3 節的拍攝注意事項操作。</p>
-
-<h2>9. 聯絡方式</h2>
-<p>隱私相關問題請聯絡：<a href="mailto:jack.hou@gmail.com">jack.hou@gmail.com</a></p>
-
-<h2>10. 政策變更</h2>
-<p>本政策若有實質變更，App 內的同意文案版本號會一併遞增，
-並在您下次啟動時重新徵詢同意。已依舊版同意收集的資料仍依舊版條款處理。</p>
-
-<!-- ============ ENGLISH ============ -->
-<div class="en">
-<h1>WoundLite Privacy Policy</h1>
-<p class="sub">Last updated: 2026-08-21 · Consent text version: 2026-08-19.1</p>
-
-<div class="key">
-<strong>In one sentence:</strong> If you decline research upload, your photos and depth data
-<strong>never leave your phone</strong>. Even if you consent, we do not know who you are —
-WoundLite has no accounts, requires no registration, and collects no name or contact details.
-</div>
-
-<h2>1. What this app does</h2>
-<p>WoundLite uses the iPhone LiDAR sensor to measure wound area for home-care tracking.
-It is a <strong>health reference tool — not a medical device, and it does not provide diagnosis</strong>.
-Seek medical care if a wound worsens, or if fever or heavy exudate occurs.</p>
-
-<h2>2. Two modes, two data paths</h2>
-<p>On first launch you are asked whether you consent to research upload. That choice
-governs everything below and can be changed at any time in Settings.</p>
-<table>
-<tr><th>　</th><th>Decline (fully functional)</th><th>Consent to research upload</th></tr>
-<tr><td>Wound outline</td><td>You trace it by finger</td><td>Cloud AI proposes it; you may edit</td></tr>
-<tr><td>Photos</td><td><strong>Stay on device</strong> (encrypted)</td><td>De-identified, uploaded for research</td></tr>
-<tr><td>LiDAR depth</td><td><strong>Stays on device</strong></td><td>Uploaded for 3D accuracy research</td></tr>
-<tr><td>Measurements</td><td>Stay on device</td><td>Uploaded</td></tr>
-<tr><td>Your traced outline</td><td>Stays on device</td><td>Uploaded only if you edited it</td></tr>
-</table>
-
-<h2>3. What is uploaded when you consent</h2>
-<ul>
-<li><strong>Wound image</strong> — re-encoded on upload, which <strong>strips all EXIF metadata</strong>
-(no capture time, no GPS, no device model).</li>
-<li><strong>LiDAR depth map and camera intrinsics</strong> — geometry only; cannot be
-reconstructed into an identifiable image.</li>
-<li><strong>Measurement values</strong> — area, tilt angle, distance, depth coverage.</li>
-<li><strong>Your manually traced or edited outline</strong> — only when you actually edit;
-if you accept the AI result unchanged, nothing is returned.</li>
-<li><strong>Device anonymous code</strong> (section 4) and consent text version.</li>
-</ul>
-<p><strong>Never uploaded:</strong> name, phone, email, date of birth, national ID,
-GPS location, contacts, advertising identifiers (IDFA/IDFV), or activity in other apps.</p>
-
-<h3>Please note when photographing</h3>
-<p>Technical measures strip metadata but <strong>cannot remove what is in the frame</strong>.
-Photograph the wound area only; keep faces, ID cards, name badges and other identifying
-objects out of shot. The server also runs face detection and will reject an image containing
-a clear frontal face — a secondary safeguard, not a guarantee.</p>
-
-<h2>4. Device anonymous code (anon_id)</h2>
-<p>A random UUID is generated on your device at first launch. It is <strong>not linked to any
-identity</strong> — not your Apple ID, device serial, or advertising identifier. It serves only
-two purposes: rate limiting and data withdrawal. Deleting and reinstalling the app generates
-a new code; data uploaded under the old code can no longer be withdrawn from within the app.</p>
-
-<h2>5. Abuse prevention</h2>
-<p>The recognition service is open to all users, so abuse prevention is necessary. We store a
-<strong>salted one-way hash of the source IP address</strong> for daily rate limiting.
-<strong>Raw IP addresses are not retained.</strong></p>
-
-<h2>6. Retention and purpose</h2>
-<ul>
-<li><strong>On device:</strong> photos, depth data and records are stored encrypted (AES-256-GCM)
-in the app's private container. Deleting a record deletes its image and depth file.
-Removing the app deletes all local data.</li>
-<li><strong>Uploaded research data:</strong> used to improve wound recognition and 3D measurement
-accuracy. <strong>Not used for advertising, not sold, not shared with third parties,
-not used for cross-app tracking.</strong></li>
-<li><strong>Retention period:</strong> until you withdraw or the research project concludes,
-as approved by the governing research ethics protocol.</li>
-</ul>
-
-<h2>7. How to withdraw</h2>
-<ol>
-<li><strong>Stop future uploads:</strong> Settings → turn off research upload. Effective immediately.</li>
-<li><strong>Delete uploaded data:</strong> the in-app withdrawal function requests deletion of all
-data filed under your device anonymous code.</li>
-<li>You may also email us (section 9). Note that because we collect no identity information,
-<strong>the device anonymous code is the only way we can locate your data</strong>.</li>
-</ol>
-
-<h2>8. Children</h2>
-<p>This app is not directed at children and does not knowingly collect data from anyone under 13.</p>
-
-<h2>9. Contact</h2>
-<p><a href="mailto:jack.hou@gmail.com">jack.hou@gmail.com</a></p>
-
-<h2>10. Changes</h2>
-<p>Material changes increment the in-app consent text version and re-prompt for consent on next
-launch. Data collected under a previous version remains governed by that version.</p>
-</div>
-
-<footer>
-<p><a href="./">← 返回 / Back</a></p>
-</footer>
-</body>
-</html>
+<p>資料供本次雲端辨識、經同意的傷口辨識／量測研究，以及後續獨立 WoundAI3D 研究與模型改進使用。App 目前不以這些資料提供已驗證的自動 3D 診斷。深度已傳送不代表照片與深度配準、感測精確度或訓練資料資格均已通過；衍生的有效像素遮罩不能當成原生感測器信心值，缺少的拍攝姿態／時間不會推算為實測值。</p>
+<p>已取得雲端影像識別碼的紀錄，修正後可另傳輪廓、分组與量測修訂，不重傳照片；網路或伺服器未確認時，App 顯示待同步，不能視為已保存。沒有雲端識別碼的舊紀錄只在本機更新。</p>
+<h2>4. 去識別限制與影像安全</h2>
+<p>影像重新編碼不會移除像素中的姓名、臉部、證件、刺青或背景資訊。請只拍傷口部位，避免其他可識別內容入鏡。候選公開後台在偵測到人臉，或人臉檢查不可用時拒絕繼續辨識及研究保存；這項有限檢查不保證所有人臉或個人資訊都能被偵測，也不是已完成的自動模糊化服務。</p>
+<p>影像、深度、傷口位置與歷次量測可能揭露健康資訊。安裝假名代碼會串聯同一安裝的資料；沒有姓名或帳號不等於完全匿名，也不能保證無法重新辨識。因此隱私宣告將照片、健康資料與裝置識別資訊列為有關聯資料。</p>
+<h2>5. 身分驗證、供應商與連線資料</h2>
+<p>候選使用 Apple App Attest 驗證請求來源及原安裝身分。這會與 Apple 的裝置驗證服務通訊；不是註冊 Apple ID 帳號給 WoundLite，也不把驗證結果當成量測準確率證明。尚須完成真實 Apple／後台端到端驗收。</p>
+<p>候選雲端由 Google Cloud 處理與儲存資料。應用程式限流記錄安裝代碼及加鹽 IP 雜湊；雜湊不能保證不可反推，也不代表雲端平台、代理或存取日誌沒有原始 IP。正式服務地區、日誌欄位、存取權限、保存期限、研究接收者與跨境安排須在開放前確認。本稿不承諾未核對的「完全不與第三方處理」或「不保存任何連線資料」。</p>
+<p>目前候選未使用廣告或跨 App 追蹤，研究資料不作廣告用途。未來新增計費、廣告或新的研究接收者須另行評估及更新揭露；不由本次同意概括授權。</p>
+<h2>6. 關閉上傳、撤回與清除範圍</h2>
+<p>設定中關閉研究上傳會停止後續新傳送，不會自動召回已送出的請求，也不刪除雲端資料。另設「撤回研究並要求清除雲端媒體」按鈕，依本安裝仍保有的可驗證身分，向目前服務提出撤回。</p>
+<p>新版候選後台先阻止新的研究寫入，再清空此安裝目前可見的照片、深度、metadata、研究索引及標註／量測修訂內容，並核對結果。為阻止延遲上傳重新寫回，保留最少的安裝／物件識別、撤回狀態與空物件標記；安全驗證與防濫用狀態不因此全部刪除。不宣稱所有物件名稱消失。</p>
+<p>失敗或連線中斷會保留待處理狀態，請在設定重試／查核；只有收到符合範圍的確認才顯示清除完成。本機紀錄保留，撤回後本安裝維持離線，不會自動換身分恢復研究。此流程不涵蓋其他服務、舊版無法驗證身分的資料、未追蹤的匯出／備份或既有模型；這些範圍的處理責任及時程需依核定計畫另行公布。</p>
+<h2>7. 保存、研究期間與參與資格：發布前待確認</h2>
+<p>正式研究的期間、資料與安全標記／日誌保存期限、用途終止後處理、刪除例外與回覆時限尚未由負責方確認。本稿不承諾永久保存，也不虛構已核准的保留期限。現階段測試限定合成或模擬資料，不能據此開始真實人體收案。</p>
+<p>須補齊研究程序、風險與利益、研究負責者／資料管理者、適用地區、成人／未成年人參與條件，以及倫理審查核准或適用性判定。家長拍攝不會自動代替研究所需的監護人同意流程。</p>
+<h2>8. 聯絡及變更</h2>
+<p>專案聯絡：Jack Hou，<a href="mailto:jack.hou@gmail.com">jack.hou@gmail.com</a>。請勿直接寄送傷口影像或病患身分資料；先詢問安全的處理管道。正式資料管理機構與研究責任角色仍待確認。</p>
+<p>用途或處理範圍實質改變時，須更新政策及必要的同意流程；不能將新用途自動套用於舊資料。發布前需使 App、App Store Connect 隱私問卷、公開政策與實際部署一致。</p>
+<div class="en" lang="en">
+<h1>WoundLite Privacy Policy — Draft</h1>
+<p class="sub">Revised 2026-10-04; compared with candidate consent text 2026-10-04.1. Not published. The new backend is not deployed and real public research enrollment is not open.</p>
+<h2>1. Offline use and cloud choice</h2>
+<p>WoundLite supports personal wound photographs, outlines and LiDAR-assisted surface-area estimates for reference. It does not provide diagnosis or treatment advice; this is not a regulatory classification. Declining research upload keeps the measurement workflow on the phone without cloud segmentation. No name, phone or email account is required. Cloud recognition is currently proposed as an explicitly consented research-participation feature; this design and the full consent process still require review.</p>
+<h2>2. On-device records</h2>
+<p>Photographs and depth sidecars use AES-GCM with a device Keychain key. Measurements, dates, grouping, location and outlines are sandboxed JSON, not separately AES-encrypted. Local deletion does not delete cloud copies. Removing the app or losing its original installation identity may prevent self-service withdrawal of older data; contact support first.</p>
+<p>The candidate app requests exclusion of its measurement index, photographs and depth files from system backups, including after atomic updates. This flag does not guarantee exclusion from every backup or remove previous backups. Local records may be unrecoverable after a device change, app removal or device loss; research uploads are not a personal backup service.</p>
+<h2>3. Consented transmissions and purposes</h2>
+<p>Candidate uploads include the photograph, valid raw LiDAR depth, image/depth dimensions, camera intrinsics, orientation and available quality metadata; AI and corrected outlines, surface-area and other available estimates, wound-group codes, side/site and consent version; and a verified installation pseudonym with request/revision identifiers. Unedited AI results may also be synchronized and remain marked as unverified AI output.</p>
+<p>Purposes are cloud recognition, consented wound-recognition/measurement research and later independent WoundAI3D research/model improvement. This does not provide validated automated 3D diagnosis. A depth-storage receipt does not prove RGB-D registration, sensor accuracy or training eligibility. Derived validity masks are not native sensor confidence; unavailable pose/time is not invented. Record corrections send revisions without retransmitting the photograph; unacknowledged requests remain pending. Older records without a cloud image identifier remain local.</p>
+<h2>4. Identification risks</h2>
+<p>Re-encoding does not remove faces, names, documents, tattoos or background details in pixels. Photograph the wound only. The public backend candidate stops inference and research persistence when a face is detected or its face check is unavailable. This limited check cannot guarantee detection of every identifying feature and is not an implemented automatic-blurring service. Photographs, depth, body location and longitudinal measurements may reveal health information. An installation pseudonym links records; no account does not mean complete anonymity. The privacy manifest therefore marks photos, health data and device identifiers as linked.</p>
+<h2>5. Verification and providers</h2>
+<p>The candidate uses Apple App Attest, communicating with Apple's verification service to authenticate requests and installation ownership. This does not create an Apple ID account with WoundLite or certify measurement accuracy. Real Apple/backend end-to-end verification is still pending. Cloud processing/storage uses Google Cloud. Application rate records include the installation pseudonym and a salted IP hash; hashing does not guarantee non-identifiability or absence of raw IP in infrastructure logs. Production regions, log fields, access, retention, research recipients and cross-border arrangements require confirmation before opening. No advertising or cross-app tracking is implemented in the candidate; research data is not for advertising. Future monetization or new recipients require separate assessment and disclosure.</p>
+<h2>6. Stopping uploads and withdrawal</h2>
+<p>Turning off research upload stops subsequent new transmissions, not already-sent requests or existing cloud data. A separate withdrawal button requests removal from the current service using the installation's verifiable identity. The new backend candidate closes research writes, clears the installation's currently live photographs, depth, metadata, research indexes and annotation/measurement revisions, then verifies the result. Minimal owner/object identifiers, revocation state and empty markers remain to stop delayed writes from recreating payloads. Verification and abuse-prevention state is not entirely deleted.</p>
+<p>Failures remain pending and can be retried in Settings. Completion requires a valid scoped receipt. Local records remain; the installation stays offline without silently creating a new identity. Other services, unverifiable legacy data, untracked exports/backups and existing models are outside this automated receipt. Their handling, responsibilities and timelines must be published under the approved protocol.</p>
+<h2>7. Publication prerequisites</h2>
+<p>The responsible party has not yet confirmed research duration, data/security-marker/log retention, end-of-purpose handling, deletion exceptions or response deadlines. This draft promises neither permanent storage nor an invented approved retention period. Current tests are synthetic or phantom only, not authorization to enroll people. Publication requires research procedures, risks/benefits, responsible investigator/controller, regions, adult/minor eligibility and ethics approval or an applicability determination. A parent taking a photograph does not replace the required guardian-consent procedure.</p>
+<h2>8. Contact and changes</h2>
+<p>Project contact: Jack Hou, <a href="mailto:jack.hou@gmail.com">jack.hou@gmail.com</a>. Do not email wound photographs or patient identifiers; request a secure channel first. The formal controlling entity and research responsibilities require confirmation. Material purpose changes need updated policy and appropriate consent; new purposes are not automatically applied to older data. App behavior, App Store disclosures, public policy and deployed services must agree before release.</p>
+</div><footer><a href="./">返回 / Back</a></footer></body></html>

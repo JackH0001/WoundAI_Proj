@@ -41,6 +41,11 @@ KNOWN_LICENSES = {
 # Android 相依：Maven 座標查不到 metadata（沒有本機安裝可讀），只能靠對照表。
 # 只填**已查證**的；查不到就留白讓它進「待確認」，不要用猜的填滿讓清單看起來完整。
 ANDROID_KNOWN_LICENSES = {
+    # 2026-10-05：社群的 com.quickbirdstudios:opencv 換成官方的 org.opencv:opencv
+    # （16 KB page size 與原生 ArUco，見 Android/app/build.gradle 的理由）。
+    # 兩者授權相同——OpenCV 自 4.5.0 起由 BSD-3-Clause 改為 Apache-2.0。
+    # 舊座標的對照保留：它仍會出現在舊版 SBOM 與歷史紀錄裡。
+    "org.opencv:opencv": "Apache-2.0（OpenCV 4.5+ 起本體為 Apache-2.0）",
     "com.quickbirdstudios:opencv": "Apache-2.0（OpenCV 4.5+ 本體與此 Android 包裝皆為 Apache-2.0）",
     "com.microsoft.onnxruntime:onnxruntime-android": "MIT",
     "com.github.PhilJay:MPAndroidChart": "Apache-2.0",

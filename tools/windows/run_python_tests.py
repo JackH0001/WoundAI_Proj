@@ -100,6 +100,8 @@ def sanitized_test_environment(source) -> dict:
         if upper == "WOUNDAI_STORE" or upper.startswith("WOUNDAI_GCS_") \
                 or upper == "WOUNDAI_AUDIT_BUCKET" \
                 or upper == "WOUNDAI_REQUIRE_FUNCTIONAL_TESTS" \
+                or upper in ("WOUNDAI_ENABLE_LITE_API", "WOUNDAI_SERVICE_PROFILE") \
+                or upper.startswith(("WOUNDAI_LITE_ATTEST_", "WOUNDAI_LITE_SECURITY_", "WOUNDAI_LITE_BUDGET_")) \
                 or upper in _STRIPPED_ENVIRONMENT_KEYS:
             env.pop(key)
     env["WOUNDAI_REQUIRE_FUNCTIONAL_TESTS"] = "1"

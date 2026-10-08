@@ -9,6 +9,11 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - run: pip install numpy onnxruntime pillow pyyaml jsonschema flask opencv-python-headless fastapi 'httpx<0.28' python-multipart
+      - name: Mobile static logic and declared parity
+        run: |
+          python -B tools/verify_logic.py
+          python -B tools/parity_check.py
+          python -B tools/test_mobile_release_contract.py
       - name: Phase 0 workflow simulation (must be 10/10)
         run: python engineering/phase0/workflow_sim.py
       - name: Phase 0 preprocess consistency

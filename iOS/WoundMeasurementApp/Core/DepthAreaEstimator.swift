@@ -52,7 +52,9 @@ enum DepthAreaEstimator {
                          smoothMm: Double = 8) -> DepthAreaResult? {
         let dw = depth.width, dh = depth.height
         guard dw >= 8, dh >= 8, imageW > 0, imageH > 0,
-              depth.fx > 0, depth.fy > 0, depth.refWidth > 0,
+              dw <= 4096, dh <= 4096, depth.map.count == dw * dh,
+              depth.matchesImageAspect(width: imageW, height: imageH),
+              depth.fx > 0, depth.fy > 0, depth.refWidth > 0, depth.refHeight > 0,
               !polygons.isEmpty else { return nil }
 
         // 內參換算到**深度圖像素空間**（原值相對 refW×refH）。

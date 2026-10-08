@@ -4,7 +4,7 @@ import UIKit
 /**
  民眾版量測流程：拍照（LiDAR）→ 輪廓（雲端辨識或手動圈選）→ 深度幾何 → 結果。
 
- 主數字＝**表面積**（傾角不變、曲面真實）；品質不足直接不給數字。
+ 主數字＝LiDAR 輔助表面積估算；品質不足直接不給數字。
  所有重計算（影像正規化、深度估算）都在背景緒——醫療版 2026-08-18 的
  「畫面凍住 10 秒」教訓，這裡從第一天就不犯。
  */
@@ -20,14 +20,16 @@ final class LiteMeasureVM: ObservableObject {
     @Published var busyHint = ""
     @Published var note: String?
     @Published var savedId: String?
+    @Published var uploadMessage: String?
     /// 輪廓來源（存進紀錄）："manual" / "cloud"
     @Published var source = "manual"
     /// 這張影像在 lite/segment 落地後的 image_id（lay label 回收的綁定鍵）。
     private(set) var cloudImageId: String?
+    private(set) var cloudBinding: LiteCloudBinding?
+    var hasManualContour: Bool { userEdited }
     /// 雲端當時有沒有給出輪廓（lay label 的 source 語意：有→edited、無→manual）。
     private var cloudHadPolys = false
-    /// 使用者動過手（手動圈選或對雲端結果重新圈選）。沒動過手不回收
-    /// ——模型自己的輸出回傳是自我確認雜訊。
+    /// 是否真的改過輪廓。AI 量測也可同步，但不可當成人工標註。
     private var userEdited = false
     private var gen = 0
 
@@ -56,10 +58,12 @@ final class LiteMeasureVM: ObservableObject {
         busyHint = "影像處理中…"
         defer { busy = false }
         savedId = nil
+        uploadMessage = nil
         note = nil
         estimate = nil
         polys = []
         cloudImageId = nil
+        cloudBinding = nil
         cloudHadPolys = false
         userEdited = false
         let work = await Task.detached(priority: .userInitiated) {
@@ -77,6 +81,12 @@ final class LiteMeasureVM: ObservableObject {
             return true   // 沒深度就不必進圈選——圈了也算不出來
         }
 
+        guard dd?.matchesImageAspect(width: imageW, height: imageH) == true else {
+            depth = nil
+            note = "照片與深度方向不相符，未送出辨識或計算。請重新拍攝。"
+            return true
+        }
+
         // 輪廓來源優先序（2026-08-18 規劃）：
         //   ① 地端模型（成熟上線後把 .mlmodel 丟進 WoundLite/Models/ 即自動啟用，離線可用）
         //   ② 雲端辨識（研究同意＋連線設定）
@@ -88,7 +98,7 @@ final class LiteMeasureVM: ObservableObject {
                 if !picked.isEmpty {
                     polys = picked
                     source = "local"
-                    note = "已由裝置端模型自動圈選（未連網）。可用「重新圈選」微調。"
+                    note = "已由裝置端模型自動圈選（未連網）。可用「修正圈選」微調。"
                     await runEstimate()
                     return true
                 }
@@ -97,7 +107,7 @@ final class LiteMeasureVM: ObservableObject {
         if LitePrefs.researchConsent == true {
             busyHint = "雲端辨識中…（約數秒）"
             switch await liteCloudSegment(work, depth: dd) {
-            case .ok(let cloud, let stored, let route, let raw):
+            case .ok(let cloud, let stored, let route, let raw, let receipt):
                 cloudHadPolys = !cloud.isEmpty
                 // Debug 組建把路由與輪廓數直接掛在畫面上：route 說出後端走哪條路、
                 // 「後端 N・解析 M」不一致＝客戶端解析問題——兩種病一眼分開。
@@ -111,10 +121,12 @@ final class LiteMeasureVM: ObservableObject {
                     source = "cloud"
                     var lines: [String] = []
                     if cloud.count > 1 {
-                        lines.append("已自動取畫面中央的傷口（偵測到 \(cloud.count) 處，其餘忽略）。可用「重新圈選」微調。")
+                        lines.append("已自動取畫面中央的傷口（偵測到 \(cloud.count) 處，其餘忽略）。可用「修正圈選」微調。")
                     }
                     // 據實告知有沒有上傳——同意分流講給人聽才有意義（後端 stored 欄位）。
-                    if stored { lines.append("去識別影像與深度資料已上傳供研究（可於設定撤回未來上傳）。") }
+                    if let status = LiteStorageReceipt.message(imageStored: stored, receipt: receipt) {
+                        lines.append(status + "可於設定停止未來上傳。")
+                    }
                     if let d = dbg { lines.append(d) }
                     note = lines.isEmpty ? nil : lines.joined(separator: "\n")
                     await runEstimate()
@@ -122,9 +134,8 @@ final class LiteMeasureVM: ObservableObject {
                 }
                 // 空輪廓時後端照樣落地（同意者）——難例正是研究最需要的樣本，
                 // 而「有沒有上傳」必須據實告知，不因辨識失敗而略過。
-                var msg = stored
-                    ? "雲端未辨識到傷口，請手動圈選。去識別資料已上傳供研究（正是改進辨識所需的難例）。"
-                    : "雲端未辨識到傷口，請手動圈選。"
+                var msg = "雲端未辨識到傷口，請手動圈選。"
+                if let status = LiteStorageReceipt.message(imageStored: stored, receipt: receipt) { msg += status }
                 if let d = dbg { msg += "\n" + d }
                 note = msg
                 return false
@@ -141,7 +152,10 @@ final class LiteMeasureVM: ObservableObject {
     }
 
     /// 手動圈選完成。
-    func applyManual(_ traced: [[[Int]]]) async {
+    func applyManual(_ traced: [[[Int]]], correctionIoU: Double? = nil) async {
+        // Merely opening the editor is not a manual label. Preserve the exact
+        // original polygons and estimate instead of retracing an unchanged mask.
+        guard correctionIoU != 1 || polys.isEmpty else { return }
         let picked = Self.centerWound(traced, w: imageW, h: imageH)
         polys = picked
         source = "manual"
@@ -182,27 +196,20 @@ final class LiteMeasureVM: ObservableObject {
         if gen == g { estimate = est }
     }
 
-    /**
-     存檔後回收民眾輪廓（lay label）。三個前提**缺一不送**：研究同意、
-     該影像已由 lite/segment 落地（有 image_id）、使用者動過手。
-     射後不理（try?）：lay label 掉一筆是可接受損失，不值得為它擋存檔流程。
-     */
-    func submitLayLabel() {
-        guard LitePrefs.researchConsent == true,
-              let iid = cloudImageId, userEdited, !polys.isEmpty else { return }
-        let p = polys, iw = imageW, ih = imageH
-        let src = cloudHadPolys ? "edited" : "manual"
+    func submitLayLabel(store: LiteStore) {
+        guard let recordID = savedId else { return }
+        uploadMessage = "本機已保存；正在核對同步狀態…"
         Task {
-            let c = BackendClient(baseUrl: AppSettings.backendURL())
-            try? await c.liteAnnotation(anonId: LitePrefs.anonId, imageId: iid,
-                                        polygons: p, imageW: iw, imageH: ih,
-                                        source: src,
-                                        consentVersion: LitePrefs.consentVersion)
+            await store.syncRevision(recordID: recordID)
+            guard savedId == recordID else { return }
+            uploadMessage = LitePrefs.researchConsent == true
+                ? store.records.first(where: { $0.id == recordID })?.cloudSyncDescription
+                : "僅更新此裝置；研究上傳未開啟。"
         }
     }
 
     enum LiteCloudOutcome {
-        case ok([[[Int]]], stored: Bool, route: String?, raw: Int)
+        case ok([[[Int]]], stored: Bool, route: String?, raw: Int, receipt: LiteStorageReceipt?)
         case softFail(String)     // 429 配額／人臉退件：後端給的可讀訊息
         case hardFail
     }
@@ -210,39 +217,50 @@ final class LiteMeasureVM: ObservableObject {
     /**
      匿名辨識（`/api/v1/lite/segment`，2026-08-19 切換；免帳號免登入）。
 
-     同意研究時一併附上深度研究資料：png16_mm 深度圖＋置信度＋**深度圖像素空間**
-     內參（與醫療版 annotation 同一 wire format、後端同一驗證器）。
+     同意研究時附上同一次 JPEG 與原始 Float32 深度資料包。缺少方向等
+     必要資訊時保留舊 PNG 路徑，但不宣稱原始深度或感測器信心值已保存。
      編碼是 MB 級工作，照例移出主執行緒。
      */
     private func liteCloudSegment(_ work: UIImage, depth d: DepthCapture?) async -> LiteCloudOutcome {
-        let payload: (jpeg: Data, dep: String?, conf: String?, k: [String: Double]?)? =
+        let payload: (jpeg: Data, dep: String?, conf: String?, k: [String: Double]?, raw: LiteRawDepthPacket?)? =
             await Task.detached(priority: .userInitiated) {
                 guard let jpeg = work.jpegData(compressionQuality: 0.92) else { return nil }
+                if let d, let packet = try? LiteRawDepthPacket.make(depth: d, jpeg: jpeg) {
+                    return (jpeg, nil, nil, nil, packet)
+                }
                 guard let d, let enc = DepthAreaEstimator.encodePng16mm(d) else {
-                    return (jpeg, nil, nil, nil)
+                    return (jpeg, nil, nil, nil, nil)
                 }
                 return (jpeg,
                         enc.depthPng.base64EncodedString(),
                         enc.confPng.base64EncodedString(),
-                        DepthAreaEstimator.intrinsicsForUpload(d))
+                        DepthAreaEstimator.intrinsicsForUpload(d), nil)
             }.value
         guard let payload else { return .hardFail }
-        let c = BackendClient(baseUrl: AppSettings.backendURL())
+        let server = AppSettings.backendURL()
+        let c = BackendClient(baseUrl: server)
         do {
+            let anonId = try await c.liteInstallation()
             let r = try await c.liteSegment(jpeg: payload.jpeg,
-                                            anonId: LitePrefs.anonId,
+                                            anonId: anonId,
                                             consentVersion: LitePrefs.consentVersion,
                                             depthMapPngBase64: payload.dep,
                                             depthConfPngBase64: payload.conf,
-                                            cameraIntrinsics: payload.k)
+                                            cameraIntrinsics: payload.k, rawCapture: payload.raw)
+            LiteUsageState.shared.record(r.quota, server: server, anonId: anonId)
             if let m = r.userMessage { return .softFail(m) }
             cloudImageId = r.imageId   // 落地鍵（stored=false 時後端本來就回 nil）
+            if r.stored, let imageID = r.imageId, !imageID.isEmpty,
+               r.imageW == work.cgImage?.width, r.imageH == work.cgImage?.height {
+                cloudBinding = LiteCloudBinding(server: server, anonID: anonId, imageID: imageID,
+                    imageW: r.imageW > 0 ? r.imageW : imageW, imageH: r.imageH > 0 ? r.imageH : imageH, storageReceipt: r.storageReceipt)
+            }
             // 以後端回覆的座標空間為準（它處理的那張圖才是輪廓所在的空間）。
             if r.imageW > 0 { imageW = r.imageW }
             if r.imageH > 0 { imageH = r.imageH }
             depth?.rgbWidth = imageW
             depth?.rgbHeight = imageH
-            return .ok(r.polygons, stored: r.stored, route: r.route, raw: r.rawPolyCount)
+            return .ok(r.polygons, stored: r.stored, route: r.route, raw: r.rawPolyCount, receipt: r.storageReceipt)
         } catch {
             // Debug 組建把確切錯誤（HTTP 狀態＋伺服器訊息／逾時）掛上畫面——
             // 「連線或服務問題」六個字對排錯毫無鑑別力（2026-08-19 教訓：
@@ -283,9 +301,9 @@ func liteVerdict(_ e: DepthAreaResult) -> LiteVerdict {
     }
     var warns: [String] = []
     if let t = e.tiltDeg, t > 25 {
-        warns.append("拍攝角度偏斜（約 \(Int(t))°），面積誤差會變大。建議正對傷口重拍。")
+        warns.append("拍攝角度偏斜（估計約 \(Int(t))°），辨識邊界與面積誤差可能增加。結果僅供參考，建議正對傷口重拍。")
     } else if let t = e.tiltDeg, t > 10 {
-        warns.append("拍攝略斜（約 \(Int(t))°）。表面積受角度影響小，但正對拍攝最準。")
+        warns.append("拍攝略斜（估計約 \(Int(t))°）。建議正對傷口拍攝，並確認圈選邊界。")
     }
     if e.medianDistanceM > 0.5 {
         warns.append("距離偏遠（約 \(Int(e.medianDistanceM * 100)) 公分），建議 25–40 公分。")
@@ -306,6 +324,13 @@ struct LiteMeasureView: View {
     @StateObject private var vm = LiteMeasureVM()
     @State private var showCamera = false
     @State private var showTrace = false
+    @State private var woundID = ""
+    @State private var woundSide = ""
+    @State private var woundSite = ""
+    @State private var addingNewWound = false
+    @State private var saveTarget: LiteWoundSaveTarget?
+    @State private var showSaveConfirmation = false
+    @State private var saveNotice: String?
 
     var body: some View {
         NavigationStack {
@@ -322,6 +347,9 @@ struct LiteMeasureView: View {
                     Text("正對傷口、距離 25–40 公分，等中央對焦框變綠再拍。")
                         .font(.footnote).foregroundStyle(.secondary)
 
+                    if LitePrefs.researchConsent == true {
+                        LiteQuotaView()
+                    }
                     if vm.busy {
                         HStack(spacing: 8) { ProgressView(); Text(vm.busyHint).font(.footnote) }
                     }
@@ -335,7 +363,7 @@ struct LiteMeasureView: View {
                         LitePreview(image: img, polys: vm.polys,
                                     imageW: vm.imageW, imageH: vm.imageH)
                         if vm.depth != nil {
-                            Button(vm.polys.isEmpty ? "圈選傷口" : "重新圈選") { showTrace = true }
+                            Button(vm.polys.isEmpty ? "圈選傷口" : "修正圈選") { showTrace = true }
                                 .buttonStyle(.bordered)
                         }
                     }
@@ -348,6 +376,13 @@ struct LiteMeasureView: View {
                 .padding()
             }
             .navigationTitle("量測")
+            .onAppear { if vm.image == nil { selectLastWound() } }
+            .alert("確認傷口位置", isPresented: $showSaveConfirmation, presenting: saveTarget) { target in
+                Button("返回修改", role: .cancel) { saveTarget = nil }
+                Button("確認並存入") { saveConfirmed(target) }
+            } message: { target in
+                Text(target.confirmationMessage)
+            }
             .fullScreenCover(isPresented: $showCamera) {
                 CameraCaptureView(
                     // 「只拍傷口」不只是構圖建議，是去識別化的一環：協定層去得掉 EXIF 與
@@ -356,6 +391,7 @@ struct LiteMeasureView: View {
                         + "避免臉部或可辨識個人的物品入鏡。",
                     onCapture: { img, dep in
                         showCamera = false
+                        selectLastWound()
                         Task {
                             let done = await vm.ingest(img, depth: dep)
                             if !done { showTrace = true }
@@ -374,9 +410,9 @@ struct LiteMeasureView: View {
                                   mmPerPx: nil, resume: nil, wbGains: nil,
                                   boundaryOnly: true,
                                   onCancel: { showTrace = false },
-                                  onDone: { _, all, _, _, _, _ in
+                                  onDone: { _, all, iou, _, _, _ in
                                       showTrace = false
-                                      Task { await vm.applyManual(all) }
+                                      Task { await vm.applyManual(all, correctionIoU: iou) }
                                   })
                 }
             }
@@ -387,36 +423,141 @@ struct LiteMeasureView: View {
     private func saveRow(e: DepthAreaResult) -> some View {
         let v = liteVerdict(e)
         if v.usable {
+            let selected = store.wounds.first { $0.id == woundID }
+            let target = currentSaveTarget
+            HStack(alignment: .top, spacing: 10) {
+                Menu {
+                    ForEach(store.wounds) { wound in
+                        Button {
+                            woundID = wound.id
+                            addingNewWound = false
+                            woundSide = ""; woundSite = ""
+                            saveNotice = nil
+                        } label: {
+                            if !addingNewWound && woundID == wound.id {
+                                Label(wound.displayName, systemImage: "checkmark")
+                            } else {
+                                Text(wound.displayName)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack {
+                        Text(addingNewWound ? "選擇已紀錄傷口" : (selected?.name ?? "選擇已紀錄傷口"))
+                            .multilineTextAlignment(.leading)
+                        Image(systemName: "chevron.down")
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .padding(.horizontal, 10)
+                    .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                }
+                .disabled(store.wounds.isEmpty)
+                .accessibilityLabel("選擇已紀錄傷口")
+                Button {
+                    addingNewWound = true
+                    woundSide = ""; woundSite = ""
+                    saveNotice = nil
+                } label: {
+                    Text("新增紀錄傷口＋")
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .padding(.horizontal, 10)
+                        .foregroundStyle(addingNewWound ? Color.white : Color.accentColor)
+                        .background(addingNewWound ? Color.accentColor : Color.secondary.opacity(0.12),
+                                    in: RoundedRectangle(cornerRadius: 10))
+                }
+                .accessibilityAddTraits(addingNewWound ? .isSelected : [])
+            }
+            .buttonStyle(.plain)
+            .disabled(vm.savedId != nil || vm.busy)
+            if !addingNewWound, let existingLocation = selected?.location {
+                Label(existingLocation.label, systemImage: "mappin.and.ellipse")
+                    .font(.subheadline)
+                Text("沿用此傷口的位置，不需重填。")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if addingNewWound || selected != nil {
+                LiteLocationFields(side: $woundSide, site: $woundSite)
+                    .disabled(vm.savedId != nil || vm.busy)
+                Text(addingNewWound ? "側別與詳細部位皆為必填。" : "此傷口的位置尚未齊全；補填會套用到同組舊紀錄。")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text("請選擇已紀錄傷口，或點右側「新增紀錄傷口＋」。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text("追蹤同一處傷口時，請選擇原有傷口；不同傷口的紀錄會分開顯示。")
+                .font(.caption).foregroundStyle(.secondary)
+            if let error = store.storageError { Text(error).font(.footnote).foregroundStyle(.orange) }
+            if let saveNotice { Text(saveNotice).font(.footnote).foregroundStyle(.orange) }
             Button(vm.savedId == nil ? "存入紀錄" : "✓ 已存入紀錄") {
-                guard vm.savedId == nil, let img = vm.image,
-                      let jpeg = img.jpegData(compressionQuality: 0.85),
-                      let name = store.images.save(jpeg: jpeg) else { return }
-                // 輪廓與深度側檔一併落地：詳情頁「重新圈選・重新量測」靠它們
-                // 把當時的幾何完整還原（只有影像沒有深度，就只能看不能重算）。
-                let polysJson = (try? JSONEncoder().encode(vm.polys))
-                    .flatMap { String(data: $0, encoding: .utf8) }
-                let depthName = vm.depth.flatMap { store.saveDepth($0) }
-                let rec = LiteRecord(
-                    id: UUID().uuidString,
-                    dateISO: ISO8601DateFormatter().string(from: Date()),
-                    surfaceCm2: e.surfaceAreaCm2,
-                    projectedCm2: e.projectedAreaCm2,
-                    tiltDeg: e.tiltDeg,
-                    volumeMl: e.volumeMl,
-                    maxDepthMm: e.maxDepthMm,
-                    quality: v.warnings.isEmpty ? "ok" : "注意",
-                    imageName: name,
-                    source: vm.source,
-                    polysJson: polysJson,
-                    depthName: depthName)
-                store.add(rec)
-                vm.savedId = rec.id
-                // 存檔即回收 lay label（前提檢查在 vm 內；不動手/未同意/未落地都靜默略過）
-                vm.submitLayLabel()
+                guard let target = currentSaveTarget else { return }
+                saveTarget = target
+                showSaveConfirmation = true
             }
             .buttonStyle(.bordered)
-            .disabled(vm.savedId != nil)
+            .disabled(vm.savedId != nil || vm.busy || target == nil || store.needsReload)
+            if let message = vm.uploadMessage {
+                Text(message).font(.footnote).foregroundStyle(.secondary)
+            }
         }
+    }
+
+    private var currentSaveTarget: LiteWoundSaveTarget? {
+        LiteWoundSaveTarget.resolve(addingNew: addingNewWound, selectedID: woundID,
+            entered: LiteWoundLocation(side: woundSide, site: woundSite), groups: store.wounds)
+    }
+
+    private func selectLastWound() {
+        woundID = LiteGrouping.mostRecentWoundID(store.records) ?? ""
+        addingNewWound = false
+        woundSide = ""; woundSite = ""
+        saveTarget = nil; saveNotice = nil
+    }
+
+    private func saveConfirmed(_ target: LiteWoundSaveTarget) {
+        defer { saveTarget = nil }
+        guard vm.savedId == nil, !vm.busy, !store.needsReload,
+              let e = vm.estimate, liteVerdict(e).usable else { return }
+        guard currentSaveTarget == target else {
+            saveNotice = "傷口或位置已變更，請重新確認後存入。"
+            return
+        }
+        guard let img = vm.image, let jpeg = img.jpegData(compressionQuality: 0.85),
+              let name = store.images.save(jpeg: jpeg) else { return }
+        let v = liteVerdict(e)
+        // 輪廓與深度側檔一併落地：詳情頁「修正圈選・重新量測」靠它們
+        // 把當時的幾何完整還原（只有影像沒有深度，就只能看不能重算）。
+        let polysJson = (try? JSONEncoder().encode(vm.polys))
+            .flatMap { String(data: $0, encoding: .utf8) }
+        guard let depth = vm.depth,
+              let depthName = store.saveDepth(depth, matchingJPEG: jpeg) else {
+            store.images.delete(name)
+            return
+        }
+        var rec = LiteRecord(
+            id: UUID().uuidString,
+            dateISO: ISO8601DateFormatter().string(from: Date()),
+            surfaceCm2: e.surfaceAreaCm2,
+            projectedCm2: e.projectedAreaCm2,
+            tiltDeg: e.tiltDeg,
+            volumeMl: e.volumeMl,
+            maxDepthMm: e.maxDepthMm,
+            quality: v.warnings.isEmpty ? "ok" : "注意",
+            imageName: name,
+            source: vm.source,
+            polysJson: polysJson,
+            depthName: depthName)
+        rec.cloudSync = vm.cloudBinding.map { LiteCloudSyncState(binding: $0) }
+        rec.manuallyConfirmed = vm.hasManualContour
+        guard let saved = store.saveMeasurement(rec, selectedWoundID: target.woundID, enteredLocation: target.location) else {
+            store.images.delete(name)
+            store.images.delete(depthName)
+            return
+        }
+        woundID = saved.woundID ?? ""
+        addingNewWound = false
+        vm.savedId = saved.id
+        // Only the server receipt confirms annotation delivery; local saving stays independent.
+        vm.submitLayLabel(store: store)
     }
 }
 
@@ -429,29 +570,7 @@ struct LitePreview: View {
     let imageH: Int
 
     var body: some View {
-        GeometryReader { geo in
-            let iw = CGFloat(max(imageW, 1)), ih = CGFloat(max(imageH, 1))
-            let s = min(geo.size.width / iw, geo.size.height / ih)
-            let ox = (geo.size.width - iw * s) / 2
-            let oy = (geo.size.height - ih * s) / 2
-            ZStack(alignment: .topLeading) {
-                Image(uiImage: image)
-                    .resizable().scaledToFit()
-                    .frame(width: geo.size.width, height: geo.size.height)
-                Path { p in
-                    for poly in polys where poly.count >= 3 {
-                        let pts = poly.map {
-                            CGPoint(x: ox + CGFloat($0[0]) * s, y: oy + CGFloat($0[1]) * s)
-                        }
-                        p.move(to: pts[0]); p.addLines(pts); p.closeSubpath()
-                    }
-                }
-                .stroke(Color.cyan, lineWidth: 2)
-            }
-        }
-        .frame(height: 280)
-        .background(Color.black.opacity(0.05))
-        .cornerRadius(8)
+        WoundImagePreview(image: image, polygons: polys, imageW: imageW, imageH: imageH, height: 280)
     }
 }
 
@@ -466,10 +585,10 @@ struct LiteResultCard: View {
             if verdict.usable {
                 Text(String(format: "傷口面積：%.2f cm²", e.surfaceAreaCm2))
                     .font(.title3).bold()
-                Text("（皮膚表面實際面積，拍攝角度改變數值不變）")
+                Text("（LiDAR 輔助表面積估算，僅供個人紀錄參考）")
                     .font(.caption).foregroundStyle(.secondary)
                 if let v = e.volumeMl, let md = e.maxDepthMm {
-                    Text(String(format: "深度參考：容積約 %.2f mL・最深 %.1f mm", v, md))
+                    Text(String(format: "估算參考：容積約 %.2f mL・最深約 %.1f mm（相對周邊皮膚擬合面，非醫療判定）", v, md))
                         .font(.footnote)
                 }
                 Text(String(format: "投影面積 %.2f cm²（平面對照用）・攝距 %.0f cm・深度覆蓋 %d%%",
@@ -487,6 +606,7 @@ struct LiteResultCard: View {
             }
             Text("健康參考工具，非醫療診斷。傷口惡化、發燒或大量滲液請就醫。")
                 .font(.caption2).foregroundStyle(.secondary)
+            NavigationLink("精確度與限制") { LiteMeasurementInfoView() }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -15,6 +15,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.woundmeasurement.app.data.store.GalleryExport
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
 
 /**
  * 模擬驗證入口(Compose)：從相簿選範例圖 / 拍照 → 端上管線或後端 classify → 顯示 [MeasureScreen]。
@@ -47,6 +50,7 @@ fun SamplePickerScreen(
     preview: @Composable () -> Unit = {}
 ) {
     val ctx = LocalContext.current
+    val captureScope = rememberCoroutineScope()
     // 模式:false=端上、true=後端。有後端時預設走後端(端上 ONNX 原生庫在模擬器可能不相容)
     var useBackend by remember { mutableStateOf(backend != null) }
 
@@ -73,8 +77,37 @@ fun SamplePickerScreen(
             if (bmp != null) dispatch(bmp)
         }
     }
-    val takePhoto = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bmp ->
-        if (bmp != null) dispatch(bmp)
+    // 2026-10：拍照改走 [CameraCaptureScreen]（CameraX 全解析），不再用
+    // ActivityResultContracts.TakePicturePreview——那個契約回傳的是**縮圖**，
+    // 12mm 的 ArUco marker 在縮圖上根本量不準，尺度基準一糊，面積就不可能準。
+    // 舊按鈕刻意移除而非並存：留著一個會產生錯誤量測結果的入口，遲早有人誤用。
+    var showCamera by remember { mutableStateOf(false) }
+    /** 上一次擷取的解析度與相簿去向。給使用者看，也是內測回報時最需要的那行字。 */
+    var captureInfo by remember { mutableStateOf<String?>(null) }
+
+    if (showCamera) {
+        CameraCaptureScreen(
+            onCaptured = { bmp ->
+                showCamera = false
+                val mp = bmp.width.toLong() * bmp.height / 1_000_000.0
+                captureScope.launch {
+                    // Re-read consent after returning from the camera, before a shared copy exists.
+                    val consentAllowsCapture = source != "clinical" ||
+                        runCatching { careCodeProvider() }.getOrNull() != null
+                    if (!measureEnabled || !consentAllowsCapture) {
+                        captureInfo = "⚠ 照護同意已失效或無法確認，未匯出影像或啟動量測。"
+                        return@launch
+                    }
+                    val rel = GalleryExport.saveCapture(ctx, bmp, source)
+                    captureInfo = "已擷取 ${bmp.width}×${bmp.height}（%.1f MP）".format(mp) +
+                        if (rel != null) " · 已存入相簿 $rel" else " · 未存入相簿（此來源或此建置不允許）"
+                    dispatch(bmp)
+                }
+            },
+            onCancel = { showCamera = false },
+            onError = { msg -> showCamera = false; captureInfo = "⚠️ $msg" },
+        )
+        return
     }
 
     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -123,13 +156,18 @@ fun SamplePickerScreen(
         val canLoad = measureEnabled && (onSource == null || source != null)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             // 臨床現場以「拍照」為主(現場拍攝是常態,事後從相簿補件有壓縮/裁切破壞尺度的風險)
-            Button({ takePhoto.launch(null) }, Modifier.weight(1f), enabled = canLoad) { Text("拍照") }
+            Button({ showCamera = true }, Modifier.weight(1f), enabled = canLoad) { Text("拍照") }
             OutlinedButton({ pickGallery.launch("image/*") }, Modifier.weight(1f), enabled = canLoad) { Text("相簿") }
             OutlinedButton({ pickFile.launch(arrayOf("image/*")) }, Modifier.weight(1f), enabled = canLoad) { Text("檔案") }
         }
         Text("「檔案」可瀏覽 Download 等資料夾(拖入模擬器的新圖選這個;相簿只列已入媒體庫的照片)",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
+        captureInfo?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall,
+                color = if (it.startsWith("⚠")) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.primary)
+        }
         Divider()
         MeasureScreen(vm = vm, onReview = onReview, onSaveToTimeline = onSaveToTimeline,
             exudate = exudate, onExudate = onExudate, preview = preview)

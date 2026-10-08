@@ -80,31 +80,42 @@ struct CaseSelectView: View {
 
                     Section("傷口個案") {
                         ForEach(cases) { c in
-                            // 同一列兩個獨立的點擊區。List 裡預設整列共用一個按鈕動作，
-                            // 所以兩顆都要 `.borderless`——否則點哪裡都會觸發第一顆。
-                            HStack {
+                            // Keep the two actions independent in List, with a full-width timeline button.
+                            VStack(alignment: .leading, spacing: 12) {
                                 Button {
                                     app.chosenCase = c
                                     app.backTo = .cases
                                     app.screen = .measure
                                 } label: {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("\(c.bodySite)・\(c.woundType)")
-                                        Text(c.wdCode).font(.caption).foregroundStyle(.secondary)
-                                        // 決策資訊：負＝縮小＝在癒合。±10% 變色與 Android 同閾值。
-                                        Text(Self.summaryLine(summaries[c.id]))
-                                            .font(.caption2)
-                                            .foregroundStyle({ () -> Color in
-                                                guard let p = summaries[c.id]?.changePct else { return .secondary }
-                                                if p < -10 { return .blue }
-                                                if p > 10 { return .red }
-                                                return .secondary
-                                            }())
+                                    HStack(spacing: 12) {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("\(c.bodySite)・\(c.woundType)")
+                                            Text(c.wdCode).font(.caption).foregroundStyle(.secondary)
+                                            // 決策資訊：負＝縮小＝在癒合。±10% 變色與 Android 同閾值。
+                                            Text(Self.summaryLine(summaries[c.id]))
+                                                .font(.caption2)
+                                                .foregroundStyle({ () -> Color in
+                                                    guard let p = summaries[c.id]?.changePct else { return .secondary }
+                                                    if p < -10 { return .blue }
+                                                    if p > 10 { return .red }
+                                                    return .secondary
+                                                }())
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .contentShape(Rectangle())
+                                        VStack(spacing: 4) {
+                                            Image(systemName: "camera.fill")
+                                            Text("臨床拍攝").font(.caption.weight(.semibold))
+                                        }
+                                        Image(systemName: "arrow.right.circle.fill").font(.title2)
                                     }
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(12)
+                                    .frame(maxWidth: .infinity, minHeight: 64)
+                                    .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
                                     .contentShape(Rectangle())
                                 }
-                                .buttonStyle(.borderless)
+                                .buttonStyle(.plain)
+                                .accessibilityHint("進入此傷口的臨床量測，可拍攝新影像")
                                 .disabled(!(consent?.consentCare ?? false))
                                 // 長按個案列：結案（有紀錄的正途）／刪除（僅限空個案）。
                                 .contextMenu {
@@ -135,10 +146,21 @@ struct CaseSelectView: View {
                                     app.backTo = .cases
                                     app.screen = .timeline
                                 } label: {
-                                    Label("時間軸", systemImage: "chart.xyaxis.line")
-                                        .labelStyle(.iconOnly)
+                                    HStack {
+                                        Label("查看傷口時間軸", systemImage: "chart.xyaxis.line")
+                                        Spacer(minLength: 8)
+                                        Image(systemName: "chevron.right")
+                                    }
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(Color.accentColor)
+                                    .padding(.horizontal, 12)
+                                    .frame(maxWidth: .infinity, minHeight: 48)
+                                    .background(Color.accentColor.opacity(0.14),
+                                                in: RoundedRectangle(cornerRadius: 10))
+                                    .contentShape(Rectangle())
                                 }
-                                .buttonStyle(.borderless)
+                                .buttonStyle(.plain)
+                                .accessibilityHint("查看此傷口的量測紀錄與變化趨勢")
                             }
                         }
                         if !(consent?.consentCare ?? false) {
@@ -557,78 +579,194 @@ struct BackendSettingsView: View {
     @State private var me: LoginIdentity?
     @State private var client: BackendClient?
     @State private var opening = false
+    @State private var progress: String?
+    @State private var connectionTask: Task<Void, Never>?
+    @State private var hasSavedCredentials = !AppSettings.backendUser().isEmpty
+    private enum Field: Hashable { case url, user, password }
+    @FocusState private var focusedField: Field?
     @Environment(\.openURL) private var openURL
+
+    private var busy: Bool { progress != nil || opening }
+
+    private var versionLabel: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "未知"
+        return "\(version)（\(build)）"
+    }
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("App 資訊") {
+                    LabeledContent("版本（建置號）", value: versionLabel)
+                        .textSelection(.enabled)
+                }
                 Section("後端連線") {
-                    TextField("位址", text: $url).autocapitalization(.none)
-                    TextField("帳號", text: $user).autocapitalization(.none)
-                    SecureField("密碼", text: $pass)
-                    Button("儲存並測試連線") { Task { await save() } }
+                    TextField("位址", text: $url)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .keyboardType(.URL).submitLabel(.next).focused($focusedField, equals: .url)
+                        .onSubmit { focusedField = .user }
+                        .disabled(busy)
+                    TextField("帳號", text: $user)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .textContentType(.username).submitLabel(.next).focused($focusedField, equals: .user)
+                        .onSubmit { focusedField = .password }
+                        .disabled(busy)
+                    SecureField("密碼（留空沿用已儲存密碼）", text: $pass)
+                        .textContentType(.password).submitLabel(.go).focused($focusedField, equals: .password)
+                        .onSubmit { startConnection() }
+                        .disabled(busy)
+                    Button(action: startConnection) {
+                        HStack {
+                            if progress != nil { ProgressView() }
+                            Text(progress == nil ? "儲存並測試連線" : "正在測試連線…")
+                        }
+                    }
+                    .disabled(busy)
+                    if let progress {
+                        Text(progress).font(.footnote).accessibilityAddTraits(.updatesFrequently)
+                        Text("首次連線或雲端服務重新啟動時可能需要較久，請稍候。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                        Button("取消連線檢查", role: .cancel) { connectionTask?.cancel() }
+                    }
                 }
                 if let u = me {
                     Section("目前身分・主控台") {
                         Text(u.label()).font(.subheadline)
-                        // 一次性登入碼放 URL fragment（# 之後不會送到伺服器、不留雲端日誌），
-                        // 60 秒有效、用過即失效；拿不到碼仍開啟網址，只是要手動登入。
+                        // 一次性碼只放 fragment，不記錄帳密或 token。
                         Button(opening ? "準備登入…" : "開啟雲端主控台（我的送件・佇列）") {
+                            focusedField = nil
                             opening = true
                             Task {
                                 let code = await client?.oneTimeCode()
-                                if let target = client?.consoleURL(oneTimeCode: code) {
+                                if let target = await client?.consoleURL(oneTimeCode: code) {
                                     openURL(target)
                                 }
                                 if code == nil { status = "ℹ 取不到一次性登入碼，已開啟主控台但需手動登入。" }
                                 opening = false
                             }
                         }
-                        .disabled(opening)
+                        .disabled(busy)
+                        if opening {
+                            ProgressView("正在取得主控台登入連結，請稍候…")
+                                .font(.footnote)
+                        }
+                    }
+                }
+                if hasSavedCredentials || me != nil {
+                    Section {
+                        Button("登出雲端帳號", role: .destructive) { Task { await signOut() } }
+                            .disabled(busy)
+                    } footer: {
+                        Text("清除此 App 儲存的帳號與密碼，保留本機紀錄及後端網址。瀏覽器主控台需另行登出。")
                     }
                 }
                 if let s = status {
-                    Section("狀態") { Text(s).font(.footnote) }
+                    Section("狀態") { Text(s).font(.footnote).accessibilityAddTraits(.updatesFrequently) }
                 }
             }
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle("設定")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("返回") { app.screen = .main }
+                    Button("返回") {
+                        focusedField = nil
+                        connectionTask?.cancel()
+                        app.screen = .main
+                    }
+                    .disabled(opening)
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("完成") { focusedField = nil }
                 }
             }
+            .onDisappear { connectionTask?.cancel() }
         }
     }
 
+    @MainActor
+    private func startConnection() {
+        guard !busy else { return }
+        focusedField = nil
+        status = nil
+        me = nil
+        client = nil
+        app.identity = nil
+        // 在建立非同步工作前更新畫面並鎖住按鈕，防止重複登入。
+        progress = "正在連接雲端服務…"
+        connectionTask = Task { await save() }
+    }
+
+    @MainActor
+    private func signOut() async {
+        guard !busy else { return }
+        focusedField = nil
+        let previousClient = client
+        AppSettings.clearCredentials()
+        user = ""
+        pass = ""
+        me = nil
+        client = nil
+        app.identity = nil
+        hasSavedCredentials = false
+        status = "已登出此 App 的雲端帳號。本機紀錄已保留。"
+        await previousClient?.logout()
+    }
+
+    @MainActor
     private func save() async {
+        defer { progress = nil; connectionTask = nil }
         AppSettings.setBackendURL(url)
+        // 帳號變更時不能默默沿用另一個帳號的密碼。
+        if pass.isEmpty && user != AppSettings.backendUser() {
+            status = "更換帳號時請重新輸入密碼。"
+            return
+        }
         if !pass.isEmpty, !AppSettings.setCredentials(user: user, password: pass) {
             status = "密碼加密失敗，未儲存。"
             return
         }
+        hasSavedCredentials = !AppSettings.backendUser().isEmpty
         let c = BackendClient(baseUrl: AppSettings.backendURL())
         do {
+            try Task.checkCancellation()
             let h = try await c.health()
+            try Task.checkCancellation()
             var lines = ["伺服器：\(h.status)"]
             if h.degraded, let r = h.degradedReason {
-                // degraded 代表面積或組織判讀其中之一不具參考價值——必須說出來。
                 lines.append("⚠ 服務降級：\(r)")
             }
-            let ok = (try? await c.login(username: AppSettings.backendUser(),
-                                         password: AppSettings.backendPassword())) ?? false
-            lines.append(ok ? "登入成功" : "登入失敗（帳號或密碼錯誤）")
-            me = ok ? c.currentIdentity() : nil
+            progress = "已連上雲端，正在驗證帳號…"
+            let ok = try await c.login(username: AppSettings.backendUser(),
+                                       password: AppSettings.backendPassword())
+            try Task.checkCancellation()
+            lines.append(ok ? "登入成功" : "登入未成功，請檢查帳號、密碼與帳號是否啟用。")
+            let identity = ok ? await c.currentIdentity() : nil
+            try Task.checkCancellation()
+            me = identity
             client = ok ? c : nil
+            app.identity = me
             if ok {
+                pass = ""
+                AppSettings.markBackendOk()
+                progress = "登入成功，正在讀取同步狀態…"
+                status = lines.joined(separator: "\n")
                 let (_, text, _) = await c.flywheelStats(source: nil)
+                try Task.checkCancellation()
                 lines.append(text)
                 let r = await ConsentSync.retryPending()
+                try Task.checkCancellation()
                 if !r.done.isEmpty { lines.append("已補做 \(r.done.count) 筆同意同步。") }
                 app.refreshBanner()
             }
             status = lines.joined(separator: "\n")
         } catch {
-            status = "連線失敗：\(error.localizedDescription)"
+            if Task.isCancelled {
+                status = "已取消連線檢查。已儲存的設定仍保留。"
+            } else {
+                status = "連線失敗：\(error.localizedDescription)\n請確認網路與後端網址後重試。"
+            }
         }
     }
 }

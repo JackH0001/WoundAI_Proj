@@ -1,3 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- API 24–25 的傳統啟動器圖示。API 26+ 會改用 mipmap-anydpi-v26 的 adaptive icon。
+
+     ⚠ 這裡的 android:src **必須**指向真正的點陣圖。原本它指向
+     @drawable/ic_launcher_foreground，而那是一個 <vector>——<bitmap> 解不了
+     向量 XML，執行期 PackageManager 會噴
+     「Failure retrieving resources ... Drawable mipmap/ic_launcher」，
+     桌面上沒有可按的圖示（2026-10-05 在 iPlay60_mini_Pro 實測到）。 -->
 <bitmap xmlns:android="http://schemas.android.com/apk/res/android"
-    android:src="@drawable/ic_launcher_foreground" /> 
+    android:src="@mipmap/ic_launcher_sq" />

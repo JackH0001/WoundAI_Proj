@@ -1,0 +1,41 @@
+[
+  {
+    "audience": "woundlite-production",
+    "installation": "synthetic-install",
+    "key_id": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "challenge": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+    "request_id": "00000000-0000-0000-0000-000000000001",
+    "method": "POST",
+    "path": "/api/v1/lite/annotation/revision",
+    "content_type": "application/json",
+    "body": "eyJyZXZpc2lvbiI6MX0=",
+    "expected_client_data": "d291bmRsaXRlLmFwcGF0dGVzdC5yZXF1ZXN0LzEAAAAAFHdvdW5kbGl0ZS1wcm9kdWN0aW9uAAAAEXN5bnRoZXRpYy1pbnN0YWxsAAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fAAAAICAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs8PT4/AAAAJDAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMQAAAARQT1NUAAAAIC9hcGkvdjEvbGl0ZS9hbm5vdGF0aW9uL3JldmlzaW9uAAAAEGFwcGxpY2F0aW9uL2pzb24AAAAg2FYLdljHkr3e1pg3sFXi7VRwi+YSO3u0zJ+t8mHqCR8=",
+    "expected_sha256": "6fe8799b972f1694571660520932d0adecaa79eeb253e94423a72c3c03d56152"
+  },
+  {
+    "audience": "woundlite-production",
+    "installation": "synthetic-install",
+    "key_id": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "challenge": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+    "request_id": "00000000-0000-0000-0000-000000000001",
+    "method": "POST",
+    "path": "/api/v1/lite/segment",
+    "content_type": "multipart/form-data; boundary=test",
+    "body": "LS10ZXN0DQoA/3Bob3RvDQotLXRlc3QtLQ0K",
+    "expected_client_data": "d291bmRsaXRlLmFwcGF0dGVzdC5yZXF1ZXN0LzEAAAAAFHdvdW5kbGl0ZS1wcm9kdWN0aW9uAAAAEXN5bnRoZXRpYy1pbnN0YWxsAAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fAAAAICAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs8PT4/AAAAJDAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMQAAAARQT1NUAAAAFC9hcGkvdjEvbGl0ZS9zZWdtZW50AAAAIm11bHRpcGFydC9mb3JtLWRhdGE7IGJvdW5kYXJ5PXRlc3QAAAAg5vsT9UAevIhaaJIV4OOKY57zGRnJI6YW2Y8oKfob1w8=",
+    "expected_sha256": "b8aba1a1f3b637566bda1eeddc7b571eadd769d14d10135d1ca811a82a478c76"
+  },
+  {
+    "audience": "woundlite-production",
+    "installation": "synthetic-install",
+    "key_id": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "challenge": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+    "request_id": "00000000-0000-0000-0000-000000000001",
+    "method": "DELETE",
+    "path": "/api/v1/lite/data/synthetic-install",
+    "content_type": "",
+    "body": "",
+    "expected_client_data": "d291bmRsaXRlLmFwcGF0dGVzdC5yZXF1ZXN0LzEAAAAAFHdvdW5kbGl0ZS1wcm9kdWN0aW9uAAAAEXN5bnRoZXRpYy1pbnN0YWxsAAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fAAAAICAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs8PT4/AAAAJDAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMQAAAAZERUxFVEUAAAAjL2FwaS92MS9saXRlL2RhdGEvc3ludGhldGljLWluc3RhbGwAAAAAAAAAIOOwxEKY/BwUmvv0yJlvuSQnrkHkZJuTTKSVmRt4UrhV",
+    "expected_sha256": "b521083e9ab694b6ac7d71364c0b472ea0f2c73bb05046cd3b215ac7faf5026d"
+  }
+]
