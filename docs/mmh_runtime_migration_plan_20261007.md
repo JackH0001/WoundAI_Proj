@@ -39,7 +39,9 @@
 5. 完成 least-privilege profile 的 51 項 v3 權限查核，並重跑同一份已登入合成流程及 build smoke。任何 UNKNOWN、資源／主體回應不符、必要功能拒絕均失敗。若失敗，按下列回復程序處理，MMH 保持未開放。
 6. 另行完成專用正式 runtime 與新 revision 的遷移。現有 `provision_runtime_identity.ps1`／`deploy_cloudrun.ps1` 要求新鎖定稽核紀元；舊 audit bucket 目前 retention=220903200 但沒有 isLocked，不能直接用既有腳本升版。不得改為跳過 locked 閘門，也不得將本次授權視為不可逆鎖桶授權。
 
-本次尚缺：完整建置入口改造及專用 build smoke、正式服務已登入合成端到端 baseline、其他建置地區／潛在跨專案使用核對。這是可用性證據缺口，不是使用者未授權；因此尚未撤銷 Editor 或切換正式流量。
+2026-10-08 更新：獨立 medical build SA、專用來源桶與映像庫已建立，13 項有效權限及一次合成 build smoke 通過，見 [建置驗證](medical_build_validation_20261008.md)。這次使用全新來源桶與映像庫，不授權 builder 存取上表的舊來源／舊映像庫；上表的遷移處理是早期方案，後續入口須對齊新資源。
+
+尚缺：完整建置入口改造、正式服務已登入合成端到端 baseline、其他建置地區／潛在跨專案使用核對。控制台已登入且可讀取統計與系統狀態，但沒有量測／存檔入口，不能替代 App 寫入驗收。這是可用性證據缺口，不是使用者未授權；因此尚未撤銷 Editor 或切換正式流量。
 
 ## 回復程序
 
