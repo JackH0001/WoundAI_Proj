@@ -53,3 +53,18 @@ python -B tools/medical_image_build.py prepare \
 ## 10:32 App 27 實測基線的限制
 
 舊服務 505ff2e：登入 200、care/attest 404、classify 200；同秒可見一個新增 JPEG 物件。新 App 要求 persisted=true，舊服務沒有此欄位，因此不綁定 image_id。手機更新時間軸不等於雲端訓練標註已入庫。未看到對應 annotation／depth 請求；這次不是完整 RGB-D 或雲端標註驗收，也不應以降級 App 安全判斷修補。
+
+## 本次完整雲端映像驗證結果
+
+來源 commit `073732dbf6338c01073f911ec9f3bac8a7eaaf6a`，manifest SHA-256 `adbdbb210f7f354dab938b1f859b4506b8f2b4630d2f7a1c5da8ab5d36d3b1f8`。明列 50 個程式／模型檔案，共 84,051,506 bytes；沒有手機照片、帳密或執行期資料。來源 Git 乾淨，三個模型雜湊逐一通過。
+
+- [Cloud Build 85053fb9](https://console.cloud.google.com/cloud-build/builds;region=asia-east1/85053fb9-be4d-4407-af4a-968acf8edc5e?project=421209514056)：SUCCESS，2026-10-08 台北時間 10:53:30 至 10:55:38，約 128 秒。
+- 雲端 manifest／逐檔雜湊檢查與 Dockerfile 的 canonical-byte gate 均通過，映像推送成功。
+- 不可變映像：`asia-east1-docker.pkg.dev/woundai-jackh001/woundai-medical-build/medical@sha256:777c6cfb7f097946fdf8ea7bfaf8684d1f45ced3b115129139c3d492292e7e8b`。
+- Python resolver 對真實 build 與 Artifact Registry 讀回成功；再以 PowerShell 7 的 Get-VerifiedMedicalImage 執行相同唯讀流程，輸出完全相同的 digest，exit 0。
+- 來源 commit 073732d 的 GitHub CI 7/7 success。本機上述四套合计 93 個測試通過；沒有把 Windows PowerShell 5.1 計入。
+- 雲端讀回仍只有既有兩個 service；沒有 MMH service，舊 Compute Editor 仍在。本次没有切流量、鎖桶、建帳號或讀取密文內容。
+
+本映像是 PR 候選來源的完整建置驗證，不是已合併 main 的正式發行。部署腳本仍要求已覆核 main 與其相符的建置；日後 main SHA 改變必須重新綁定建置，不能將 Git 環境變數改成另一個 SHA 冒充。
+
+本機原始證據：`/Users/Jack.Hou/Documents/Codex/2026-06-28/woundai-institution-evidence-20261007/medical-full-image-20261008/` 的 plan.json、build-final.json、artifact-readback.json、validation.json 與 runtime-readback.json。完整來源封包、IAM 與雲端回應留在本機受控目錄。
