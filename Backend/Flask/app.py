@@ -756,6 +756,7 @@ def health_check():
         # describe() 不另外連網，只渲染交給它的那一次結果。
         _retention = _st.retention_info()
         status['audit_retention'] = _retention
+        status['audit_write_mode'] = getattr(_st, 'audit_write_mode', 'local')
         status['store'] = _st.describe(retention=_retention)
     except Exception as _e:
         status['store'] = 'unavailable: %s' % _e

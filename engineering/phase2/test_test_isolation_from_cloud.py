@@ -145,7 +145,9 @@ class TestIsolationFromCloudStorage(unittest.TestCase):
                     "--out", str(Path(tmp) / "out")]), \
                     mock.patch.dict(os.environ, {
                         "WOUNDAI_STORE": "gcs", "WOUNDAI_GCS_BUCKET": "synthetic-main",
-                        "WOUNDAI_AUDIT_BUCKET": "synthetic-audit"}), \
+                        "WOUNDAI_AUDIT_BUCKET": "synthetic-audit",
+                        "WOUNDAI_AUDIT_MODE": "mmh-unlocked-validation",
+                        "K_SERVICE": "woundai-backend-mmhps20261007"}), \
                     mock.patch.object(runner, "source_snapshot", return_value={}), \
                     mock.patch.object(runner.subprocess, "Popen", FakeProcess):
                 self.assertEqual(runner.main(), 0)
@@ -162,7 +164,8 @@ class TestIsolationFromCloudStorage(unittest.TestCase):
         self.assertEqual(cache.parent.parent, Path(captured[0]["USERPROFILE"]))
         self.assertTrue(cache.is_absolute())
         self.assertFalse(any(k == "WOUNDAI_STORE" or k.startswith("WOUNDAI_GCS_")
-                             or k == "WOUNDAI_AUDIT_BUCKET" for k in captured[0]))
+                             or k in ("WOUNDAI_AUDIT_BUCKET", "WOUNDAI_AUDIT_MODE", "K_SERVICE")
+                             for k in captured[0]))
 
     def test_source_snapshot_covers_non_source_extension_and_tracked_diff(self):
         runner = load_runner()
