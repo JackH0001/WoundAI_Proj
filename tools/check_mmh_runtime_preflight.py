@@ -54,7 +54,8 @@ def require(condition, reason):
         raise ValueError(reason)
 
 
-def bucket_metadata(row, name, audit=False):
+def bucket_metadata(row, name, audit=False, audit_mode='locked-seven-year'):
+    require(audit_mode in ('locked-seven-year', 'mmh-unlocked-validation'), 'unknown audit mode')
     require(row.get('name') == name and str(row.get('projectNumber')) == NUMBER,
             'bucket identity mismatch')
     require(row.get('location', '').upper() == REGION.upper() and row.get('storageClass') == 'STANDARD',
@@ -67,11 +68,11 @@ def bucket_metadata(row, name, audit=False):
             str(row.get('softDeletePolicy', {}).get('retentionDurationSeconds', 'missing')) == '0',
             'unreviewed lifecycle/hold/version/soft-delete policy')
     policy = row.get('retentionPolicy', {})
-    if audit:
+    if audit and audit_mode == 'locked-seven-year':
         require(policy.get('isLocked') is True and str(policy.get('retentionPeriod')) == '220903200',
                 'exact locked seven-year audit policy absent')
     else:
-        require(not policy, 'unexpected media/security retention')
+        require(not policy, 'unexpected retention in non-retained validation/media/security bucket')
 
 
 def inspect(plan, build_id, run=cloud, read_main=remote_main):
@@ -79,6 +80,7 @@ def inspect(plan, build_id, run=cloud, read_main=remote_main):
     require(isinstance(build_id, str) and re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', build_id),
             'exact build UUID required')
     spec = plan['spec']
+    audit_mode = spec['environment'].get('WOUNDAI_AUDIT_MODE', 'locked-seven-year')
     checks = []
 
     def check(name, action):
@@ -105,9 +107,10 @@ def inspect(plan, build_id, run=cloud, read_main=remote_main):
         'image proof mismatch'))
     check('runtime_identity', lambda: verify_identity(run(['iam', 'service-accounts', 'describe', SA])))
     for name in BUCKETS:
-        check('bucket_' + ('audit_locked' if name == BUCKETS[2] else ('media' if name == BUCKETS[0] else 'security')),
+        check('bucket_' + (('audit_locked' if audit_mode == 'locked-seven-year' else 'audit_unlocked_validation')
+                          if name == BUCKETS[2] else ('media' if name == BUCKETS[0] else 'security')),
               lambda name=name: bucket_metadata(run(['storage', 'buckets', 'describe', 'gs://'+name, '--raw']),
-                                                name, audit=name == BUCKETS[2]))
+                                                name, audit=name == BUCKETS[2], audit_mode=audit_mode))
 
     def old_editor():
         policy = run(['projects', 'get-iam-policy', PROJECT])
@@ -138,12 +141,15 @@ def inspect(plan, build_id, run=cloud, read_main=remote_main):
 
 
 def result(plan, checks, complete):
+    remaining = list(REMAINING)
+    if plan['spec']['environment'].get('WOUNDAI_AUDIT_MODE') == 'mmh-unlocked-validation':
+        remaining[1] = 'explicit MMH unlocked-validation authorization; not immutable audit evidence'
     return {'schema': 'mmh.metadata-preflight/1', 'utc': datetime.now(timezone.utc).isoformat(),
             'spec_sha256': plan['spec_sha256'], 'complete': complete,
             'metadata_passed': complete and all(c['passed'] for c in checks),
             'checks': checks, 'passed': sum(c['passed'] for c in checks), 'total': len(checks),
             'deployable': False, 'cloud_mutations': False, 'secret_payloads_read': False,
-            'remaining_evidence': list(REMAINING)}
+            'remaining_evidence': remaining}
 
 
 def write_report(plan_path, build_id, report, run=cloud, read_main=remote_main):

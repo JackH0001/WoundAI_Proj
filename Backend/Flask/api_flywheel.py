@@ -334,7 +334,8 @@ def audit(actor: str, action: str, code: str, result: str,
 
     舊版是「讀全部 → 算 seq+1 → append」,讀寫之間沒有原子性,並行寫入會產生
     同 prev 的 fork(正式桶 675 筆裡有 26 處)。GCS 現在由 Store 在單一 admission
-    中驗完整名稱 manifest 與尚未驗過的 suffix，再以條件建立搶下一格；LocalStore
+    中驗完整名稱 manifest 與尚未驗過的 suffix（MMH 未鎖定特案每次重驗全部），
+    再以條件建立搶下一格；LocalStore
     則在行程鎖內驗完整鏈。離線 verifier 永遠另做全量讀取，不採 admission 快取。
     """
     from store import ChainConflict, GcsStore

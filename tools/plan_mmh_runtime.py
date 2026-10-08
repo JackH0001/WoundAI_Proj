@@ -31,7 +31,9 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()
 
 
-def generate(image, source_commit, manifest, versions):
+def generate(image, source_commit, manifest, versions, audit_mode='locked-seven-year'):
+    if audit_mode not in ('locked-seven-year', 'mmh-unlocked-validation'):
+        raise ValueError('unknown audit mode; no automatic downgrade')
     exact_hex(source_commit, 40); exact_hex(manifest, 64)
     if not isinstance(image, str) or re.fullmatch(re.escape(IMAGE_ROOT) + r'@sha256:[0-9a-f]{64}', image) is None:
         raise ValueError('fixed medical repository and immutable digest required')
@@ -62,7 +64,16 @@ def generate(image, source_commit, manifest, versions):
                  'permissions': sorted(APPEND_PERMS + ('storage.buckets.get',))}],
             'planned_secret_grants': [{'secret': s, 'role': 'roles/secretmanager.secretAccessor'}
                                       for s in SECRET_NAMES.values()]}
-    return {'schema': 'mmh.runtime-review/1', 'deployable': False,
+    if audit_mode == 'mmh-unlocked-validation':
+        env['WOUNDAI_AUDIT_MODE'] = audit_mode
+        env['GOOGLE_CLOUD_PROJECT'] = PROJECT
+        spec['audit_requirement'] = {
+            'bucket': BUCKETS[2], 'retention_seconds': 0, 'locked': False,
+            'mode': audit_mode, 'immutable_evidence': False,
+            'full_chain_readback_per_append': True,
+            'separate_formal_epoch_required': True,
+        }
+    plan = {'schema': 'mmh.runtime-review/1', 'deployable': False,
             'spec': spec, 'spec_sha256': hashlib.sha256(canonical(spec)).hexdigest(),
             'required_evidence': ['reviewed merged source and matching immutable build proof',
                 'fresh old-runtime dependency baseline and successful least-privilege migration',
@@ -73,6 +84,9 @@ def generate(image, source_commit, manifest, versions):
                 'private synthetic GCS save/readback, cold-start accounts, withdrawal and RGB-D checks'],
             'not_included': ['cloud mutations', 'public invocation', 'App URL replacement',
                              'real-patient collection', 'IRB approval', 'complete 3D readiness']}
+    if audit_mode == 'mmh-unlocked-validation':
+        plan['required_evidence'][3] = 'explicit MMH unlocked-validation authorization and fresh absence-of-retention readback'
+    return plan
 
 
 def validate(plan):
@@ -84,7 +98,8 @@ def validate(plan):
         if not isinstance(ref, str) or not ref.startswith(name + ':'):
             raise ValueError('secret is not institution-specific')
         versions[key] = ref[len(name) + 1:]
-    expected = generate(spec.get('image'), spec.get('source_commit'), spec.get('manifest_sha256'), versions)
+    expected = generate(spec.get('image'), spec.get('source_commit'), spec.get('manifest_sha256'), versions,
+                        spec.get('environment', {}).get('WOUNDAI_AUDIT_MODE', 'locked-seven-year'))
     if plan != expected:
         raise ValueError('review plan differs from exact MMH specification')
     return True
@@ -96,8 +111,10 @@ def main():
     p.add_argument('--manifest-sha256', required=True)
     p.add_argument('--secret-versions', type=Path, required=True, help='JSON of env names to version numbers only')
     p.add_argument('--out', type=Path, required=True)
+    p.add_argument('--audit-mode', choices=['locked-seven-year', 'mmh-unlocked-validation'],
+                   default='locked-seven-year')
     a = p.parse_args()
-    plan = generate(a.image, a.source_commit, a.manifest_sha256, json.loads(a.secret_versions.read_text()))
+    plan = generate(a.image, a.source_commit, a.manifest_sha256, json.loads(a.secret_versions.read_text()), a.audit_mode)
     validate(plan)
     with a.out.open('x') as f:
         f.write(json.dumps(plan, indent=2) + '\n')

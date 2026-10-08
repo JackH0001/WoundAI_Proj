@@ -718,10 +718,10 @@ class GcsStore(Store):
         return digest.hexdigest()
 
     def _list_audit_slots_for_admission(self, key: str):
-        """List the complete canonical slot manifest for one locked epoch."""
+        """List the canonical manifest after the selected audit-policy gate."""
         if not self._is_audit_chain_root(key):
             raise PermissionError("audit admission is reserved for audit.jsonl")
-        self.require_locked_audit_epoch()
+        self.require_audit_write_policy()
         bucket, bname = self._target(key)
         base = self._k(key) + "/"
         # Materialise the iterator: a pagination/network failure must raise,
@@ -766,8 +766,8 @@ class GcsStore(Store):
                     observed_prefix = self._audit_manifest_sha256(blobs[:cached.count])
                     if observed_prefix != cached.manifest_sha256:
                         raise IOError("locked audit prefix generation/name manifest changed")
-                    start = cached.count
-                    previous_hash = cached.head_hash
+                    start = cached.count if not self._reverify_audit_bytes else 0
+                    previous_hash = cached.head_hash if start else "GENESIS"
                 else:
                     start = 0
                     previous_hash = "GENESIS"
@@ -775,7 +775,7 @@ class GcsStore(Store):
                 for seq in range(start, len(blobs)):
                     blob = blobs[seq]
                     try:
-                        raw = blob.download_as_bytes().decode("utf-8")
+                        raw = self._read_admission_blob(blob).decode("utf-8")
                         record, _ = _chain_record_bytes(seq, raw)
                     except (TypeError, ValueError, UnicodeDecodeError) as exc:
                         raise IOError("invalid audit chain slot %s: %s" %
@@ -871,10 +871,9 @@ class GcsStore(Store):
         if self._is_audit_chain(key):
             raise PermissionError("audit.jsonl must be written through append_chained")
         if self._is_audit(key):
-            # Promotion/care receipts are audit evidence too.  They must not
-            # be admitted into an unlocked bucket merely because they are not
-            # chain slots.
-            self.require_locked_audit_epoch()
+            # Receipts obey the same policy as chain slots: locked by default,
+            # with the explicit scoped MMH validation exception only.
+            self.require_audit_write_policy()
         bucket, _ = self._target(key)
         blob = bucket.blob(self._k(key))
         try:
@@ -981,8 +980,17 @@ class GcsStore(Store):
             return "WORM: retention %.1fy, LOCKED (irreversible)" % years
         return "retention %.1fy, NOT locked (policy is revocable)" % years
 
+    _reverify_audit_bytes = False
+    audit_write_mode = "locked-seven-year"
+
+    def _read_admission_blob(self, blob):
+        return blob.download_as_bytes()
+
+    def require_audit_write_policy(self) -> None:
+        self.require_locked_audit_epoch()
+
     def require_locked_audit_epoch(self) -> None:
-        """Fail closed for every direct GCS audit-chain append path."""
+        """Formal WORM gate; never relaxed by the MMH validation subclass."""
         reason = RETIRED_AUDIT_EPOCHS.get(self._audit_bucket_name)
         if reason:
             raise PermissionError("retired audit epoch is read-only: " + reason)
@@ -1059,18 +1067,101 @@ class GcsStore(Store):
         return d
 
 
+class MmhUnlockedValidationStore(GcsStore):
+    """Explicit MMH exception, NOT immutable/WORM evidence.
+
+    Full current-chain verification and conditional creation detect corruption
+    and competing appends. They cannot prevent a privileged external rewrite,
+    or prove history across a restart without an independent checkpoint.
+    Never use this class to satisfy the formal locked-epoch gate.
+    """
+    audit_write_mode = "mmh-unlocked-validation"
+    _reverify_audit_bytes = True
+    _mmh_buckets = tuple("woundai-mmhps20261007-%s-421209514056" % suffix
+                         for suffix in ("media", "security", "audit"))
+
+    @classmethod
+    def validate_scope(cls, bucket, prefix, audit_bucket, security_bucket):
+        expected = {
+            "WOUNDAI_AUDIT_MODE": cls.audit_write_mode,
+            "WOUNDAI_STORE": "gcs",
+            "WOUNDAI_INSTITUTION_ORG": "mmhps20261007",
+            "WOUNDAI_SERVICE_PROFILE": "medical",
+            "WOUNDAI_ENABLE_LITE_API": "0",
+            "GOOGLE_CLOUD_PROJECT": "woundai-jackh001",
+            "K_SERVICE": "woundai-backend-mmhps20261007",
+        }
+        if any(os.environ.get(k) != v for k, v in expected.items()):
+            raise PermissionError("unlocked audit mode requires the exact MMH validation service")
+        if ((bucket, security_bucket, audit_bucket) != cls._mmh_buckets
+                or prefix != "flywheel"):
+            raise PermissionError("unlocked audit mode requires the isolated MMH bucket tuple")
+
+    def __init__(self, bucket, prefix="flywheel", audit_bucket=None, security_bucket=None):
+        self.validate_scope(bucket, prefix, audit_bucket, security_bucket)
+        super().__init__(bucket, prefix, audit_bucket, security_bucket)
+
+    def require_audit_write_policy(self):
+        self.validate_scope(self._bucket_name, self.prefix,
+                            self._audit_bucket_name, self._security_bucket_name)
+        if getattr(self, "_validation_audit_fault", False):
+            raise PermissionError("validation audit fault requires operator investigation")
+        info = self.retention_info()
+        if not (info.get("verified") is True
+                and info.get("bucket") == self._audit_bucket_name
+                and info.get("locked") is False
+                and info.get("retention_seconds") == 0
+                and not self._audit_bucket._properties.get("retentionPolicy")):
+            raise PermissionError("MMH validation requires verified absence of retention; no automatic mode change")
+
+    def _read_admission_blob(self, blob):
+        return blob.download_as_bytes(if_generation_match=int(blob.generation))
+
+    def _verified_audit_prefix(self, key):
+        with self._audit_append_lock:
+            try:
+                state = super()._verified_audit_prefix(key)
+                _, bname, base, current = self._list_audit_slots_for_admission(key)
+                if (bname != state.bucket or base != state.base or len(current) < state.count
+                        or self._audit_manifest_sha256(current[:state.count]) != state.manifest_sha256):
+                    raise IOError("validation audit changed during full verification")
+                return state
+            except Exception:
+                # Do not let the base cache eviction silently bless a changed
+                # history on the next retry. Fail closed for this process.
+                self._validation_audit_fault = True
+                raise
+
+    def describe(self, *, retention=None):
+        text = super().describe(retention=retention) + " [MMH validation; mutable audit, not WORM]"
+        if getattr(self, "_validation_audit_fault", False):
+            text += " [writes blocked: audit verification failed; investigate before restarting]"
+        return text
+
+
 _ACTIVE = None
 
 
 def get_store(root: str = None) -> Store:
     """依環境變數挑實作。root 只給 LocalStore 用（相容既有的 WOUNDAI_FLYWHEEL_DIR）。"""
     global _ACTIVE
+    mode = os.environ.get("WOUNDAI_AUDIT_MODE", "locked-seven-year")
+    if mode not in ("locked-seven-year", "mmh-unlocked-validation"):
+        raise RuntimeError("unknown WOUNDAI_AUDIT_MODE")
     kind = (os.environ.get("WOUNDAI_STORE") or "local").lower()
+    if mode == "mmh-unlocked-validation":
+        MmhUnlockedValidationStore.validate_scope(
+            os.environ.get("WOUNDAI_GCS_BUCKET"), os.environ.get("WOUNDAI_GCS_PREFIX", "flywheel"),
+            os.environ.get("WOUNDAI_AUDIT_BUCKET"), os.environ.get("WOUNDAI_SECURITY_BUCKET"))
     # Check before returning a cache populated before tests started. A later
     # env change to local must not make that live client safe to reuse.
     if kind == "gcs" or getattr(_ACTIVE, "_cloud_client_constructed", False):
         _refuse_cloud_in_test_process()
     if _ACTIVE is not None:
+        if mode == "mmh-unlocked-validation" and not isinstance(_ACTIVE, MmhUnlockedValidationStore):
+            raise RuntimeError("MMH validation cannot reuse a different store")
+        if isinstance(_ACTIVE, GcsStore) and _ACTIVE.audit_write_mode != mode:
+            raise RuntimeError("audit mode changed after store initialization")
         return _ACTIVE
     if kind == "gcs":
         bucket = os.environ.get("WOUNDAI_GCS_BUCKET")
@@ -1082,7 +1173,8 @@ def get_store(root: str = None) -> Store:
         if BOUND_ORG is not None and (not security or not audit or len({bucket, security, audit}) != 3):
             raise RuntimeError("institution storage requires distinct media, security and audit buckets")
         # Protected-key access refuses a missing audit bucket in _target().
-        _ACTIVE = GcsStore(bucket, os.environ.get("WOUNDAI_GCS_PREFIX", "flywheel"),
+        store_type = MmhUnlockedValidationStore if mode == "mmh-unlocked-validation" else GcsStore
+        _ACTIVE = store_type(bucket, os.environ.get("WOUNDAI_GCS_PREFIX", "flywheel"),
                            audit, security_bucket=security)
     else:
         _ACTIVE = LocalStore(root or os.environ.get("WOUNDAI_FLYWHEEL_DIR") or "flywheel")
