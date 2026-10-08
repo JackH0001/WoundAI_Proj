@@ -135,13 +135,11 @@ class DemoPathCannotTouchProduction(unittest.TestCase):
         self.assertNotIn("| 多實例 |", doc, "the cap is back in the table of impossibilities")
 
     def test_the_build_source_does_not_depend_on_where_it_was_run_from(self):
-        # `--source .` uploads whatever directory the operator happens to be in.
-        # Run as .\Backend\Flask\deploy_demo_candidate.ps1 from the repo root,
-        # that is the whole repository. The script's own directory is the only
-        # source that is correct regardless of the caller's location.
+        # A prebuilt digest removes the caller-directory upload hazard entirely.
         code = code_only(text(DEMO))
-        self.assertIn("--source $PSScriptRoot", code)
-        self.assertNotRegex(code, r"--source\s+\.\s")
+        self.assertIn("--image $VerifiedImage", code)
+        self.assertIn("$VerifiedImage = Get-VerifiedMedicalImage", code)
+        self.assertNotRegex(code, r"--source\s+")
 
     def test_it_refuses_the_production_runtime_identity(self):
         code = code_only(text(DEMO))

@@ -22,6 +22,9 @@ param(
     [Parameter(Mandatory = $true)][string]$Bucket,
     [Parameter(Mandatory = $true)][string]$AuditBucket,
     [Parameter(Mandatory = $true)][string]$RuntimeServiceAccount,
+    # Prebuilt, reviewed image: no implicit Compute build identity.
+    [string]$BuildId,
+    [string]$BuildManifestSha256,
     [string]$Region = "asia-east1",
     [string]$Service = "woundai-backend",
     [string]$CareReceiptSecret = "woundai-care-receipt-secret",
@@ -57,6 +60,7 @@ param(
 # gcloud 呼叫就中止，而畫面上只有一句看起來與部署無關的 Test-Path 錯誤。
 # 改成明確檢查 $LASTEXITCODE，該中止的地方自己 throw。
 $ErrorActionPreference = "Continue"
+. (Join-Path $PSScriptRoot '../../tools/resolve_medical_image.ps1')
 
 # 直接叫 gcloud.cmd 繞過 .ps1 包裝，連那行噪音都不會出現。
 # 找不到就退回 gcloud（PATH 上有就好）。
@@ -498,6 +502,8 @@ $PreviousRevision = $null
 # -VerifyOnly 時整段建置流程跳過。這裡不是「加速」——是讓驗證能獨立重跑，
 # 因為一個要等五分鐘才能重試的檢查，實務上等於沒有檢查。
 if (-not $VerifyOnly -and -not $PromoteCandidate) {
+    $VerifiedImage = Get-VerifiedMedicalImage -ProjectId $ProjectId -Region $Region `
+        -GitCommit $GitCommit -BuildId $BuildId -BuildManifestSha256 $BuildManifestSha256
 
     # ── 出發前檢查 ───────────────────────────────────────────────────────
     # 這兩個檔案是病人影像不進容器映像的唯一防線。缺了就中止——
@@ -688,7 +694,7 @@ if (-not $VerifyOnly -and -not $PromoteCandidate) {
     Write-Host "  ✓ previous live revision preserved for rollback: $PreviousRevision"
 
     Invoke-GCloud run deploy $Service `
-        --source . `
+        --image $VerifiedImage `
         --project $ProjectId `
         --region $Region `
         --revision-suffix $RevisionSuffix `

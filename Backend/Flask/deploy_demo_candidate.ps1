@@ -101,6 +101,9 @@ param(
     # 下面會機械拒絕佔位符形狀——這個欄位的意義在於「有人想過才按下去」，
     # 貼一句樣板等於沒有授權。
     [Parameter(Mandatory = $true)][string]$DemoAuthorisationRef,
+    # Prebuilt, reviewed image: no implicit Compute build identity.
+    [string]$BuildId,
+    [string]$BuildManifestSha256,
     [string]$Region = "asia-east1",
     # 示範 service。名稱必須以 -demo 結尾，且不得等於正式 service。
     [string]$Service = "woundai-backend-demo",
@@ -122,6 +125,7 @@ param(
 # 而它啟動時的 Test-Path 探測在某些安裝上會丟無害的 Access denied。
 # 改成明確檢查 $LASTEXITCODE。
 $ErrorActionPreference = "Continue"
+. (Join-Path $PSScriptRoot '../../tools/resolve_medical_image.ps1')
 
 function Say($msg)  { Write-Host "`n▶ $msg" -ForegroundColor Cyan }
 function Warn($msg) { Write-Host "⚠ $msg" -ForegroundColor Yellow }
@@ -918,15 +922,16 @@ $RevisionSuffix = 'demo-' + $GitCommit.Substring(0, 8) + '-' + `
 Ok "部署來源 commit：$GitCommit"
 
 if (-not $VerifyOnly) {
+    $VerifiedImage = Get-VerifiedMedicalImage -ProjectId $ProjectId -Region $Region `
+        -GitCommit $GitCommit -BuildId $BuildId -BuildManifestSha256 $BuildManifestSha256
     Say "複製 engineering 模組到 vendor/（與正式部署同一份清單）"
     Copy-EngineeringVendor -FlaskDir $PSScriptRoot
 
     Say "建置並部署到示範 service（實例上限 1、local store）"
-    # --source 用腳本所在目錄，不用 `.`。從 repo 根目錄執行
-    # `.\Backend\Flask\deploy_demo_candidate.ps1` 時，`.` 會是 repo 根目錄，
-    # gcloud 就會把整個 repo（iOS、Android、engineering…）打包上傳。
+    # Image was built separately with an explicit builder and read back by digest.
+    # No local directory is uploaded by this deployment command.
     Invoke-GCloud run deploy $Service `
-        --source $PSScriptRoot `
+        --image $VerifiedImage `
         --project $ProjectId `
         --region $Region `
         --revision-suffix $RevisionSuffix `
