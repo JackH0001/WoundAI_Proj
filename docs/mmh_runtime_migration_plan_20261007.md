@@ -99,3 +99,14 @@ Jack 在瀏覽器重新登入後，透過送件審閱開啟一筆既有 phantom 
 補查其他執行身分依賴時，Compute Engine API 與 Cloud Asset API 均回 SERVICE_DISABLED。失敗清單已明確記為 incomplete，而非空清單；因此尚未證明 VM／GKE／Cloud Functions／App Engine 沒有依賴，Editor 仍保留。Cloud Asset API 啟用已提出精確範圍確認，尚未執行。
 
 本機證據：`legacy-synthetic-baseline-20261008-summary.json`、對應 request 與 object metadata、`legacy-synthetic-readback-20261008-requests.json`。公開文件僅保留數量／大小／狀態，不含假名代碼或影像。
+
+
+## 2026-10-08 部署授權後：Cloud Asset 與 Editor 遷移準備
+
+Jack 明確授權啟用 Cloud Asset API 並繼續部署後，已成功啟用 `cloudasset.googleapis.com`；未啟用 Compute Engine API。限定 project 的 Cloud Asset 查詢成功，六種資源類型（Compute Instance、GKE Cluster、Cloud Function、App Engine Application、Cloud Run Service、Cloud Run Job）僅回傳兩個既有 Cloud Run service。這是該查詢時間的同專案資源盤點，不涵蓋跨專案，也不消除索引延遲的可能。
+
+Cloud Asset 對舊 Compute 身分查得五個直接政策資源：專案 Editor、舊媒體及稽核桶 objectAdmin、舊 admin／JWT 密文 secretAccessor。沒有讀取密文內容。後四個直接資源授權應保留，不能以刪除 Editor 為由一併收回。
+
+新增純政策轉換工具 `tools/migrate_mmh_editor.py`：只移除具名舊 Compute 成員的無條件 Editor；保留 etag、其他角色／成員、條件與 auditConfigs。條件式或重複 Editor binding 不自動處理。回復必須讀新的政策及 etag，只恢復原成員，保留期間新增的其他設定。工具沒有雲端呼叫或自動執行入口。
+
+9/9 離線測試通過，包含單一成員 binding、其他 Editor 成員保留、缺失 etag、條件式及重複 binding、並行變更保留及回復冪等。已納入 CI。實際撤權前仍需即時重查建置、直接授權及政策 etag；撤權後需 51 項有效權限與舊平台讀寫驗收，失敗則讀新 etag 回復該單一成員。此段記錄準備完成，**不代表已撤權**。
