@@ -1,10 +1,10 @@
 # MMHPS20261007 機構版：環境、登入與帳號交付說明
 
-核對日期：2026-10-07。狀態：**已建立三個空桶與執行身分；隔離及部署未完成／未開放登入**。本文涵蓋 WoundAI 醫療端 iOS／Android 機構特殊版，不包含 WoundLite 民眾版。
+核對日期：2026-10-08。狀態：**三桶與執行身分已建立；舊執行身分撤權及指定範圍隔離驗證通過，MMH 部署／登入仍未完成**。本文涵蓋 WoundAI 醫療端 iOS／Android 機構特殊版，不包含 WoundLite 民眾版。
 
 2026-10-08 更新：完整候選映像已建置，同一 digest 的 [隔離執行期驗證](medical_runtime_validation_20261008.md) 39/39 通過；再次讀回仍無 MMH service。下列網址與帳號維持待建立，不能使用測試探針內的暫存帳號登入線上服務。
 
-最新進度：[第二階段 IAM 驗證與權限阻斷](mmh_iam_validation_20261007.md)。三桶已直接綁定專用標籤，但 deny policy 尚未建立，標籤本身不會拒絕存取。已授權的專案範圍限時 denyAdmin 授予遭 Google 拒絕；讀回確認專案 IAM 未變、沒有殘留提升權限。隔離仍未通過，不能提供正式登入網址。
+最新進度：[Editor 撤權驗證](mmh_editor_migration_validation_20261008.md) 51/51，撤權後舊平台合成讀寫及專用建置均通過。這是具名主體的權限矩陣，MMH runtime 尚未授權或完成 GCS 業務驗收。三桶標籤不構成 deny；沒有 deny policy、沒有殘留 denyAdmin，亦未鎖桶。
 
 ## 目前已確認與尚未建立的項目
 
@@ -43,7 +43,7 @@
 | 帳號及安全狀態（空桶已建立） | `woundai-mmhps20261007-security-421209514056` | 密碼只存雜湊、跨實例持久化、IAM、備份與恢復 |
 | 稽核（空桶已建立，未鎖定） | `woundai-mmhps20261007-audit-421209514056` | 實際保留與鎖定狀態；保留不等於已不可逆鎖定 |
 
-候選程式已將 users.jsonl 路由至 WOUNDAI_SECURITY_BUCKET，機構 GCS 設定要求三桶不同。本機測試通過，線上 IAM、稽核及部署配置尚待驗收。三桶為 ASIA-EAST1／STANDARD／uniform IAM／禁止公開；無 retention、lifecycle、versioning 或 soft delete。已移除新桶的 projectEditor／projectViewer 預設授權、保留 Owner；專案層舊執行身分的刪桶權限仍未解決，不能稱完成隔離。手機只呼叫 HTTPS API，不能填入 `gs://` 當後端位址，也不能持有儲存桶金鑰。不得沿用寬權限預設 Compute 身分。新稽核桶的不可逆鎖定另行確認，不因本文出現桶名就視為已授權鎖定。
+候選程式已將 users.jsonl 路由至 WOUNDAI_SECURITY_BUCKET，機構 GCS 設定要求三桶不同。本機測試通過，線上 IAM、稽核及部署配置尚待驗收。三桶為 ASIA-EAST1／STANDARD／uniform IAM／禁止公開；無 retention、lifecycle、versioning 或 soft delete。已移除新桶的 projectEditor／projectViewer 預設授權、保留 Owner；專案層舊執行身分 Editor 已移除，指定的刪桶／冒用權限矩陣通過；不等於所有主體、跨專案冒用鏈及新 runtime 業務驗收完成。手機只呼叫 HTTPS API，不能填入 `gs://` 當後端位址，也不能持有儲存桶金鑰。不得沿用寬權限預設 Compute 身分。新稽核桶的不可逆鎖定另行確認，不因本文出現桶名就視為已授權鎖定。
 
 ## 各權限範例帳號（全部待建立）
 

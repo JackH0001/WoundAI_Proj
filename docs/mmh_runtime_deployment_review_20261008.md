@@ -2,6 +2,8 @@
 
 2026-10-08。**這是離線產生、可覆核的部署規格，尚未執行部署或鎖桶。** 原有完整映像與 39 項執行期驗證見 [驗證報告](medical_runtime_validation_20261008.md)。
 
+最新進度（台北 17:14）：[舊 Editor 撤權及驗收已完成](mmh_editor_migration_validation_20261008.md)，51/51 有效權限通過。重新檢查 metadata 為 7/13，來源 main、稽核鎖定及四把密文條件仍未滿足，部署仍阻擋。以下早期盤點保留其日期範圍。
+
 ## 本輪發現及處理
 
 現有 `Backend/Flask/deploy_cloudrun.ps1` 設定媒體／稽核桶，但沒有傳入 `WOUNDAI_INSTITUTION_ORG` 或 `WOUNDAI_SECURITY_BUCKET`；密文設定也仍使用舊平台名稱。`provision_runtime_identity.ps1` 同樣是既有正式服務流程。它們不能直接當成 MMH 三桶及獨立帳號部署入口。沒有機構設定時，候選 app 為相容舊服務而允許 legacy 行為，不能期待應用啟動自動修正部署遺漏。
