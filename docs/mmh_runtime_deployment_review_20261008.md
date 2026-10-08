@@ -94,3 +94,37 @@ python -B tools/test_plan_mmh_runtime.py
 `python -B engineering/phase2/test_check_locked_epoch_gate.py`：13/13 測試方法通過，包含 MMH 未鎖定、錯誤保留期、未知讀回、設定／實際桶身分不一致、非空桶與正式閘門失敗均拒絕。這是離線測試，真實 MMH 桶仍未鎖定，不能通過部署閘門。
 
 兩個 engineering 檔依現行 owner_guard 仍歸 Windows；本次依 Jack 已明確授權 Mac 進行必要後端對齊的例外提交，未修改所有權規則，也不宣稱已完成 Windows 全套驗證。
+
+
+## 真實資源部署前查核（2026-10-08 台北 13:10）
+
+新增 `tools/check_mmh_runtime_preflight.py`，直接查詢固定專案的資源中繼資料，並重用完整建置來源／digest 驗證器。它沒有 apply、部署、IAM 修改或讀取密文值的功能；只允許限定的 describe/list/get-iam-policy 指令。每次先將報告標記未完成，輸入錯誤、憑證失效或查詢失敗都不能留下前一次的綠燈。即使所有中繼資料符合，仍輸出 `deployable=false`，不能替代有效權限、登入後業務流程、鎖定授權與 GCS E2E。
+
+本次真實查核完整執行 13 項、6 項通過，整體按預期 exit 1：
+
+| 查核 | 結果 |
+|---|---|
+| 專案身分、完整建置／Artifact digest、runtime 身分 | 3 項通過 |
+| 媒體／安全狀態桶設定、MMH service 不存在 | 3 項通過 |
+| 來源精確等於遠端 main | 未通過；候選來源仍在 Draft 分支 |
+| 稽核桶精確鎖定七年 | 未通過；不自動設定或鎖定 |
+| 舊 Compute Editor 已移除 | 未通過；不自動撤權 |
+| 四個獨立密文的固定版本 ENABLED | 4 項查詢失敗，不作可用證據；不讀取密文值 |
+
+這是部署前條件未滿足，不是 6/13 的程式品質分數，也不等於重新跑過 GCS 業務驗收。查詢失敗沒有當成資源不存在或可忽略處理。本階段沒有新增雲端建置、映像推送、IAM 或服務變更。
+
+15/15 新離線測試方法通過，涵蓋重算 hash 後篡改方案、錯誤 build、專案查詢失敗停止、draft 來源、映像 provenance、每個桶的身分／隱私設定、未鎖定或錯誤保留期、停用身分、條件式 Editor、服務已存在／未知、密文資源名／編號／版本／狀態、過期綠燈失效與拒絕雲端寫入／讀取密文值。已加入 p0-4-audit CI。
+
+重現：
+
+```sh
+python -B tools/test_check_mmh_runtime_preflight.py
+python -B tools/check_mmh_runtime_preflight.py \
+  --plan /path/to/runtime-plan.json \
+  --build-id 85053fb9-be4d-4407-af4a-968acf8edc5e \
+  --report /path/to/new-preflight-report.json
+```
+
+本機真實結果：既有證據資料夾 `mmh-deployment-preflight-20261008/live-metadata-preflight.json`。這是唯讀 metadata preflight，專用部署執行入口尚未完成。舊平台登入後的合成讀寫基線仍須補齊，不能以控制台顯示或 metadata 通過替代。
+
+另以八種變異逐一移除關鍵拒絕條件：方案驗證、遠端 main、稽核鎖定、Editor、密文 ENABLED、服務已存在、失敗項目合併判定、deployable=false。8/8 都造成測試斷言失敗，沒有將 import 或執行環境錯誤算作捕獲。證據：`metadata-preflight-mutations.json`。
