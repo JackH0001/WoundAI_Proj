@@ -72,6 +72,68 @@ def _store_module(instance):
 
 
 class LockedEpochGateTests(unittest.TestCase):
+    def run_mmh(self, instance, overrides=None, constructed_security=None):
+        env = {"WOUNDAI_STORE": "gcs", "WOUNDAI_SERVICE_PROFILE": "medical",
+               "WOUNDAI_INSTITUTION_ORG": "mmhps20261007", "WOUNDAI_GCS_PREFIX": "flywheel",
+               "WOUNDAI_GCS_BUCKET": "woundai-mmhps20261007-media-421209514056",
+               "WOUNDAI_SECURITY_BUCKET": "woundai-mmhps20261007-security-421209514056",
+               "WOUNDAI_AUDIT_BUCKET": "woundai-mmhps20261007-audit-421209514056"}
+        instance._bucket_name = env["WOUNDAI_GCS_BUCKET"]
+        instance._audit_bucket_name = env["WOUNDAI_AUDIT_BUCKET"]
+        instance._security_bucket_name = (env["WOUNDAI_SECURITY_BUCKET"]
+                                          if constructed_security is None else constructed_security)
+        instance.info["bucket"] = env["WOUNDAI_AUDIT_BUCKET"]
+        env.update(overrides or {})
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.dict(
+            sys.modules, {"store": _store_module(instance)}
+        ), redirect_stdout(output):
+            code = gate.main(["--audit-bucket", instance._audit_bucket_name,
+                              "--project-number", "421209514056", "--location", "asia-east1"])
+        return code, output.getvalue()
+
+    def test_mmh_exact_three_bucket_tuple_accepts_only_locked_empty_epoch(self):
+        store = _GcsStore()
+        code, _ = self.run_mmh(store)
+        self.assertEqual(code, 0)
+        self.assertEqual(store.calls, ["retention_info", "require_locked_audit_epoch"])
+
+    def test_mmh_unlocked_and_wrong_retention_are_still_rejected(self):
+        for field,value in [("locked", False), ("retention_seconds", 86400), ("verified", False)]:
+            store = _GcsStore();store.info[field] = value
+            code, _ = self.run_mmh(store)
+            self.assertEqual(code, 1)
+
+    def test_mmh_missing_or_wrong_institution_tuple_rejected_before_store(self):
+        for field,value in [("WOUNDAI_INSTITUTION_ORG", "default"),
+                            ("WOUNDAI_SERVICE_PROFILE", "lite"),
+                            ("WOUNDAI_GCS_BUCKET", MAIN_BUCKET),
+                            ("WOUNDAI_SECURITY_BUCKET", ""),
+                            ("WOUNDAI_SECURITY_BUCKET", "other-security")]:
+            store = _GcsStore()
+            code, _ = self.run_mmh(store, {field:value})
+            self.assertEqual(code, 2);self.assertEqual(store.calls, [])
+
+    def test_mmh_constructed_security_bucket_mismatch_rejected_before_readback(self):
+        for bucket in ["", "other-security"]:
+            with self.subTest(bucket=bucket):
+                store = _GcsStore()
+                code, output = self.run_mmh(store, constructed_security=bucket)
+                self.assertEqual(code, 2)
+                self.assertIn("constructed GcsStore identity", output)
+                self.assertEqual(store.calls, [])
+
+    def test_mmh_nonempty_or_production_gate_failure_rejected(self):
+        for store in [_GcsStore(objects=["outside-prefix/synthetic.json"]),
+                      _GcsStore(gate_error=RuntimeError("retention unreadable"))]:
+            code, _ = self.run_mmh(store)
+            self.assertEqual(code, 1)
+
+    def test_mmh_wrong_resource_project_or_location_rejected(self):
+        for store in [_GcsStore(project_number="999"), _GcsStore(location="US")]:
+            code, _ = self.run_mmh(store)
+            self.assertEqual(code, 1)
+
     def run_gate(self, instance, *, store="gcs", bucket=FORMAL_BUCKET):
         env = {
             "WOUNDAI_STORE": store,

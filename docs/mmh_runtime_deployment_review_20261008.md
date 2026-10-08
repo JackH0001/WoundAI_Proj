@@ -85,3 +85,12 @@ python -B tools/test_plan_mmh_runtime.py
 本機證據位於 `/Users/Jack.Hou/Documents/Codex/2026-06-28/woundai-institution-evidence-20261007/mmh-deployment-preflight-20261008/`：runtime-plan.json、planned-secret-versions.json、build-region-inventory.json、resource-preflight.json，以及只含唯讀 API 的盤點腳本。方案產生器沒有雲端執行功能，不能單靠 plan 驗證通过就跳過上述證據。
 
 下一步：按舊 505ff2e 的實際契約補齊可用性基線（不能要求 App 27 在不存在的 care/attest 上成功），完成最小權限遷移；覆核本規格後再實作受閘門保護的 MMH 專用執行入口。部署、真實 GCS 讀回、冷啟動帳號持久化及手機上傳驗收都仍未完成。
+
+
+## MMH 稽核桶名稱相容性補驗證
+
+既有 `check_locked_epoch_gate.py` 要求桶名含有 `epoch`，因此會拒絕已核准建立的 MMH 專用稽核桶。現在只對專案編號、asia-east1、medical profile、機構代碼及三個完整桶名全部相符的 MMH 組合放行名稱檢查；仍要求 GCS 實際專案／地區、七年保留、已鎖定、正式寫入閘門與全桶無物件。另核對實際建構的安全狀態桶，不能只相信環境變數。
+
+`python -B engineering/phase2/test_check_locked_epoch_gate.py`：13/13 測試方法通過，包含 MMH 未鎖定、錯誤保留期、未知讀回、設定／實際桶身分不一致、非空桶與正式閘門失敗均拒絕。這是離線測試，真實 MMH 桶仍未鎖定，不能通過部署閘門。
+
+兩個 engineering 檔依現行 owner_guard 仍歸 Windows；本次依 Jack 已明確授權 Mac 進行必要後端對齊的例外提交，未修改所有權規則，也不宣稱已完成 Windows 全套驗證。
