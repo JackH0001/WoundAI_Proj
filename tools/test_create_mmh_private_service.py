@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 import create_mmh_private_service as m
@@ -218,6 +219,60 @@ class CreatorTests(unittest.TestCase):
                 else:
                     with self.assertRaises(ValueError):m.live_effective(plan(),(),report)
                     self.assertFalse(json.loads(report.read_text())['complete'])
+
+    def refresh_case(self):
+        case=(m.SA,'//storage.googleapis.com/projects/_/buckets/other','storage.objects.get',False)
+        response={'accessTuple':{'principal':case[0],'fullResourceName':case[1],'permission':case[2]},
+                  'overallAccessState':'CANNOT_ACCESS',
+                  'allowPolicyExplanation':{'allowAccessState':'ALLOW_ACCESS_STATE_NOT_GRANTED'},
+                  'denyPolicyExplanation':{'denyAccessState':'DENY_ACCESS_STATE_NOT_DENIED'}}
+        return case,response
+
+    def test_expired_token_refreshes_once_for_identical_read_only_query(self):
+        case,response=self.refresh_case()
+        expired=urllib.error.HTTPError('https://example.invalid',401,'unauthorized',None,None)
+        with patch.object(m,'request_v3',side_effect=[expired,response]) as request,patch.object(m,'access_token',return_value='fresh-token') as token:
+            got,new_token=m.effective_response(case,'expired-token')
+        self.assertEqual(new_token,'fresh-token');self.assertEqual(got,response)
+        self.assertEqual(request.call_args_list[0].args,(*case[:3],'expired-token'))
+        self.assertEqual(request.call_args_list[1].args,(*case[:3],'fresh-token'))
+        token.assert_called_once_with()
+
+    def test_repeated_401_is_not_an_unbounded_retry(self):
+        case,_=self.refresh_case()
+        with patch.object(m,'request_v3',side_effect=urllib.error.HTTPError('https://example.invalid',401,'unauthorized',None,None)) as request,patch.object(m,'access_token',return_value='fresh-token') as token:
+            with self.assertRaises(urllib.error.HTTPError):m.effective_response(case,'expired-token')
+        self.assertEqual(request.call_count,2);token.assert_called_once_with()
+
+    def test_non_401_errors_do_not_refresh_or_retry(self):
+        case,_=self.refresh_case()
+        for code in (403,429,500):
+            with self.subTest(code=code),patch.object(m,'request_v3',side_effect=urllib.error.HTTPError('https://example.invalid',code,'failed',None,None)) as request,patch.object(m,'access_token') as token:
+                with self.assertRaises(urllib.error.HTTPError):m.effective_response(case,'old-token')
+                request.assert_called_once();token.assert_not_called()
+
+    def test_failed_credential_refresh_stops_before_second_query(self):
+        case,_=self.refresh_case()
+        with patch.object(m,'request_v3',side_effect=urllib.error.HTTPError('https://example.invalid',401,'unauthorized',None,None)) as request,patch.object(m,'access_token',side_effect=ValueError('credential unavailable')):
+            with self.assertRaises(ValueError):m.effective_response(case,'old-token')
+            request.assert_called_once()
+
+    def test_unknown_after_refresh_does_not_complete_the_gate(self):
+        case,response=self.refresh_case();response['overallAccessState']='UNKNOWN_INFO_DENIED'
+        report=Path(self.tmp.name)/'refresh-unknown.json'
+        with patch.object(m,'legacy_cases',return_value=[]),patch.object(m,'runtime_cases',return_value=[case]),patch.object(m,'access_token',side_effect=['old-token','fresh-token']),patch.object(m,'request_v3',side_effect=[urllib.error.HTTPError('https://example.invalid',401,'unauthorized',None,None),response]):
+            with self.assertRaises(ValueError):m.live_effective(plan(),(),report)
+        self.assertFalse(json.loads(report.read_text())['complete'])
+
+    def test_full_gate_uses_refreshed_token_on_following_case(self):
+        case,response=self.refresh_case();second=(*case[:2],'storage.objects.list',False)
+        second_response=copy.deepcopy(response);second_response['accessTuple']['permission']=second[2]
+        report=Path(self.tmp.name)/'refresh-success.json'
+        with patch.object(m,'legacy_cases',return_value=[]),patch.object(m,'runtime_cases',return_value=[case,second]),patch.object(m,'access_token',side_effect=['old-token','fresh-token']) as token,patch.object(m,'request_v3',side_effect=[urllib.error.HTTPError('https://example.invalid',401,'unauthorized',None,None),response,second_response]) as request,patch.object(m.time,'sleep'):
+            self.assertTrue(m.live_effective(plan(),(),report))
+        self.assertEqual(request.call_args_list[-1].args,(*second[:3],'fresh-token'))
+        self.assertEqual(token.call_count,2)
+        self.assertTrue(json.loads(report.read_text())['complete'])
 
     def test_existing_service_or_disabled_secret_prevents_create(self):
         for prefix,edit in [(['run','services','list'],lambda r:[{'metadata':{'name':m.SERVICE}}]),

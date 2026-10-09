@@ -153,6 +153,19 @@ def runtime_cases(plan, inventory):
     return rows
 
 
+def effective_response(case, token):
+    """Refresh an expired caller token once for this read-only IAM query."""
+    try:
+        response = request_v3(*case[:3], token)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 401:
+            raise
+        token = access_token()
+        # A second 401, failed refresh, or any other error still stops the gate.
+        response = request_v3(*case[:3], token)
+    return response, token
+
+
 def live_effective(plan, inventory, report):
     matrix = legacy_cases('least-privilege') + runtime_cases(plan, inventory)
     report.write_text(json.dumps({'complete': False, 'total': len(matrix)})+'\n')
@@ -161,7 +174,8 @@ def live_effective(plan, inventory, report):
     for i, case in enumerate(matrix):
         if i:
             time.sleep(7)
-        row = assess(request_v3(*case[:3], token), *case)
+        response, token = effective_response(case, token)
+        row = assess(response, *case)
         results.append(row)
         report.write_text(json.dumps({'complete': False, 'cases': results, 'total': len(matrix)}, indent=2)+'\n')
         require(row['passed'], 'effective permission failed or unknown')

@@ -38,3 +38,20 @@ python -B -m unittest discover -s tools -p 'test_*mmh*.py'
 本機證據位於 `woundai-institution-evidence-20261007/mmh-unlocked-main-20261008/` 的
 `create-format-regression.log`、`create-format-mutation.json`、`create-format-validate-only.json`，
 以及保留的 `deployment-retry-20261009-1139/` 失敗 journal。
+
+## 後續：長時間 IAM 查核的憑證更新
+
+修正格式後的新 journal 在 67 項已通過時，下一個 Troubleshooter 查詢回 401，
+`creation_attempted=false`。原迴圈全程持有最初的權杖；重新向既有 gcloud 登入
+取得權杖後，同一項唯讀權限查詢成功，不需要使用者重新登入。
+
+新增 `effective_response()`：只有唯讀 IAM HTTP 401 才重新取得一次呼叫者權杖，
+並以相同 principal／resource／permission 重查一次；後續項目沿用更新後權杖。
+再次 401、更新失敗、403／429／500 都停止，不重試 Cloud Run create，也不把
+UNKNOWN 或錯誤回應轉成允許。憑證始終只在記憶體，不存入報告。
+
+- 增量後部署工具測試 **121/121** 通過，涵蓋以上拒絕條件及下一項確實使用新權杖。
+- 真 API 唯讀探針先送一個刻意無效的非密文占位 token，驗證 401 後自動取得
+  現有登入的 token 並完成相同權限查詢：通過。没有建立服務、授予 IAM 或存取密文值。
+- 失敗 journal `deployment-create-formatfix-20261009/` 保留；再部署仍須新 journal
+  重跑全部閘門，不能把 67 項部分成功當成完整證據。
