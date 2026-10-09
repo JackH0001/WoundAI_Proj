@@ -1,8 +1,9 @@
 # MMHPS20261007 機構版：環境、登入與帳號交付說明
 
-核對日期：2026-10-09。**MMH 私有服務已部署，264/264 有效 IAM、45/45 真實 GCS 合成流程通過；尚未開放一般手機入口或完成機構 App 發行。** 本文涵蓋 WoundAI 醫療端 iOS／Android 機構特殊版，不包含 WoundLite 民眾版。
+核對日期：2026-10-10。**MMH 私有服務已部署，264/264 有效 IAM、45/45 真實 GCS 合成流程通過；尚未開放一般手機入口或完成機構 App 發行。** 本文涵蓋 WoundAI 醫療端 iOS／Android 機構特殊版，不包含 WoundLite 民眾版。
 
 目前結果與來源綁定見 [私有部署與合成驗收](mmh_private_acceptance_20261009.md)。
+新增 [Mac 私有入口與冷啟動驗證](mmh_console_access_validation_20261010.md)，提供限時本機管理入口；不是手機入口。
 舊正式與 demo 的 revision、流量、映像及執行身分讀回皆未變動。
 MMH 明確使用 `mmh-unlocked-validation`，無保留政策且未鎖定；不宣稱 WORM。
 高合規路徑仍維持七年鎖定守門。本階段 IRB 尚未送件，限模擬／測試資料。
@@ -44,7 +45,7 @@ MMH 明確使用 `mmh-unlocked-validation`，無保留政策且未鎖定；不�
 | 帳號及安全狀態（合成帳號已驗證） | `woundai-mmhps20261007-security-421209514056` | 密碼只存雜湊、跨實例持久化、IAM、備份與恢復 |
 | 稽核（雜湊鏈已驗證，未鎖定） | `woundai-mmhps20261007-audit-421209514056` | 實際保留與鎖定狀態；保留不等於已不可逆鎖定 |
 
-部署程式將 users.jsonl 路由至 WOUNDAI_SECURITY_BUCKET，機構 GCS 設定要求三桶不同。指定 IAM、稽核鏈及真實 GCS 合成流程已驗證；帳號冷啟動留存尚未實測。三桶為 ASIA-EAST1／STANDARD／uniform IAM／禁止公開；無 retention、lifecycle、versioning 或 soft delete。已移除新桶的 projectEditor／projectViewer 預設授權、保留 Owner；專案層舊執行身分 Editor 已移除，指定的刪桶／冒用權限矩陣通過；此結果不等於所有主體或跨專案多跳冒用鏈均已排除。手機只呼叫 HTTPS API，不能填入 `gs://` 當後端位址，也不能持有儲存桶金鑰。不得沿用寬權限預設 Compute 身分。本案已選擇未鎖定模式，不執行不可逆鎖定。
+部署程式將 users.jsonl 路由至 WOUNDAI_SECURITY_BUCKET，機構 GCS 設定要求三桶不同。指定 IAM、稽核鏈及真實 GCS 合成流程已驗證；2026-10-10 已觀察一次自然新實例啟動後，管理者可登入、原帳號及停用狀態仍保留；不等於多實例故障切換或備份恢復驗收。三桶為 ASIA-EAST1／STANDARD／uniform IAM／禁止公開；無 retention、lifecycle、versioning 或 soft delete。已移除新桶的 projectEditor／projectViewer 預設授權、保留 Owner；專案層舊執行身分 Editor 已移除，指定的刪桶／冒用權限矩陣通過；此結果不等於所有主體或跨專案多跳冒用鏈均已排除。手機只呼叫 HTTPS API，不能填入 `gs://` 當後端位址，也不能持有儲存桶金鑰。不得沿用寬權限預設 Compute 身分。本案已選擇未鎖定模式，不執行不可逆鎖定。
 
 ## 各權限範例帳號（全部待建立）
 
