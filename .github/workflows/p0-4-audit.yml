@@ -79,6 +79,7 @@ on:
       - 'tools/test_migrate_mmh_editor.py'
       - 'tools/create_mmh_private_service.py'
       - 'tools/test_create_mmh_private_service.py'
+      - 'tools/test_medical_depth_orientation_storage.py'
       - 'engineering/phase2/verify_audit_chain.py'
       - 'engineering/phase2/Assert-CIGreen.ps1'
       - 'engineering/phase2/test_ci_gate_static.py'
@@ -183,6 +184,7 @@ on:
       - 'tools/test_migrate_mmh_editor.py'
       - 'tools/create_mmh_private_service.py'
       - 'tools/test_create_mmh_private_service.py'
+      - 'tools/test_medical_depth_orientation_storage.py'
       - 'engineering/phase2/verify_audit_chain.py'
       - 'engineering/phase2/Assert-CIGreen.ps1'
       - 'engineering/phase2/test_ci_gate_static.py'
@@ -310,6 +312,7 @@ jobs:
           python -B tools/test_check_mmh_runtime_preflight.py
           python -B tools/test_migrate_mmh_editor.py
           python -B tools/test_create_mmh_private_service.py
+          python -B tools/test_medical_depth_orientation_storage.py
           python -B engineering/phase2/test_p0_4_staging.py
           python -B engineering/phase2/test_runtime_golden_contract.py
 
