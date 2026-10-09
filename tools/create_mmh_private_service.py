@@ -59,7 +59,10 @@ def payload(plan):
         secret, version = ref.split(':')
         env.append({'name': key, 'valueSource': {'secretKeyRef': {
             'secret': 'projects/'+NUMBER+'/secrets/'+secret, 'version': version}}})
-    return {'name': NAME, 'ingress': 'INGRESS_TRAFFIC_ALL', 'invokerIamDisabled': False,
+    # CreateService takes the identifier in ?serviceId=. The resource name is
+    # assigned by the API; sending it in the create body is INVALID_ARGUMENT.
+    # Read-back identity is still checked against NAME in check_ready().
+    return {'ingress': 'INGRESS_TRAFFIC_ALL', 'invokerIamDisabled': False,
             'scaling': {'minInstanceCount': 0, 'maxInstanceCount': 1, 'scalingMode': 'AUTOMATIC'},
             'template': {'serviceAccount': SA, 'timeout': '120s',
                          'maxInstanceRequestConcurrency': 1,

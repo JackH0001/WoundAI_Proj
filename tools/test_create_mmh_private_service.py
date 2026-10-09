@@ -44,6 +44,8 @@ class CreatorTests(unittest.TestCase):
         self.posts = []
 
     def api(self, method, path, body=None):
+        if method == 'POST' and body.get('name'):
+            raise ValueError('service.name must be empty on CreateServiceRequest')
         self.posts.append((method,path,body))
         return {'name':m.PARENT+'/operations/one'}
 
@@ -55,6 +57,7 @@ class CreatorTests(unittest.TestCase):
 
     def test_payload_keeps_all_three_buckets_and_four_pinned_secrets(self):
         p=m.payload(plan()); env=p['template']['containers'][0]['env']
+        self.assertNotIn('name',p)
         self.assertFalse(p['invokerIamDisabled'])
         self.assertEqual(p['template']['serviceAccount'],m.SA)
         self.assertEqual(len([e for e in env if 'valueSource' in e]),4)
@@ -77,6 +80,7 @@ class CreatorTests(unittest.TestCase):
     def test_confirmed_create_posts_once_and_is_not_acceptance(self):
         r=self.execute(confirm_sha=plan()['spec_sha256'])
         self.assertEqual(len(self.posts),1);self.assertEqual(self.posts[0][:2],('POST',m.PARENT+'/services?serviceId='+m.SERVICE))
+        self.assertNotIn('name',self.posts[0][2])
         self.assertFalse(r['deployed']);self.assertEqual(r['state'],'submitted_not_accepted')
         with self.assertRaises(FileExistsError):self.execute(confirm_sha=plan()['spec_sha256'])
         self.assertEqual(len(self.posts),1)
@@ -162,8 +166,16 @@ class CreatorTests(unittest.TestCase):
         self.assertNotIn('sensitive',json.dumps(r));self.assertEqual(len(self.posts),1)
 
     def ready(self):
-        s=m.payload(plan());s.update(generation='1',observedGeneration='1',latestReadyRevision='r1',latestCreatedRevision='r1',terminalCondition={'state':'CONDITION_SUCCEEDED'},reconciling=False)
+        s=m.payload(plan());s.update(name=m.NAME,generation='1',observedGeneration='1',latestReadyRevision='r1',latestCreatedRevision='r1',terminalCondition={'state':'CONDITION_SUCCEEDED'},reconciling=False)
         return s
+
+    def test_readback_still_requires_exact_server_assigned_name(self):
+        for name in (None, '', m.PARENT+'/services/woundai-backend'):
+            service=self.ready()
+            if name is None:service.pop('name')
+            else:service['name']=name
+            with self.subTest(name=name),self.assertRaises(ValueError):
+                m.check_ready(plan(),service,{})
 
     def test_ready_does_not_claim_gcs_or_mobile_acceptance(self):
         r=m.check_ready(plan(),self.ready(),{})
