@@ -69,7 +69,7 @@ def payload(plan):
                          'scaling': {'minInstanceCount': 0, 'maxInstanceCount': 1},
                          'containers': [{'image': s['image'], 'env': env,
                              'resources': {'limits': {'cpu': '2', 'memory': '4Gi'}, 'cpuIdle': True},
-                             'ports': [{'containerPort': 8080}]}]},
+                             'ports': [{'name': 'http1', 'containerPort': 8080}]}]},
             'traffic': [{'type': 'TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST', 'percent': 100}]}
 
 

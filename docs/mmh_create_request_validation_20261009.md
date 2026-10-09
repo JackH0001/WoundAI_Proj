@@ -55,3 +55,17 @@ UNKNOWN 或錯誤回應轉成允許。憑證始終只在記憶體，不存入報
   現有登入的 token 並完成相同權限查詢：通過。没有建立服務、授予 IAM 或存取密文值。
 - 失敗 journal `deployment-create-formatfix-20261009/` 保留；再部署仍須新 journal
   重跑全部閘門，不能把 67 項部分成功當成完整證據。
+
+## 線上就緒讀回：HTTP/1 預設欄位
+
+264/264 即時 IAM 及第二次 metadata／政策查核通過後，CreateService 成功，
+Cloud Run operation done=true、無 error，revision 已 Ready。覆核工具卻拒絕
+`container port mismatch`：API 會在原本省略 name 的 8080 port 自動補上
+`name: http1`。這是工具對伺服器正規化欄位的假陽性，不是容器啟動失敗。
+
+現在 payload 明確指定 `http1:8080`，readiness 仍逐欄完全比對，不移除協定
+或埠號檢查。fixture 的真實 API port 格式改為獨立常數，避免從 payload
+複製同一個錯誤；缺協定、h2c、錯誤埠及多個埠皆拒絕。測試 **122/122**。
+此次只對既有服務重新執行唯讀 status；沒有重新 create、PATCH、切流或變更 IAM。
+實際業務驗收仍須另看合成 JPEG／組織圖層／深度的 GCS 讀回與撤回結果，
+不能從 Ready 推定全部功能通過。

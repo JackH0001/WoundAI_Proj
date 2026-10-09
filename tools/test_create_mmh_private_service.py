@@ -60,6 +60,7 @@ class CreatorTests(unittest.TestCase):
         p=m.payload(plan()); env=p['template']['containers'][0]['env']
         self.assertNotIn('name',p)
         self.assertFalse(p['invokerIamDisabled'])
+        self.assertEqual(p['template']['containers'][0]['ports'], [{'name':'http1','containerPort':8080}])
         self.assertEqual(p['template']['serviceAccount'],m.SA)
         self.assertEqual(len([e for e in env if 'valueSource' in e]),4)
         refs=[e['valueSource']['secretKeyRef'] for e in env if 'valueSource' in e]
@@ -168,7 +169,18 @@ class CreatorTests(unittest.TestCase):
 
     def ready(self):
         s=m.payload(plan());s.update(name=m.NAME,generation='1',observedGeneration='1',latestReadyRevision='r1',latestCreatedRevision='r1',terminalCondition={'state':'CONDITION_SUCCEEDED'},reconciling=False)
+        # Real Cloud Run readback includes the default HTTP/1 protocol name.
+        # Keep this independent of the create payload to detect API-shape regressions.
+        s['template']['containers'][0]['ports']=[{'name':'http1','containerPort':8080}]
         return s
+
+    def test_readback_rejects_wrong_or_missing_protocol_and_port(self):
+        for ports in ([], [{'containerPort':8080}], [{'name':'h2c','containerPort':8080}],
+                      [{'name':'http1','containerPort':8081}],
+                      [{'name':'http1','containerPort':8080},{'name':'http1','containerPort':8081}]):
+            service=self.ready();service['template']['containers'][0]['ports']=ports
+            with self.subTest(ports=ports),self.assertRaises(ValueError):
+                m.check_ready(plan(),service,{})
 
     def test_readback_still_requires_exact_server_assigned_name(self):
         for name in (None, '', m.PARENT+'/services/woundai-backend'):
