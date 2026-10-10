@@ -61,6 +61,7 @@ class MedicalDepthOrientationStorageTests(unittest.TestCase):
             data={'image_id':self.iid,'meta':json.dumps(meta),'depth_f32':(io.BytesIO(raw),'depth.f32')},
             content_type='multipart/form-data')
         self.assertEqual(r.status_code,200,r.json)
+        self.last_response = r.json
         folder=Path(self.tmp.name)/'depth_maps'
         self.assertEqual((folder/f'{self.iid}.f32').read_bytes(),raw)
         saved=json.loads((folder/f'{self.iid}.meta.json').read_text())
@@ -81,6 +82,74 @@ class MedicalDepthOrientationStorageTests(unittest.TestCase):
             self.assertNotIn('source_exif_orientation',saved)
             self.assertNotIn('normalized_exif_orientation',saved)
             for key,value in extra.items():self.assertEqual(saved[key],value)
+
+    def test_identical_retry_and_json_key_order_keep_revision(self):
+        extra={'source_exif_orientation':6,'normalized_exif_orientation':1,
+               'orientation_status':'normalized','registration':'not_verified'}
+        self.upload(extra); first=self.last_response
+        self.assertEqual(first['comparison'],'first_upload')
+        self.upload(dict(reversed(list(extra.items())))); second=self.last_response
+        self.assertFalse(second['replaced_previous'])
+        self.assertEqual(second['comparison'],'identical')
+        self.assertEqual(first['depth_revision_id'],second['depth_revision_id'])
+
+    def test_metadata_only_changes_are_revisions(self):
+        self.upload({'source_exif_orientation':1}); first=self.last_response
+        for changed in [
+            {'source_exif_orientation':8},
+            {'source_exif_orientation':8,'camera_intrinsics':
+                {'fx':19,'fy':17,'cx':4,'cy':3,'ref_width':16,'ref_height':12}},
+        ]:
+            self.upload(changed); second=self.last_response
+            self.assertEqual(first['depth_id'],second['depth_id'])
+            self.assertTrue(second['replaced_previous'])
+            self.assertEqual(second['comparison'],'changed')
+            self.assertNotEqual(first['depth_revision_id'],second['depth_revision_id'])
+            first=second
+
+    def test_hashes_bind_actual_stored_bytes_and_audit_intent(self):
+        self.upload({'source_exif_orientation':7})
+        folder=Path(self.tmp.name)/'depth_maps'
+        raw=(folder/f'{self.iid}.f32').read_bytes()
+        meta=(folder/f'{self.iid}.meta.json').read_bytes()
+        raw_sha=hashlib.sha256(raw).hexdigest(); meta_sha=hashlib.sha256(meta).hexdigest()
+        combined=hashlib.sha256(b'woundai-medical-depth-v1\0'+bytes.fromhex(raw_sha)+bytes.fromhex(meta_sha)).hexdigest()
+        row=self.fw.read_jsonl(self.fw.DEPTH_INDEX)[-1]
+        self.assertEqual(row['sha256'],raw_sha)
+        for record in [row,self.last_response]:
+            self.assertEqual(record['meta_sha256'],meta_sha)
+            self.assertEqual(record['payload_sha256'],combined)
+            self.assertEqual(record['payload_hash_version'],1)
+        self.assertEqual(self.last_response['depth_revision_id'],combined[:16])
+        # Intercept the audit intent boundary without replacing storage.
+        with patch.object(self.fw,'audit_intent',wraps=self.fw.audit_intent) as intent:
+            self.upload({'source_exif_orientation':7})
+        evidence=intent.call_args.args[5]
+        self.assertEqual(evidence['meta_sha256'],meta_sha)
+        self.assertEqual(evidence['payload_sha256'],combined)
+
+    def test_legacy_index_without_metadata_hash_is_not_identical_evidence(self):
+        self.upload({})
+        row=self.fw.read_jsonl(self.fw.DEPTH_INDEX)[-1]
+        self.fw.append_jsonl(self.fw.DEPTH_INDEX,{'image_id':self.iid,'sha256':row['sha256']})
+        self.upload({})
+        self.assertTrue(self.last_response['replaced_previous'])
+        self.assertEqual(self.last_response['comparison'],'legacy_unverifiable')
+
+    def test_rejected_metadata_preserves_assets_and_index(self):
+        self.upload({'source_exif_orientation':6})
+        folder=Path(self.tmp.name)/'depth_maps'
+        old_meta=(folder/f'{self.iid}.meta.json').read_bytes()
+        old_index=self.fw.read_jsonl(self.fw.DEPTH_INDEX)
+        bad={'width':16,'height':12,'format':'f32_le_meters','camera_intrinsics':
+             {'fx':0,'fy':17,'cx':4,'cy':3,'ref_width':16,'ref_height':12}}
+        r=self.client.post('/api/v1/depth',headers=self.headers,
+            data={'image_id':self.iid,'meta':json.dumps(bad),
+                  'depth_f32':(io.BytesIO(struct.pack('<192f',*([.3]*192))),'depth.f32')},
+            content_type='multipart/form-data')
+        self.assertEqual(r.status_code,400)
+        self.assertEqual((folder/f'{self.iid}.meta.json').read_bytes(),old_meta)
+        self.assertEqual(self.fw.read_jsonl(self.fw.DEPTH_INDEX),old_index)
 
 
 if __name__=='__main__':unittest.main()
