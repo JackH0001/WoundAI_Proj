@@ -8,8 +8,8 @@ import CoreGraphics
  ## 為什麼現在就收
 
  3D 重建研究需要的是「拍攝當下」的深度圖＋相機內參——事後補不回來。影像本身 90 天
- 會依保存政策清除，但深度圖與內參是去識別的幾何資料（不含可辨識病患的外觀資訊，
- 仍與影像同等加密保存）。現在每一筆臨床收案順手收下，WoundAI3D 開案時就有資料集。
+ 會依保存政策清除，但深度圖與內參仍可與影像及個案連結，
+ 應視為敏感資料並與影像同等加密保存。現在每一筆臨床收案順手收下，WoundAI3D 開案時就有資料集。
 
  ## 設計邊界（刻意的）
 
@@ -63,8 +63,8 @@ struct DepthCapture {
 
     var metaJson: [String: Any] {
         let c = coverage()
-        return [
-            "version": 1,
+        var meta: [String: Any] = [
+            "version": 2,
             "format": "f32_le_meters",
             "width": width, "height": height,
             "intrinsics": ["fx": fx, "fy": fy, "cx": cx, "cy": cy,
@@ -74,8 +74,17 @@ struct DepthCapture {
             "rgb_w": rgbWidth, "rgb_h": rgbHeight,
             "coverage": c.valid, "min_m": c.minM, "max_m": c.maxM,
             "captured_at": ISO8601DateFormatter().string(from: Date()),
-            "device": BackendClient.deviceModelString()
+            "device": BackendClient.deviceModelString(),
+            // Transformation provenance is not a registration/accuracy certificate.
+            "registration": "not_verified",
+            "orientation_status": "unknown"
         ]
+        if let exif = sourceExifOrientation, (1...8).contains(exif) {
+            meta["source_exif_orientation"] = exif
+            meta["normalized_exif_orientation"] = 1
+            meta["orientation_status"] = "normalized"
+        }
+        return meta
     }
 
     /// 從 `AVDepthData` 轉出。一律轉成 DepthFloat32（LiDAR 原生常是 f16 視差／深度）。

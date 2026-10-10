@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 import create_mmh_private_service as m
@@ -44,6 +45,8 @@ class CreatorTests(unittest.TestCase):
         self.posts = []
 
     def api(self, method, path, body=None):
+        if method == 'POST' and body.get('name'):
+            raise ValueError('service.name must be empty on CreateServiceRequest')
         self.posts.append((method,path,body))
         return {'name':m.PARENT+'/operations/one'}
 
@@ -55,7 +58,9 @@ class CreatorTests(unittest.TestCase):
 
     def test_payload_keeps_all_three_buckets_and_four_pinned_secrets(self):
         p=m.payload(plan()); env=p['template']['containers'][0]['env']
+        self.assertNotIn('name',p)
         self.assertFalse(p['invokerIamDisabled'])
+        self.assertEqual(p['template']['containers'][0]['ports'], [{'name':'http1','containerPort':8080}])
         self.assertEqual(p['template']['serviceAccount'],m.SA)
         self.assertEqual(len([e for e in env if 'valueSource' in e]),4)
         refs=[e['valueSource']['secretKeyRef'] for e in env if 'valueSource' in e]
@@ -77,6 +82,7 @@ class CreatorTests(unittest.TestCase):
     def test_confirmed_create_posts_once_and_is_not_acceptance(self):
         r=self.execute(confirm_sha=plan()['spec_sha256'])
         self.assertEqual(len(self.posts),1);self.assertEqual(self.posts[0][:2],('POST',m.PARENT+'/services?serviceId='+m.SERVICE))
+        self.assertNotIn('name',self.posts[0][2])
         self.assertFalse(r['deployed']);self.assertEqual(r['state'],'submitted_not_accepted')
         with self.assertRaises(FileExistsError):self.execute(confirm_sha=plan()['spec_sha256'])
         self.assertEqual(len(self.posts),1)
@@ -162,8 +168,27 @@ class CreatorTests(unittest.TestCase):
         self.assertNotIn('sensitive',json.dumps(r));self.assertEqual(len(self.posts),1)
 
     def ready(self):
-        s=m.payload(plan());s.update(generation='1',observedGeneration='1',latestReadyRevision='r1',latestCreatedRevision='r1',terminalCondition={'state':'CONDITION_SUCCEEDED'},reconciling=False)
+        s=m.payload(plan());s.update(name=m.NAME,generation='1',observedGeneration='1',latestReadyRevision='r1',latestCreatedRevision='r1',terminalCondition={'state':'CONDITION_SUCCEEDED'},reconciling=False)
+        # Real Cloud Run readback includes the default HTTP/1 protocol name.
+        # Keep this independent of the create payload to detect API-shape regressions.
+        s['template']['containers'][0]['ports']=[{'name':'http1','containerPort':8080}]
         return s
+
+    def test_readback_rejects_wrong_or_missing_protocol_and_port(self):
+        for ports in ([], [{'containerPort':8080}], [{'name':'h2c','containerPort':8080}],
+                      [{'name':'http1','containerPort':8081}],
+                      [{'name':'http1','containerPort':8080},{'name':'http1','containerPort':8081}]):
+            service=self.ready();service['template']['containers'][0]['ports']=ports
+            with self.subTest(ports=ports),self.assertRaises(ValueError):
+                m.check_ready(plan(),service,{})
+
+    def test_readback_still_requires_exact_server_assigned_name(self):
+        for name in (None, '', m.PARENT+'/services/woundai-backend'):
+            service=self.ready()
+            if name is None:service.pop('name')
+            else:service['name']=name
+            with self.subTest(name=name),self.assertRaises(ValueError):
+                m.check_ready(plan(),service,{})
 
     def test_ready_does_not_claim_gcs_or_mobile_acceptance(self):
         r=m.check_ready(plan(),self.ready(),{})
@@ -206,6 +231,60 @@ class CreatorTests(unittest.TestCase):
                 else:
                     with self.assertRaises(ValueError):m.live_effective(plan(),(),report)
                     self.assertFalse(json.loads(report.read_text())['complete'])
+
+    def refresh_case(self):
+        case=(m.SA,'//storage.googleapis.com/projects/_/buckets/other','storage.objects.get',False)
+        response={'accessTuple':{'principal':case[0],'fullResourceName':case[1],'permission':case[2]},
+                  'overallAccessState':'CANNOT_ACCESS',
+                  'allowPolicyExplanation':{'allowAccessState':'ALLOW_ACCESS_STATE_NOT_GRANTED'},
+                  'denyPolicyExplanation':{'denyAccessState':'DENY_ACCESS_STATE_NOT_DENIED'}}
+        return case,response
+
+    def test_expired_token_refreshes_once_for_identical_read_only_query(self):
+        case,response=self.refresh_case()
+        expired=urllib.error.HTTPError('https://example.invalid',401,'unauthorized',None,None)
+        with patch.object(m,'request_v3',side_effect=[expired,response]) as request,patch.object(m,'access_token',return_value='fresh-token') as token:
+            got,new_token=m.effective_response(case,'expired-token')
+        self.assertEqual(new_token,'fresh-token');self.assertEqual(got,response)
+        self.assertEqual(request.call_args_list[0].args,(*case[:3],'expired-token'))
+        self.assertEqual(request.call_args_list[1].args,(*case[:3],'fresh-token'))
+        token.assert_called_once_with()
+
+    def test_repeated_401_is_not_an_unbounded_retry(self):
+        case,_=self.refresh_case()
+        with patch.object(m,'request_v3',side_effect=urllib.error.HTTPError('https://example.invalid',401,'unauthorized',None,None)) as request,patch.object(m,'access_token',return_value='fresh-token') as token:
+            with self.assertRaises(urllib.error.HTTPError):m.effective_response(case,'expired-token')
+        self.assertEqual(request.call_count,2);token.assert_called_once_with()
+
+    def test_non_401_errors_do_not_refresh_or_retry(self):
+        case,_=self.refresh_case()
+        for code in (403,429,500):
+            with self.subTest(code=code),patch.object(m,'request_v3',side_effect=urllib.error.HTTPError('https://example.invalid',code,'failed',None,None)) as request,patch.object(m,'access_token') as token:
+                with self.assertRaises(urllib.error.HTTPError):m.effective_response(case,'old-token')
+                request.assert_called_once();token.assert_not_called()
+
+    def test_failed_credential_refresh_stops_before_second_query(self):
+        case,_=self.refresh_case()
+        with patch.object(m,'request_v3',side_effect=urllib.error.HTTPError('https://example.invalid',401,'unauthorized',None,None)) as request,patch.object(m,'access_token',side_effect=ValueError('credential unavailable')):
+            with self.assertRaises(ValueError):m.effective_response(case,'old-token')
+            request.assert_called_once()
+
+    def test_unknown_after_refresh_does_not_complete_the_gate(self):
+        case,response=self.refresh_case();response['overallAccessState']='UNKNOWN_INFO_DENIED'
+        report=Path(self.tmp.name)/'refresh-unknown.json'
+        with patch.object(m,'legacy_cases',return_value=[]),patch.object(m,'runtime_cases',return_value=[case]),patch.object(m,'access_token',side_effect=['old-token','fresh-token']),patch.object(m,'request_v3',side_effect=[urllib.error.HTTPError('https://example.invalid',401,'unauthorized',None,None),response]):
+            with self.assertRaises(ValueError):m.live_effective(plan(),(),report)
+        self.assertFalse(json.loads(report.read_text())['complete'])
+
+    def test_full_gate_uses_refreshed_token_on_following_case(self):
+        case,response=self.refresh_case();second=(*case[:2],'storage.objects.list',False)
+        second_response=copy.deepcopy(response);second_response['accessTuple']['permission']=second[2]
+        report=Path(self.tmp.name)/'refresh-success.json'
+        with patch.object(m,'legacy_cases',return_value=[]),patch.object(m,'runtime_cases',return_value=[case,second]),patch.object(m,'access_token',side_effect=['old-token','fresh-token']) as token,patch.object(m,'request_v3',side_effect=[urllib.error.HTTPError('https://example.invalid',401,'unauthorized',None,None),response,second_response]) as request,patch.object(m.time,'sleep'):
+            self.assertTrue(m.live_effective(plan(),(),report))
+        self.assertEqual(request.call_args_list[-1].args,(*second[:3],'fresh-token'))
+        self.assertEqual(token.call_count,2)
+        self.assertTrue(json.loads(report.read_text())['complete'])
 
     def test_existing_service_or_disabled_secret_prevents_create(self):
         for prefix,edit in [(['run','services','list'],lambda r:[{'metadata':{'name':m.SERVICE}}]),

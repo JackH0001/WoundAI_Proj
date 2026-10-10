@@ -656,28 +656,12 @@ actor BackendClient {
        iOS 原生就是 LE，長度必須等於 width×height×4——後端唯一抓得到截斷的檢查）。
      - `sidecarMeta`：**本機 sidecar 的 metaJson**。本機鍵名（`intrinsics.ref_w`）與
        後端鍵名（`camera_intrinsics.ref_width`）不同——轉換集中在這裡，
-       兩邊各自已落地的格式都不動。
+       舊檔仍可讀取；sidecar v2 另帶方向沿革，未知來源不得補猜。
      - 前置條件：該 `image_id` 已有標註且未撤回（孤兒深度後端 400 拒收，是設計）。
      */
     func uploadDepth(imageId: String, raw: Data,
                      sidecarMeta: [String: Any]) async throws -> (depthId: String, replaced: Bool) {
-        var ci: [String: Any] = [:]
-        if let s = sidecarMeta["intrinsics"] as? [String: Any] {
-            for k in ["fx", "fy", "cx", "cy"] { ci[k] = s[k] }
-            if let rw = s["ref_w"] as? NSNumber { ci["ref_width"] = rw.intValue }
-            if let rh = s["ref_h"] as? NSNumber { ci["ref_height"] = rh.intValue }
-        }
-        var meta: [String: Any] = [
-            "width": sidecarMeta["width"] ?? 0,
-            "height": sidecarMeta["height"] ?? 0,
-            "format": "f32_le_meters",
-            "camera_intrinsics": ci
-        ]
-        // 快篩統計與出處照抄（後端驗證器容忍額外鍵；這些是研究端不解檔就能用的資訊）。
-        for k in ["accuracy", "filtered", "rgb_w", "rgb_h", "coverage",
-                  "min_m", "max_m", "captured_at", "device"] {
-            if let v = sidecarMeta[k] { meta[k] = v }
-        }
+        let meta = Self.depthUploadMetadata(sidecarMeta)
         let metaStr = (try? JSONSerialization.data(withJSONObject: meta))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
 
@@ -696,6 +680,42 @@ actor BackendClient {
             throw BackendError.badResponse("depth")
         }
         return (j["depth_id"].string(""), j["replaced_previous"].bool(false))
+    }
+
+    /// Pure mapping used by the actual upload path and persistence contract tests.
+    nonisolated static func depthUploadMetadata(_ sidecarMeta: [String: Any]) -> [String: Any] {
+        var ci: [String: Any] = [:]
+        if let s = sidecarMeta["intrinsics"] as? [String: Any] {
+            for k in ["fx", "fy", "cx", "cy"] { ci[k] = s[k] }
+            if let rw = s["ref_w"] as? NSNumber { ci["ref_width"] = rw.intValue }
+            if let rh = s["ref_h"] as? NSNumber { ci["ref_height"] = rh.intValue }
+        }
+        var meta: [String: Any] = [
+            "width": sidecarMeta["width"] ?? 0,
+            "height": sidecarMeta["height"] ?? 0,
+            "format": "f32_le_meters",
+            "camera_intrinsics": ci
+        ]
+        // 快篩統計與出處照抄（後端驗證器容忍額外鍵；這些是研究端不解檔就能用的資訊）。
+        for k in ["accuracy", "filtered", "rgb_w", "rgb_h", "coverage",
+                  "min_m", "max_m", "captured_at", "device"] {
+            if let v = sidecarMeta[k] { meta[k] = v }
+        }
+        // Legacy sidecars must remain unknown; never infer upright from dimensions.
+        meta["registration"] = "not_verified"
+        meta["orientation_status"] = "unknown"
+        if sidecarMeta["orientation_status"] as? String == "normalized",
+           let source = sidecarMeta["source_exif_orientation"] as? NSNumber,
+           CFGetTypeID(source) != CFBooleanGetTypeID(),
+           let normalized = sidecarMeta["normalized_exif_orientation"] as? NSNumber,
+           CFGetTypeID(normalized) != CFBooleanGetTypeID(),
+           let exif = sidecarMeta["source_exif_orientation"] as? Int, (1...8).contains(exif),
+           sidecarMeta["normalized_exif_orientation"] as? Int == 1 {
+            meta["source_exif_orientation"] = exif
+            meta["normalized_exif_orientation"] = 1
+            meta["orientation_status"] = "normalized"
+        }
+        return meta
     }
 
     /// 拆出來是為了讓契約測試可以在沒有網路的情況下直接餵 JSON 驗證解析。

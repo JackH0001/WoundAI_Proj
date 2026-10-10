@@ -1585,15 +1585,40 @@ try:
             audit(actor, "depth_rejected", rec.get("code", "?"), str(e), role, org)
             return jsonify({"error": "深度資料不符規範", "issues": [str(e)]}), 400
 
+        # A map with different intrinsics/orientation is a different research
+        # payload, even when every depth byte is unchanged. Hash the exact
+        # canonical metadata bytes that will be stored, after validation has
+        # recomputed coverage. Keep the legacy raw-depth identity compatible.
+        meta_raw = json.dumps(meta, ensure_ascii=False, sort_keys=True,
+                              separators=(",", ":")).encode("utf-8")
+        raw_sha = hashlib.sha256(raw).hexdigest()
+        meta_sha = hashlib.sha256(meta_raw).hexdigest()
+        payload_sha = hashlib.sha256(
+            b"woundai-medical-depth-v1\0" + bytes.fromhex(raw_sha) + bytes.fromhex(meta_sha)
+        ).hexdigest()
+        prev = [x for x in read_jsonl(DEPTH_INDEX) if x.get("image_id") == image_id]
+        if not prev:
+            comparison = "first_upload"
+        elif not prev[-1].get("meta_sha256"):
+            # Historical indexes cannot prove equality of the old metadata.
+            # Do not backfill invented evidence or label this an identical retry.
+            comparison = "legacy_unverifiable"
+        elif prev[-1].get("sha256") == raw_sha and prev[-1]["meta_sha256"] == meta_sha:
+            comparison = "identical"
+        else:
+            comparison = "changed"
+        replaced = bool(prev) and comparison != "identical"
         key = _key(os.path.join(DEPTH_DIR, image_id + ".f32"))
         try:
             audit_intent(actor, "depth_store", rec.get("code", "?"), role, org,
-                         {"image_id": image_id, "bytes": len(raw)})
+                         {"image_id": image_id, "bytes": len(raw),
+                          "sha256": raw_sha, "meta_sha256": meta_sha,
+                          "payload_sha256": payload_sha, "comparison": comparison})
         except AuditUnavailable:
             return jsonify({"error": "audit_unavailable"}), 503
         _store().put_blob(key, raw)
         _store().put_blob(_key(os.path.join(DEPTH_DIR, image_id + ".meta.json")),
-                          json.dumps(meta, ensure_ascii=False).encode("utf-8"))
+                          meta_raw)
 
         entry = {
             "image_id": image_id,
@@ -1605,19 +1630,28 @@ try:
             "bytes": len(raw),
             # 內容雜湊。重傳（斷網重試很正常）要能分辨「同一份又送一次」與
             # 「換了一份蓋掉」——後者在稽核上是完全不同的事件。
-            "sha256": hashlib.sha256(raw).hexdigest(),
+            "sha256": raw_sha,
+            "meta_sha256": meta_sha,
+            "payload_sha256": payload_sha,
+            "payload_hash_version": 1,
+            "comparison": comparison,
             "actor": actor, "received_at": utc_now(),
         }
-        prev = [x for x in read_jsonl(DEPTH_INDEX) if x.get("image_id") == image_id]
-        replaced = bool(prev) and prev[-1].get("sha256") != entry["sha256"]
         append_jsonl(DEPTH_INDEX, entry)
         audit(actor, "depth_stored", rec.get("code", "?"),
               "%d bytes %dx%d；%s" % (len(raw), meta.get("width", 0), meta.get("height", 0),
-                                      "覆蓋前一份" if replaced else
-                                      ("重複上傳，內容相同" if prev else "首次")),
+                                      {"first_upload": "首次",
+                                       "identical": "重複上傳，深度與 metadata 相同",
+                                       "changed": "覆蓋前一份，深度或 metadata 已變更",
+                                       "legacy_unverifiable": "覆蓋舊版，先前 metadata 雜湊未記錄"}[comparison]),
               role, org)
         return jsonify({"status": "stored", "image_id": image_id,
                         "depth_id": entry["sha256"][:16],
+                        "depth_revision_id": payload_sha[:16],
+                        "meta_sha256": meta_sha,
+                        "payload_sha256": payload_sha,
+                        "payload_hash_version": 1,
+                        "comparison": comparison,
                         "depth_source": entry["depth_source"],
                         "replaced_previous": replaced}), 200
 

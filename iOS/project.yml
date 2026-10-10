@@ -169,6 +169,7 @@ targets:
     sources:
       - path: WoundAITests
       - path: WoundLiteTests/LiteZoomPreviewTests.swift
+      - path: WoundLiteTests/DepthPhotoAlignmentTests.swift
     dependencies:
       - target: WoundMeasurementApp
     settings:
