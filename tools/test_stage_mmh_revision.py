@@ -110,6 +110,8 @@ class StageTests(unittest.TestCase):
         with self.assertRaises(ValueError):m.proposal(self.old,self.new,s,self.policy)
         s=copy.deepcopy(self.service);s['template']['containers'][0]['livenessProbe']={'httpGet':{'path':'/'}}
         with self.assertRaises(ValueError):m.proposal(self.old,self.new,s,self.policy)
+        s=copy.deepcopy(self.service);s['template']['containers'][0]['resources']['startupCpuBoost']=True
+        with self.assertRaises(ValueError):m.proposal(self.old,self.new,s,self.policy)
 
     def test_rehashed_request_tampering_refused(self):
         mutations=[lambda s:s.update(path=m.base.NAME+'?updateMask=*'),

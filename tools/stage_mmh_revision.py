@@ -79,6 +79,8 @@ def extra_guards(service):
     require(set(container) <= {'image', 'env', 'resources', 'ports', 'startupProbe'},
             'unreviewed container fields would be replaced')
     require(container.get('startupProbe') in (None, DEFAULT_PROBE), 'unreviewed startup probe')
+    require(container.get('resources') == {'limits': {'cpu': '2', 'memory': '4Gi'}, 'cpuIdle': True},
+            'unreviewed resource options would be replaced')
 
 
 def containers(new, probe):
