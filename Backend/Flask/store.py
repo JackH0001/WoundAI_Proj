@@ -48,6 +48,7 @@
                                    # （該桶應設保留政策/WORM，見 harden_bucket.ps1）
 """
 import io
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -371,11 +372,16 @@ class LocalStore(Store):
                 f.write(line.rstrip("\n") + "\n")
 
     def read_lines(self, key: str):
-        p = self._p(key)
-        if not os.path.exists(p):
-            return []
-        with open(p, encoding="utf-8") as f:
-            return [ln.rstrip("\n") for ln in f]
+        p = os.path.abspath(self._p(key))
+        # Full-chain verification (including read_lines_fresh) must share the
+        # append lock, not just chain_tail. Otherwise it can parse a partially
+        # flushed JSON line as corruption. RLock permits reads inside append.
+        lock = _chain_lock_for(p) if self._is_audit_chain_root(key) else nullcontext()
+        with lock:
+            if not os.path.exists(p):
+                return []
+            with open(p, encoding="utf-8") as f:
+                return [ln.rstrip("\n") for ln in f]
 
     def chain_tail(self, key: str):
         p = os.path.abspath(self._p(key))
