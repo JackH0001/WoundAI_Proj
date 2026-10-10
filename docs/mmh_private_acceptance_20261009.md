@@ -86,3 +86,21 @@ metadata、未知結果及密文版本守門，8/8 被斷言捕獲。這些是�
 
 Google 參照：[Service PATCH](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services/patch)、
 [etag 與 trafficStatuses](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services)。
+
+### 同輪 CI 發現的 LocalStore 並行讀取缺口
+
+公開庫 PR #22 的 `60a0cef` 在既有稽核並行測試失敗（186/200 筆），而母庫相同實作
+當次通過。這是排程相關的競態，不能用單次綠燈消除。問題區域與已合併 main
+`1c7daf3` 逐位元相同：`append_chained()` 與 `chain_tail()` 有共用鎖，但
+`read_lines()`／`read_lines_fresh()` 可讀到尚未寫完的 JSON，導致合法寫入被拒絕。
+
+修正讓完整稽核讀取共用同一把行程內 RLock；其他 JSONL 讀取不改。
+新增測試將真正的 `append_chained()` 暫停在半筆已 flush 的 JSON，分別測試一般／
+fresh 讀取、相對／絕對路徑、不同 LocalStore 實例。原版八項斷言失敗，修正版
+八項通過；既有 8 執行緒 × 25 筆全部保存，並保留破損歷史拒絕、CAS 與 GCS 守門。
+這不是跨行程檔案鎖，也未變更 GcsStore。
+
+此修正從 Mac 提交 Backend／engineering，依本對話 Jack 授權 Mac 後端檢查提交及
+必要對齊程序作為本次範圍例外；不修改 owner_guard 的一般所有權規則，亦不把
+例外說成 owner_guard 原生通過。相關九支回歸腳本均 rc=0；Windows PowerShell
+5.1 全套未在本輪執行。新提交仍需各庫 CI 通過及合併，現有映像不包含這項修正。

@@ -224,6 +224,78 @@ def main():
           len(poisoned_local.read_lines("audit.jsonl")) == 1)
     shutil.rmtree(poisoned_local_root, ignore_errors=True)
 
+    # Force a real append_chained() write to pause after a flushed partial JSON
+    # record. Both public readers must wait for the writer, even through another
+    # LocalStore instance or an absolute path alias. This reproduces the race
+    # without relying on the OS to happen to split a short write.
+    from unittest.mock import patch
+    import builtins
+    for method in ("read_lines", "read_lines_fresh"):
+        for absolute in (False, True):
+            with tempfile.TemporaryDirectory(prefix="chain_partial_") as root:
+                writer_store, reader_store = st.LocalStore(root), st.LocalStore(root)
+                path = os.path.join(root, "audit.jsonl")
+                partial, release, attempted, finished = (threading.Event() for _ in range(4))
+                failures, seen = [], []
+                real_open = builtins.open
+
+                class SplitWriter:
+                    def __enter__(self):
+                        self.file = real_open(path, "a", encoding="utf-8")
+                        return self
+
+                    def write(self, value):
+                        self.file.write(value[:len(value) // 2])
+                        self.file.flush()
+                        partial.set()
+                        if not release.wait(5):
+                            raise TimeoutError("reader test did not release writer")
+                        return self.file.write(value[len(value) // 2:])
+
+                    def __exit__(self, *args):
+                        self.file.close()
+
+                def split_open(name, mode="r", *args, **kwargs):
+                    if os.path.abspath(name) == path and mode == "a":
+                        return SplitWriter()
+                    return real_open(name, mode, *args, **kwargs)
+
+                def append_one():
+                    try:
+                        writer_store.append_chained("audit.jsonl", 0, json.dumps(recs[0]))
+                    except Exception as exc:
+                        failures.append(repr(exc))
+
+                def read_one():
+                    try:
+                        attempted.set()
+                        key = os.path.join(root, ".", "audit.jsonl") if absolute else "audit.jsonl"
+                        seen.extend(getattr(reader_store, method)(key))
+                    except Exception as exc:
+                        failures.append(repr(exc))
+                    finally:
+                        finished.set()
+
+                with patch.object(st, "open", split_open, create=True):
+                    writer = threading.Thread(target=append_one)
+                    reader = threading.Thread(target=read_one)
+                    writer.start()
+                    try:
+                        ready = partial.wait(5)
+                        reader.start()
+                        entered = attempted.wait(5)
+                        premature = finished.wait(0.2)
+                    finally:
+                        release.set()
+                        writer.join(5)
+                        if reader.ident is not None:
+                            reader.join(5)
+                label = "A11 %s %s" % (method, "absolute" if absolute else "relative")
+                check(label + " waits for complete append", ready and entered and not premature)
+                check(label + " returns exact complete record",
+                      not failures and not writer.is_alive() and not reader.is_alive()
+                      and seen == [json.dumps(recs[0])], failures)
+
     # ══ B. GCS 後端(假件):條件建立、仲裁、守門、用盡重試 ══════════════════
     fake = _FakeGcs(PreconditionFailed)
     g = make_gcs_store(fake)
