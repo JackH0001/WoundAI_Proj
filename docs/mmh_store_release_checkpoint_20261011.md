@@ -1,5 +1,18 @@
 # MMH 商店發布檢查點（2026-10-11）
 
+## 最新狀態（2026-10-12）：Play 已接受，尚未啟用內測
+
+ARCore 修正版已由使用者重新簽署並上傳，Play 接收版本 26（1.0-mmh-internal）。獨立簽章驗證 1024 個 payload 全部通過，內容與指定 unsigned AAB 完全一致。新版 signed AAB SHA-256 為 `35b352432d3a4ae06cea3eb02ec54a0824df7dc6ac05199566240114437308aa`。
+
+Play 審查預覽當時為 0 錯誤、3 警告（尚無測試者、缺少混淆對照檔、缺少原生 debug symbols）。之後已儲存僅含 Jack 本人的 MMH Synthetic QA 名單並選為此內測群組；尚未重讀版本頁確認警告數是否下降。R8 未啟用；不填造混淆對照檔。尚未按「儲存並發布」，也尚未驗證 Play 安裝版。
+
+使用者提供 Play App Signing SHA-1：`DC:66:73:BD:75:F6:E2:0B:0E:3C:6E:22:7F:78:FB:F8:1E:C1:19:B9`，不是 upload key 指紋。Cloud 現有清單僅有 Android Validation、iOS、IAP Web 三個 MMH OAuth client。已準備新的 Android Play Internal 表單，套件 `com.woundai.app.mmhps20261007`，綁定此 SHA-1；尚未建立，等待新增登入用戶端授權。未修改 IAM、IAP 或其他 OAuth client。
+
+參照：[Play／簽署驗證摘要](/Users/Jack.Hou/Documents/Codex/2026-06-28/woundai-institution-evidence-20261007/mmh-iap-update-20261011/android-local-signing/arcore-fix/summary.json)、[待建立 OAuth 表單](/Users/Jack.Hou/Documents/Codex/2026-06-28/woundai-institution-evidence-20261007/mmh-iap-update-20261011/android-local-signing/arcore-fix/play-oauth-prepared.png)、[已儲存測試名單](/Users/Jack.Hou/Documents/Codex/2026-06-28/woundai-institution-evidence-20261007/mmh-iap-update-20261011/android-local-signing/arcore-fix/play-testers-saved.png)。
+
+以下較早段落保留當時狀態；目前待辦為 OAuth 建立、內測啟用，以及 Play 安裝後雙登入／上傳驗收。
+
+
 此文件依各階段追加證據，以下最新進度優先於先前登入頁檢查點；非商店上架完成證明。目標仍包含 iOS TestFlight 外部測試、Android Play 內測實際啟用及完整帳號權限管理介面。
 
 ## 更新：MMH iOS Build 33 已上傳（2026-10-11 19:08 台北時間）
