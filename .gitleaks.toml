@@ -41,6 +41,14 @@ description = "Generic hardcoded password assignment"
 regex = '''(?i)(password|passwd|pwd)\s*[:=]\s*['"][^'"\s]{6,}['"]'''
 tags = ["password"]
 
+  # Synthetic in-memory session fixture only; require exact path AND value.
+  [rules.allowlist]
+  description = "Exact synthetic management session fixture credential"
+  condition = "AND"
+  regexTarget = "match"
+  paths = ['''^Backend/AccessManager/test_sessions\.py$''']
+  regexes = ['''^password\s*=\s*"synthetic-test"$''']
+
 [allowlist]
 description = "忽略測試/範例與 stub"
 paths = ['''(.*?)_stub\.onnx''', '''.*/test/.*''', '''.*Test\.kt''']
