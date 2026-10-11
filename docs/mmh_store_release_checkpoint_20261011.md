@@ -63,6 +63,8 @@ Android Google OAuth 現有授權及實機驗證限 validation package 與其已
 
 ## Android MMH 發布配置本機驗證
 
+**後續更正（23:48 台北）：** 以下為當時的本機檢查，ARCore optional 的判準不完整。實際 Play 上傳仍被拒絕，因沒有 ARCore SDK 卻保留 `com.google.ar.core` metadata。已移除未實作的宣告並重建；新 AAB 尚待重新簽署及 Play 再驗證。詳見 [Play 拒絕原因與修正](mmh_play_arcore_rejection_20261011.md)。
+
 新增 `mmhInternal`（1.0-mmh-internal／26），套件固定 `com.woundai.app.mmhps20261007`，與現有 validation 安裝分開。繼承 release、停用除錯，沿用 MMH IAP 與合成驗證限制，固定既有 candidate 私有網址；不自動開啟臨床影像共用相簿輸出。Manifest 停用備份及明文 HTTP。現有量測流程沒有使用 ARCore Session，故此 MMH 配置將 ARCore metadata 改為 optional，避免不必要的裝置篩選。
 
 - `assembleMmhInternal` 與 `bundleMmhInternal`：BUILD SUCCESSFUL（41 秒），包含 release vital lint。
