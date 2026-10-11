@@ -227,6 +227,10 @@ def read_jsonl(path: str, with_bad: bool = False):
             bad += 1; continue
         if isinstance(rec, dict): out.append(rec)
         else: bad += 1
+    # GCS immutable receipt objects are named by digest, not arrival time.
+    # Sort these two ledgers by stored chronology, never by object filename.
+    if os.path.abspath(path) in (os.path.abspath(QUEUE), os.path.abspath(DEPTH_INDEX)):
+        out.sort(key=lambda row: (row.get("received_at") or "", row.get("revision_order_ns") or 0))
     return (out, bad) if with_bad else out
 
 
@@ -765,14 +769,83 @@ def validate_depth_payload(raw: bytes, meta: dict):
     return (not issues), issues
 
 
+def revision_id(rec):
+    """Stable annotation identity, also for legacy rows without a stored receipt."""
+    from consent_staging import annotation_receipt
+    return rec.get("annotation_receipt_id") or annotation_receipt(
+        rec.get("code") or "", rec.get("actor") or "", rec.get("image_id") or "",
+        poly_sig(rec.get("gt_polygon")), rec.get("tissue_sig"))
+
+
+def annotation_revision_signature(data, actor, org):
+    # Preserve clinical/scoring, raster placement and calibration edits too.
+    # Exclude bearer/care receipts and delivery times: retries keep one identity.
+    body = {k: data.get(k) for k in REQUIRED + PROVENANCE
+            if k not in ("tissue_mask_key", "depth_map_key", "depth_conf_key")}
+    body["source"] = str(data.get("source") or DEFAULT_SOURCE)
+    body["actor"] = actor
+    body["org"] = org
+    for name in ("tissue_mask_png", "depth_map_png", "depth_conf_png"):
+        value = data.get(name)
+        body[name] = hashlib.sha256(base64.b64decode(value, validate=True)).hexdigest() if value else None
+    return hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False,
+                                    separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def legacy_2d_signature(rec):
+    """Reconstruct only proven legacy 2D payloads; never guess old RGB-D assets."""
+    if rec.get("revision_signature") or rec.get("depth_source") != "none":
+        return None
+    if any(rec.get(k) for k in ("depth_map_key", "depth_conf_key")):
+        return None
+    raw = _store().get_blob(_key(os.path.join(IMAGES_DIR, str(rec.get("image_id")) + ".jpg")))
+    if raw is None or hashlib.sha1(raw).hexdigest()[:16] != rec.get("image_id"):
+        return None
+    restored = dict(rec)
+    try:
+        tissue = verified_tissue(rec)
+        if tissue is not None:
+            restored["tissue_mask_png"] = base64.b64encode(tissue).decode()
+        return annotation_revision_signature(restored, rec.get("actor"), rec.get("org"))
+    except (ValueError, TypeError):
+        return None
+
+
+def store_revision_asset(folder, image_id, raw, suffix, content_type):
+    digest = hashlib.sha256(raw).hexdigest()
+    key = "%s/%s/%s%s" % (folder, image_id, digest, suffix)
+    _store().put_blob_immutable(_key(os.path.join(FLYWHEEL_DIR, key)), raw, content_type)
+    return key, digest
+
+
+def verified_tissue(rec):
+    key = rec.get("tissue_mask_key")
+    if not key:
+        return None
+    raw = _store().get_blob(_key(os.path.join(FLYWHEEL_DIR, key)))
+    if raw is None:
+        raise ValueError("tissue asset missing")
+    if rec.get("tissue_mask_sha256"):
+        valid = hashlib.sha256(raw).hexdigest() == rec["tissue_mask_sha256"]
+    else:
+        # A legacy shared filename may already contain a different revision.
+        valid = bool(rec.get("tissue_sig")) and tissue_sig(base64.b64encode(raw).decode()) == rec["tissue_sig"]
+    if not valid:
+        raise ValueError("tissue revision unverifiable")
+    return raw
+
+
 def depth_index_map(path=None):
-    """image_id → 最後一筆深度索引。佇列是唯讀累加的，補傳只能靠側檔 join。"""
+    """Revision-bound entries only. Legacy image-only links are not evidence."""
     out = {}
     for e in read_jsonl(path or DEPTH_INDEX):
-        iid = e.get("image_id")
-        if iid:
-            out[iid] = e          # 後寫的覆蓋先寫的：重傳以最新那一份為準
+        if e.get("image_id") and e.get("annotation_receipt_id"):
+            out[(e["image_id"], e["annotation_receipt_id"])] = e
     return out
+
+
+def depth_for_record(rec, index):
+    return index.get((rec.get("image_id"), revision_id(rec)), {})
 
 
 def withdrawn_keys(withdrawn_path=None):
@@ -1347,7 +1420,17 @@ try:
         # 而把醫師的標註丟掉（見 sample_key 的說明）。
         t_sig = tissue_sig(d.get("tissue_mask_png"))
         from consent_staging import ConsentError, annotation_receipt
-        rid = annotation_receipt(d["code"], actor, image_id, poly_sig(d.get("gt_polygon")), t_sig)
+        try:
+            signature = annotation_revision_signature(d, actor, org)
+        except (ValueError, TypeError):
+            return jsonify({"error": "invalid_revision_payload"}), 400
+        _, same_img = find_duplicate(QUEUE, image_id, d.get("gt_polygon"), t_sig)
+        exact = next((r for r in reversed(same_img)
+                      if r.get("actor") == actor and r.get("org") == org
+                      and (r.get("revision_signature") == signature or legacy_2d_signature(r) == signature)), None)
+        # Keep the original receipt when acknowledging an unchanged legacy 2D
+        # upload. Do not append a migration duplicate or rewrite its old row.
+        rid = revision_id(exact) if exact is not None else signature[:16]
         svc = promotion_service(actor, role, org)
         try:
             promotion_fields = svc.prepare(d, actor, role, org, rid)
@@ -1356,14 +1439,12 @@ try:
         except ConsentError as exc:
             audit(actor, "annotation_rejected", d["code"], exc.code, role, org)
             return jsonify({"error": exc.code}), exc.status
-        exact, same_img = find_duplicate(QUEUE, image_id, d.get("gt_polygon"), t_sig)
-        # Same contour by a different actor is a parallel annotation, not a dup.
-        exact = next((r for r in reversed(same_img)
-                      if r.get("actor") == actor
-                      and sample_key(image_id, r.get("gt_polygon"), r.get("tissue_sig"))
-                      == sample_key(image_id, d.get("gt_polygon"), t_sig)), None)
         # 已撤回的舊紀錄不算重複(否則重新取得同意後永遠補不回來)
         if exact is not None and exact.get("code") not in wd_codes:
+            try:
+                verified_tissue(exact)
+            except ValueError:
+                return jsonify({"error": "historical_tissue_revision_unverifiable"}), 409
             try:
                 audit_intent(actor, "annotation_duplicate", d.get("code", "?"), role, org,
                              {"annotation_receipt_id": rid, "image_id": image_id})
@@ -1376,13 +1457,24 @@ try:
             audit(actor, "annotation_duplicate", d.get("code", "?"),
                   f"同影像、同輪廓、同組織遮罩已在佇列({exact.get('code')})", role, org)
             return jsonify({"status": "duplicate_skipped", "code": d.get("code"),
+                            "image_id": image_id, "annotation_receipt_id": revision_id(exact),
                             "note": "此筆與佇列中既有樣本的**影像、傷口輪廓、組織遮罩三者皆相同**，"
                                     "已自動略過（避免重複樣本）。若您剛才有修改，請確認是否按下了「完成修邊」。"}), 200
 
         rec = {k: d.get(k) for k in REQUIRED}
         rec.update(promotion_fields)
         for k in PROVENANCE:
-            if d.get(k) is not None: rec[k] = d.get(k)
+            if d.get(k) is not None and k not in ("tissue_mask_key", "depth_map_key", "depth_conf_key"):
+                rec[k] = d.get(k)
+        rec["asset_schema"] = 2
+        rec["revision_signature"] = signature
+        rec["annotation_receipt_id"] = rid
+        rec["supersedes_revision_ids"] = [revision_id(r) for r in same_img
+                                          if r.get("actor") == actor and r.get("code") == d["code"]]
+        image_raw = _store().get_blob(_key(os.path.join(IMAGES_DIR, image_id + ".jpg")))
+        if image_raw is None:
+            return jsonify({"error": "image_asset_missing"}), 409
+        rec["image_sha256"] = hashlib.sha256(image_raw).hexdigest()
         rec["source"] = str(d.get("source") or DEFAULT_SOURCE)   # 顯式落盤,免得日後靠預設值猜
         rec["poly_sig"] = poly_sig(d.get("gt_polygon"))
         # 落盤，否則下一次的去重比對拿不到它，同樣的漏洞會再出現一次。
@@ -1397,8 +1489,7 @@ try:
                          {"annotation_receipt_id": rid, "image_id": image_id})
         except AuditUnavailable:
             return jsonify({"error": "audit_unavailable"}), 503
-        # 組織遮罩落盤。**失敗不阻擋標註**——遮罩缺席只是少一個組織訓練樣本，
-        # 讓整筆標註失敗會連傷口分割的 GT 一起丟掉，那是更大的損失。
+        # 有送出的組織遮罩必須保存成功，才可確認此修訂；失敗保留手機待傳工作。
         if d.get("tissue_mask_png"):
             try:
                 raw = base64.b64decode(d["tissue_mask_png"], validate=True)
@@ -1406,9 +1497,8 @@ try:
                     raise ValueError("遮罩超過 4MB（1024² 的 5 類 PNG 應在 40KB 量級，這幾乎必然是送錯東西）")
                 if raw[:8] != b"\x89PNG\r\n\x1a\n":
                     raise ValueError("不是 PNG。JPEG 會把類別邊界糊掉，解碼端只能猜，一律拒收")
-                key = _key(os.path.join(TISSUE_DIR, image_id + ".png"))
-                _store().put_blob(key, raw)
-                rec["tissue_mask_key"] = "tissue_masks/%s.png" % image_id
+                rec["tissue_mask_key"], rec["tissue_mask_sha256"] = store_revision_asset(
+                    "tissue_masks", image_id, raw, ".png", "image/png")
                 audit(actor, "tissue_mask_stored", rec["code"],
                       "%d bytes；醫師修正 %s px（%.1f%%）"
                       % (len(raw), d.get("tissue_edit_px", 0),
@@ -1416,6 +1506,7 @@ try:
             except Exception as e:
                 logger.warning("組織遮罩落盤失敗(%s): %s", image_id, e)
                 audit(actor, "tissue_mask_rejected", rec["code"], str(e), role, org)
+                return jsonify({"error": "tissue_asset_not_saved"}), 409
 
         # ── 深度圖落盤（WoundAI3D）──────────────────────────────────────
         #
@@ -1447,16 +1538,15 @@ try:
                 if miss:
                     raise ValueError("camera_intrinsics 缺 %s。沒有內參就無法反投影，"
                                      "深度圖存下來也用不了，而那些值事後查不到" % "、".join(miss))
-                key = _key(os.path.join(DEPTH_DIR, image_id + ".png"))
-                _store().put_blob(key, raw)
-                rec["depth_map_key"] = "depth_maps/%s.png" % image_id
+                rec["depth_map_key"], rec["depth_map_sha256"] = store_revision_asset(
+                    "depth_maps", image_id, raw, ".png", "image/png")
                 rec["depth_format"] = d.get("depth_format") or "png16_mm"
                 if d.get("depth_conf_png"):
                     craw = base64.b64decode(d["depth_conf_png"], validate=True)
                     if craw[:8] != b"\x89PNG\r\n\x1a\n":
                         raise ValueError("置信度圖不是 PNG")
-                    _store().put_blob(_key(os.path.join(DEPTH_DIR, image_id + "_conf.png")), craw)
-                    rec["depth_conf_key"] = "depth_maps/%s_conf.png" % image_id
+                    rec["depth_conf_key"], rec["depth_conf_sha256"] = store_revision_asset(
+                        "depth_maps", image_id, craw, "_conf.png", "image/png")
                 audit(actor, "depth_map_stored", rec["code"],
                       "%d bytes；source=%s format=%s 置信度=%s"
                       % (len(raw), rec.get("depth_source"), rec["depth_format"],
@@ -1471,6 +1561,7 @@ try:
                 rec.pop("depth_conf_key", None)
 
         rec["received_at"] = utc_now()
+        rec["revision_order_ns"] = time.time_ns()
         try:
             svc._guard(d["code"], image_id)
             inserted = _store().append_record_once(_key(QUEUE), rid, rec)
@@ -1481,7 +1572,8 @@ try:
         except Exception:
             logger.warning("staging cleanup deferred to retry/TTL")
         if not inserted:
-            return jsonify({"status": "duplicate_skipped", "code": rec["code"]}), 200
+            return jsonify({"status": "duplicate_skipped", "code": rec["code"],
+                            "image_id": image_id, "annotation_receipt_id": rid}), 200
         note = None
         if same_img:
             # ⚠ 措辭要正確，而且**兩件事可能同時成立**：
@@ -1506,7 +1598,7 @@ try:
                   rec["code"], note, role, org)
         audit(actor, "annotation_enqueued", rec["code"], "ok", role, org)
         return jsonify({"status": "enqueued", "code": rec["code"], "queue": "retrain",
-                        "image_id": image_id, "note": note}), 200
+                        "image_id": image_id, "annotation_receipt_id": rid, "note": note}), 200
 
 
     @flywheel_bp.route("/api/v1/depth", methods=["POST"])
@@ -1563,7 +1655,21 @@ try:
             msg = f"查無 image_id={image_id} 的標註。請先送出標註再補傳深度"
             audit(actor, "depth_rejected", image_id, msg, role, org)
             return jsonify({"error": "不符上傳規範", "issues": [msg]}), 400
-        rec = recs[-1]
+        from consent_staging import ConsentError
+        requested_revision = (request.form.get("annotation_receipt_id") or "").strip()
+        own = [r for r in recs if r.get("actor") == actor and r.get("org") == org]
+        if requested_revision:
+            own = [r for r in own if revision_id(r) == requested_revision]
+        # Older clients are accepted only when there is exactly one possible
+        # annotation by this actor. Never guess the latest on an ambiguous image.
+        if len(own) != 1:
+            return jsonify({"error": "annotation_revision_required_or_not_owned"}), 409
+        rec = own[0]
+        rid = revision_id(rec)
+        image_raw = _store().get_blob(_key(os.path.join(IMAGES_DIR, image_id + ".jpg")))
+        if image_raw is None or (rec.get("image_sha256") and
+                hashlib.sha256(image_raw).hexdigest() != rec["image_sha256"]):
+            return jsonify({"error": "image_revision_mismatch"}), 409
         if rec.get("code") in wd_codes:
             msg = f"代碼 {rec.get('code')} 已撤回訓練同意，不接受深度補傳"
             audit(actor, "depth_rejected", rec.get("code", "?"), msg, role, org)
@@ -1596,7 +1702,8 @@ try:
         payload_sha = hashlib.sha256(
             b"woundai-medical-depth-v1\0" + bytes.fromhex(raw_sha) + bytes.fromhex(meta_sha)
         ).hexdigest()
-        prev = [x for x in read_jsonl(DEPTH_INDEX) if x.get("image_id") == image_id]
+        prev = [x for x in read_jsonl(DEPTH_INDEX) if x.get("image_id") == image_id
+                and x.get("actor") == actor]
         if not prev:
             comparison = "first_upload"
         elif not prev[-1].get("meta_sha256"):
@@ -1607,8 +1714,8 @@ try:
             comparison = "identical"
         else:
             comparison = "changed"
-        replaced = bool(prev) and comparison != "identical"
-        key = _key(os.path.join(DEPTH_DIR, image_id + ".f32"))
+        replaced = any(x.get("annotation_receipt_id") == rid for x in prev) and comparison != "identical"
+        depth_prefix = "depth_maps/%s/%s" % (image_id, payload_sha)
         try:
             audit_intent(actor, "depth_store", rec.get("code", "?"), role, org,
                          {"image_id": image_id, "bytes": len(raw),
@@ -1616,15 +1723,25 @@ try:
                           "payload_sha256": payload_sha, "comparison": comparison})
         except AuditUnavailable:
             return jsonify({"error": "audit_unavailable"}), 503
-        _store().put_blob(key, raw)
-        _store().put_blob(_key(os.path.join(DEPTH_DIR, image_id + ".meta.json")),
-                          meta_raw)
+        try:
+            _store().put_blob_immutable(_key(os.path.join(FLYWHEEL_DIR, depth_prefix + ".f32")),
+                                        raw, "application/octet-stream")
+            _store().put_blob_immutable(_key(os.path.join(FLYWHEEL_DIR, depth_prefix + ".meta.json")),
+                                        meta_raw, "application/json")
+            promotion_service(actor, role, org)._guard(rec["code"], image_id)
+        except ConsentError as exc:
+            return jsonify({"error": exc.code}), exc.status
+        except Exception:
+            return jsonify({"error": "depth_asset_not_saved"}), 409
 
         entry = {
             "image_id": image_id,
             "code": rec.get("code"),
-            "depth_key": "depth_maps/%s.f32" % image_id,
-            "depth_meta_key": "depth_maps/%s.meta.json" % image_id,
+            "depth_key": depth_prefix + ".f32",
+            "depth_meta_key": depth_prefix + ".meta.json",
+            "annotation_receipt_id": rid,
+            "image_sha256": hashlib.sha256(image_raw).hexdigest(),
+            "org": org,
             "depth_format": "raw_f32_m",
             "depth_source": meta.get("depth_source") or "lidar",
             "bytes": len(raw),
@@ -1635,17 +1752,20 @@ try:
             "payload_sha256": payload_sha,
             "payload_hash_version": 1,
             "comparison": comparison,
-            "actor": actor, "received_at": utc_now(),
+            "actor": actor, "received_at": utc_now(), "revision_order_ns": time.time_ns(),
         }
-        append_jsonl(DEPTH_INDEX, entry)
+        depth_receipt = hashlib.sha256((rid + "|" + payload_sha).encode()).hexdigest()
+        entry["depth_receipt_id"] = depth_receipt
+        _store().append_record_once(_key(DEPTH_INDEX), depth_receipt, entry, "depth_receipt_id")
         audit(actor, "depth_stored", rec.get("code", "?"),
               "%d bytes %dx%d；%s" % (len(raw), meta.get("width", 0), meta.get("height", 0),
                                       {"first_upload": "首次",
                                        "identical": "重複上傳，深度與 metadata 相同",
-                                       "changed": "覆蓋前一份，深度或 metadata 已變更",
-                                       "legacy_unverifiable": "覆蓋舊版，先前 metadata 雜湊未記錄"}[comparison]),
+                                       "changed": "新增深度修訂，保留前一份",
+                                       "legacy_unverifiable": "新增修訂；舊版 metadata 雜湊未記錄"}[comparison]),
               role, org)
         return jsonify({"status": "stored", "image_id": image_id,
+                        "annotation_receipt_id": rid,
                         "depth_id": entry["sha256"][:16],
                         "depth_revision_id": payload_sha[:16],
                         "meta_sha256": meta_sha,
@@ -1653,7 +1773,7 @@ try:
                         "payload_hash_version": 1,
                         "comparison": comparison,
                         "depth_source": entry["depth_source"],
-                        "replaced_previous": replaced}), 200
+                        "replaced_previous": False, "superseded_previous": replaced}), 200
 
 
     @flywheel_bp.route("/api/v1/retract", methods=["POST"])
@@ -1816,6 +1936,7 @@ try:
             meta = rt_meta.get(r.get("image_id")) or {}
             out.append({
                 "code": r.get("code"), "image_id": r.get("image_id"),
+                "annotation_receipt_id": revision_id(r),
                 "received_at": r.get("received_at"), "source": rec_source(r),
                 "route": r.get("route"), "status": st,
                 "status_zh": RECORD_STATUS.get(st, st),
@@ -1851,9 +1972,9 @@ try:
                 # ⚠ 側檔優先：補傳的深度（POST /api/v1/depth）不會、也不該回頭改寫
                 # 佇列裡那一筆（唯讀累加）。只看紀錄本身的話，補傳成功的樣本會
                 # 永遠顯示 lidar_local——主控台說沒傳，而檔案其實躺在 depth_maps/。
-                "depth_source": (_dix.get(r.get("image_id"), {}).get("depth_source")
+                "depth_source": (depth_for_record(r, _dix).get("depth_source")
                                  or r.get("depth_source") or "none"),
-                "depth_bytes": _dix.get(r.get("image_id"), {}).get("bytes"),
+                "depth_bytes": depth_for_record(r, _dix).get("bytes"),
                 "capture_device": r.get("capture_device"),
                 # 影像品質旗標。對焦不足／過曝／標記太小都會讓面積不可信，
                 # 而那是排除的正當理由之一（且比事後看面積異常更早發現）。
@@ -1901,19 +2022,17 @@ try:
             # 路徑穿越守門。image_id 會被拼進物件鍵，沒有這一行就能拿去讀別的東西。
             return jsonify({"error": "image_id 格式不合法"}), 400
 
-        rec = None
-        for r in read_jsonl(QUEUE):
-            if r.get("image_id") == image_id:
-                # 同影像可能有多筆（修訂／平行標註）。取最新的那筆，
-                # 因為複核者最可能是在看剛剛送出的東西。
-                if rec is None or (r.get("received_at") or "") >= (rec.get("received_at") or ""):
-                    rec = r
-        if rec is None:
+        recs = [r for r in read_jsonl(QUEUE) if r.get("image_id") == image_id
+                and (_can(role, "audit.read") or r.get("actor") == actor)]
+        requested = request.args.get("revision")
+        if requested:
+            recs = [r for r in recs if revision_id(r) == requested]
+        if not recs:
             return jsonify({"error": "查無此筆"}), 404
-        if not _can(role, "audit.read") and rec.get("actor") != actor:
-            # 措辭用「查無」而非「無權限」：後者會洩漏「這個 image_id 存在」，
-            # 而 image_id 本身就是可枚舉的。
-            return jsonify({"error": "查無此筆"}), 404
+        rec = recs[-1]
+        codes, images = withdrawn_keys()
+        if image_id in images or rec.get("code") in codes or is_quarantined(image_id):
+            return jsonify({"error": "已撤回"}), 410
 
         w = int(rec.get("image_w") or 0); h = int(rec.get("image_h") or 0)
         poly = rec.get("gt_polygon") or []
@@ -1929,7 +2048,7 @@ try:
         tissue_note = "此筆沒有組織遮罩"
         if rec.get("tissue_mask_key"):
             try:
-                raw = _store().get_blob(_key(os.path.join(TISSUE_DIR, image_id + ".png")))
+                raw = verified_tissue(rec)
                 cells, gw, gh = _tissue_cells(raw, 64)
                 if rect is None:
                     # 缺 tissue_raster（舊紀錄）→ 不知道遮罩該擺哪。**寧可不畫**：
@@ -1984,6 +2103,11 @@ try:
         recs = [r for r in read_jsonl(QUEUE) if r.get("image_id") == image_id]
         if not recs:
             return jsonify({"error": "查無此送件"}), 404
+        requested = request.args.get("revision")
+        if requested:
+            recs = [r for r in recs if revision_id(r) == requested]
+            if not recs:
+                return jsonify({"error": "查無此修訂"}), 404
         rec = recs[-1]
         if rec.get("actor") != actor and not _can(role, "audit.read"):
             audit(actor, "image_view_denied", rec.get("code", "?"),
@@ -2000,6 +2124,8 @@ try:
         raw = _store().get_blob(_key(os.path.join(IMAGES_DIR, image_id + ".jpg")))
         if raw is None:
             return jsonify({"error": "影像檔不存在（可能已依保存期限清除）"}), 404
+        if rec.get("image_sha256") and hashlib.sha256(raw).hexdigest() != rec["image_sha256"]:
+            return jsonify({"error": "image_revision_mismatch"}), 409
         audit(actor, "image_viewed", rec.get("code", "?"),
               f"image_id={image_id}（{len(raw)} bytes）", role, org)
         from flask import Response as _Resp
@@ -2028,19 +2154,23 @@ try:
         image_id = str(image_id or "").strip()
         if not re.fullmatch(r"[0-9a-f]{8,40}", image_id):
             return jsonify({"error": "image_id 格式不合"}), 400
-        recs = [r for r in read_jsonl(QUEUE) if r.get("image_id") == image_id]
+        recs = [r for r in read_jsonl(QUEUE) if r.get("image_id") == image_id
+                and (_can(role, "audit.read") or r.get("actor") == actor)]
+        requested = request.args.get("revision")
+        if requested:
+            recs = [r for r in recs if revision_id(r) == requested]
         if not recs:
             return jsonify({"error": "查無此送件"}), 404
         rec = recs[-1]
-        if rec.get("actor") != actor and not _can(role, "audit.read"):
-            return jsonify({"error": "權限不足"}), 403
         wd_codes, wd_imgs = withdrawn_keys()
         if image_id in wd_imgs or rec.get("code") in wd_codes or is_quarantined(image_id):
             audit(actor, "tissue_mask_view_denied", rec.get("code", "?"),
                   f"image_id={image_id} 已撤回訓練同意", role, org)
             return jsonify({"error": "已依撤回同意隔離，不提供"}), 410
-        key = rec.get("tissue_mask_key")
-        raw = _store().get_blob(_key(os.path.join(FLYWHEEL_DIR, key))) if key else None
+        try:
+            raw = verified_tissue(rec)
+        except ValueError:
+            return jsonify({"error": "tissue_revision_unverifiable"}), 409
         if raw is None:
             return jsonify({"error": "此筆沒有組織遮罩"}), 404
         from flask import Response as _Resp
@@ -2109,7 +2239,13 @@ try:
                     continue
                 if not r.get("tissue_mask_key") or not r.get("tissue_edited"):
                     continue          # 沒有經人修正的遮罩，比較的是演算法跟自己
+                try:
+                    verified_tissue(r)
+                except ValueError:
+                    continue
                 by_img.setdefault(r["image_id"], []).append({
+                    "annotation_receipt_id": revision_id(r),
+                    "tissue_mask_sha256": r.get("tissue_mask_sha256"),
                     "actor": r.get("actor"), "role": r.get("role"), "code": r.get("code"),
                     "tissue_mask_key": r.get("tissue_mask_key"),
                     "tissue_raster": r.get("tissue_raster"),
@@ -2136,6 +2272,7 @@ try:
         def drop(why):
             excluded[why] = excluded.get(why, 0) + 1
 
+        depth_refs = depth_index_map()
         for r in recs:
             q = r.get("quality") or {}
             if kind == "tissue":
@@ -2143,6 +2280,10 @@ try:
                     drop("no_tissue_mask"); continue
                 if want_edited and not r.get("tissue_edited"):
                     drop("tissue_not_edited"); continue
+                try:
+                    verified_tissue(r)
+                except ValueError:
+                    drop("tissue_revision_unverifiable"); continue
             # 品質門檻。缺指標（舊紀錄）**不擋**——那些影像本身沒問題，
             # 只是收集時還沒有這個欄位；擋掉會把早期樣本整批丟掉。
             if q.get("focus_lapvar") is not None and q["focus_lapvar"] < min_focus:
@@ -2156,6 +2297,15 @@ try:
             if q.get("roi_short_px") is not None and q["roi_short_px"] < min_roi:
                 drop("roi_too_small"); continue
             items.append({
+                "annotation_receipt_id": revision_id(r),
+                "image_sha256": r.get("image_sha256"),
+                "tissue_mask_sha256": r.get("tissue_mask_sha256"),
+                "depth_map_key": r.get("depth_map_key"),
+                "depth_map_sha256": r.get("depth_map_sha256"),
+                "depth_conf_key": r.get("depth_conf_key"),
+                "depth_conf_sha256": r.get("depth_conf_sha256"),
+                "camera_intrinsics": r.get("camera_intrinsics"),
+                "raw_depth": depth_for_record(r, depth_refs) or None,
                 "image_id": r.get("image_id"), "code": r.get("code"),
                 "image_key": "images/%s.jpg" % r.get("image_id"),
                 "tissue_mask_key": r.get("tissue_mask_key"),

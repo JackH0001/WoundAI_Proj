@@ -167,7 +167,8 @@ class Store:
             raise FileNotFoundError(src)
         return self.put_blob_immutable(dst, data)
 
-    def append_record_once(self, key: str, receipt_id: str, record: dict) -> bool:
+    def append_record_once(self, key: str, receipt_id: str, record: dict,
+                           receipt_field: str = "annotation_receipt_id") -> bool:
         raise NotImplementedError
 
     # ── 稽核鏈的序列化寫入 ──────────────────────────────────────────────
@@ -480,10 +481,13 @@ class LocalStore(Store):
         finally:
             os.unlink(tmp)
 
-    def append_record_once(self, key: str, receipt_id: str, record: dict) -> bool:
+    def append_record_once(self, key: str, receipt_id: str, record: dict,
+                           receipt_field: str = "annotation_receipt_id") -> bool:
         if self._is_audit(key):
             raise PermissionError("protected keys cannot use queue receipt append")
-        if record.get("annotation_receipt_id") != receipt_id:
+        if receipt_field not in ("annotation_receipt_id", "depth_receipt_id"):
+            raise ValueError("invalid receipt field")
+        if record.get(receipt_field) != receipt_id:
             raise ValueError("queue receipt mismatch")
         p = self._p(key)
         os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -491,7 +495,7 @@ class LocalStore(Store):
         with record_file_lock(p):
             for line in self.read_lines(key):
                 row = json.loads(line)
-                if row.get("annotation_receipt_id") == receipt_id:
+                if row.get(receipt_field) == receipt_id:
                     return False
             with open(p, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
@@ -893,14 +897,17 @@ class GcsStore(Store):
             raise IOError("immutable blob readback mismatch: " + key)
         return True
 
-    def append_record_once(self, key: str, receipt_id: str, record: dict) -> bool:
+    def append_record_once(self, key: str, receipt_id: str, record: dict,
+                           receipt_field: str = "annotation_receipt_id") -> bool:
         import re
         from google.api_core.exceptions import PreconditionFailed
         if self._is_audit(key):
             raise PermissionError("protected keys cannot use queue receipt append")
-        if not re.fullmatch(r"[0-9a-f]{16}", receipt_id):
+        if not re.fullmatch(r"[0-9a-f]{16}" if receipt_field == "annotation_receipt_id" else r"[0-9a-f]{64}", receipt_id):
             raise ValueError("invalid annotation receipt id")
-        if record.get("annotation_receipt_id") != receipt_id:
+        if receipt_field not in ("annotation_receipt_id", "depth_receipt_id"):
+            raise ValueError("invalid receipt field")
+        if record.get(receipt_field) != receipt_id:
             raise ValueError("queue receipt mismatch")
         bucket, _ = self._target(key)
         blob = bucket.blob(self._k(key) + "/receipt_" + receipt_id + ".jsonl")
@@ -911,7 +918,7 @@ class GcsStore(Store):
             return True
         except PreconditionFailed:
             old = json.loads(blob.download_as_bytes())
-            if old.get("annotation_receipt_id") != receipt_id:
+            if old.get(receipt_field) != receipt_id:
                 raise ImmutableConflict(key)
             return False
 

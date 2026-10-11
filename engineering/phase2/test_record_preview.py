@@ -248,9 +248,9 @@ def main():
     #
     # 傷口輪廓與組織分區是兩份獨立的 GT，任一份變了就是一筆新的標註。
     print("\n── 3b 只改組織不改邊界 ──")
-    b3 = dict(body, code="WD-TISSUEONLY",
+    b3 = dict(body,
               tissue_mask_png=base64.b64encode(make_tissue_png(200, 150)).decode(),
-              tissue_edit_px=99999)
+              tissue_edit_px=body["tissue_edit_px"])
     r3 = cli.post("/api/v1/annotation", headers=H, json=b3)
     check("相同影像＋相同輪廓＋相同組織遮罩 → 判定重複",
           (r3.get_json() or {}).get("status") == "duplicate_skipped",
@@ -280,7 +280,7 @@ def main():
         check("紀錄帶有 tissue_sig（下次比對才拿得到）", bool(recs4[0].get("tissue_sig")))
         check("新遮罩的醫師修正像素數有落盤", recs4[0].get("tissue_edit_px") == 54321)
     # 覆蓋後的遮罩檔要是新的那一份
-    _stored = open(os.path.join(tmp, "tissue_masks", iid + ".png"), "rb").read()
+    _stored = open(os.path.join(tmp, recs4[0]["tissue_mask_key"]), "rb").read()
     check("落盤的遮罩已更新為最新送出的那一份",
           hashlib.sha1(_stored).hexdigest() == hashlib.sha1(_buf.getvalue()).hexdigest())
 

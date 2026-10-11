@@ -81,6 +81,9 @@ on:
       - 'tools/test_create_mmh_private_service.py'
       - 'tools/stage_mmh_revision.py'
       - 'tools/test_stage_mmh_revision.py'
+      - 'tools/stage_mmh_iap_revision.py'
+      - 'tools/test_stage_mmh_iap_revision.py'
+      - 'engineering/phase2/test_medical_revision_assets.py'
       - 'tools/test_medical_depth_orientation_storage.py'
       - 'engineering/phase2/verify_audit_chain.py'
       - 'engineering/phase2/Assert-CIGreen.ps1'
@@ -188,6 +191,9 @@ on:
       - 'tools/test_create_mmh_private_service.py'
       - 'tools/stage_mmh_revision.py'
       - 'tools/test_stage_mmh_revision.py'
+      - 'tools/stage_mmh_iap_revision.py'
+      - 'tools/test_stage_mmh_iap_revision.py'
+      - 'engineering/phase2/test_medical_revision_assets.py'
       - 'tools/test_medical_depth_orientation_storage.py'
       - 'engineering/phase2/verify_audit_chain.py'
       - 'engineering/phase2/Assert-CIGreen.ps1'
@@ -317,6 +323,8 @@ jobs:
           python -B tools/test_migrate_mmh_editor.py
           python -B tools/test_create_mmh_private_service.py
           python -B tools/test_stage_mmh_revision.py
+          python -B tools/test_stage_mmh_iap_revision.py
+          python -B engineering/phase2/test_medical_revision_assets.py
           python -B tools/test_medical_depth_orientation_storage.py
           python -B engineering/phase2/test_p0_4_staging.py
           python -B engineering/phase2/test_runtime_golden_contract.py

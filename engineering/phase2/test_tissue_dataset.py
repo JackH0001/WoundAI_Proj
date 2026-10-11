@@ -128,7 +128,7 @@ def main():
     s, r = post("/api/v1/annotation", "physician", anno("edited", "WD-EDIT", make_png()))
     check("1  帶遮罩的標註入列", s == 200 and r.get("status") == "enqueued", (s, r))
     check("1b 遮罩落盤為 PNG",
-          os.path.exists(os.path.join(tmp, "tissue_masks", ids["edited"] + ".png")))
+          os.path.exists(os.path.join(tmp, [r for r in fw.read_jsonl(fw.QUEUE) if r["code"] == "WD-EDIT"][-1]["tissue_mask_key"])))
     aud = [json.loads(l) for l in open(os.path.join(tmp, "audit.jsonl"), encoding="utf-8")]
     check("1c 落盤留痕（含醫師修正量）",
           any(a["action"] == "tissue_mask_stored" and "醫師修正" in a["result"] for a in aud))
@@ -137,7 +137,7 @@ def main():
     #
     # 遮罩缺席只是少一個組織訓練樣本；讓整筆標註失敗會連傷口分割的 GT 一起丟掉。
     s, r = post("/api/v1/annotation", "physician", anno("bad", "WD-BAD", make_jpeg()))
-    check("2  送 JPEG 當遮罩 → 標註仍成功", s == 200 and r.get("status") == "enqueued", (s, r))
+    check("2  送 JPEG 當遮罩 → 不得誤報成功", s == 409 and r.get("error") == "tissue_asset_not_saved", (s, r))
     check("2b 但遮罩沒落盤",
           not os.path.exists(os.path.join(tmp, "tissue_masks", ids["bad"] + ".png")))
     aud = [json.loads(l) for l in open(os.path.join(tmp, "audit.jsonl"), encoding="utf-8")]
@@ -146,7 +146,7 @@ def main():
 
     s, _ = post("/api/v1/annotation", "physician",
                 anno("big", "WD-BIG", make_png() + b"\x00" * (5 * 1024 * 1024)))
-    check("2d 超大遮罩被拒但標註仍成功", s == 200)
+    check("2d 超大遮罩拒收整筆待重試", s == 409)
     aud = [json.loads(l) for l in open(os.path.join(tmp, "audit.jsonl"), encoding="utf-8")]
     check("2e 超大拒收留痕", any(a["action"] == "tissue_mask_rejected" and "4MB" in a["result"] for a in aud))
 
@@ -154,7 +154,7 @@ def main():
     s, _ = post("/api/v1/annotation", "physician",
                 anno("raw", "WD-RAW", make_png(val=3), edited=False))
     check("3  未修正的遮罩仍會落盤（要留著才能事後檢視與比對）",
-          s == 200 and os.path.exists(os.path.join(tmp, "tissue_masks", ids["raw"] + ".png")))
+          s == 200 and os.path.exists(os.path.join(tmp, [r for r in fw.read_jsonl(fw.QUEUE) if r["code"] == "WD-RAW"][-1]["tissue_mask_key"])))
 
     s, m = get("/api/v1/dataset/manifest?kind=tissue", "engineer")
     got = {i["code"] for i in m["items"]}
@@ -162,7 +162,7 @@ def main():
     check("3c WD-EDIT 在清單裡", "WD-EDIT" in got, sorted(got))
     check("3d 排除原因與筆數要現形（不能靜默消失）",
           m["excluded"].get("tissue_not_edited") == 1, m["excluded"])
-    check("3e 沒有遮罩的那筆歸在 no_tissue_mask", m["excluded"].get("no_tissue_mask", 0) >= 1, m["excluded"])
+    check("3e 遮罩失敗的送件未進佇列", not any(r["code"] in ("WD-BAD", "WD-BIG") for r in fw.read_jsonl(fw.QUEUE)), m["excluded"])
     check("3f require_edited 明確回報", m["require_edited"] is True)
 
     s, m2 = get("/api/v1/dataset/manifest?kind=tissue&require_edited=0", "engineer")

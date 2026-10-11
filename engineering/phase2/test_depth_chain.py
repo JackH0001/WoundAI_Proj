@@ -234,13 +234,13 @@ def main():
 
     recs = [x for x in fw.read_jsonl(fw.QUEUE) if x.get("image_id") == iid]
     rec = recs[-1] if recs else {}
-    check("紀錄有 depth_map_key", rec.get("depth_map_key") == "depth_maps/%s.png" % iid,
+    check("紀錄有 depth_map_key", rec.get("depth_map_key", "").startswith("depth_maps/%s/" % iid),
           rec.get("depth_map_key"))
     check("紀錄有 depth_conf_key", bool(rec.get("depth_conf_key")))
     check("紀錄保留內參", (rec.get("camera_intrinsics") or {}).get("fx") is not None)
     check("depth_source 是真值", rec.get("depth_source") == "arcore_depth")
 
-    stored = os.path.join(tmp, "depth_maps", iid + ".png")
+    stored = os.path.join(tmp, rec["depth_map_key"])
     check("深度圖確實落盤", os.path.exists(stored))
     raw_back = open(stored, "rb").read()
     check("落盤位元組與送出的完全相同",

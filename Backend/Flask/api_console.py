@@ -411,9 +411,9 @@ async function loadRecs(){
     recsData.map((r,i) => `<tr class="${r.status==="trainable"?"":"off"}">
       <td class="nowrap">${esc((r.received_at||"").replace("T"," ").replace("Z",""))}</td>
       <td class="nowrap"><code>${esc(r.code)}</code>${r.has_preview
-        ? `<br><a href="#" onclick="showImage('${esc(r.image_id)}');return false"
+        ? `<br><a href="#" onclick="showImage('${esc(r.image_id)}','${esc(r.annotation_receipt_id || '')}');return false"
              style="font-size:11px">看疊圖</a>
-           <a href="#" onclick="showPreview('${esc(r.image_id)}');return false"
+           <a href="#" onclick="showPreview('${esc(r.image_id)}','${esc(r.annotation_receipt_id || '')}');return false"
              style="font-size:11px">・僅標註</a>` : ""}</td>
       <td>${esc(r.source)}<br><span style="font-size:11px;color:var(--dim)">${esc(r.route||"")}</span></td>
       <td class="nowrap">${r.area_cm2==null?"—":esc(r.area_cm2)+" cm²"}</td>
@@ -472,11 +472,11 @@ function qualityCell(r){
 // ⚠ 不能用 <img src="...">：那個請求不會帶 Authorization 標頭，會拿到 401
 //（與 auditCsv 同一個坑）。改成 fetch 取回 SVG 文字再內嵌。
 // 回應是我們自己後端產生的 SVG，內容只有 rect/polygon/text，沒有腳本。
-async function showPreview(iid){
+async function showPreview(iid, revision){
   const box = $("r_panel");
   box.innerHTML = `<div class="banner">載入標註示意圖…</div>`;
   try{
-    const res = await fetch("/api/v1/flywheel/record/" + encodeURIComponent(iid) + "/preview.svg",
+    const res = await fetch("/api/v1/flywheel/record/" + encodeURIComponent(iid) + "/preview.svg?revision=" + encodeURIComponent(revision || ""),
                             {headers:{Authorization:"Bearer "+tok}});
     if(!res.ok) throw new Error("HTTP " + res.status);
     const svg = await res.text();
@@ -571,10 +571,10 @@ async function showOverlay(box, imgUrl, svgUrl, legendHtml, note){
     box.innerHTML = "";
   });
 }
-async function showImage(iid){
+async function showImage(iid, revision){
   showOverlay($("r_panel"),
-    "/api/v1/flywheel/record/" + encodeURIComponent(iid) + "/image.jpg",
-    "/api/v1/flywheel/record/" + encodeURIComponent(iid) + "/preview.svg?overlay=1",
+    "/api/v1/flywheel/record/" + encodeURIComponent(iid) + "/image.jpg?revision=" + encodeURIComponent(revision || ""),
+    "/api/v1/flywheel/record/" + encodeURIComponent(iid) + "/preview.svg?overlay=1" + "&revision=" + encodeURIComponent(revision || ""),
     `<p class="note" style="margin:4px 0">青＝傷口輪廓，色塊＝組織分區（與 App 修邊畫面同配色）。</p>`);
 }
 function liteShow(anon, iid){
