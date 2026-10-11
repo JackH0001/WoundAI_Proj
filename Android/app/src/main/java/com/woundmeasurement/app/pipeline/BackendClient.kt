@@ -108,9 +108,10 @@ data class LoginIdentity(
     fun label() = "${displayName ?: user}（$roleZh）"
 }
 
-class BackendClient(private val baseUrl: String, jwt: String = "") {
+/** Production construction always applies the MMH gateway and its routing checks. */
+private fun createBackendHttpClient(): OkHttpClient {
     // escalate 的 classify 需跑 student+A∪U 兩模型,首次冷啟>10s;拉長逾時避免 timeout
-    private val http = OkHttpClient.Builder()
+    return OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(90, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
@@ -123,6 +124,16 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
             }
         }
         .build()
+}
+
+class BackendClient internal constructor(
+    private val baseUrl: String,
+    jwt: String,
+    private val http: OkHttpClient
+) {
+    // Public app call sites keep the guarded production transport. The internal
+    // overload lets instrumented tests exercise receipt parsing on loopback.
+    constructor(baseUrl: String, jwt: String = "") : this(baseUrl, jwt, createBackendHttpClient())
     @Volatile private var jwt: String = jwt
 
     /** 登入後的身分；未登入為 null。 */

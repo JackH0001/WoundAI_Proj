@@ -7,6 +7,8 @@ import java.net.ServerSocket
 import java.net.InetAddress
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import okhttp3.OkHttpClient
+import com.woundmeasurement.app.BuildConfig
 
 /** Exercise the actual OkHttp + Android JSON call path, entirely on loopback. */
 class AnnotationTransportTest {
@@ -40,7 +42,14 @@ class AnnotationTransportTest {
                         socket.getOutputStream().apply { write(header.toByteArray()); write(bytes); flush() }
                     }
                 }
-                val client = BackendClient("http://127.0.0.1:${server.localPort}", "synthetic-test-token")
+                // MMH deliberately rejects loopback in the production transport. Inject
+                // a local-only transport for these receipt tests; separate tests
+                // in InstitutionTransportBoundaryTest exercise the guarded public
+                // constructor without relaxing it.
+                val client = if (BuildConfig.MMH_VALIDATION) {
+                    BackendClient("http://127.0.0.1:${server.localPort}", "synthetic-test-token",
+                        OkHttpClient.Builder().callTimeout(5, TimeUnit.SECONDS).build())
+                } else BackendClient("http://127.0.0.1:${server.localPort}", "synthetic-test-token")
                 val result = client.submitAnnotation(
                     code = "WD-synthetic", gtPolygon = listOf(listOf(1,1),listOf(8,1),listOf(1,8)),
                     exudate = 0, imageId = imageId, imageW = 10, imageH = 10,
