@@ -1,0 +1,32 @@
+name: MMH AAB signing helper
+on:
+  pull_request:
+    paths:
+      - 'tools/sign_mmh_aab.py'
+      - 'tools/VerifyMmhBundle.java'
+      - 'tools/test_sign_mmh_aab.py'
+      - '.github/workflows/mmh-aab-signing.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/sign_mmh_aab.py'
+      - 'tools/VerifyMmhBundle.java'
+      - 'tools/test_sign_mmh_aab.py'
+      - '.github/workflows/mmh-aab-signing.yml'
+permissions:
+  contents: read
+jobs:
+  disposable-local-signatures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Verify local signatures with disposable test keys
+        run: MMH_TEST_JAVA_HOME="$JAVA_HOME" python -B tools/test_sign_mmh_aab.py
