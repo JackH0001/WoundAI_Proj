@@ -241,13 +241,13 @@ def main():
     check("回傳 depth_id", bool(j.get("depth_id")), j.get("depth_id"))
     check("depth_source 升級為 lidar", j.get("depth_source") == "lidar", j.get("depth_source"))
     check("首次上傳不算覆蓋", j.get("replaced_previous") is False, j.get("replaced_previous"))
-    check("深度檔真的落盤", os.path.isfile(os.path.join(tmp, "depth_maps", iid + ".f32")))
+    check("深度檔真的落盤", os.path.isfile(os.path.join(tmp, fw.read_jsonl(fw.DEPTH_INDEX)[-1]["depth_key"])))
     check("meta 也落盤（內參事後查不到，必須跟著存）",
-          os.path.isfile(os.path.join(tmp, "depth_maps", iid + ".meta.json")))
+          os.path.isfile(os.path.join(tmp, fw.read_jsonl(fw.DEPTH_INDEX)[-1]["depth_meta_key"])))
 
     def saved_depth_state():
-        names = [os.path.join(tmp, "depth_maps", iid + suffix)
-                 for suffix in (".f32", ".meta.json")]
+        entry = fw.read_jsonl(fw.DEPTH_INDEX)[-1]
+        names = [os.path.join(tmp, entry[k]) for k in ("depth_key", "depth_meta_key")]
         names.append(os.path.join(tmp, "depth_index.jsonl"))
         return [open(name, "rb").read() for name in names]
 
@@ -259,7 +259,7 @@ def main():
               rejected.status_code)
 
     r_stats = upload(iid, depth_bytes(.30), meta(coverage=.01, min_m=-999, max_m=999))
-    stored_meta = json.load(open(os.path.join(tmp, "depth_maps", iid + ".meta.json")))
+    stored_meta = json.load(open(os.path.join(tmp, fw.read_jsonl(fw.DEPTH_INDEX)[-1]["depth_meta_key"])))
     check("HTTP persists server-derived statistics", r_stats.status_code == 200
           and stored_meta["coverage"] == 1.0 and abs(stored_meta["min_m"] - .30) < 1e-3
           and abs(stored_meta["max_m"] - .30) < 1e-3)
@@ -268,8 +268,9 @@ def main():
     check("同一份重傳：不算覆蓋（斷網重試是正常的）",
           (r2.get_json() or {}).get("replaced_previous") is False)
     r3 = upload(iid, depth_bytes(0.35), meta())
-    check("換一份重傳：標記為覆蓋（稽核上是不同的事件）",
-          (r3.get_json() or {}).get("replaced_previous") is True)
+    check("換一份重傳：保留舊版並標記新增修訂",
+          (r3.get_json() or {}).get("superseded_previous") is True
+          and (r3.get_json() or {}).get("replaced_previous") is False)
 
     r = upload("0123456789abcdef", depth_bytes(), meta())
     check("孤兒 image_id 被擋（沒有 GT 可配對）", r.status_code == 400, r.status_code)
