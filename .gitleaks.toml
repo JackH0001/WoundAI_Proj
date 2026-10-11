@@ -41,6 +41,15 @@ description = "Generic hardcoded password assignment"
 regex = '''(?i)(password|passwd|pwd)\s*[:=]\s*['"][^'"\s]{6,}['"]'''
 tags = ["password"]
 
+  # Only two literal values in the in-memory iOS transport fixture are fake.
+  # Both path and exact matched assignment must match; other values still fail.
+  [rules.allowlist]
+  description = "Exact synthetic iOS transport fixture credentials"
+  condition = "AND"
+  regexTarget = "match"
+  paths = ['''^iOS/WoundAITests/InstitutionIAPTransportTests\.swift$''']
+  regexes = ['''^password\s*:\s*"synthetic(?:-password)?"$''']
+
 [allowlist]
 description = "忽略測試/範例與 stub"
 paths = ['''(.*?)_stub\.onnx''', '''.*/test/.*''', '''.*Test\.kt''']
