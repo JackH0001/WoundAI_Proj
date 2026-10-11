@@ -36,3 +36,9 @@
 5. 尚未完成上述實際部署與平板重送前，不宣告端到端通過。
 
 本機證據（repo 外）：`../woundai-institution-evidence-20261007/mmh-iap-update-20261011/`，含 boundary-before.json 與 tests/。不包含密碼、token 或研究影像。
+
+## PR #23 首次 CI 與補修
+
+已授權的 a407b8f 推送並建立 Draft PR #23；6 項 check 通過，audit-contract 在既有 `test_medical_depth_orientation_storage.py` 失敗。該測試仍讀舊 image_id 固定檔名並預期覆寫；新契約為內容雜湊路徑、保留歷史版本。
+
+本機补修只更新此測試與本文件：由深度索引及回覆收據選取實際資產，核對 image_id、annotation receipt、payload hash；新增修訂後逐位元組核對所有先前資產仍存在且不變。舊索引反例補齊 actor 與排序資訊，確實進入 legacy_unverifiable 檢查。方向保存 7/7、修訂資產 19/19、後續 p0_4_staging 與 runtime_golden_contract 均通過。未推送此追加修正，尚不能宣稱遠端 CI 全綠。
