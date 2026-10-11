@@ -853,7 +853,7 @@ async function renameUser(u){
   if(name === null) return;
   try{
     // 不傳 password → 沿用既有雜湊；不傳 disabled → 沿用目前狀態。
-    await api("/api/v1/users", {body: JSON.stringify({user:u, role:rec.role, display_name:name})});
+    await api("/api/v1/users", {body: JSON.stringify({user:u, expected_revision:rec.revision, role:rec.role, display_name:name})});
     loadUsers(); loaded.audit = false;
   }catch(e){ alert("失敗：" + e.message); }
 }
@@ -890,7 +890,7 @@ async function changeRole(u){
   try{
     // upsert 是整筆覆寫：display_name / disabled 要原樣帶回，否則會被清掉；
     // 不傳 password＝沿用既有雜湊（改角色不該連帶換密碼）。
-    await api("/api/v1/users", {body: JSON.stringify({user:u, role:pick.v,
+    await api("/api/v1/users", {body: JSON.stringify({user:u, expected_revision:rec.revision, role:pick.v,
       display_name:rec.display_name||"", disabled:!!rec.disabled})});
     loadUsers(); loaded.audit = false;
   }catch(e){ alert("失敗：" + e.message); }
@@ -901,7 +901,7 @@ async function toggleUser(u){
   if(!confirm((to?"停用":"啟用") + " " + u + "？")) return;
   try{
     // upsert 是整筆覆寫，role 少傳會被後端拒絕；密碼不傳＝不變更。
-    await api("/api/v1/users", {body: JSON.stringify({user:u, role:rec.role, disabled:to,
+    await api("/api/v1/users", {body: JSON.stringify({user:u, expected_revision:rec.revision, role:rec.role, disabled:to,
                                                       display_name:rec.display_name||""})});
     loadUsers(); loaded.audit = false;
   }catch(e){ alert("失敗：" + e.message); }
@@ -910,11 +910,11 @@ async function resetPw(u){
   const rec = users.find(x => x.user === u); if(!rec) return;
   if(!confirm("重設 " + u + " 的密碼？舊密碼立即失效，新密碼只顯示一次。")) return;
   try{
-    const j = await api("/api/v1/users", {body: JSON.stringify({user:u, role:rec.role,
+    const j = await api("/api/v1/users", {body: JSON.stringify({user:u, expected_revision:rec.revision, role:rec.role,
       display_name:rec.display_name||"", disabled:!!rec.disabled, generate_password:true})});
     banner(`✓ <code>${esc(u)}</code> 新密碼：<span class="pw">${esc(j.generated_password)}</span><br>` +
            `<span style="font-size:12px">舊密碼已失效。${esc(j.note||"")}</span>`);
-    loaded.audit = false;
+    loadUsers(); loaded.audit = false;
   }catch(e){ alert("失敗：" + e.message); }
 }
 

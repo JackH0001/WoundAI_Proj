@@ -208,6 +208,7 @@ class Store:
         return {"verified": False, "locked": False, "reason": "local storage is not WORM"}
 
     def append_line(self, key: str, line: str) -> None: raise NotImplementedError
+    def append_user_version(self, record: dict) -> None: raise NotImplementedError
     def read_lines(self, key: str): raise NotImplementedError
     def read_lines_fresh(self, key: str):
         """Read a complete current log, bypassing any backend cache if needed."""
@@ -352,6 +353,20 @@ class LocalStore(Store):
             return key
         return os.path.join(self.root, *key.split("/"))
 
+    def append_user_version(self, record: dict) -> None:
+        from account_versions import validate_append
+        from lite_ledger_purge import record_file_lock
+        path = self._p("users.jsonl")
+        with record_file_lock(path):
+            lines = []
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as source:
+                    lines = source.read().splitlines()
+            validate_append(lines, record)
+            with open(path, "a", encoding="utf-8") as target:
+                target.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+                target.flush(); os.fsync(target.fileno())
+
     def append_line(self, key: str, line: str) -> None:
         # The audit chain has one writer: append_chained().  Letting the public
         # JSONL helper append a raw line bypasses seq/prev/hash validation.
@@ -362,7 +377,7 @@ class LocalStore(Store):
         if d:
             os.makedirs(d, exist_ok=True)
         from lite_ledger_purge import LEDGERS, record_file_lock
-        if self._protected_identity(key) in LEDGERS:
+        if self._protected_identity(key) in LEDGERS or self._protected_identity(key) == "users.jsonl":
             # Purge and both append paths must serialize across processes.
             with record_file_lock(p):
                 with open(p, "a", encoding="utf-8") as f:
@@ -378,6 +393,9 @@ class LocalStore(Store):
         # append lock, not just chain_tail. Otherwise it can parse a partially
         # flushed JSON line as corruption. RLock permits reads inside append.
         lock = _chain_lock_for(p) if self._is_audit_chain_root(key) else nullcontext()
+        if self._protected_identity(key) == "users.jsonl":
+            from lite_ledger_purge import record_file_lock
+            lock = record_file_lock(p)
         with lock:
             if not os.path.exists(p):
                 return []
@@ -604,6 +622,22 @@ class GcsStore(Store):
 
     def _k(self, key: str) -> str:
         return "%s/%s" % (self.prefix, key.strip("/")) if self.prefix else key.strip("/")
+
+    def append_user_version(self, record: dict) -> None:
+        from account_versions import AccountConflict, validate_append
+        import re
+        if (not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,20}", record.get("org", ""))
+                or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,30}", record.get("user", ""))):
+            raise ValueError("invalid_account_identity")
+        validate_append(self.read_lines_fresh("users.jsonl"), record)
+        # Two writers based on one parent contend for one immutable object.
+        # GCS create-if-generation-zero is the atomic arbiter, not list order.
+        key = "users.jsonl/cas/%s/%s/%s.json" % (record["org"], record["user"], record["_account_cas"]["parent"])
+        try:
+            self.put_blob_immutable(key, json.dumps(record, ensure_ascii=False, sort_keys=True,
+                                    separators=(",", ":"), allow_nan=False).encode(), "application/json")
+        except ImmutableConflict:
+            raise AccountConflict("stale_account_revision") from None
 
     def append_line(self, key: str, line: str) -> None:
         # 一筆一個物件。不做 read-modify-write：那會在多實例下靜默吃掉紀錄，
