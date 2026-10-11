@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WoundAI MMHPS 合成測試版隱私說明草稿</title>
+<style>body{max-width:760px;margin:auto;padding:24px;font:17px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#182b36;background:#fafcfd}h1{font-size:1.6rem}h2{font-size:1.2rem;margin-top:2rem}a{color:#006d92}.notice{padding:16px;border-left:4px solid #ad6500;background:#fff4df}section{border-top:1px solid #ccd9df;margin-top:32px;padding-top:16px}li{margin:.5rem 0}footer{margin-top:32px;font-size:.9rem;color:#50616a}</style>
+</head><body>
+<p class="notice"><strong>待負責人核閱草稿，尚未發布。</strong>本文件限定 MMHPS 合成測試，不適用於正式臨床收案或 WoundLite 公開研究。</p>
+<h1>WoundAI MMHPS 合成測試版隱私說明</h1>
+<p>草稿日期：2026-10-11。適用於機構私有驗證入口與 WoundAI MMHPS 測試 App；目前測試範圍只允許合成圖形、模擬標靶與獲准的測試資料。</p>
+<h2>測試範圍</h2>
+<p>本版本用於驗證影像量測、輪廓及組織標註、個案時間軸、雲端保存與支援裝置的深度資料流程。請勿輸入真實病患姓名、病歷號、簽名或傷口照片，亦勿拍入臉部、證件、名牌或其他可識別資訊。測試結果不可用於診斷或治療決策。介面有臨床或研究欄位，不代表已取得臨床收案或人體研究核准。</p>
+<h2>兩層登入會處理哪些資料？</h2>
+<p>Google 帳號用於核對進入私有服務的資格；WoundAI 帳號用於核對醫師、護理等測試角色與操作權限。App 會顯示 Google 登入電子郵件，服務會處理 Google 身分權杖及 WoundAI 登入／角色資訊。這些資料與登入者有關聯，不能稱為完全匿名。</p>
+<p>Google 登入及雲端入口也會涉及 Google 的資料處理。Google 官方說明指出，登入 SDK 可能處理使用者識別碼與 IP，並可能由 IP 推估概略位置以防詐。iOS 所用 Google SDK 的隱私宣告另涵蓋姓名、電子郵件、電話號碼、裝置識別碼、使用情形及其他資料類型；依其宣告用於功能或分析。這不表示 App 讀取通訊錄或 GPS，也不表示每次登入都會取得上述每一項。詳見 <a href="https://developers.google.com/identity/sign-in/ios/app-privacy">Google 登入資料揭露</a>及 <a href="https://policies.google.com/privacy">Google 隱私權政策</a>。</p>
+<h2>測試影像與結果</h2>
+<p>呼叫雲端辨識時，測試影像會傳到 Google Cloud 上的 MMH 後端處理；依流程與有效保存條件，可留存影像、假名個案代碼、量測結果、輪廓與組織分類遮罩、修訂資訊、來源及品質資訊。支援且實際取得深度的 iOS 裝置，還可傳送原始深度、信心資料、相機參數、方向沿革與裝置資訊。Android 目前的 MMH 驗證路徑未實作完整深度採集，不能視為相同 RGB-D 能力。</p>
+<p>假名代碼、同筆影像與修訂版本仍可相互關聯。影像自身也可能含有識別內容；本版本不保證自動去除所有人臉、文字或個資。請只使用規定的測試資料。</p>
+<p>資料用於本次功能、完整性、品質與安全驗證。畫面使用「研究標註」或「訓練佇列」名稱，不代表資料已獲准納入模型訓練。本測試不得被當成公開招募臨床研究資料的管道。</p>
+<h2>本機副本與手動匯出</h2>
+<p>App 會保存本機紀錄及流程所需的影像／側檔。iOS MMH 的行政私密副本選項預設關閉；開啟時可建立加密副本，再由使用者選擇分享／匯出。匯出後的可讀檔案由使用者選定目的地管理，不等於 App 會控制目的地的同步或刪除。Android MMH 目前關閉一般內測版的自動共用相簿輸出，不能推定已有 iOS 相同的私密副本功能。</p>
+<h2>雲端保存與期限</h2>
+<p>本次核對的 MMH 影像、帳號安全及應用稽核三個專用儲存桶位於 Google Cloud asia-east1。這不代表 Google 登入、Apple TestFlight 或其安全處理均限於同一地區。</p>
+<p>截至草稿日期，這三個桶的設定未見物件自動刪除期限，不能承諾影像在 30 天後自動消失；資料可能持續保留，直到管理者依測試需求或有效請求另行處理。MMH 應用稽核桶採本特案未鎖定模式，不宣稱為不可變更或不可竄改。</p>
+<p>同專案 global Cloud Logging 的既有「預設」及「必要」日誌桶，本次核對保留天數分別為 30 與 400 天。這是兩個日誌桶的設定，不是所有影像、應用稽核、備份或 Google／Apple 處理資料的共同期限。服務的連線與安全處理可能涉及 IP 或登入相關資訊，不能承諾完全不留連線日誌。</p>
+<h2>停止使用、撤回及查詢</h2>
+<p>可停止拍攝與上傳並登出 App。登出、刪除本機紀錄或撤回 Google 連結，不代表雲端資料、機構入口權限及所有稽核資料已一併刪除。測試帳號與入口資格由管理者分別管理。</p>
+<p>如需查詢、更正、停用帳號或要求處理已上傳測試資料，請聯絡下方窗口，由管理者核對請求範圍與保存狀態並回覆結果。研究撤回、照護／測試紀錄、歷次修訂、稽核及使用者自行匯出的副本屬不同範圍；本說明不承諾按一次撤回就全面或立即清除所有副本。</p>
+<h2>聯絡與版本變更</h2>
+<p>測試聯絡窗口：Jack Hou，<a href="mailto:jack.hou@gmail.com">jack.hou@gmail.com</a>。請先提供 App 版本與問題摘要，不要寄送密碼、權杖、病患資料或原始傷口影像；需要資料核對時先安排適當的管道。</p>
+<p>若轉為正式臨床或研究收案，須先完成相應核准、資訊揭露與同意流程，並更新適用政策；本合成測試說明不涵蓋該階段。</p>
+<section lang="en">
+<h1>WoundAI MMHPS Synthetic Testing Privacy Notice</h1>
+<p class="notice"><strong>Draft for owner review — not published.</strong> Dated October 11, 2026. This notice covers private MMHPS synthetic workflow testing, not clinical enrollment or WoundLite public research.</p>
+<h2>Scope and sign-in</h2>
+<p>Use only permitted synthetic images, paper geometry and phantom targets. Do not enter patient identifiers, signatures or real wound images, or use results for diagnosis or treatment. Clinical/research labels in the interface do not establish approval for human-subject enrollment.</p>
+<p>Google identity controls entry to the private service; WoundAI credentials control the test role and actions. The app displays the signed-in Google email. Google identity tokens and application authentication/role information are processed to verify access and can be linked to the user.</p>
+<p>Google states that its sign-in SDK may process user identifiers and IP addresses, including approximate location inferred for fraud prevention. The bundled iOS SDK also declares contact information, device identifiers, usage and other data for functionality or analytics. These declarations do not establish that every item is collected in every session or that the app reads contacts or GPS. See the linked Google notices above.</p>
+<h2>Images, depth and exports</h2>
+<p>Cloud recognition sends the test image to the MMH backend on Google Cloud. Depending on the workflow and valid storage conditions, records may include images, pseudonymous case codes, measurements, outline/tissue masks, revisions, provenance and quality metadata. Supported iOS capture may also provide raw depth, confidence data, camera parameters, orientation history and device information. The current Android MMH path does not implement equivalent full depth capture.</p>
+<p>Codes and revisions remain linkable. Images may contain identifying content; automatic removal of all faces, text or personal information is not guaranteed. Data is for workflow, integrity, quality and security validation. An upload labelled as research or a training queue is not evidence of authorization to use it for model training.</p>
+<p>Local records and supporting files are retained by the app. The optional iOS private administrative copy is off by default and can be manually exported. Readable exports are thereafter subject to the chosen destination's controls. Current Android MMH disables the general internal build's automatic shared-gallery export and does not claim the same private-copy feature.</p>
+<h2>Retention and requests</h2>
+<p>The three inspected MMH media, security and application-audit buckets are in Google Cloud asia-east1. This does not place all Google identity or Apple TestFlight processing in that region. Their inspected settings do not establish automatic object deletion after a fixed number of days; test data may remain until separately handled by the administrator. The MMH application-audit bucket uses the approved unlocked special-case mode and is not represented as immutable storage.</p>
+<p>The project's global Cloud Logging default and required buckets were configured for 30 and 400 days respectively. Those settings are not a universal deletion deadline for images, application audit, copies or provider-held information. Connection/security processing may include IP and sign-in information.</p>
+<p>You may stop capture/upload and sign out. Signing out, deleting local records or disconnecting Google does not automatically remove all cloud records, access grants or audit data. Contact Jack Hou at <a href="mailto:jack.hou@gmail.com">jack.hou@gmail.com</a> for questions, correction, account deactivation or requests concerning uploaded test data. The administrator will verify the scope and report the result. No one-step deletion of all revisions, audit records or user exports is promised. Do not email passwords, tokens or patient images; arrange an appropriate channel first.</p>
+<p>Clinical or human-subject research use requires its own approvals, disclosures and consent before a change of scope. This synthetic-test notice does not cover that future use.</p>
+</section><footer>文件狀態：待核閱；未填入商店生效政策網址。Document status: pending review, not an active store policy URL.</footer>
+</body></html>

@@ -43,6 +43,18 @@ Google 的 iOS 登入資料揭露文件目前列明，使用者識別碼及 IP �
 
 ## 完成外測前剩餘工作
 
+### 保存設定與可核閱草稿
+
+2026-10-11 13:11 UTC 的唯讀 GCP 核對涵蓋 MMH media、security、audit 三個專用桶：區域均為 ASIA-EAST1、公開存取禁止及統一桶層級存取啟用；回覆未見 lifecycle 自動刪除期限或 retention policy。這不能被描述成「研究影像 30 天後自動刪除」。同專案 global Cloud Logging 的 `_Default` 為 30 天、`_Required` 為 400 天且 locked；這與 MMH 應用稽核 GCS 桶是不同資源，也未驗證所有服務日誌的路由。
+
+已新增 `site/privacy/woundai-mmhps-beta.html` 繁中／英文草稿，明示合成測試、兩層登入、SDK 資料處理、RGB-D 平台差異、匯出及撤回範圍、未設定物件自動清除期限。這是待負責人核閱的政策提案，**尚未發布、未填入商店的有效隱私網址**；先前 demo 政策核准不視為本 MMH 新聲明的核准。
+
+本機瀏覽器已實際載入並檢視草稿，663px 視窗下 document width 648px，無水平溢出；12 個標題、英文區段可讀，無 JavaScript。HTML 結構與連結協定檢查通過。這是文件驗證，不是新一輪手機／雲端上傳驗收。
+
+證據：[唯讀雲端核對記錄](/Users/Jack.Hou/Documents/Codex/2026-06-28/woundai-institution-evidence-20261007/mmh-iap-update-20261011/testflight-privacy-review/cloud-readback.json)、[日誌桶設定](/Users/Jack.Hou/Documents/Codex/2026-06-28/woundai-institution-evidence-20261007/mmh-iap-update-20261011/testflight-privacy-review/logging-buckets.json)、[草稿預覽](/Users/Jack.Hou/Documents/Codex/2026-06-28/woundai-institution-evidence-20261007/mmh-iap-update-20261011/testflight-privacy-review/mmh-privacy-draft-preview.png)。
+
+### 發布前條件
+
 1. 確認專供合成審查的 Google 身分／入口方案，以及最低必要的 WoundAI 測試角色；從無既有登入狀態的裝置驗證可用性。新的入口成員須具體授權，不以個人 Google 帳密供審查。
 2. 補齊 MMH 公開隱私說明，包括 Google／IAP 與角色帳號、上傳內容、實際保留與撤回範圍、私密副本／手動匯出、聯絡窗口，再由負責人核閱發布。不將未核對的保留期限或全面刪除當成承諾。
 3. 依 App、後端與 SDK 證據完成 App Privacy 問卷；不以本表直接宣稱所有選項已適用、已提交或獲准。
