@@ -10,6 +10,7 @@ switch fail-closed and compare each profile with a named runbook entry.
 from pathlib import Path
 import re
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -110,7 +111,7 @@ def android_backend_urls():
                 "(found %d)" % (idx + 1, len(values)))
         block = None
         for back in range(idx, -1, -1):
-            hit = re.match(r"[ \t]*(release|debug)[ \t]*\{[ \t]*$", lines[back])
+            hit = re.match(r"[ \t]*(release|debug|mmhValidation|mmhInternal|internalTest)[ \t]*\{[ \t]*$", lines[back])
             if hit:
                 block = hit.group(1)
                 break
@@ -121,9 +122,9 @@ def android_backend_urls():
         if block in found:
             raise AssertionError("two DEFAULT_BACKEND_URL entries in the %s block" % block)
         found[block] = values[0]
-    if set(found) != {"release", "debug"}:
+    if set(found) != {"release", "debug", "mmhValidation", "mmhInternal"}:
         raise AssertionError(
-            "expected one DEFAULT_BACKEND_URL in each of release and debug; got %s"
+            "expected one DEFAULT_BACKEND_URL in each of release, debug, mmhValidation and mmhInternal; got %s"
             % sorted(found))
     return found
 
@@ -133,11 +134,11 @@ def android_backend_urls():
 def runbook_profiles():
     src = text(RUNBOOK)
     pairs = re.findall(
-        r'^\| `(ios-medical-testflight|ios-lite|android-release)` \| `(https://[^`]+)` \|$',
+        r'^\| `(ios-medical-testflight|ios-lite|android-release|android-mmh-validation|android-mmh-internal)` \| `(https://[^`]+)` \|$',
         src, re.M)
     profiles = dict(pairs)
-    expected = {"ios-medical-testflight", "ios-lite", "android-release"}
-    if len(pairs) != 3 or set(profiles) != expected:
+    expected = {"ios-medical-testflight", "ios-lite", "android-release", "android-mmh-validation", "android-mmh-internal"}
+    if len(pairs) != 5 or set(profiles) != expected:
         raise AssertionError("runbook must name each shipping profile exactly once")
     if set(RUN_APP.findall(src)) != set(profiles.values()):
         raise AssertionError("runbook contains an undocumented or missing backend origin")
@@ -197,6 +198,38 @@ class BackendUrlParityTests(unittest.TestCase):
             "Android release resolves to [%s]" % urls["release"])
         self.assertTrue(urls["release"].startswith("https://"))
 
+    def test_mmh_validation_is_separate_and_private_candidate(self):
+        urls = android_backend_urls()
+        self.assertEqual(urls["mmhValidation"], "https://candidate---woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app")
+        self.assertNotEqual(urls["release"], urls["mmhValidation"])
+        src = text(GRADLE)
+        self.assertIn('applicationIdSuffix ".mmhps20261007.validation"', src)
+        self.assertIn('"MMH_VALIDATION", "true"', src)
+
+    def test_mmh_internal_is_separate_and_private_candidate(self):
+        urls = android_backend_urls()
+        self.assertEqual(urls["mmhInternal"], "https://candidate---woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app")
+        self.assertNotEqual(urls["release"], urls["mmhInternal"])
+
+    def test_wrong_mmh_internal_address_is_rejected(self):
+        original = text(GRADLE)
+        before, marker, after = original.partition("        mmhInternal {")
+        self.assertTrue(marker)
+        changed = before + marker + after.replace(
+            "https://candidate---woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app",
+            "https://woundai-backend-421209514056.asia-east1.run.app", 1)
+        with patch(__name__ + ".text", return_value=changed):
+            with self.assertRaises(AssertionError):
+                self.test_mmh_internal_is_separate_and_private_candidate()
+
+    def test_missing_or_unknown_mmh_internal_profile_is_rejected(self):
+        original = text(GRADLE)
+        for replacement in ("unknownProfile", "mmhValidation"):
+            with self.subTest(replacement=replacement), patch(
+                __name__ + ".text", return_value=original.replace("        mmhInternal {", "        " + replacement + " {")):
+                with self.assertRaises(AssertionError):
+                    android_backend_urls()
+
     def test_the_two_platforms_do_not_copy_each_others_loopback(self):
         # An iOS simulator's localhost is the Mac; Android's emulator loopback to the
         # host is 10.0.2.2. Copying either value across platforms silently breaks the
@@ -213,6 +246,8 @@ class BackendUrlParityTests(unittest.TestCase):
             "ios-medical-testflight": ios["ios-medical-testflight"],
             "ios-lite": ios["ios-lite"],
             "android-release": android_backend_urls()["release"],
+            "android-mmh-validation": android_backend_urls()["mmhValidation"],
+            "android-mmh-internal": android_backend_urls()["mmhInternal"],
         }
         self.assertEqual(shipped, runbook_profiles())
         self.assertEqual(shipped["ios-lite"], shipped["android-release"],

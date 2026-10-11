@@ -1,4 +1,8 @@
 import SwiftUI
+import Combine
+#if WOUND_INSTITUTION
+import GoogleSignIn
+#endif
 
 /**
  App 進入點與導覽狀態機（對等 Android `MainActivity.WoundMeasurementApp()`）。
@@ -9,7 +13,12 @@ import SwiftUI
 @main
 struct WoundAIApp: App {
     var body: some Scene {
-        WindowGroup { RootView() }
+        WindowGroup {
+            RootView()
+                #if WOUND_INSTITUTION
+                .onOpenURL { url in _ = GIDSignIn.sharedInstance.handle(url) }
+                #endif
+        }
     }
 }
 
@@ -44,6 +53,9 @@ final class AppState: ObservableObject {
 
 struct RootView: View {
     @StateObject private var app = AppState()
+    @StateObject private var uploads = ClinicalUploadOutbox.shared
+    @Environment(\.scenePhase) private var scenePhase
+    private let retryTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
     var body: some View {
         Group {
@@ -60,6 +72,29 @@ struct RootView: View {
             case .manual:   ManualView()
             }
         }
+        .safeAreaInset(edge: .bottom) {
+            if let issue = uploads.storageIssue {
+                Text(issue).font(.footnote).foregroundStyle(.red).padding().background(.regularMaterial)
+            } else if uploads.pendingCount > 0 {
+                HStack {
+                    if uploads.activeID != nil { ProgressView() }
+                    VStack(alignment: .leading) {
+                        Text(uploads.activeID == nil ? "研究資料待傳：\(uploads.pendingCount) 筆" : uploads.phase)
+                            .font(.footnote).bold()
+                        Text("臨床紀錄已保存在手機，可繼續操作；中斷後回到 App 會續傳。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Button("重試") { uploads.resume(repo: app.repo, imageStore: app.imageStore, force: true) }
+                        .disabled(uploads.activeID != nil)
+                }.padding(10).background(.regularMaterial)
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { uploads.resume(repo: app.repo, imageStore: app.imageStore) }
+        }
+        .onReceive(retryTimer) { _ in
+            if scenePhase == .active { uploads.resume(repo: app.repo, imageStore: app.imageStore) }
+        }
         .environmentObject(app)
         .task {
             // 啟動時做三件事，都吞例外——它們失敗不該擋住 App 開啟。
@@ -75,6 +110,7 @@ struct RootView: View {
             //   "No 'async' operations occur within 'await' expression"。
             //   下面 `app.repo` 是 `actor`，那個 await 是真的、不可省。
             app.refreshBanner()
+            uploads.resume(repo: app.repo, imageStore: app.imageStore)
 
             // 90 天影像清除。
             //

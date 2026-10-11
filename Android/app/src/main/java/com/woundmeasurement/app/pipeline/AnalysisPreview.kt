@@ -2,6 +2,13 @@ package com.woundmeasurement.app.pipeline
 
 import android.graphics.Bitmap
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.*
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -161,9 +168,13 @@ fun AnalysisPreview(
      * 這裡才讀到新的柵格。之後 produceState 以柵格的**實例**為 key 重算圖層。
      */
     editRaster: EditRaster? = null,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    allowTissueEstimate: Boolean = true,
+    showCalibration: Boolean = true
 ) {
-    var layers by remember { mutableStateOf(Layers()) }
+    var layers by remember(bitmap) { mutableStateOf(Layers()) }
+    var zoom by remember(bitmap) { mutableStateOf(1f) }
+    var pan by remember(bitmap) { mutableStateOf(Offset.Zero) }
 
     val preview = remember(bitmap) {
         val s = min(1f, PREVIEW_MAX.toFloat() / max(bitmap.width, bitmap.height))
@@ -187,11 +198,11 @@ fun AnalysisPreview(
     }
     // editRaster 要列進 key。漏掉的話修邊回來這一頁會停在修邊前的圖，
     // 而同一畫面的百分比已經是修邊後的——2026-10-06 回報的就是這個。
-    val layer by produceState<TissueLayer?>(null, bitmap, drawPolys, wbGains, editRaster) {
+    val layer by produceState<TissueLayer?>(null, bitmap, drawPolys, wbGains, editRaster, allowTissueEstimate) {
         val r = editRaster
         value = withContext(Dispatchers.Default) {
             if (r != null) TissueLayer(rasterTissueOverlay(r, bitmap, preview), true)
-            else TissueLayer(buildTissueOverlay(bitmap, preview, drawPolys, wbGains), false)
+            else TissueLayer(if (allowTissueEstimate) buildTissueOverlay(bitmap, preview, drawPolys, wbGains) else null, false)
         }
     }
     val img = remember(preview) { preview.asImageBitmap() }
@@ -200,9 +211,30 @@ fun AnalysisPreview(
     Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = modifier) {
         Text("辨識參照圖", style = MaterialTheme.typography.titleSmall)
 
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
+        BoxWithConstraints(Modifier.fillMaxWidth().testTag("analysis-preview").semantics {
+            stateDescription = "縮放 ${(zoom * 100).roundToInt()}%"
+        }.clipToBounds().pointerInput(bitmap) {
+            awaitEachGesture {
+                awaitFirstDown(requireUnconsumed = false)
+                do {
+                    val event = awaitPointerEvent()
+                    // Single-finger scrolling belongs to the surrounding record page.
+                    if (event.changes.count { it.pressed } >= 2) {
+                        zoom = (zoom * event.calculateZoom()).coerceIn(1f, 6f)
+                        val limitX = size.width * (zoom - 1f) / 2f
+                        val limitY = size.height * (zoom - 1f) / 2f
+                        val delta = event.calculatePan()
+                        pan = Offset((pan.x + delta.x).coerceIn(-limitX, limitX),
+                            (pan.y + delta.y).coerceIn(-limitY, limitY))
+                        event.changes.forEach { it.consume() }
+                    }
+                } while (event.changes.any { it.pressed })
+            }
+        }) {
             val ar = preview.height.toFloat() / preview.width
-            Canvas(Modifier.fillMaxWidth().height(maxWidth * ar)) {
+            Canvas(Modifier.fillMaxWidth().height(maxWidth * ar).graphicsLayer {
+                scaleX = zoom; scaleY = zoom; translationX = pan.x; translationY = pan.y
+            }) {
                 val k = size.width / bitmap.width          // 影像座標 → 畫布座標
                 drawImage(img, dstOffset = IntOffset.Zero,
                     dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()))
@@ -240,16 +272,21 @@ fun AnalysisPreview(
             }
         }
 
+        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            Text("雙指縮放與移動，檢查圈選邊界。", modifier = Modifier.weight(1f), fontSize = 12.sp)
+            TextButton({ zoom = 1f; pan = Offset.Zero }) { Text("重設檢視") }
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             FilterChip(layers.outline, { layers = layers.copy(outline = !layers.outline) },
                 { Text("傷口輪廓") }, modifier = Modifier.weight(1f))
             FilterChip(layers.tissue, { layers = layers.copy(tissue = !layers.tissue) },
-                { Text("組織") }, modifier = Modifier.weight(1f))
-            FilterChip(layers.marker, { layers = layers.copy(marker = !layers.marker) },
+                { Text("組織") }, modifier = Modifier.weight(1f), enabled = tImg != null)
+            if (showCalibration) FilterChip(layers.marker, { layers = layers.copy(marker = !layers.marker) },
                 { Text("校正框") }, modifier = Modifier.weight(1f))
         }
 
         // 校正狀態。這一段的措辭刻意直白——它要求的是一個動作（看一眼），不是一則資訊。
+        if (showCalibration) {
         if (markerQuad != null && markerQuad.size == 4) {
             Text("🟩 綠框＝ArUco 校正貼紙的辨識位置" +
                  (mmPerPx?.let { "　尺度 %.4f mm/px".format(it) } ?: ""),
@@ -262,6 +299,7 @@ fun AnalysisPreview(
                  (calibMethod?.takeIf { it != "none" }?.let { "（改用 $it）" } ?: "（面積未校正）") +
                  "。貼紙要完整入鏡、不反光、與傷口大致同一平面。",
                 fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         }
         // 這句話必須跟著實際畫出來的那一層走。寫死「色彩啟發式」的話，醫師修完邊回來
         // 看到的是自己的筆畫，字卻說那是演算法輸出——說明與畫面不一致比沒有說明更糟。
@@ -276,6 +314,8 @@ fun AnalysisPreview(
                 "⚠ 修邊柵格與目前影像尺寸不符，已**不顯示**組織層（寧可不畫，也不要畫在錯的位置）。" +
                 "請重新進入修邊。",
                 fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+            !allowTissueEstimate -> Text("此筆沒有可讀取的已保存組織遮罩；不以重新推估取代歷史標註。",
+                fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             else -> Text(
                 "組織分區為色彩啟發式（與後端同一套規則），**非模型輸出、非診斷**；以醫師修邊為準。",
                 fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)

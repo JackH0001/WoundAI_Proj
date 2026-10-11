@@ -108,7 +108,9 @@ class EditRaster(
      * 沒有它 seedAuto 會退回灰世界，底稿與當初量測時的分區對不上——
      * 而醫師會以為是自己上次標錯了，然後把對的改成錯的。
      */
-    val wbGains: DoubleArray? = null
+    val wbGains: DoubleArray? = null,
+    val autoBaseline: ByteArray? = null,
+    val tissueEditCountKnown: Boolean = true
 ) {
     val tissueEdited: Boolean get() = tissueEditedPx > 0
     val tissueEditRatio: Double get() = if (maskPx > 0) tissueEditedPx.toDouble() / maskPx else 0.0
@@ -121,7 +123,7 @@ class EditRaster(
  * 2200² 的柵格要 484 萬次 HSV 換算，而且結果是椒鹽狀雜點；
  * 512² 上算完再放大既快又平滑，代價只是分區邊界精細度——那本來就要靠醫師修。
  */
-private fun seedAuto(st: RasterState, src: Bitmap, wbGains: DoubleArray? = null) {
+private fun seedAuto(st: RasterState, src: Bitmap, wbGains: DoubleArray? = null, preserveExisting: Boolean = false) {
     val x0 = st.rx0.roundToInt().coerceIn(0, src.width - 2)
     val y0 = st.ry0.roundToInt().coerceIn(0, src.height - 2)
     val x1 = (st.rx0 + st.mw / st.mScale).roundToInt().coerceIn(x0 + 2, src.width)
@@ -142,7 +144,8 @@ private fun seedAuto(st: RasterState, src: Bitmap, wbGains: DoubleArray? = null)
         val gy = (y * gh / st.mh).coerceIn(0, gh - 1)
         for (x in 0 until st.mw) {
             val gx = (x * gw / st.mw).coerceIn(0, gw - 1)
-            st.auto[y * st.mw + x] = g[gy * gw + gx]
+            if (!preserveExisting || st.auto[y * st.mw + x].toInt() == 0)
+                st.auto[y * st.mw + x] = g[gy * gw + gx]
         }
     }
 }
@@ -309,9 +312,10 @@ fun WoundEditScreen(
                 System.arraycopy(resume.mask, 0, mask, 0, mask.size)
                 System.arraycopy(resume.tissue, 0, tissue, 0, tissue.size)
                 System.arraycopy(resume.origMask, 0, orig, 0, orig.size)
-                seedAuto(this, bitmap, wbGains)   // 續編時 auto 不隨 EditRaster 保存,重算即可(便宜且必然一致)
-                cm2PerPx = if (mmPerPx != null) (mmPerPx * mmPerPx / 100.0) / (resume.mScale * resume.mScale).toDouble()
-                           else resume.cm2PerPx
+                if (resume.autoBaseline?.size == auto.size)
+                    System.arraycopy(resume.autoBaseline, 0, auto, 0, auto.size)
+                else seedAuto(this, bitmap, wbGains) // Display fallback only; not a proven historical baseline.
+                cm2PerPx = resume.cm2PerPx
                 recount(); syncAll()
             }
         } else {
@@ -463,7 +467,7 @@ fun WoundEditScreen(
                 //
                 // 這正是「擴張時畫面卡一下、手指繼續移動、恢復後邊界突然過標」的來源：
                 // 不是畫面移動了，是使用者在看不到回饋的那幾百毫秒裡把手指帶過頭了。
-                if (tool == EditTool.B_PAINT) seedAuto(st, bitmap, wbGains)
+                if (tool == EditTool.B_PAINT) seedAuto(st, bitmap, wbGains, preserveExisting = true)
                 cx = (imgPt.x - st.rx0) * st.mScale; cy = (imgPt.y - st.ry0) * st.mScale
             }
         }
@@ -754,6 +758,23 @@ fun WoundEditScreen(
             OutlinedButton(onCancel, Modifier.weight(1f)) { Text("取消") }
             Button({
                 try {
+                    // No-op must be handled before boundary simplification (which can discard tiny regions).
+                    val unchanged = resume?.let {
+                        EditRasterIdentity.sameContent(it, EditRaster(st.mask, st.tissue, st.orig,
+                            st.rx0, st.ry0, st.mw, st.mh, st.mScale, st.cm2PerPx,
+                            canvasW = bw, canvasH = bh, wbGains = wbGains))
+                    } == true
+                    if (unchanged && resume != null) {
+                        var intersection = 0; var union = 0
+                        for (i in st.mask.indices) {
+                            val a = st.orig[i].toInt() != 0; val b = st.mask[i].toInt() != 0
+                            if (a || b) union++
+                            if (a && b) intersection++
+                        }
+                        val iou = if (union == 0) 1.0 else intersection.toDouble() / union
+                        onDone(PolygonJson.largest(initPolys), initPolys, iou, originalArea, tissueFrac, resume)
+                        return@Button
+                    }
                     // 追**所有**連通元件。同一肢體多處傷口是臨床常態，
                     // 只取最大的那一個等於把第二個傷口標成背景（見 traceAllBoundaries）。
                     val boundaries = traceAllBoundaries(st.mask, st.mw, st.mh)
@@ -783,7 +804,9 @@ fun WoundEditScreen(
                             canvasW = bw, canvasH = bh,
                             // 帶著白平衡增益一起存。下次從時間軸回頭修邊時沒有後端回應，
                             // 底稿要靠它才能重建成與這次相同的分區。
-                            wbGains = wbGains)
+                            wbGains = wbGains,
+                            autoBaseline = if (resume == null || resume.autoBaseline != null) st.auto.copyOf() else null,
+                            tissueEditCountKnown = resume == null || (resume.autoBaseline != null && resume.tissueEditCountKnown))
                         // ⚠ 沒動過邊界就**不要動那個數字**。
                         //
                         // 由多邊形重建柵格是有損的（RDP 簡化 + 重新掃描線填充 + ROI 外框改變），

@@ -1,6 +1,10 @@
 import XCTest
 import UIKit
+#if WOUND_INSTITUTION_TESTS
+@testable import WoundAIInstitution
+#else
 @testable import WoundMeasurementApp
+#endif
 
 final class InstitutionExportTests: XCTestCase {
     private func fixture() -> (UIImage, EditRaster) {
@@ -12,7 +16,13 @@ final class InstitutionExportTests: XCTestCase {
             rx0: 10, ry0: 10, mw: 2, mh: 2, mScale: 1, cm2PerPx: 0.01, canvasW: 64, canvasH: 64)
         return (image, raster)
     }
-    func testStandardMedicalBuildDoesNotExport() { XCTAssertFalse(InstitutionExport.enabled) }
+    func testExportAvailabilityFollowsBuildPolicy() {
+        #if WOUND_INSTITUTION_TESTS && !WOUND_ADMIN_EXPORT_DISABLED
+        XCTAssertTrue(InstitutionExport.enabled)
+        #else
+        XCTAssertFalse(InstitutionExport.enabled)
+        #endif
+    }
     func testMismatchedCoordinateSpaceIsRejected() {
         var (image, raster) = fixture(); raster.canvasW = 63
         XCTAssertThrowsError(try InstitutionExport.validate(image: image, raster: raster))

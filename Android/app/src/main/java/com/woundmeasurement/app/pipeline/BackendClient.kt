@@ -115,6 +115,13 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
         .readTimeout(90, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .callTimeout(120, TimeUnit.SECONDS)
+        .apply {
+            if (com.woundmeasurement.app.BuildConfig.MMH_VALIDATION) {
+                followRedirects(false); followSslRedirects(false); retryOnConnectionFailure(false)
+                addInterceptor(com.woundmeasurement.app.institution.InstitutionInterceptor(
+                    com.woundmeasurement.app.institution.InstitutionRegistry.snapshot()))
+            }
+        }
         .build()
     @Volatile private var jwt: String = jwt
 
@@ -162,6 +169,8 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
     }
 
     fun login(username: String, password: String): Boolean {
+        jwt = ""
+        identity = null
         val body = JSONObject(mapOf("username" to username, "password" to password)).toString()
             .toRequestBody("application/json".toMediaType())
         val req = Request.Builder().url("$baseUrl/api/auth/login").post(body).build()
@@ -399,6 +408,8 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
         doctorVerified: Boolean
     ): Pair<Boolean, String> {
         // 沒有 image_id/尺寸就送出 = 產生孤兒 GT(後端會 400)。提早在端上擋下並給明確訊息。
+        if (tissueRaster?.tissueEditCountKnown == false)
+            return Pair(false, "缺少原始組織分類基準，無法確認修改量；未送出標註")
         if (imageId.isNullOrEmpty() || imageW <= 0 || imageH <= 0) {
             return Pair(false, "缺影像綁定(image_id/尺寸);請重新以後端模式量測一次再送出")
         }
@@ -472,7 +483,7 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
             val body = resp.body?.string() ?: ""
             // 直接把 raw JSON 丟給醫師看會變成一整串 \uXXXX 逃脫碼(實機截圖確認過,完全不可讀)
             // → 解析出 issues 逐條顯示中文
-            return Pair(resp.isSuccessful, summarize(body))
+            return AnnotationReceipt.validate(resp.code, body, code, imageId)
         }
     }
 

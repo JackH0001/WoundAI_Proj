@@ -38,11 +38,12 @@ import java.util.Locale
  * 兩處共用同一份邏輯才不會有一邊忘了重讀。畫面停留期間病患隨時可能撤回同意，
  * 只信進來時的快照等於閘門有洞。
  */
-private suspend fun readTrainConsent(repo: CaseRepository, caseId: Long?): Boolean {
-    val cid = caseId ?: return false
-    return withContext(Dispatchers.IO) {
-        runCatching { repo.getCase(cid)?.let { repo.canSubmitTraining(it.patientId) } ?: false }
-            .getOrDefault(false)
+private suspend fun readTrainConsent(repo: CaseRepository, record: MeasurementEntity): Boolean {
+    return ReviewTrainingConsent.allowed(record.source, record.caseId) { cid ->
+        withContext(Dispatchers.IO) {
+            runCatching { repo.getCase(cid)?.let { repo.canSubmitTraining(it.patientId) } ?: false }
+                .getOrDefault(false)
+        }
     }
 }
 
@@ -63,6 +64,8 @@ fun MeasurementReviewScreen(
     val scope = rememberCoroutineScope()
 
     var bmp by remember { mutableStateOf<Bitmap?>(null) }
+    var submitting by remember { mutableStateOf(false) }
+    val annotationGate = remember { AnnotationUploadGate() }
     var loading by remember { mutableStateOf(true) }
     var editing by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf<String?>(null) }
@@ -81,6 +84,7 @@ fun MeasurementReviewScreen(
     // 而畫面只會顯示「沒有 GT 輪廓，不能補送」。
     val polys = remember(cur.gtPolygon) { parsePolygons(cur.gtPolygon) }
     val poly = remember(polys) { PolygonJson.largest(polys) }
+    val provenance = remember(cur.annotationProvenance) { AnnotationProvenance.decode(cur.annotationProvenance) }
 
     /**
      * 影像尺寸與 `gtPolygon` 座標空間是否一致。
@@ -105,10 +109,17 @@ fun MeasurementReviewScreen(
 
     LaunchedEffect(cur.id) {
         loading = true
+        val latest = withContext(Dispatchers.IO) { dao.getById(record.id) }
+        if (latest == null) {
+            msg = "此筆紀錄已不存在，請返回時間軸。"
+            loading = false
+            return@LaunchedEffect
+        }
+        cur = latest
         val b = withContext(Dispatchers.IO) { runCatching { store.loadFull(cur.imagePath) }.getOrNull() }
         spaceMismatch = when {
             b == null -> null
-            cur.imageW == null || cur.imageH == null -> null   // 沒有宣告座標空間,不做比對
+            cur.imageW == null || cur.imageH == null -> "缺少原始輪廓座標尺寸"
             b.width != cur.imageW || b.height != cur.imageH ->
                 "影像 ${b.width}×${b.height} 與輪廓座標空間 ${cur.imageW}×${cur.imageH} 不一致"
             else -> null
@@ -120,7 +131,7 @@ fun MeasurementReviewScreen(
                     store.rawBytes(cur.rasterPath), cur.rasterMeta, b.width, b.height)
             }.getOrNull()
         }
-        trainOk = readTrainConsent(repo, cur.caseId)
+        trainOk = readTrainConsent(repo, cur)
         // 憑證來自「設定」頁（Keystore 加密存本機），不再硬編碼 admin/woundai-admin。
         val u = AppSettings.backendUser(ctx)
         val p = AppSettings.backendPassword(ctx)
@@ -133,7 +144,9 @@ fun MeasurementReviewScreen(
         loading = false
     }
 
-    BackHandler(enabled = editing) { editing = false }
+    BackHandler(enabled = editing || submitting) {
+        if (!submitting) editing = false
+    }
 
     val b = bmp
     if (editing && b != null) {
@@ -171,7 +184,20 @@ fun MeasurementReviewScreen(
             //      醫師花時間標的組織分區從來沒有進過訓練集
             // 三個後果都是安靜的。修邊當下看起來完全正常。
             onDone = { newPoly, allPolys, iou, newArea, tis, raster ->
+                val editorSnapshot = cur
                 scope.launch {
+                    if (raster != null && raster === resumeRaster) {
+                        // Editor proved exact content equality; do not rewrite assets, notes or receipt state.
+                        val verified = editorSnapshot.doctorVerified || me?.can("gt.verify") == true
+                        val updated = editorSnapshot.copy(doctorVerified = verified)
+                        runCatching { withContext(Dispatchers.IO) { check(dao.updateIfUnchanged(editorSnapshot, updated)) { "紀錄已在其他操作中更新，請返回時間軸重新開啟；本次未覆寫。" } } }
+                            .onSuccess { cur = updated; msg = if (verified)
+                                "遮罩與量測資料未變，已完成確認；保留原修訂與上傳狀態。"
+                                else "遮罩與量測資料未變；目前身分未產生醫師確認。" }
+                            .onFailure { msg = "⚠️ 確認未能保存，請返回時間軸重新核對。" }
+                        editing = false
+                        return@launch
+                    }
                     // ⚠ 多處傷口時要存**全部**輪廓。只存 newPoly 的話，
                     // 第二個傷口在下次載回與補送標註時都會消失。
                     // 格式與 MeasureViewModel.polyJson 一致：單一輪廓存成點陣列（相容舊紀錄），
@@ -179,7 +205,7 @@ fun MeasurementReviewScreen(
                     val js = polygonsToJson(allPolys.ifEmpty {
                         if (newPoly.size >= 3) listOf(newPoly) else emptyList()
                     })
-                    val oldArea = cur.estimatedArea
+                    val oldArea = editorSnapshot.estimatedArea
                     val finalArea = newArea ?: oldArea
                     // 面積變了,notes 裡的 PUSH 與組織%就不能原封不動留著——否則時間軸卡片會出現
                     // 「新面積 + 舊 PUSH + 舊組織%」並列的自相矛盾紀錄。
@@ -187,12 +213,15 @@ fun MeasurementReviewScreen(
                     // 重算不了就**明講它是修邊前的值**,不要假裝它還成立。
                     val subOld = WoundPipeline.areaSubscore(oldArea)
                     val subNew = WoundPipeline.areaSubscore(finalArea)
-                    // 柵格落地。存檔失敗不可讓整筆更新一起失敗——輪廓與面積仍該存下來，
-                    // 但也**不可**假裝成功：rasterName 為 null 時下面會沿用舊值，
-                    // 而畫面訊息會明說組織分區這次沒存到。
+                    // Save the complete revision together; never pair a new polygon with an old tissue raster.
                     val rasterPair = raster?.let { runCatching { EditRasterCodec.encode(it) }.getOrNull() }
                     val rasterName = rasterPair?.let {
                         runCatching { withContext(Dispatchers.IO) { store.save(it.first) } }.getOrNull()
+                    }
+                    if (rasterPair == null || rasterName == null) {
+                        msg = "修訂影像未能完整保存，原紀錄維持不變；請稍後重試。"
+                        editing = false
+                        return@launch
                     }
                     val stamp = SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date())
                     // ⚠ 組織比例要寫進修訂行。
@@ -212,15 +241,15 @@ fun MeasurementReviewScreen(
                         (iou?.let { "; 本次相對前版 IoU %.2f".format(it) } ?: "") +
                         "; " + tisTxt +
                         "。**以本行為準**——最上方那行是首次量測的數值"
-                    val updated = cur.copy(
+                    val updated = editorSnapshot.copy(
                         gtPolygon = js,
                         estimatedArea = finalArea,
                         // AI 空手、醫師從零畫出傷口的情形:hasWound 原本會停在 false
-                        hasWound = (finalArea ?: 0.0) > 0.0 || cur.hasWound,
+                        hasWound = (finalArea ?: 0.0) > 0.0 || editorSnapshot.hasWound,
                         // 走到這裡代表醫師按了「完成修邊」（取消不會呼叫 onDone）
                         // 從時間軸回頭修邊時同樣要看身分。原本硬寫 true，
                         // 註解寫「走到這裡代表醫師按了完成修邊」——那個假設在共用手機上不成立。
-                        // 另外這裡**刻意不做 `|| cur.doctorVerified`**：輪廓已經換了，
+                        // 另外這裡**刻意不做 `|| editorSnapshot.doctorVerified`**：輪廓已經換了，
                         // 舊的背書是針對舊輪廓的，不該自動延用到新輪廓上。
                         doctorVerified = me?.can("gt.verify") == true,
                         // ⚠ correctionIou **刻意不覆寫**。它的定義是「與 AI 原始遮罩的 IoU」,
@@ -228,27 +257,27 @@ fun MeasurementReviewScreen(
                         // 從本畫面進來時,修邊的起點是**已經修過的 GT** 而非 AI 原圖遮罩,
                         // 覆寫上去會讓這個指標系統性趨近 1.0,看起來像「模型幾乎不用修」——失真的自我評分。
                         // 本次相對前版的 IoU 改記在 notes,保留可追溯性但不污染指標。
-                        notes = listOfNotNull(cur.notes?.takeIf { it.isNotBlank() }, revision).joinToString("\n"),
+                        notes = listOfNotNull(editorSnapshot.notes?.takeIf { it.isNotBlank() }, revision).joinToString("\n"),
                         // 輪廓改了就不能再算「已送出」——要重新送才會讓雲端拿到新 GT
                         annotationSubmitted = false,
                         // v6：柵格與 meta 必須**成對**更新。只更新其中一個，
                         // 座標就會對到錯的影像，而載回來時看起來只是「遮罩位置怪怪的」。
-                        rasterPath = rasterName ?: cur.rasterPath,
-                        rasterMeta = if (rasterName != null) rasterPair?.second else cur.rasterMeta,
+                        rasterPath = rasterName ?: editorSnapshot.rasterPath,
+                        rasterMeta = if (rasterName != null) rasterPair?.second else editorSnapshot.rasterMeta,
                         // v5：組織比例。原始影像會依 90 天政策清除，沒有現在存下來就永遠補不回來。
-                        tissueGranulation = tis["granulation"] ?: cur.tissueGranulation,
-                        tissueSlough = tis["slough"] ?: cur.tissueSlough,
-                        tissueNecrosis = tis["necrosis"] ?: cur.tissueNecrosis,
-                        tissueEpithelial = tis["epithelial"] ?: cur.tissueEpithelial,
-                        tissueOther = tis["other"] ?: cur.tissueOther
+                        tissueGranulation = tis["granulation"] ?: editorSnapshot.tissueGranulation,
+                        tissueSlough = tis["slough"] ?: editorSnapshot.tissueSlough,
+                        tissueNecrosis = tis["necrosis"] ?: editorSnapshot.tissueNecrosis,
+                        tissueEpithelial = tis["epithelial"] ?: editorSnapshot.tissueEpithelial,
+                        tissueOther = tis["other"] ?: editorSnapshot.tissueOther
                     )
-                    runCatching { withContext(Dispatchers.IO) { dao.updateMeasurement(updated) } }
+                    runCatching { withContext(Dispatchers.IO) { check(dao.updateIfUnchanged(editorSnapshot, updated)) { "紀錄已在其他操作中更新，請返回時間軸重新開啟；本次未覆寫。" } } }
                         .onSuccess {
                             // 先寫 DB 再刪舊檔。反過來的話 update 失敗就留下指向不存在檔案的死路徑，
                             // 而那個路徑會讓下次進來 decode 失敗——又退回顏色啟發式。
-                            if (rasterName != null && !cur.rasterPath.isNullOrEmpty()
-                                && cur.rasterPath != rasterName) {
-                                runCatching { withContext(Dispatchers.IO) { store.delete(cur.rasterPath!!) } }
+                            if (rasterName != null && !editorSnapshot.rasterPath.isNullOrEmpty()
+                                && editorSnapshot.rasterPath != rasterName) {
+                                runCatching { withContext(Dispatchers.IO) { store.delete(editorSnapshot.rasterPath!!) } }
                             }
                             cur = updated
                             // 記憶體中的快照也要換掉。不換的話**不離開這頁**再按一次「重新修邊」，
@@ -261,7 +290,11 @@ fun MeasurementReviewScreen(
                                       "⚠️ 但組織分區**未能存檔**，下次進來會退回 AI 的猜測。\n" else "") +
                                   "輪廓已變更，此筆需**重新送出**才會讓雲端拿到新的 GT。"
                         }
-                        .onFailure { msg = "⚠️ 更新失敗：${it.message}" }
+                        .onFailure {
+                            // This newly created asset was never linked by the failed transaction.
+                            runCatching { withContext(Dispatchers.IO) { store.delete(rasterName) } }
+                            msg = "⚠️ 更新失敗：${it.message}"
+                        }
                     editing = false
                 }
             }
@@ -273,13 +306,13 @@ fun MeasurementReviewScreen(
         Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Text("紀錄檢視 / 補送標註", style = MaterialTheme.typography.titleLarge)
+        Text("紀錄檢視／重修補送標註", style = MaterialTheme.typography.titleLarge)
         Text("代碼 ${cur.wdCode ?: "—"}・面積 ${cur.estimatedArea?.let { "%.2f cm²".format(it) } ?: "未校正"}" +
              "・滲液 ${cur.exudate ?: "—"}",
             style = MaterialTheme.typography.bodyMedium)
         msg?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
 
-        if (loading) Text("載入影像中…", style = MaterialTheme.typography.bodySmall)
+        if (loading) Text("正在載入影像與驗證登入權限，請稍候…", style = MaterialTheme.typography.bodySmall)
 
         val noImage = !loading && bmp == null
         if (noImage) Text(
@@ -296,44 +329,58 @@ fun MeasurementReviewScreen(
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
 
-        Button(
-            onClick = { editing = true },
-            enabled = bmp != null && spaceMismatch == null,
-            modifier = Modifier.fillMaxWidth()
-        ) { Text("重新修邊（載回原影像與輪廓）") }
+        if (!loading && b != null) {
+            AnalysisPreview(
+                bitmap = b, polygon = if (spaceMismatch == null) poly else emptyList(),
+                polygons = if (spaceMismatch == null) polys else emptyList(),
+                markerQuad = null, mmPerPx = cur.mmPerPx, calibMethod = null,
+                editRaster = if (spaceMismatch == null) resumeRaster else null,
+                allowTissueEstimate = false, showCalibration = false
+            )
+        }
+        ReviewEditEntry(loading, submitting, bmp != null && spaceMismatch == null,
+            loggedIn && me?.can("gt.verify") == true) { editing = true }
 
         Divider()
         Text("補送訓練標註", style = MaterialTheme.typography.titleSmall)
+        if (ReviewTrainingConsent.isUnlinkedPhantom(cur.source, cur.caseId)) {
+            Text("此筆為模擬圖驗證資料，沒有病患個案；不計入臨床收案、不作模型訓練。仍需醫師確認與有效保存收據。",
+                style = MaterialTheme.typography.bodySmall)
+        }
         Text(
             when {
-                cur.annotationSubmitted -> "此筆已送出過訓練標註。重新修邊後可再送（雲端會視為醫師修訂版）。"
+                loading -> "正在驗證登入權限，暫停修邊與送件。"
+                cur.annotationSubmitted -> "此筆標註已確認保存，無需補送。修改後才需重新送出，相同內容由後端去重。"
                 cur.gtPolygon == null -> "⚠ 此筆沒有 GT 輪廓，不能補送（請先重新修邊）。"
                 cur.imageId == null -> "⚠ 此筆沒有後端影像綁定（當初可能走端上模式），不能補送。"
+                !loggedIn -> "⚠ 登入尚未通過，請回設定確認 WoundAI 登入；MMH 另需 Google 門禁驗證。修邊可存本機，但不會產生醫師確認。"
                 // 這一條要排在 !cur.doctorVerified 之前。對一個沒有 gt.verify 權限的人說
                 // 「請先按重新修邊」是**誤導**——他按了也不會變成已驗證。先講真正的原因。
                 loggedIn && me?.can("gt.verify") != true ->
                     "⚠ 目前的登入身分沒有 gt.verify 權限：可以重新修邊與存檔，但不會產生" +
                     "「醫師已驗證」，因此不得送訓練標註。GT 的背書須由醫師完成" +
                     "——這是後端強制的，換帳號才會改變。"
+                provenance == null -> "此舊紀錄缺少原始模型／影像品質溯源，暫停補送；需先核對原始保存收據，不能猜填資料。"
+                resumeRaster?.tissueEditCountKnown == false -> "此筆缺少原始組織分類基準，無法確認修改量，暫停補送。"
                 !cur.doctorVerified -> "⚠ 此筆未經醫師完成修邊確認，不得送訓練標註。\n" +
                     "請先按「重新修邊」並完成（按取消不算確認）。舊版紀錄一律視為未確認。"
-                !trainOk -> "⚠ 此病患未取得②訓練同意（或已撤回），不得送出。"
-                !loggedIn -> "⚠ 後端未連線或尚未設定帳密 — 請到主畫面「設定」填入後端位址與帳號密碼（目前：$baseUrl）。"
+                !trainOk -> ReviewTrainingConsent.blockedMessage(cur.source, cur.caseId)
                 else -> "可補送：後端靠 image_id 就找得到當初的影像，**不需要重新上傳或重測**。"
             },
             style = MaterialTheme.typography.bodySmall,
-            color = if (cur.gtPolygon != null && cur.imageId != null && trainOk && loggedIn)
+            color = if (cur.gtPolygon != null && cur.imageId != null && trainOk && loggedIn && cur.doctorVerified && me?.can("gt.verify") == true)
                 MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error
         )
-        Button(
+        AnnotationSubmitButton(
+            busy = submitting,
+            label = if (cur.annotationSubmitted) "標註已保存，無需補送" else "補送訓練標註 → 再訓練佇列",
             onClick = { confirmSubmit = true },
-            enabled = !cur.annotationSubmitted && cur.gtPolygon != null && cur.imageId != null &&
-                      cur.wdCode != null && cur.doctorVerified && trainOk && loggedIn,
-            modifier = Modifier.fillMaxWidth()
-        ) { Text("補送訓練標註 → 再訓練佇列") }
+            enabled = !loading && !submitting && provenance != null && resumeRaster?.tissueEditCountKnown != false && me?.can("gt.verify") == true && !cur.annotationSubmitted && cur.gtPolygon != null && cur.imageId != null &&
+                      cur.wdCode != null && cur.doctorVerified && trainOk && loggedIn
+        )
 
         Divider()
-        OutlinedButton(onBack, Modifier.fillMaxWidth()) { Text("返回時間軸") }
+        OutlinedButton(onBack, Modifier.fillMaxWidth(), enabled = !submitting) { Text("返回時間軸") }
     }
 
     // ---- 送出前的人工確認 ----
@@ -384,49 +431,73 @@ fun MeasurementReviewScreen(
         },
         confirmButton = {
             TextButton({
+                if (!annotationGate.acquire()) return@TextButton
                 confirmSubmit = false
+                submitting = true
                 scope.launch {
+                  try {
                     // ⚠ 同意真值必須在**按下的當下重讀**,不可用進畫面時的快照,更不可硬編碼 true。
                     // 硬編碼 true 等於每筆送出都謊稱已取得訓練同意——這正是 BackendClient 註解裡
                     // 記載過的法規級缺陷,不能在新畫面重蹈。閘門要放在每一個會產生資料的動作上。
-                    val okNow = readTrainConsent(repo, cur.caseId)
+                    if (provenance == null || resumeRaster?.tissueEditCountKnown == false) {
+                        msg = "缺少原始標註溯源或組織基準，未送出；請保留紀錄供核對。"
+                        return@launch
+                    }
+                    val submittedSnapshot = cur
+                    val submittedPoly = poly.toList()
+                    val submittedPolys = polys.map { it.toList() }
+                    val submittedRaster = resumeRaster
+                    val submittedProvenance = provenance
+                    val latest = withContext(Dispatchers.IO) { dao.getById(submittedSnapshot.id) }
+                    if (latest == null) {
+                        msg = "此筆紀錄已不存在，未送出。"; return@launch
+                    }
+                    if (latest.copy(annotationSubmitted = submittedSnapshot.annotationSubmitted) != submittedSnapshot) {
+                        msg = "紀錄已更新，請返回時間軸重新開啟，確認最新修訂後再送出。"; return@launch
+                    }
+                    if (latest.annotationSubmitted) {
+                        cur = latest
+                        msg = "此修訂已確認保存，無需補送。"; return@launch
+                    }
+                    val okNow = readTrainConsent(repo, submittedSnapshot)
                     trainOk = okNow
                     if (!okNow) {
-                        msg = "⚠️ 此病患目前無有效的②訓練同意（可能剛撤回），已停止送出"
+                        msg = ReviewTrainingConsent.blockedMessage(cur.source, cur.caseId)
                         return@launch
                     }
                     val res = runCatching {
                         withContext(Dispatchers.IO) {
                             backend.submitAnnotation(
-                                code = cur.wdCode!!, gtPolygon = poly, exudate = cur.exudate,
-                                imageId = cur.imageId, imageW = cur.imageW ?: 0, imageH = cur.imageH ?: 0,
+                                code = submittedSnapshot.wdCode!!, gtPolygon = submittedPoly, exudate = submittedSnapshot.exudate,
+                                imageId = submittedSnapshot.imageId, imageW = submittedSnapshot.imageW ?: 0, imageH = submittedSnapshot.imageH ?: 0,
                                 // 多處傷口：只送 poly 的話其餘傷口在訓練集裡是背景。
-                                allPolygons = polys,
+                                allPolygons = submittedPolys,
                                 // 面積以本機紀錄為真值（來自遮罩像素數），不讓後端由多邊形反算。
-                                areaCm2 = cur.estimatedArea,
-                                mmPerPx = cur.mmPerPx, route = cur.route, segModel = null,
-                                correctionIou = cur.correctionIou, careNote = "resubmit from timeline",
-                                source = cur.source ?: "clinical", consentTrain = okNow,
+                                areaCm2 = submittedSnapshot.estimatedArea,
+                                mmPerPx = submittedSnapshot.mmPerPx, route = submittedSnapshot.route, segModel = submittedProvenance?.segModel,
+                                quality = submittedProvenance?.quality,
+                                correctionIou = submittedSnapshot.correctionIou, careNote = submittedProvenance?.careNote,
+                                source = submittedSnapshot.source ?: "clinical", consentTrain = okNow,
                                 // 組織比例與分割 GT。這裡曾經**完全沒送**——醫師從時間軸修好的
                                 // 組織分區永遠進不了訓練集，而畫面照樣顯示「✅ 已補送」。
                                 // 失敗方向是安全的（沒送假 GT），但等於白做。
                                 tissueFrac = mapOf(
-                                    "granulation" to (cur.tissueGranulation ?: 0.0),
-                                    "slough" to (cur.tissueSlough ?: 0.0),
-                                    "necrosis" to (cur.tissueNecrosis ?: 0.0),
-                                    "epithelial" to (cur.tissueEpithelial ?: 0.0),
-                                    "other" to (cur.tissueOther ?: 0.0)
+                                    "granulation" to (submittedSnapshot.tissueGranulation ?: 0.0),
+                                    "slough" to (submittedSnapshot.tissueSlough ?: 0.0),
+                                    "necrosis" to (submittedSnapshot.tissueNecrosis ?: 0.0),
+                                    "epithelial" to (submittedSnapshot.tissueEpithelial ?: 0.0),
+                                    "other" to (submittedSnapshot.tissueOther ?: 0.0)
                                 ).takeIf { m -> m.values.any { it > 0.0 } },
                                 // 沒有柵格就整組不送。硬用輪廓補一張遮罩出來只會製造假 GT，
                                 // 而 tissue_edited 由 BackendClient 從柵格自己算——
                                 // 未經醫師修正的啟發式輸出後端會擋在訓練集外。
-                                tissueMaskPng = resumeRaster?.let {
+                                tissueMaskPng = submittedRaster?.let {
                                     TissueMaskCodec.encode(it.tissue, it.mask, it.mw, it.mh)
                                 },
-                                tissueRaster = resumeRaster,
+                                tissueRaster = submittedRaster,
                                 // 真值來自本機紀錄。v3 以前的舊紀錄一律 false（當時系統沒記錄
                                 // 醫師是否確認過，填 true 等於憑空捏造一個驗證事實）。
-                                doctorVerified = cur.doctorVerified
+                                doctorVerified = submittedSnapshot.doctorVerified
                             )
                         }
                     }
@@ -435,15 +506,16 @@ fun MeasurementReviewScreen(
                             // 本機標記失敗時**不可**假裝成功:畫面顯示「已送出」而 DB 沒記,
                             // 重開這頁又變成可補送,醫師會以為系統壞了(雲端會去重,但人不知道)。
                             val marked = runCatching {
-                                withContext(Dispatchers.IO) { dao.markAnnotationSubmitted(cur.id) }
-                            }.isSuccess
-                            if (marked) cur = cur.copy(annotationSubmitted = true)
+                                withContext(Dispatchers.IO) { dao.acknowledgeAnnotationIfUnchanged(submittedSnapshot) }
+                            }.getOrDefault(false)
+                            if (marked) cur = submittedSnapshot.copy(annotationSubmitted = true)
                             val base = if (m.contains("duplicate")) "ℹ️ 相同影像的相同遮罩已在佇列（去重），未重複新增"
                                        else "✅ 已補送訓練標註（${cur.wdCode}）\n本筆已進入雲端再訓練佇列。"
                             msg = if (marked) base
-                                  else "$base\n⚠️ 但本機狀態未更新成功，此筆仍會顯示為「可補送」"
+                                  else "$base\n⚠️ 本機紀錄可能已變更或無法更新狀態；未標記其他修訂，請返回時間軸重新核對。"
                         } else msg = "⚠️ 被守門擋下：$m"
                     }.onFailure { msg = "⚠️ 送出失敗：${it.message}" }
+                  } finally { annotationGate.release(); submitting = false }
                 }
             }) { Text("確認送出") }
         },

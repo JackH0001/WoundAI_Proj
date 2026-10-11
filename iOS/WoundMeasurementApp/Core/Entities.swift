@@ -95,7 +95,7 @@ struct Consent: Identifiable, Equatable {
 
 // MARK: - Measurement
 
-struct Measurement: Identifiable, Equatable {
+struct Measurement: Identifiable, Equatable, Codable {
     var id: Int64 = 0
     var patientId: String?
     var timestamp: Date = Date()

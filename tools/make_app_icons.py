@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
-"""Export user-approved artwork (2026-10-01) to iOS catalogs, without redrawing it.
-
-SSOT: iOS/IconSources/{medical,lite}.png. Uses macOS sips only for PNG
-format/size conversion; keep composition and the approved pale mint background.
-The generated imagegen previews were approved in the WoundAI release conversation.
+"""Export current IconSources to opaque iOS catalogs with sips.
+Artwork and user-requested margin removal are tracked in provenance.json.
 """
 import json
 from pathlib import Path

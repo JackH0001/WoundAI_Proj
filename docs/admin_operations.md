@@ -18,6 +18,10 @@
 | `ios-medical-testflight` | `https://woundai-backend-demo-z4kgfkob4a-de.a.run.app` |
 | `ios-lite` | `https://woundai-backend-421209514056.asia-east1.run.app` |
 | `android-release` | `https://woundai-backend-421209514056.asia-east1.run.app` |
+| `android-mmh-validation` | `https://candidate---woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app` |
+| `android-mmh-internal` | `https://candidate---woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app` |
+
+`android-mmh-validation` 是獨立 Debug 簽章的合成驗收套件，固定 MMH 私有入口、Google/IAP 與 WoundAI 雙層登入，尚非發布版；一般 Android 設定不變。
 
 此表由 `test_backend_url_parity.py` 逐設定核對。醫療版的 demo 分流不代表 Lite／Android 已完成雲端發布驗收。Debug 模擬器仍使用本機服務。
 

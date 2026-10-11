@@ -424,6 +424,7 @@ extension View {
  東西就永遠沒有人看得到，那和不存沒有兩樣。
  */
 struct TimelineView: View {
+    @ObservedObject private var uploads = ClinicalUploadOutbox.shared
     @EnvironmentObject var app: AppState
     @State private var rows: [Measurement] = []
     @State private var caseTitle: String?
@@ -488,8 +489,11 @@ struct TimelineView: View {
                     // 條件與 Android 同：要有影像座標宣告才可修邊；其餘情況進去也會被
                     // ReviewView 逐項說明擋在哪。
                     Button {
-                        app.reviewRecord = m
-                        app.screen = .review
+                        Task {
+                            guard let current = await app.repo.measurement(id: m.id) else { await load(); return }
+                            app.reviewRecord = current
+                            app.screen = .review
+                        }
                     } label: {
                     HStack(alignment: .top, spacing: 10) {
                         VStack(alignment: .leading, spacing: 2) {
@@ -513,8 +517,13 @@ struct TimelineView: View {
                                 Text(n).font(.caption2).foregroundStyle(.secondary).lineLimit(3)
                             }
                             // 標註狀態徽章：complete 的紀錄才有資格補送（見 pendingAnnotationCount）。
-                            if m.annotationSubmitted {
-                                Text("已送訓練").font(.caption2).foregroundStyle(.blue)
+                            if let job = uploads.latest(recordID: m.id) {
+                                Text(job.status).font(.caption).foregroundStyle(job.completed ? Color.blue : Color.orange)
+                            }
+                            if uploads.latest(recordID: m.id) != nil {
+                                // The durable queue above distinguishes annotation from complete depth.
+                            } else if m.annotationSubmitted {
+                                Text("已送標註（未代表完整深度）").font(.caption2).foregroundStyle(.blue)
                             } else if m.gtPolygon != nil && m.imageId != nil {
                                 Text("可補送標註").font(.caption2).foregroundStyle(.orange)
                             }
@@ -527,7 +536,9 @@ struct TimelineView: View {
                     // 長按單筆：只有**沒送出過標註**的可刪（送過的已進雲端 append-only 佇列，
                     // 本機刪了兩邊對不上帳——那種用主控台「誤送排除」）。
                     .contextMenu {
-                        if m.annotationSubmitted {
+                        if uploads.latest(recordID: m.id) != nil {
+                            Text("此筆有研究送件紀錄，請先由管理端確認或排除，避免刪除待傳來源。")
+                        } else if m.annotationSubmitted {
                             Text("此筆已送出訓練標註，不可刪除；誤送請用主控台「誤送排除」。")
                         } else {
                             Button("刪除這筆量測（含加密影像與深度）", role: .destructive) {
@@ -571,6 +582,9 @@ struct TimelineView: View {
 // MARK: - 設定
 
 struct BackendSettingsView: View {
+    #if WOUND_INSTITUTION
+    @ObservedObject private var institutionEntry = InstitutionGoogleSession.shared
+    #endif
     @EnvironmentObject var app: AppState
     @State private var url = AppSettings.backendURL()
     @State private var user = AppSettings.backendUser()
@@ -586,7 +600,25 @@ struct BackendSettingsView: View {
     @FocusState private var focusedField: Field?
     @Environment(\.openURL) private var openURL
 
-    private var busy: Bool { progress != nil || opening }
+    private var busy: Bool {
+        #if WOUND_INSTITUTION
+        return progress != nil || opening || institutionEntry.busy
+        #else
+        return progress != nil || opening
+        #endif
+    }
+    private var entryReady: Bool {
+        #if WOUND_INSTITUTION
+        return institutionEntry.ready
+        #else
+        return true
+        #endif
+    }
+
+    private var loginDisplay: BackendLoginPresentation {
+        BackendLoginPresentation(entryReady: entryReady, verified: me != nil,
+                                 busy: progress != nil, saved: hasSavedCredentials)
+    }
 
     private var versionLabel: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知"
@@ -601,12 +633,24 @@ struct BackendSettingsView: View {
                     LabeledContent("版本（建置號）", value: versionLabel)
                         .textSelection(.enabled)
                 }
+                #if WOUND_INSTITUTION
+                InstitutionGoogleEntrySection(connectionBusy: progress != nil || opening) {
+                    connectionTask?.cancel()
+                    user = ""; pass = ""; me = nil; client = nil
+                    hasSavedCredentials = false; status = nil
+                }
+                #endif
                 Section("後端連線") {
+                    Text(loginDisplay.status).accessibilityIdentifier("WoundAILoginState")
+                    #if WOUND_INSTITUTION
+                    LabeledContent("位址", value: url.hasSuffix(".invalid") ? "機構入口準備中" : url)
+                    #else
                     TextField("位址", text: $url)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                         .keyboardType(.URL).submitLabel(.next).focused($focusedField, equals: .url)
                         .onSubmit { focusedField = .user }
                         .disabled(busy)
+                    #endif
                     TextField("帳號", text: $user)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                         .textContentType(.username).submitLabel(.next).focused($focusedField, equals: .user)
@@ -619,10 +663,10 @@ struct BackendSettingsView: View {
                     Button(action: startConnection) {
                         HStack {
                             if progress != nil { ProgressView() }
-                            Text(progress == nil ? "儲存並測試連線" : "正在測試連線…")
+                            Text(loginDisplay.button)
                         }
                     }
-                    .disabled(busy)
+                    .disabled(busy || !entryReady)
                     if let progress {
                         Text(progress).font(.footnote).accessibilityAddTraits(.updatesFrequently)
                         Text("首次連線或雲端服務重新啟動時可能需要較久，請稍候。")
@@ -630,7 +674,7 @@ struct BackendSettingsView: View {
                         Button("取消連線檢查", role: .cancel) { connectionTask?.cancel() }
                     }
                 }
-                if let u = me {
+                if entryReady, let u = me {
                     Section("目前身分・主控台") {
                         Text(u.label()).font(.subheadline)
                         // 一次性碼只放 fragment，不記錄帳密或 token。
@@ -653,14 +697,19 @@ struct BackendSettingsView: View {
                         }
                     }
                 }
-                if hasSavedCredentials || me != nil {
+                if loginDisplay.showLogout {
                     Section {
-                        Button("登出雲端帳號", role: .destructive) { Task { await signOut() } }
+                        Button("登出 WoundAI 帳號", role: .destructive) { Task { await signOut() } }
                             .disabled(busy)
                     } footer: {
-                        Text("清除此 App 儲存的帳號與密碼，保留本機紀錄及後端網址。瀏覽器主控台需另行登出。")
+                        Text("清除此 App 儲存的帳密，保留本機紀錄及後端網址；機構版也會登出 Google 門禁。瀏覽器主控台需另行登出。")
                     }
                 }
+                if hasSavedCredentials && me == nil {
+                    Button("清除已儲存帳密", role: .destructive) { Task { await signOut() } }
+                        .disabled(busy)
+                }
+                InstitutionExportSettingsSection()
                 if let s = status {
                     Section("狀態") { Text(s).font(.footnote).accessibilityAddTraits(.updatesFrequently) }
                 }
@@ -681,13 +730,28 @@ struct BackendSettingsView: View {
                     Button("完成") { focusedField = nil }
                 }
             }
+            .task {
+                hasSavedCredentials = !AppSettings.backendUser().isEmpty && !AppSettings.backendPassword().isEmpty
+                if hasSavedCredentials && entryReady { startConnection() }
+            }
+            .onChange(of: user) { _, _ in invalidateApplicationVerification() }
+            .onChange(of: pass) { _, _ in if progress == nil { invalidateApplicationVerification() } }
+            .onChange(of: url) { _, _ in invalidateApplicationVerification() }
+            .onChange(of: entryReady) { _, ready in
+                if !ready { connectionTask?.cancel(); invalidateApplicationVerification() }
+            }
             .onDisappear { connectionTask?.cancel() }
         }
     }
 
     @MainActor
+    private func invalidateApplicationVerification() {
+        me = nil; client = nil; app.identity = nil
+    }
+
+    @MainActor
     private func startConnection() {
-        guard !busy else { return }
+        guard !busy, entryReady else { return }
         focusedField = nil
         status = nil
         me = nil
@@ -712,36 +776,36 @@ struct BackendSettingsView: View {
         hasSavedCredentials = false
         status = "已登出此 App 的雲端帳號。本機紀錄已保留。"
         await previousClient?.logout()
+        #if WOUND_INSTITUTION
+        await institutionEntry.signOut()
+        #endif
     }
 
     @MainActor
     private func save() async {
         defer { progress = nil; connectionTask = nil }
-        AppSettings.setBackendURL(url)
-        // 帳號變更時不能默默沿用另一個帳號的密碼。
-        if pass.isEmpty && user != AppSettings.backendUser() {
-            status = "更換帳號時請重新輸入密碼。"
+        // Never send an existing password to a different account or server.
+        if pass.isEmpty && !BackendLoginPresentation.mayReusePassword(inputUser: user,
+            savedUser: AppSettings.backendUser(), inputURL: url, savedURL: AppSettings.backendURL()) {
+            status = "更換帳號或位址時請重新輸入密碼。"
             return
         }
         if !pass.isEmpty, !AppSettings.setCredentials(user: user, password: pass) {
             status = "密碼加密失敗，未儲存。"
             return
         }
-        hasSavedCredentials = !AppSettings.backendUser().isEmpty
+        AppSettings.setBackendURL(url)
+        hasSavedCredentials = !AppSettings.backendUser().isEmpty && !AppSettings.backendPassword().isEmpty
+        guard hasSavedCredentials else { status = "請輸入帳號與密碼。"; return }
         let c = BackendClient(baseUrl: AppSettings.backendURL())
         do {
             try Task.checkCancellation()
-            let h = try await c.health()
-            try Task.checkCancellation()
-            var lines = ["伺服器：\(h.status)"]
-            if h.degraded, let r = h.degradedReason {
-                lines.append("⚠ 服務降級：\(r)")
-            }
-            progress = "已連上雲端，正在驗證帳號…"
+            var lines: [String] = []
+            progress = "正在驗證 WoundAI 帳號…"
             let ok = try await c.login(username: AppSettings.backendUser(),
                                        password: AppSettings.backendPassword())
             try Task.checkCancellation()
-            lines.append(ok ? "登入成功" : "登入未成功，請檢查帳號、密碼與帳號是否啟用。")
+            lines.append(ok ? "登入成功" : (await c.lastLoginFailure ?? "登入未成功，請檢查帳號與機構入口。"))
             let identity = ok ? await c.currentIdentity() : nil
             try Task.checkCancellation()
             me = identity
@@ -752,6 +816,10 @@ struct BackendSettingsView: View {
                 AppSettings.markBackendOk()
                 progress = "登入成功，正在讀取同步狀態…"
                 status = lines.joined(separator: "\n")
+                let h = try await c.health()
+                try Task.checkCancellation()
+                lines.append("伺服器：\(h.status)")
+                if h.degraded { lines.append("⚠ 雲端服務降級，請通知管理員。") }
                 let (_, text, _) = await c.flywheelStats(source: nil)
                 try Task.checkCancellation()
                 lines.append(text)
@@ -765,7 +833,8 @@ struct BackendSettingsView: View {
             if Task.isCancelled {
                 status = "已取消連線檢查。已儲存的設定仍保留。"
             } else {
-                status = "連線失敗：\(error.localizedDescription)\n請確認網路與後端網址後重試。"
+                status = me == nil ? "連線失敗：\(error.localizedDescription)\n請確認網路與後端網址後重試。"
+                    : "WoundAI 已登入；雲端健康度或同步狀態未能讀取，請稍後重新驗證連線。"
             }
         }
     }

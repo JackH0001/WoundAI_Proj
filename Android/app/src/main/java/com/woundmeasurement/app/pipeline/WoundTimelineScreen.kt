@@ -238,7 +238,7 @@ private fun TimelineRow(
                                     else MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
-                m.notes?.let { Text(it, fontSize = 12.sp) }
+                m.notes?.let { ReviewNotes(it) }
                 Row {
                     Text(m.woundType ?: "", fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)

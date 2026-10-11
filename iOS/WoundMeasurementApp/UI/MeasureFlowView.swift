@@ -1,4 +1,5 @@
 import SwiftUI
+import CryptoKit
 import PhotosUI
 import UIKit   // UIGraphicsImageRenderer（normalizeForBackend 的縮圖與方向烘焙）
 import UniformTypeIdentifiers   // fileImporter 的 UTType.image
@@ -46,20 +47,33 @@ final class MeasureViewModel: ObservableObject {
     @Published var identity: LoginIdentity?
     var canVerifyEdits: Bool { identity?.canVerifyClinicalEdits == true }
 
+    private let backendFactory: () -> BackendClient
+    private let credentials: () -> (String, String)
+    init(backendFactory: @escaping () -> BackendClient = { BackendClient(baseUrl: AppSettings.backendURL()) },
+         credentials: @escaping () -> (String, String) = { (AppSettings.backendUser(), AppSettings.backendPassword()) }) {
+        self.backendFactory = backendFactory; self.credentials = credentials
+    }
+    @Published private(set) var analysisDurations: [String: Double] = [:]
+    @Published private(set) var loadingStartedAt: Date?
     private var backend: BackendClient?
     private var boundCareCode: String?
 
     func ensureLogin() async -> Bool {
         identity = nil
         backend = nil
-        let user = AppSettings.backendUser(), pass = AppSettings.backendPassword()
+        let (user, pass) = credentials()
         guard !user.isEmpty, !pass.isEmpty else {
             error = "尚未設定後端帳號密碼，請先到「設定」填寫。"
             return false
         }
-        let c = BackendClient(baseUrl: AppSettings.backendURL())
-        guard (try? await c.login(username: user, password: pass)) == true else {
-            error = "後端登入失敗，請檢查位址與帳號密碼。"
+        let c = backendFactory()
+        do {
+            guard try await c.login(username: user, password: pass) else {
+                error = await c.lastLoginFailure ?? "WoundAI 登入未通過；本次影像尚未上傳。"
+                return false
+            }
+        } catch {
+            self.error = "登入階段未完成：\(error.localizedDescription)（本次影像尚未上傳）"
             return false
         }
         backend = c
@@ -143,17 +157,31 @@ final class MeasureViewModel: ObservableObject {
 
     func analyze(_ img: UIImage, phantom: Bool, depth: DepthCapture? = nil,
                  repo: CaseRepository? = nil, woundCase: WoundCase? = nil) async {
-        boundCareCode = nil
+        guard !loading && !saving else { return }
+        // A failed new capture must never leave the previous result paired with a new operation.
+        boundCareCode = nil; result = nil; image = nil; pendingDepth = nil
+        depthGen += 1; depthEstimate = nil; depthBusy = false
+        raster = nil; doctorVerified = false; editedPolygons = nil; correctionIou = nil
+        lastSavedId = nil; saveNote = nil; submitStatus = nil
+        analysisDurations = [:]; loadingStartedAt = Date()
+        var checkpoint = ProcessInfo.processInfo.systemUptime
+        func mark(_ phase: String) {
+            let now = ProcessInfo.processInfo.systemUptime
+            analysisDurations[phase] = now - checkpoint; checkpoint = now
+        }
         // ⚠ 轉圈圈必須在 **ensureLogin 之前**開始：冷啟動吃在登入那一次呼叫上，
         //   之前 loading 是 classify 才開——喚醒的 10–30 秒畫面看起來像當機。
         loading = true; error = nil; statusNote = nil
-        loadingHint = AppSettings.backendLikelyCold()
-            ? "喚醒雲端中…（閒置會自動縮容，首次約需 10–30 秒，照片已就緒請稍候）"
-            : "分析中…（約數秒）"
+        #if WOUND_INSTITUTION
+        loadingHint = "正在等候機構服務並驗證登入…（若前筆仍上傳，本次會依序等候）"
+        #else
+        loadingHint = "正在驗證登入並等候雲端服務…（閒置後首次連線可能較慢）"
+        #endif
         defer { loading = false }
-        guard await ensureLogin(), let backend else { return }
+        guard await ensureLogin(), let backend else { mark("登入驗證"); return }
+        mark("登入驗證")
         AppSettings.markBackendOk()
-        loadingHint = "分析中…（上傳與辨識約數秒）"
+        loadingHint = "正在準備本次影像…"
         // 12MP 重畫＋JPEG 編碼是秒級 CPU 工作——放背景緒，轉圈圈才轉得動
         // （之前在 MainActor 同步做，spinner 畫不出來，看起來像當機）。
         // ⚠ 一律送原始像素、不自行套白平衡。先套的話，後端會在已校正的圖上再做一次
@@ -162,6 +190,7 @@ final class MeasureViewModel: ObservableObject {
             let w = Self.normalizeForBackend(img)
             return (w, w.jpegData(compressionQuality: 0.92))
         }.value
+        mark("影像準備")
         let work = prep.work
         guard let jpeg = prep.jpeg else {
             error = "影像編碼失敗"; return
@@ -174,9 +203,13 @@ final class MeasureViewModel: ObservableObject {
             } else if source == "sample" || source == "phantom" {
                 careCode = WoundCase.newWdCode()
             }
+            loadingHint = "正在確認影像保存授權…"
             var receipt: String?
             if let careCode { receipt = try? await backend.attestCare(code: careCode) }
+            mark("保存授權")
+            loadingHint = "正在傳送、辨識並保存影像…（網路與伺服器處理時間可能超過 10 秒）"
             var r = try await backend.classify(jpeg: jpeg, seg: phantom ? "color" : nil, careReceipt: receipt)
+            mark("傳送／辨識／保存")
             guard r.imageW == Int(work.size.width * work.scale), r.imageH == Int(work.size.height * work.scale) else {
                 error = "後端影像座標空間不一致"; return
             }
@@ -345,7 +378,7 @@ final class MeasureViewModel: ObservableObject {
      */
     @discardableResult
     func saveToTimeline(repo: CaseRepository, imageStore: LocalImageStore,
-                        woundCase: WoundCase?) async -> Bool {
+                        woundCase: WoundCase?, requireDepth: Bool = false) async -> Bool {
         guard !saving else { return false }
         saving = true
         defer { saving = false }
@@ -386,8 +419,18 @@ final class MeasureViewModel: ObservableObject {
             if DepthStore.attach(imagePath: newImagePath, capture: d, store: imageStore) {
                 depthNote = "（含 LiDAR 深度）"
             } else {
+                if requireDepth {
+                    imageStore.delete(newImagePath)
+                    saveNote = "原始深度未能保存在手機，未開始上傳；請重試存檔。"
+                    return false
+                }
                 depthNote = "（⚠ 深度存檔失敗，本筆無深度）"
             }
+        }
+
+        if requireDepth && pendingDepth != nil && newImagePath.isEmpty {
+            saveNote = "影像未能保存在手機，未開始上傳。"
+            return false
         }
 
         // (3) 修邊過就以柵格為準。
@@ -446,13 +489,39 @@ final class MeasureViewModel: ObservableObject {
             m.id = id
             // 保留**原始**量測時間。補個滲液就把時間往後推的話，時間軸上的間隔會失真。
             m.timestamp = old.timestamp
-            m.annotationSubmitted = old.annotationSubmitted
+            // Start unconfirmed; preserve the receipt below only after comparing annotation content.
+            m.annotationSubmitted = false
             // 醫師背書只增不減：這一輪沒重新修邊，不代表上一輪的修邊不算數。
             m.doctorVerified = doctorVerified || old.doctorVerified
             if rasterPath == nil {
                 m.rasterPath = old.rasterPath
                 m.rasterMeta = old.rasterMeta
                 m.correctionIou = old.correctionIou
+            }
+            let sameAnnotation = ClinicalAnnotationRevision.matches(m, old,
+                rasterA: m.rasterPath.flatMap { imageStore.rawBytes($0) },
+                rasterB: old.rasterPath.flatMap { imageStore.rawBytes($0) })
+            if sameAnnotation { m.annotationSubmitted = old.annotationSubmitted }
+            let sameDepth: Bool
+            if let a = DepthStore.load(imagePath: m.imagePath, store: imageStore),
+               let b = DepthStore.load(imagePath: old.imagePath, store: imageStore) {
+                sameDepth = ClinicalAnnotationRevision.sameDepth(a, b)
+            } else {
+                sameDepth = DepthStore.lookup(imagePath: m.imagePath) == nil
+                    && DepthStore.lookup(imagePath: old.imagePath) == nil
+            }
+            // Reuse the verified capture and its depth receipt on an unchanged save.
+            // Otherwise a new sidecar timestamp would falsely look like a new depth revision.
+            if sameAnnotation && sameDepth && !old.imagePath.isEmpty,
+               let newBytes = imageStore.rawBytes(m.imagePath),
+               let oldBytes = imageStore.rawBytes(old.imagePath), newBytes == oldBytes {
+                if m.imagePath != old.imagePath {
+                    imageStore.delete(m.imagePath)
+                    DepthStore.purge(imagePath: m.imagePath, store: imageStore)
+                }
+                m.imagePath = old.imagePath
+                if let rp = m.rasterPath, rp != old.rasterPath { imageStore.delete(rp) }
+                m.rasterPath = old.rasterPath; m.rasterMeta = old.rasterMeta
             }
             // (2) 先寫資料庫，再刪舊檔。舊影像的深度 sidecar 一併清，否則變孤兒密文。
             await repo.updateMeasurement(m)
@@ -485,18 +554,18 @@ final class MeasureViewModel: ObservableObject {
 
     private func exportInstitutionCopy(id: Int64, image: UIImage, raster: EditRaster?,
                                        polygons: [[[Int]]], marker: [[Int]]?, verified: Bool, exudate: Int?) async {
-        guard InstitutionExport.enabled else { return }
+        guard InstitutionPrivateExports.automaticEnabled else { return }
         guard let raster else {
             saveNote = (saveNote ?? "") + " 尚未完成修邊，未匯出機構遮罩副本。"
             return
         }
-        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("MMHPS20261007/Exports", isDirectory: true)
         let note = await Task.detached(priority: .utility) { () -> String in
             do {
-                _ = try InstitutionExport.write(image: image, raster: raster, polygons: polygons,
-                    marker: marker, measurementID: id, doctorVerified: verified, exudate: exudate, directory: directory)
-                return " 已輸出至「檔案」／WoundAI MMHPS／MMHPS20261007／Exports。此為本機副本，未表示雲端已收到。"
+                let files = try InstitutionExport.contents(image: image, raster: raster, polygons: polygons,
+                    marker: marker, measurementID: id, doctorVerified: verified, exudate: exudate)
+                let digest = SHA256.hash(data: files["sha256.json"]!).map { String(format: "%02x", $0) }.joined()
+                _ = try InstitutionPrivateExports.save(files: files, name: "measurement-\(id)-\(digest)")
+                return " 行政副本已加密保存於 App 私密空間，可從設定手動匯出；此副本不表示雲端已收到。"
             } catch {
                 return " 機構圖像匯出失敗（座標、遮罩或檔案檢查未通過），時間軸紀錄已保留。"
             }
@@ -523,10 +592,19 @@ final class MeasureViewModel: ObservableObject {
      ⚠ 臨床樣本的②訓練同意在**按下的當下重讀**，不用畫面快照——醫師可能剛在個案頁撤回，
      快照仍是舊的 true，那就等於回到「宣稱已同意但其實沒有」的原始缺陷。
 
-     成功後**刻意不**更新本機 `annotationSubmitted`（與 Android 量測流程一致）：
-     那個旗標由時間軸複核頁的補送流程維護，後端本來就會對同影像同遮罩去重。
+     先保存送件快照，再確認標註與原始深度；失敗保留時間軸供補傳。
      */
-    func submitTraining(repo: CaseRepository, woundCase: WoundCase?, clinicalMode: Bool) async {
+    func submitTraining(repo: CaseRepository, imageStore: LocalImageStore,
+                        woundCase: WoundCase?, clinicalMode: Bool) async {
+        guard !loading && !saving else { return }
+        if let id = lastSavedId, ClinicalUploadOutbox.shared.jobs.contains(where: { $0.measurement.id == id && !$0.completed }) {
+            submitStatus = "ℹ️ 此筆研究資料已在待傳佇列，請先等候確認；不需重複修邊或送出。"
+            return
+        }
+        loading = true
+        loadingStartedAt = Date()
+        loadingHint = "確認登入、同意與本機保存…"
+        defer { loading = false }
         guard let r = result else { submitStatus = "⚠️ 尚未完成量測"; return }
         let polys = effectivePolygons
         guard let _ = polys.first(where: { $0.count >= 3 }) else {
@@ -550,7 +628,7 @@ final class MeasureViewModel: ObservableObject {
                 submitStatus = "⚠️ 此病患的訓練同意已撤回或失效，不得送出訓練標註"; return
             }
         }
-        guard await ensureLogin(), let backend else {
+        guard await ensureLogin(), backend != nil else {
             submitStatus = "⚠️ " + (error ?? "後端未連線"); return
         }
         guard identity?.canSubmitClinicalTraining == true else {
@@ -565,9 +643,12 @@ final class MeasureViewModel: ObservableObject {
         // 隨②同意把關的標註一起上傳——契約 docs/depth_capture_contract.md。
         // 深度 PNG／組織遮罩的編碼＋base64 是 MB 級工作，移出主執行緒；
         // 上傳期間掛進度圈——沒有回饋的 10–20 秒會被當成當機（2026-08-10 實測回報）。
-        loading = true
-        loadingHint = "上傳標註與深度研究資料中…（約 10–20 秒，請勿離開此頁）"
-        defer { loading = false }
+        guard await saveToTimeline(repo: repo, imageStore: imageStore, woundCase: woundCase, requireDepth: true),
+              let savedID = lastSavedId, let saved = await repo.measurement(id: savedID),
+              saved.imageId == imageId else {
+            submitStatus = "⚠️ 本機送件快照尚未保存，未開始上傳。請先重試存入時間軸。"
+            return
+        }
         let dep = pendingDepth
         let depthUpload: (d: String, c: String, k: [String: Double])? = await Task.detached {
             () -> (d: String, c: String, k: [String: Double])? in
@@ -581,9 +662,9 @@ final class MeasureViewModel: ObservableObject {
             ras.flatMap { TissueMaskCodec.encodeBase64(tissue: $0.tissue, mask: $0.mask,
                                                        mw: $0.mw, mh: $0.mh) }
         }.value
-        submitStatus = "送出中…"
+        submitStatus = nil
         do {
-            let outcome = try await backend.submitAnnotation(
+            let payload = try BackendClient.annotationPayload(
                 code: code,
                 gtPolygon: PolygonJson.largest(polys),
                 exudate: exudate,
@@ -614,17 +695,15 @@ final class MeasureViewModel: ObservableObject {
                 cameraIntrinsics: depthUpload?.k,
                 consentTrain: true,          // 上面已重讀驗證；範例／模擬圖無受試者
                 doctorVerified: doctorVerified)
-            switch outcome {
-            case .rejected(let msg):
-                submitStatus = "⚠️ 被守門擋下：\(msg)"
-            case .duplicateSkipped(let note):
-                submitStatus = "ℹ️ \(note)"
-            case .enqueued(let note):
-                submitStatus = "✅ 已送出，進再訓練佇列（\(code)）"
-                             + (note.map { "\n\($0)" } ?? "")
-            }
+            guard let actor = identity?.identity else { throw BackendError.notLoggedIn }
+            let depth = DepthStore.load(imagePath: saved.imagePath, store: imageStore)
+            try ClinicalUploadOutbox.shared.enqueue(measurement: saved, payload: payload,
+                server: AppSettings.backendURL(), configuredUser: AppSettings.backendUser(),
+                actor: actor, depth: depth, requiresDepth: dep != nil)
+            ClinicalUploadOutbox.shared.resume(repo: repo, imageStore: imageStore)
+            submitStatus = "ℹ️ 臨床紀錄已保存；研究資料已安全排入待傳佇列，可繼續下一個案。進度會持續顯示，未確認完整前不算研究上傳完成。"
         } catch {
-            submitStatus = "⚠️ 送出失敗：\(error.localizedDescription)"
+            submitStatus = "⚠️ 臨床紀錄已保存，但未能建立研究待傳工作：\(error.localizedDescription)"
         }
     }
 }
@@ -633,6 +712,7 @@ struct MeasureFlowView: View {
     let clinicalMode: Bool
     @EnvironmentObject var app: AppState
     @StateObject private var vm = MeasureViewModel()
+    @ObservedObject private var uploads = ClinicalUploadOutbox.shared
     @State private var pick: PhotosPickerItem?
     @State private var phantom = false
     @State private var showCamera = false
@@ -714,12 +794,96 @@ struct MeasureFlowView: View {
         return nil
     }
 
+    @MainActor @ViewBuilder
+    private func measurementResult(_ r: ClassifyResult, image img: UIImage) -> some View {
+    // ★ 安全關鍵：校正框必須畫出來讓醫師看一眼。
+    AnalysisPreview(image: img, result: r)
+
+    ResultCard(result: r)
+
+    if let de = vm.depthEstimate {
+        depthCard(de, sticker: r.areaCm2)
+    } else if vm.depthBusy {
+        HStack(spacing: 8) {
+            ProgressView()
+            Text("深度幾何計算中…（背景執行，可先檢視上方結果）")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.blue.opacity(0.08))
+        .cornerRadius(8)
+    }
+
+    if let note = vm.statusNote, !note.isEmpty {
+        Text(note)
+            .font(.footnote)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.orange.opacity(0.15))
+            .cornerRadius(8)
+    }
+
+    ExudatePicker(value: $vm.exudate)
+
+    // 滲液未填前，修邊與存檔都鎖定（對齊 Android `needExudate`）：
+    // PUSH 總分缺滲液算不出來，存進去的 notes 會永遠是「滲液 未填」。
+    let needExudate = vm.exudate == nil
+    if needExudate {
+        Text("⚠ 請先輸入滲液量，才能進行「修邊」或「存入時間軸」")
+            .font(.footnote).foregroundStyle(.red)
+    }
+
+    // 醫師修邊確認狀態。**取消不算確認**——存檔仍允許（合法的 AI 初步
+    // 量測紀錄），但送訓練標註必須擋下，且要讓醫師看得出現在是什麼狀態。
+    if vm.doctorVerified {
+        Text("✓ 已完成醫師修邊確認；送出仍需符合下方條件。")
+            .font(.footnote).foregroundStyle(.blue)
+    } else {
+        Text(vm.canVerifyEdits
+             ? "尚未完成醫師修邊確認；可先存入時間軸。請完成「醫師確認・修邊」後再送訓練標註。"
+             : "目前帳號可調整輪廓與儲存量測，但不會標記為醫師確認，也不能送訓練標註。")
+            .font(.footnote).foregroundStyle(.red)
+    }
+
+    Button(vm.canVerifyEdits ? "醫師確認・修邊" : "調整輪廓（不作醫師確認）") { vm.editing = true }
+        .buttonStyle(.borderedProminent)
+        .disabled(needExudate)
+
+    // ★ 存檔與「送訓練標註」門檻不同：存病歷不需要 image_id 與修邊
+    //   （那仍是一次真實量測）；送標註才需要三者齊備。
+    if let reason = saveBlockedReason {
+        Text("存入時間軸：\(reason)")
+            .font(.footnote).foregroundStyle(.secondary)
+    }
+    Button(vm.lastSavedId == nil ? "存入時間軸" : "更新這一筆紀錄") {
+        Task {
+            await vm.saveToTimeline(
+                repo: app.repo,
+                imageStore: app.imageStore,
+                // ⚠ 快速量測一律傳 nil。範例圖／模擬圖不得綁上真實病患。
+                woundCase: clinicalMode ? app.chosenCase : nil)
+        }
+    }
+    .buttonStyle(.bordered)
+    .disabled(vm.saving || needExudate || saveBlockedReason != nil)
+
+    if let s = vm.saveNote {
+        Text(s).font(.footnote).foregroundStyle(.secondary)
+    }
+    if vm.lastSavedId != nil {
+        Button("查看時間軸") { app.screen = .timeline }
+    }
+
+    flywheelSection
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     if InstitutionExport.enabled {
-                        Text("MMHPS20261007 機構驗證版 · 本機輸出至「檔案」；專用雲端尚未設定時不會使用其他後端。")
+                        Text("MMHPS20261007 機構驗證版 · 行政影像副本可在設定開關；臨床紀錄與研究上傳分別顯示狀態。")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                     if clinicalMode, let c = app.chosenCase {
@@ -747,100 +911,42 @@ struct MeasureFlowView: View {
                             .font(.footnote)
                     }
 
+                    if uploads.pendingCount > 0 {
+                        Text("研究資料待傳 \(uploads.pendingCount) 筆；待傳與量測分析分開顯示，結果出現不代表研究資料已傳完。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
                     if vm.loading { ProgressView(vm.loadingHint) }
+                    if !vm.loading && !vm.analysisDurations.isEmpty {
+                        DisclosureGroup("本次量測耗時") {
+                            ForEach(vm.analysisDurations.keys.sorted(), id: \.self) { phase in
+                                Text(String(format: "%@：%.1f 秒", phase, vm.analysisDurations[phase] ?? 0))
+                            }
+                            Text("傳送／辨識／保存為合計時間，尚不能區分網路與後端耗時；原始深度待傳另行顯示。")
+                        }.font(.footnote)
+                    }
                     if let e = vm.error {
                         Text(e).foregroundStyle(.red).font(.footnote)
                     }
 
                     if let r = vm.result, let img = vm.image {
-                        // ★ 安全關鍵：校正框必須畫出來讓醫師看一眼。
-                        AnalysisPreview(image: img, result: r)
-
-                        ResultCard(result: r)
-
-                        if let de = vm.depthEstimate {
-                            depthCard(de, sticker: r.areaCm2)
-                        } else if vm.depthBusy {
-                            HStack(spacing: 8) {
-                                ProgressView()
-                                Text("深度幾何計算中…（背景執行，可先檢視上方結果）")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                            .padding(10)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.blue.opacity(0.08))
-                            .cornerRadius(8)
-                        }
-
-                        if let note = vm.statusNote, !note.isEmpty {
-                            Text(note)
-                                .font(.footnote)
-                                .padding(10)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color.orange.opacity(0.15))
-                                .cornerRadius(8)
-                        }
-
-                        ExudatePicker(value: $vm.exudate)
-
-                        // 滲液未填前，修邊與存檔都鎖定（對齊 Android `needExudate`）：
-                        // PUSH 總分缺滲液算不出來，存進去的 notes 會永遠是「滲液 未填」。
-                        let needExudate = vm.exudate == nil
-                        if needExudate {
-                            Text("⚠ 請先輸入滲液量，才能進行「修邊」或「存入時間軸」")
-                                .font(.footnote).foregroundStyle(.red)
-                        }
-
-                        // 醫師修邊確認狀態。**取消不算確認**——存檔仍允許（合法的 AI 初步
-                        // 量測紀錄），但送訓練標註必須擋下，且要讓醫師看得出現在是什麼狀態。
-                        if vm.doctorVerified {
-                            Text("✓ 已完成醫師修邊確認；送出仍需符合下方條件。")
-                                .font(.footnote).foregroundStyle(.blue)
-                        } else {
-                            Text(vm.canVerifyEdits
-                                 ? "尚未完成醫師修邊確認；可先存入時間軸。請完成「醫師確認・修邊」後再送訓練標註。"
-                                 : "目前帳號可調整輪廓與儲存量測，但不會標記為醫師確認，也不能送訓練標註。")
-                                .font(.footnote).foregroundStyle(.red)
-                        }
-
-                        Button(vm.canVerifyEdits ? "醫師確認・修邊" : "調整輪廓（不作醫師確認）") { vm.editing = true }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(needExudate)
-
-                        // ★ 存檔與「送訓練標註」門檻不同：存病歷不需要 image_id 與修邊
-                        //   （那仍是一次真實量測）；送標註才需要三者齊備。
-                        if let reason = saveBlockedReason {
-                            Text("存入時間軸：\(reason)")
-                                .font(.footnote).foregroundStyle(.secondary)
-                        }
-                        Button(vm.lastSavedId == nil ? "存入時間軸" : "更新這一筆紀錄") {
-                            Task {
-                                await vm.saveToTimeline(
-                                    repo: app.repo,
-                                    imageStore: app.imageStore,
-                                    // ⚠ 快速量測一律傳 nil。範例圖／模擬圖不得綁上真實病患。
-                                    woundCase: clinicalMode ? app.chosenCase : nil)
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(vm.saving || needExudate || saveBlockedReason != nil)
-
-                        if let s = vm.saveNote {
-                            Text(s).font(.footnote).foregroundStyle(.secondary)
-                        }
-                        if vm.lastSavedId != nil {
-                            Button("查看時間軸") { app.screen = .timeline }
-                        }
-
-                        flywheelSection
+                        measurementResult(r, image: img)
                     }
                 }
                 .padding()
             }
+            .disabled(vm.loading)
+            .safeAreaInset(edge: .bottom) {
+                if vm.loading {
+                    SwiftUI.TimelineView(.periodic(from: .now, by: 1)) { context in
+                        let seconds = max(0, Int(context.date.timeIntervalSince(vm.loadingStartedAt ?? context.date)))
+                        UploadProgressBanner(message: "\(vm.loadingHint) 已等候 \(seconds) 秒。")
+                    }
+                }
+            }
             .navigationTitle(clinicalMode ? "臨床量測" : "快速量測")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("返回") { app.screen = app.backTo }
+                    Button("返回") { app.screen = app.backTo }.disabled(vm.loading)
                 }
             }
             .onChange(of: pick) { _, newValue in
@@ -983,15 +1089,19 @@ struct MeasureFlowView: View {
                 // 狀態放按鈕**上方**，按下即可見。
                 Text(s).font(.footnote).foregroundStyle(.blue)
             }
-            Button("醫師確認・送出標註 → 再訓練佇列") {
+            if let id = vm.lastSavedId, let job = uploads.latest(recordID: id) {
+                Text(job.status).font(.footnote).foregroundStyle(.secondary)
+            }
+            Button("確認送出研究資料（標註與深度）") {
                 Task {
-                    await vm.submitTraining(repo: app.repo,
+                    await vm.submitTraining(repo: app.repo, imageStore: app.imageStore,
                                             woundCase: clinicalMode ? app.chosenCase : nil,
                                             clinicalMode: clinicalMode)
                 }
             }
             .buttonStyle(.borderedProminent)
             .disabled(vm.submitBlockedReason != nil
+                      || uploads.jobs.contains(where: { $0.measurement.id == vm.lastSavedId && !$0.completed })
                       || (clinicalMode && (app.chosenCase == nil || !trainOkHint)))
         } else {
             Text("（輸入滲液並完成「修邊確認」或「存入時間軸」後，將顯示送出訓練標註）")

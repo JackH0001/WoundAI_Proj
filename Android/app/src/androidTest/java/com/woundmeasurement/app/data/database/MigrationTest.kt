@@ -111,7 +111,8 @@ class MigrationTest {
                 WoundMeasurementDatabase.MIGRATION_2_3,
                 WoundMeasurementDatabase.MIGRATION_3_4,
                 WoundMeasurementDatabase.MIGRATION_4_5,
-                WoundMeasurementDatabase.MIGRATION_5_6
+                WoundMeasurementDatabase.MIGRATION_5_6,
+                WoundMeasurementDatabase.MIGRATION_6_7
             )
             // 刻意**不加** fallbackToDestructiveMigration：這個測試存在的意義就是抓住
             // 「缺 Migration 導致資料被清空」。加了它，測試會靜默通過而資料早就沒了。
@@ -206,6 +207,40 @@ class MigrationTest {
         } finally {
             room.close()
         }
+    }
+
+    @Test fun v6KeepsReceiptAndRasterAndLeavesMissingProvenanceUnknown() {
+        val path = ctx.getDatabasePath(TEST_DB)
+        path.parentFile?.mkdirs()
+        SQLiteDatabase.openOrCreateDatabase(path, null).use { db ->
+            createV1(db)
+            upgradeToV2(db)
+            listOf(WoundMeasurementDatabase.MIGRATION_2_3,
+                WoundMeasurementDatabase.MIGRATION_3_4,
+                WoundMeasurementDatabase.MIGRATION_4_5,
+                WoundMeasurementDatabase.MIGRATION_5_6).forEach { it.migrate(FrameworkDbWrapper(db)) }
+            db.version = 6
+            seedPatientAndMeasurements(db, 1)
+            db.execSQL("UPDATE measurements SET doctorVerified=1, annotationSubmitted=1, rasterPath='encrypted.png', rasterMeta='fixture', gtPolygon='[[1,2],[3,4],[5,6]]'")
+        }
+        val room = openRoom()
+        try {
+            runBlocking {
+                val before = room.measurementDao().getAllMeasurementsOnce().single()
+                assertEquals(null, before.annotationProvenance)
+                assertTrue(before.doctorVerified)
+                assertTrue(before.annotationSubmitted)
+                assertEquals("encrypted.png", before.rasterPath)
+                assertEquals("fixture", before.rasterMeta)
+                assertEquals("[[1,2],[3,4],[5,6]]", before.gtPolygon)
+                assertEquals(1001L, before.timestamp.time)
+                val metadata = com.woundmeasurement.app.pipeline.AnnotationProvenance(
+                    "fixture-model", mapOf("focus_lapvar" to 42.5), "app confirm").encode()
+                room.measurementDao().updateMeasurement(before.copy(annotationProvenance = metadata))
+                assertEquals(before.copy(annotationProvenance = metadata),
+                    room.measurementDao().getAllMeasurementsOnce().single())
+            }
+        } finally { room.close() }
     }
 
     /**

@@ -6,7 +6,7 @@ import CryptoKit
 enum InstitutionExport {
     static let institution = "MMHPS20261007"
     static var enabled: Bool {
-        #if WOUND_INSTITUTION
+        #if WOUND_INSTITUTION && !WOUND_ADMIN_EXPORT_DISABLED
         return true
         #else
         return false
@@ -71,8 +71,8 @@ enum InstitutionExport {
     }
 
     /// Revision hash avoids duplicate output on an identical retry. No patient names or IDs in file names.
-    static func write(image: UIImage, raster: EditRaster, polygons: [[[Int]]], marker: [[Int]]?,
-                      measurementID: Int64, doctorVerified: Bool, exudate: Int?, directory: URL) throws -> URL {
+    static func contents(image: UIImage, raster: EditRaster, polygons: [[[Int]]], marker: [[Int]]?,
+                      measurementID: Int64, doctorVerified: Bool, exudate: Int?) throws -> [String: Data] {
         try validate(image: image, raster: raster)
         let fractions = raster.tissueFrac()
         let push = WoundPipeline.push(cm2: raster.areaCm2, frac: fractions, exudate: exudate)
@@ -93,6 +93,14 @@ enum InstitutionExport {
         let hashes = files.mapValues { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined() }
         let manifest = try JSONSerialization.data(withJSONObject: hashes, options: [.sortedKeys])
         files["sha256.json"] = manifest
+        return files
+    }
+
+    static func write(image: UIImage, raster: EditRaster, polygons: [[[Int]]], marker: [[Int]]?,
+                      measurementID: Int64, doctorVerified: Bool, exudate: Int?, directory: URL) throws -> URL {
+        let files = try contents(image: image, raster: raster, polygons: polygons, marker: marker,
+            measurementID: measurementID, doctorVerified: doctorVerified, exudate: exudate)
+        let manifest = files["sha256.json"]!
         let revision = SHA256.hash(data: manifest).map { String(format: "%02x", $0) }.joined()
         try HealthDataFiles.prepareDirectory(directory)
         let destination = directory.appendingPathComponent("measurement-\(measurementID)-\(revision)", isDirectory: true)

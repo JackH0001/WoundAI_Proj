@@ -1,0 +1,7 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+    <application android:allowBackup="false" android:usesCleartextTraffic="false"
+        tools:replace="android:allowBackup,android:usesCleartextTraffic">
+        <!-- The medical measurement pipeline uses CameraX/Camera2, not an ARCore Session. -->
+        <meta-data android:name="com.google.ar.core" android:value="optional" tools:replace="android:value" />
+    </application>
+</manifest>

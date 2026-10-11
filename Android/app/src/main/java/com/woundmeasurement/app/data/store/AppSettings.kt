@@ -112,7 +112,8 @@ object AppSettings {
         ctx.applicationContext.getSharedPreferences(PREF, Context.MODE_PRIVATE)
 
     fun backendUrl(ctx: Context): String =
-        prefs(ctx).getString(K_URL, null)?.takeIf { it.isNotBlank() } ?: DEFAULT_URL
+        if (com.woundmeasurement.app.BuildConfig.MMH_VALIDATION) DEFAULT_URL
+        else prefs(ctx).getString(K_URL, null)?.takeIf { it.isNotBlank() } ?: DEFAULT_URL
 
     fun setBackendUrl(ctx: Context, url: String) {
         prefs(ctx).edit().putString(K_URL, normalizeUrl(url)).apply()

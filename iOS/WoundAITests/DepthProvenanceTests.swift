@@ -1,5 +1,10 @@
 import XCTest
+import CryptoKit
+#if WOUND_INSTITUTION_TESTS
+@testable import WoundAIInstitution
+#else
 @testable import WoundMeasurementApp
+#endif
 
 final class DepthProvenanceTests: XCTestCase {
     private func capture(_ exif: Int?) -> DepthCapture {
@@ -71,7 +76,7 @@ final class DepthProvenanceTests: XCTestCase {
         config.protocolClasses = [OrientationRequestProtocol.self]
         let session = URLSession(configuration:config)
         defer { session.invalidateAndCancel() }
-        let client = BackendClient(baseUrl:"https://orientation-test.invalid",jwt:UUID().uuidString,session:session)
+        let client = BackendClient(baseUrl:"https://orientation-test.invalid",jwt:UUID().uuidString,session:session,institutionTransport:OrientationTestTransport(session:session))
         let d = capture(6)
         _ = try await client.uploadDepth(imageId:"fixture",raw:d.map.withUnsafeBufferPointer { Data(buffer:$0) },sidecarMeta:try roundTrip(d.metaJson))
         await fulfillment(of:[expected],timeout:2)
@@ -112,8 +117,21 @@ private final class OrientationRequestProtocol: URLProtocol {
         Self.inspect?(request)
         let response = HTTPURLResponse(url:request.url!,statusCode:200,httpVersion:nil,headerFields:nil)!
         client?.urlProtocol(self,didReceive:response,cacheStoragePolicy:.notAllowed)
-        client?.urlProtocol(self,didLoad:Data("{\"status\":\"stored\",\"depth_id\":\"fixture\",\"replaced_previous\":false}".utf8))
+        let raw = [Float](repeating: 0.3, count: 192).withUnsafeBufferPointer { Data(buffer: $0) }
+        let digest = SHA256.hash(data: raw).prefix(8).map { String(format: "%02x", $0) }.joined()
+        let body = try! JSONSerialization.data(withJSONObject: ["status":"stored", "image_id":"fixture", "depth_id":digest])
+        client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
+}
+
+private actor OrientationTestTransport: InstitutionAuthenticatedTransport {
+    let session: URLSession
+    init(session: URLSession) { self.session = session }
+    func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let (data, response) = try await session.data(for: request)
+        return (data, response as! HTTPURLResponse)
+    }
+    func invalidate() async {}
 }

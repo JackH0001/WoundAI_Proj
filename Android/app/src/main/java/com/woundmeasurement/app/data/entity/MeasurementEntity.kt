@@ -113,5 +113,7 @@ data class MeasurementEntity(
     // 存的是加密後的無損 PNG（R=組織碼 G=遮罩 B=原始遮罩），檔名寫在這裡。
     val rasterPath: String? = null,
     /** 仿射參數與畫布尺寸（JSON）。與 rasterPath 必須成對，缺一就無法還原座標。 */
-    val rasterMeta: String? = null
+    val rasterMeta: String? = null,
+    /** Versioned capture provenance; null means legacy/unknown, never guessed. */
+    val annotationProvenance: String? = null
 )

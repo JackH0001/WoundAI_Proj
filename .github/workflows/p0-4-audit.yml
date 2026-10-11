@@ -99,6 +99,20 @@ on:
       - 'engineering/phase2/test_hardening_lifecycle.py'
       - 'engineering/phase2/test_deployment_input_gate.py'
       - 'engineering/phase2/test_backend_url_parity.py'
+      - 'engineering/phase2/test_manual_consistency.py'
+      - 'Android/app/src/main/assets/manual.html'
+      - 'Android/app/src/main/java/com/woundmeasurement/app/**'
+      - 'iOS/WoundMeasurementApp/Resources/manual.html'
+      - 'iOS/WoundMeasurementApp/Core/BackendClient.swift'
+      - 'tools/parity_check.py'
+      - 'tools/mobile_release_contract.py'
+      - 'tools/test_annotation_parity_boundary.py'
+      - 'tools/plan_mmh_iap_entry.py'
+      - 'tools/test_plan_mmh_iap_entry.py'
+      - 'tools/test_mmh_native_iap_probe.py'
+      - 'docs/PARITY.md'
+      - 'Android/version.properties'
+      - 'iOS/project.yml'
       - 'engineering/phase2/test_secret_key_fail_closed.py'
       - 'engineering/phase2/test_gitleaks_rule_precision.py'
       - 'iOS/WoundMeasurementApp/Core/AppSettings.swift'
@@ -209,6 +223,20 @@ on:
       - 'engineering/phase2/test_hardening_lifecycle.py'
       - 'engineering/phase2/test_deployment_input_gate.py'
       - 'engineering/phase2/test_backend_url_parity.py'
+      - 'engineering/phase2/test_manual_consistency.py'
+      - 'Android/app/src/main/assets/manual.html'
+      - 'Android/app/src/main/java/com/woundmeasurement/app/**'
+      - 'iOS/WoundMeasurementApp/Resources/manual.html'
+      - 'iOS/WoundMeasurementApp/Core/BackendClient.swift'
+      - 'tools/parity_check.py'
+      - 'tools/mobile_release_contract.py'
+      - 'tools/test_annotation_parity_boundary.py'
+      - 'tools/plan_mmh_iap_entry.py'
+      - 'tools/test_plan_mmh_iap_entry.py'
+      - 'tools/test_mmh_native_iap_probe.py'
+      - 'docs/PARITY.md'
+      - 'Android/version.properties'
+      - 'iOS/project.yml'
       - 'engineering/phase2/test_secret_key_fail_closed.py'
       - 'engineering/phase2/test_gitleaks_rule_precision.py'
       - 'iOS/WoundMeasurementApp/Core/AppSettings.swift'
@@ -269,6 +297,10 @@ jobs:
           python -B engineering/phase2/test_audit_console_verdict.py
           python -B engineering/phase2/test_test_isolation_from_cloud.py
           python -B engineering/phase2/test_backend_url_parity.py
+          python -B engineering/phase2/test_manual_consistency.py
+          python -B tools/test_annotation_parity_boundary.py
+          python -B tools/test_plan_mmh_iap_entry.py
+          python -B tools/test_mmh_native_iap_probe.py
           python -B engineering/phase2/test_secret_key_fail_closed.py
           python -B engineering/phase2/test_gitleaks_rule_precision.py
           python -B engineering/phase2/test_inventory_is_read_only.py
