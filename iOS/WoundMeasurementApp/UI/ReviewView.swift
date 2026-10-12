@@ -307,6 +307,16 @@ struct ReviewView: View {
             // 範例／模擬圖無受試者，不受訓練同意限制。
             trainOk = (m.source ?? "clinical") != "clinical"
         }
+        #if WOUND_INSTITUTION
+        do {
+            let c = try await MedicalSessionPool.shared.acquire()
+            try Task.checkCancellation()
+            backend = c; identity = await c.currentIdentity(); loggedIn = identity != nil
+        } catch {
+            backend = nil; identity = nil; loggedIn = false
+            msg = "登入狀態尚未驗證：\(error.localizedDescription)"
+        }
+        #else
         let c = BackendClient(baseUrl: AppSettings.backendURL())
         let u = AppSettings.backendUser(), p = AppSettings.backendPassword()
         // ⚠ 不可寫成 `!u.isEmpty && (try? await …)`：`&&` 的右運算元是 @autoclosure，
@@ -318,6 +328,7 @@ struct ReviewView: View {
         }
         backend = c
         identity = loggedIn ? await c.currentIdentity() : nil
+        #endif
         loading = false
     }
 

@@ -49,9 +49,17 @@ final class MeasureViewModel: ObservableObject {
 
     private let backendFactory: () -> BackendClient
     private let credentials: () -> (String, String)
-    init(backendFactory: @escaping () -> BackendClient = { BackendClient(baseUrl: AppSettings.backendURL()) },
-         credentials: @escaping () -> (String, String) = { (AppSettings.backendUser(), AppSettings.backendPassword()) }) {
-        self.backendFactory = backendFactory; self.credentials = credentials
+    private let sessionProvider: (() async throws -> BackendClient)?
+    init(backendFactory: (() -> BackendClient)? = nil,
+         credentials: @escaping () -> (String, String) = { (AppSettings.backendUser(), AppSettings.backendPassword()) },
+         sessionProvider: (() async throws -> BackendClient)? = nil) {
+        self.backendFactory = backendFactory ?? { BackendClient(baseUrl: AppSettings.backendURL()) }
+        self.credentials = credentials
+        #if WOUND_INSTITUTION
+        self.sessionProvider = sessionProvider ?? (backendFactory == nil ? { try await MedicalSessionPool.shared.acquire() } : nil)
+        #else
+        self.sessionProvider = sessionProvider
+        #endif
     }
     @Published private(set) var analysisDurations: [String: Double] = [:]
     @Published private(set) var loadingStartedAt: Date?
@@ -59,6 +67,7 @@ final class MeasureViewModel: ObservableObject {
     private var boundCareCode: String?
 
     func ensureLogin() async -> Bool {
+        let previousIdentity = identity
         identity = nil
         backend = nil
         let (user, pass) = credentials()
@@ -66,18 +75,26 @@ final class MeasureViewModel: ObservableObject {
             error = "尚未設定後端帳號密碼，請先到「設定」填寫。"
             return false
         }
-        let c = backendFactory()
+        let c: BackendClient
         do {
-            guard try await c.login(username: user, password: pass) else {
+            if let sessionProvider { c = try await sessionProvider() }
+            else {
+                c = backendFactory()
+                guard try await c.login(username: user, password: pass) else {
                 error = await c.lastLoginFailure ?? "WoundAI 登入未通過；本次影像尚未上傳。"
                 return false
+                }
             }
         } catch {
+            doctorVerified = false
             self.error = "登入階段未完成：\(error.localizedDescription)（本次影像尚未上傳）"
             return false
         }
         backend = c
         identity = await c.currentIdentity()
+        if identity?.canVerifyClinicalEdits != true || (previousIdentity != nil && previousIdentity != identity) {
+            doctorVerified = false
+        }
         return true
     }
 

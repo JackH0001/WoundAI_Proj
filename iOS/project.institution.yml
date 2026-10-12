@@ -56,6 +56,7 @@ targets:
     type: bundle.unit-test
     platform: iOS
     sources:
+      - path: WoundAITests/MedicalSessionPoolTests.swift
       - path: WoundAITests/BackendLoginAndCaptureTests.swift
       - path: WoundAITests/InstitutionGoogleTokenTests.swift
       - path: WoundAITests/InstitutionIAPTransportTests.swift

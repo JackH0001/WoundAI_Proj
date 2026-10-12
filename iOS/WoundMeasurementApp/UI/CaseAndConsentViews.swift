@@ -797,13 +797,17 @@ struct BackendSettingsView: View {
         AppSettings.setBackendURL(url)
         hasSavedCredentials = !AppSettings.backendUser().isEmpty && !AppSettings.backendPassword().isEmpty
         guard hasSavedCredentials else { status = "請輸入帳號與密碼。"; return }
-        let c = BackendClient(baseUrl: AppSettings.backendURL())
         do {
             try Task.checkCancellation()
             var lines: [String] = []
             progress = "正在驗證 WoundAI 帳號…"
-            let ok = try await c.login(username: AppSettings.backendUser(),
-                                       password: AppSettings.backendPassword())
+            #if WOUND_INSTITUTION
+            let c = try await MedicalSessionPool.shared.acquire()
+            let ok = true
+            #else
+            let c = BackendClient(baseUrl: AppSettings.backendURL())
+            let ok = try await c.login(username: AppSettings.backendUser(), password: AppSettings.backendPassword())
+            #endif
             try Task.checkCancellation()
             lines.append(ok ? "登入成功" : (await c.lastLoginFailure ?? "登入未成功，請檢查帳號與機構入口。"))
             let identity = ok ? await c.currentIdentity() : nil

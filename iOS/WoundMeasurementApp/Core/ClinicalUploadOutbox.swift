@@ -187,9 +187,14 @@ final class ClinicalUploadOutbox: ObservableObject {
                         try persist(job); blockedRecords.insert(job.measurement.id); continue
                     }
                     activeID = job.id; phase = "驗證研究資料上傳身分…"
+                    #if WOUND_INSTITUTION
+                    let backend = try await MedicalSessionPool.shared.acquire()
+                    #else
                     let backend = BackendClient(baseUrl: job.server)
-                    guard try await backend.login(username: job.configuredUser, password: AppSettings.backendPassword()),
-                          let identity = await backend.currentIdentity(), identity.canSubmitClinicalTraining,
+                    guard try await backend.login(username: job.configuredUser, password: AppSettings.backendPassword())
+                    else { throw BackendError.notLoggedIn }
+                    #endif
+                    guard let identity = await backend.currentIdentity(), identity.canSubmitClinicalTraining,
                           Self.bindingMatches(job, server: AppSettings.backendURL(), user: AppSettings.backendUser(), actor: identity.identity)
                     else { throw BackendError.badResponse("請用原送件醫師帳號登入") }
                     try await process(id: job.id, allowed: { await self.permitted(job, repo: repo) },

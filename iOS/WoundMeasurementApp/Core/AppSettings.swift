@@ -74,6 +74,7 @@ enum AppSettings {
     }
 
     static func setBackendURL(_ raw: String) {
+        if normalize(raw) != normalize(backendURL()) { MedicalSessionEpoch.shared.invalidate() }
         d.set(normalize(raw), forKey: K.baseUrl)
     }
 
@@ -100,6 +101,7 @@ enum AppSettings {
     static func setCredentials(user: String, password: String) -> Bool {
         do {
             let enc = try PhiCrypto.encrypt(password)
+            MedicalSessionEpoch.shared.invalidate()
             d.set(user, forKey: K.user)
             d.set(enc ?? "", forKey: K.passEnc)
             return true
@@ -109,6 +111,7 @@ enum AppSettings {
     }
 
     static func clearCredentials() {
+        MedicalSessionEpoch.shared.invalidate()
         d.removeObject(forKey: K.user)
         d.removeObject(forKey: K.passEnc)
     }

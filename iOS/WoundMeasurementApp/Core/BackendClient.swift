@@ -186,6 +186,7 @@ enum BackendError: Error, LocalizedError {
 actor BackendClient {
 
     private let baseUrl: String
+    private let sessionEpoch: UInt64
     private var jwt: String
     private var authGeneration: UInt64 = 0
     private(set) var identity: LoginIdentity?
@@ -208,6 +209,7 @@ actor BackendClient {
          liteTransport: (any LiteAuthenticatedTransport)? = nil,
          institutionTransport: (any InstitutionAuthenticatedTransport)? = nil) {
         self.baseUrl = BackendClient.normalize(baseUrl)
+        self.sessionEpoch = MedicalSessionEpoch.shared.snapshot()
         self.jwt = jwt
         #if WOUND_INSTITUTION
         // Capture this identity's transport once. Never rebind an old client after account switch.
@@ -257,9 +259,20 @@ actor BackendClient {
         return r
     }
 
+    private func requireCurrentSessionContext() throws {
+        #if WOUND_INSTITUTION
+        guard sessionEpoch == MedicalSessionEpoch.shared.snapshot() else {
+            authGeneration &+= 1; jwt = ""; identity = nil
+            throw CancellationError()
+        }
+        #endif
+    }
+
     private func send(_ req: URLRequest) async throws -> (Int, Data) {
+        try requireCurrentSessionContext()
         if let institutionTransport {
             let (data, response) = try await institutionTransport.send(req)
+            try requireCurrentSessionContext()
             return (response.statusCode, data)
         }
         #if WOUND_INSTITUTION
@@ -343,6 +356,40 @@ actor BackendClient {
             perms:       Set(j["perms"].array.compactMap { $0.string })
         )
         return true
+    }
+
+    /// Read-only live account-version check. Never retries login or writes.
+    func validateMedicalSession() async throws -> LoginIdentity {
+        let generation = authGeneration
+        let previous = identity
+        identity = nil
+        let (status, data) = try await send(request("GET", "/api/v1/auth/session"))
+        guard generation == authGeneration else { throw CancellationError() }
+        guard status == 200 else {
+            if [401, 403].contains(status) { jwt = "" }
+            throw BackendError.http(status: status, message: status == 404
+                ? "此後端尚未支援登入狀態驗證，請聯絡管理員更新。"
+                : "登入狀態驗證未完成（HTTP \(status)），請稍後重新驗證；本次未送出影像。")
+        }
+        guard let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              j["session_contract"] as? String == "account-revision-v1",
+              let actor = j["identity"] as? String,
+              let org = j["org"] as? String, org == "mmhps20261007",
+              let user = j["user"] as? String, !user.isEmpty, actor == org + ":" + user,
+              let role = j["role"] as? String,
+              ["physician", "nurse", "assistant", "engineer", "admin"].contains(role),
+              let roleZh = j["role_zh"] as? String,
+              let perms = j["perms"] as? [String], perms.contains("measure.sample"),
+              let expiry = j["expires_at"] as? Double, expiry.isFinite,
+              expiry > Date().timeIntervalSince1970,
+              previous == nil || previous?.identity == actor else {
+            jwt = ""
+            throw BackendError.badResponse("登入狀態回覆不完整或身分不符，未沿用工作階段。")
+        }
+        let verified = LoginIdentity(identity: actor, org: org, user: user, role: role,
+            roleZh: roleZh, displayName: j["display_name"] as? String, perms: Set(perms))
+        identity = verified
+        return verified
     }
 
     func logout() async {

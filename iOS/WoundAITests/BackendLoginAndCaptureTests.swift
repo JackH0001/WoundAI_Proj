@@ -10,6 +10,9 @@ private actor CaptureTransportFixture: InstitutionAuthenticatedTransport {
     var loginStatus = 200
     var classifyCount = 0
     var loginCount = 0
+    var sessionCount = 0
+    var sessionStatus = 200
+    func setSessionStatus(_ value: Int) { sessionStatus = value }
     func setLoginStatus(_ value: Int) { loginStatus = value }
     func invalidate() {}
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
@@ -18,7 +21,14 @@ private actor CaptureTransportFixture: InstitutionAuthenticatedTransport {
         var body = "{}"
         if path == "/api/auth/login" {
             loginCount += 1; status = loginStatus
-            body = #"{"access_token":"synthetic-app-token","identity":"fixture:doctor","org":"fixture","user":"doctor","role":"physician","perms":["gt.verify","annotation.submit"]}"#
+            body = #"{"access_token":"synthetic-app-token","identity":"mmhps20261007:dr01","org":"mmhps20261007","user":"dr01","role":"physician","perms":["gt.verify","annotation.submit"]}"#
+        } else if path == "/api/v1/auth/session" {
+            sessionCount += 1; status = sessionStatus
+            let object: [String: Any] = ["identity":"mmhps20261007:dr01", "org":"mmhps20261007",
+                "user":"dr01", "role":"physician", "role_zh":"醫師",
+                "perms":["measure.sample", "gt.verify", "annotation.submit"],
+                "session_contract":"account-revision-v1", "expires_at":Date().timeIntervalSince1970 + 300]
+            body = String(data: try JSONSerialization.data(withJSONObject: object), encoding: .utf8)!
         } else if path == "/api/v1/classify" {
             classifyCount += 1
             try await Task.sleep(nanoseconds: 40_000_000)
@@ -52,6 +62,36 @@ final class BackendLoginAndCaptureTests: XCTestCase {
     private func model(_ transport: CaptureTransportFixture) -> MeasureViewModel {
         MeasureViewModel(backendFactory: { BackendClient(baseUrl:"https://test.invalid",institutionTransport:transport) },
                          credentials: { ("fixture-doctor","synthetic-password") })
+    }
+    private func sharedModel(_ transport: CaptureTransportFixture) -> MeasureViewModel {
+        let pool = MedicalSessionPool(input: {
+            MedicalSessionPool.Input(origin:"https://test.invalid", user:"dr01", password:UUID().uuidString,
+                                     epoch:MedicalSessionEpoch.shared.snapshot())
+        }, factory: { BackendClient(baseUrl:$0, institutionTransport:transport) })
+        return MeasureViewModel(credentials: { ("dr01", "fixture") },
+                                sessionProvider: { try await pool.acquire() })
+    }
+    func testSharedSessionTenCapturesKeepImageBindingsWithoutTenLogins() async throws {
+        let transport = CaptureTransportFixture(); let vm = sharedModel(transport)
+        for index in 1...10 {
+            await vm.analyze(image(), phantom:true)
+            XCTAssertEqual(vm.result?.imageId,"fixture-\(index)")
+            XCTAssertNil(vm.error)
+        }
+        let logins = await transport.loginCount, sessions = await transport.sessionCount
+        let images = await transport.classifyCount
+        XCTAssertEqual(logins,1); XCTAssertEqual(sessions,10); XCTAssertEqual(images,10)
+    }
+    func testSharedSessionSecondCaptureRevalidationFailureDoesNotUpload() async {
+        let transport = CaptureTransportFixture(); let vm = sharedModel(transport)
+        await vm.analyze(image(), phantom:true)
+        await transport.setSessionStatus(503)
+        await vm.analyze(image(), phantom:true)
+        XCTAssertNil(vm.result); XCTAssertNil(vm.image); XCTAssertNil(vm.identity)
+        XCTAssertNil(vm.lastSavedId); XCTAssertFalse(vm.loading)
+        XCTAssertTrue(vm.error?.contains("HTTP 503") == true)
+        let logins = await transport.loginCount, images = await transport.classifyCount
+        XCTAssertEqual(logins,1); XCTAssertEqual(images,1)
     }
     func testSecondCaptureLoginFailureCannotDisplayPreviousResult() async {
         let transport = CaptureTransportFixture(); let vm = model(transport)

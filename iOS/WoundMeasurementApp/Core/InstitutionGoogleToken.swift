@@ -54,6 +54,7 @@ final class InstitutionTransportRegistry: @unchecked Sendable {
     @discardableResult
     func replace(with next: (any InstitutionAuthenticatedTransport)?) -> (any InstitutionAuthenticatedTransport)? {
         lock.lock(); defer { lock.unlock() }
+        MedicalSessionEpoch.shared.invalidate()
         let previous = transport; transport = next; return previous
     }
 }
