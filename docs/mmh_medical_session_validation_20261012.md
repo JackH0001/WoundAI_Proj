@@ -26,3 +26,11 @@ The shared global guard can reject unavailable account state before the endpoint
 Bind shared in-memory mobile sessions to origin, credential generation and Google transport/subject generation; invalidate stale async responses after logout or switching. Add single-flight login, read-only live revalidation, fail-closed role transitions and tests for ten captures, concurrent work and expired/unavailable sessions before installation. Do not persist bearer tokens or retry timed-out writes merely to hide waiting.
 
 This is an independent local change, not part of PR #26. No cloud build, deployment, account mutation or phone acceleration is claimed. Backend changes follow the user's requested MMH latency/login fixes; no Windows deployment script was changed or claimed tested.
+
+## Integration with deployed latency baseline
+
+Merged fixed deployed source `85775e8613b8a4680f8df2d0eca2e292dd383fd9` locally on 2026-10-12. Combined medical-session, admin-session, institution, account CAS and unlocked-audit suites passed **74/74** with `PYTHONPATH=engineering/phase2 python -B -m unittest tools.test_mmh_medical_session tools.test_mmh_management_session tools.test_mmh_institution tools.test_mmh_account_versions engineering.phase2.test_mmh_unlocked_audit`.
+
+The first invocation omitted the audit suite's sibling-fixture import path: the 50 authentication/account cases passed, but audit import failed. Adding the existing fixture directory to PYTHONPATH produced the complete passing run; no product change was required. Log: `/private/tmp/mmh-session-merged-backend-tests.log`.
+
+Local iOS and Android reuse implementations are now prepared, separately tested, and not installed. This integrated backend source is not pushed, built or deployed; the live latency revision still has no medical-session reuse endpoint.
