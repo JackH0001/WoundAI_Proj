@@ -49,8 +49,10 @@
 """
 import io
 from contextlib import nullcontext
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -816,10 +818,9 @@ class GcsStore(Store):
                     start = 0
                     previous_hash = "GENESIS"
 
-                for seq in range(start, len(blobs)):
-                    blob = blobs[seq]
+                for seq, (blob, body) in enumerate(self._read_admission_batch(blobs, start), start):
                     try:
-                        raw = self._read_admission_blob(blob).decode("utf-8")
+                        raw = body.decode("utf-8")
                         record, _ = _chain_record_bytes(seq, raw)
                     except (TypeError, ValueError, UnicodeDecodeError) as exc:
                         raise IOError("invalid audit chain slot %s: %s" %
@@ -1033,6 +1034,11 @@ class GcsStore(Store):
     def _read_admission_blob(self, blob):
         return blob.download_as_bytes()
 
+    def _read_admission_batch(self, blobs, start):
+        # Locked epochs retain their existing sequential suffix-read behavior.
+        for blob in blobs[start:]:
+            yield blob, self._read_admission_blob(blob)
+
     def require_audit_write_policy(self) -> None:
         self.require_locked_audit_epoch()
 
@@ -1164,20 +1170,41 @@ class MmhUnlockedValidationStore(GcsStore):
     def _read_admission_blob(self, blob):
         return blob.download_as_bytes(if_generation_match=int(blob.generation))
 
+    def _read_admission_batch(self, blobs, start):
+        # Only overlap network reads. Every byte is still read on every append,
+        # generation-pinned, and verified in sequence by the caller. Batches
+        # bound queued work/memory; do not submit the entire growing chain.
+        # The append lock and the final fresh manifest check remain in force.
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="mmh-audit-read") as pool:
+            for offset in range(start, len(blobs), 4):
+                batch = blobs[offset:offset + 4]
+                bodies = list(pool.map(self._read_admission_blob, batch))
+                for blob, body in zip(batch, bodies):
+                    yield blob, body
+
     def _verified_audit_prefix(self, key):
+        started = time.monotonic()
+        count, verified = 0, False
         with self._audit_append_lock:
             try:
                 state = super()._verified_audit_prefix(key)
+                count = state.count
                 _, bname, base, current = self._list_audit_slots_for_admission(key)
                 if (bname != state.bucket or base != state.base or len(current) < state.count
                         or self._audit_manifest_sha256(current[:state.count]) != state.manifest_sha256):
                     raise IOError("validation audit changed during full verification")
+                verified = True
                 return state
             except Exception:
                 # Do not let the base cache eviction silently bless a changed
                 # history on the next retry. Fail closed for this process.
                 self._validation_audit_fault = True
                 raise
+            finally:
+                # Counts/timing only: never log record contents or identities.
+                logging.getLogger(__name__).info(
+                    "mmh_audit_verify slots=%d verified=%s elapsed_ms=%.1f readers=4",
+                    count, verified, (time.monotonic() - started) * 1000)
 
     def describe(self, *, retention=None):
         text = super().describe(retention=retention) + " [MMH validation; mutable audit, not WORM]"
