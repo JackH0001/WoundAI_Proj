@@ -91,3 +91,14 @@ test('confirmed logout hides management and restores unauthenticated state',asyn
   await f.click('logout');noAccess(f);assert.equal(f.elements['login-form'].hidden,false);
   assert.equal(f.calls.filter(c=>c.url==='/api/session/logout').length,1);
 });
+
+test('backend outage gives service guidance without blaming password or retrying',async()=>{
+  const f=fixture(state(false));await flush();f.elements['login-user'].value='admin';f.elements['login-password'].value='synthetic-test';
+  f.routes.handler=async()=>response(503,{error:'backend_verification_unavailable'});
+  await f.submit('login-form');
+  assert.equal(f.elements['login-password'].value,'');
+  assert.equal(f.calls.filter(c=>c.url==='/api/session/login').length,1);
+  assert.match(f.elements.status.textContent,/後端服務/);
+  assert.match(f.elements.status.textContent,/無須先重設密碼/);
+  assert.equal(f.elements.logout.hidden,true);
+});

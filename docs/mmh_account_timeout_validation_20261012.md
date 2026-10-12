@@ -1,0 +1,7 @@
+# MMH account completion timeout — 2026-10-12
+
+The approved synthetic account creation completed in the medical backend with HTTP 200 after 35.793 s. The management proxy had already returned HTTP 502 after 30.484 s due to its 30 s upstream timeout. The user therefore never received the generated password. Refresh cannot retrieve it: only its hash remains. Existing account is not to be recreated; recovery requires an explicit password reset with the owner handling the new credential. Role/enable updates do not regenerate passwords. A later unchanged update correctly returned 200 without another backend POST.
+
+Local repair: account POST timeout 90 s and login POST timeout 60 s, scoped to the two fixed backend endpoints; other transport caps remain unchanged. No automatic write retries. CAS/readback and uncertain-result behavior preserved. Backend outage/missing-session endpoint returns safe 503 instead of blaming credentials; UI explains waiting and brings successful one-time-password section into view. This avoids the demonstrated premature proxy abort but is not a latency optimization or a guarantee against all interrupted deliveries.
+
+Validation: manager Python 121/121, UI JavaScript 9/9. Includes simulated 36 s account response, timeout scope/ceiling, no retry, malformed/upstream unavailable login and fail-closed behavior. Local only, not deployed. cascheck26 role change/disable/stale-token and management audit readback remain pending. No password was read, reconstructed or reset by this repair.
