@@ -116,6 +116,7 @@ object AppSettings {
         else prefs(ctx).getString(K_URL, null)?.takeIf { it.isNotBlank() } ?: DEFAULT_URL
 
     fun setBackendUrl(ctx: Context, url: String) {
+        if (normalizeUrl(url) != backendUrl(ctx)) com.woundmeasurement.app.pipeline.MedicalSessionEpoch.invalidate()
         prefs(ctx).edit().putString(K_URL, normalizeUrl(url)).apply()
     }
 
@@ -133,6 +134,7 @@ object AppSettings {
      */
     fun setCredentials(ctx: Context, user: String, password: String): Boolean {
         val enc = runCatching { PhiCrypto.encrypt(password) }.getOrNull() ?: return false
+        com.woundmeasurement.app.pipeline.MedicalSessionEpoch.invalidate()
         prefs(ctx).edit().putString(K_USER, user.trim()).putString(K_PASS_ENC, enc).apply()
         return true
     }
@@ -141,6 +143,7 @@ object AppSettings {
         backendUser(ctx).isNotBlank() && prefs(ctx).getString(K_PASS_ENC, null) != null
 
     fun clearCredentials(ctx: Context) {
+        com.woundmeasurement.app.pipeline.MedicalSessionEpoch.invalidate()
         prefs(ctx).edit().remove(K_USER).remove(K_PASS_ENC).apply()
     }
 

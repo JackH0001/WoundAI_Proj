@@ -99,8 +99,10 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
                 AppSettings.setBackendUrl(ctx, norm)
                 url = norm; user = u; pass = ""; hasSaved = true
             }
-            val c = BackendClient(norm)
-            val ok = withContext(Dispatchers.IO) { c.login(u, p) }
+            val c = withContext(Dispatchers.IO) {
+                if (mmh) MedicalSessions.acquire(ctx) else BackendClient(norm)
+            }
+            val ok = if (mmh) c.identity != null else withContext(Dispatchers.IO) { c.login(u, p) }
             if (!ok) {
                 result = "登入未通過，請確認 WoundAI 帳號、密碼與機構入口。"; return
             }

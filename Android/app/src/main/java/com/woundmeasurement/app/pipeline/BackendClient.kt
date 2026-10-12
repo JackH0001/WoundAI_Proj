@@ -129,15 +129,31 @@ private fun createBackendHttpClient(): OkHttpClient {
 class BackendClient internal constructor(
     private val baseUrl: String,
     jwt: String,
-    private val http: OkHttpClient
-) {
+    http: OkHttpClient
+) : MedicalSessionClient {
     // Public app call sites keep the guarded production transport. The internal
     // overload lets instrumented tests exercise receipt parsing on loopback.
     constructor(baseUrl: String, jwt: String = "") : this(baseUrl, jwt, createBackendHttpClient())
     @Volatile private var jwt: String = jwt
+    private val sessionEpoch = MedicalSessionEpoch.snapshot()
+    private val http = http.newBuilder().apply {
+        if (com.woundmeasurement.app.BuildConfig.MMH_VALIDATION) interceptors().add(0, okhttp3.Interceptor { chain ->
+            fun checkContext() {
+                if (sessionEpoch != MedicalSessionEpoch.snapshot()) {
+                    this@BackendClient.jwt=""; identity=null
+                    throw java.io.IOException("登入設定已變更，請重新驗證；本機紀錄保留")
+                }
+            }
+            checkContext()
+            val response=chain.proceed(chain.request())
+            try { checkContext() } catch (error: Exception) { response.close(); throw error }
+            response
+        })
+    }.build()
+    override val hasSessionToken: Boolean get() = jwt.isNotEmpty()
 
     /** 登入後的身分；未登入為 null。 */
-    @Volatile var identity: LoginIdentity? = null
+    @Volatile override var identity: LoginIdentity? = null
         private set
 
     /** 登入取得 JWT(後端 /api/auth/login)。成功回 true 並存 token 供後續呼叫。同步阻塞,請於 IO 執行。 */
@@ -179,7 +195,7 @@ class BackendClient internal constructor(
         null      // 連不上與降級是兩件事，這裡只回報「問不到」，由呼叫端區分
     }
 
-    fun login(username: String, password: String): Boolean {
+    override fun login(username: String, password: String): Boolean {
         jwt = ""
         identity = null
         val body = JSONObject(mapOf("username" to username, "password" to password)).toString()
@@ -212,6 +228,23 @@ class BackendClient internal constructor(
      * 特別把 clinical 與其他來源分開顯示——範例/模擬圖走同一條管線收進來,
      * 混在一起看會讓收案進度看起來比實際多。
      */
+    override fun validateMedicalSession(): LoginIdentity {
+        val previous=identity; identity=null
+        val req=Request.Builder().url("$baseUrl/api/v1/auth/session")
+            .header("Authorization", "Bearer $jwt").get().build()
+        http.newCall(req).execute().use { response ->
+            if (response.code != 200) {
+                if (response.code in listOf(401,403)) jwt=""
+                throw java.io.IOException(if (response.code==404) "此後端尚未支援登入狀態驗證，請聯絡管理員更新"
+                    else "登入狀態驗證未完成（HTTP ${response.code}），請稍後重新驗證；本次未送出影像")
+            }
+            val verified=try { MedicalSessionContract.decode(response.body?.string() ?: "",previous) }
+            catch (error: Exception) { jwt=""; throw error }
+            identity=verified
+            return verified
+        }
+    }
+
     /**
      * 取一個一次性登入碼，用來把「已登入的身分」交給同一台裝置上的瀏覽器。
      *

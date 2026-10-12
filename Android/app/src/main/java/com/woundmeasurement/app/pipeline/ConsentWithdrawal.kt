@@ -80,8 +80,11 @@ object ConsentWithdrawal {
                 return@withContext Result(emptyList(), list)
             }
 
-            val backend = BackendClient(url)
-            val loggedIn = runCatching { backend.login(user, pass) }.getOrDefault(false)
+            val backend = runCatching {
+                if (com.woundmeasurement.app.BuildConfig.MMH_VALIDATION) MedicalSessions.acquire(ctx)
+                else BackendClient(url).also { if (!it.login(user,pass)) throw java.io.IOException("登入未完成") }
+            }.getOrNull()
+            val loggedIn = backend != null
             if (!loggedIn) {
                 remember(list)
                 return@withContext Result(emptyList(), list)
@@ -93,7 +96,7 @@ object ConsentWithdrawal {
                 // 逐筆處理而非整批：一個代碼失敗不該讓其他的也留在佇列裡，
                 // 而重試時只重試真正沒完成的那些。
                 val ok = runCatching {
-                    if (dir == Dir.WITHDRAW) backend.withdrawConsent(c) else backend.restoreConsent(c)
+                    if (dir == Dir.WITHDRAW) backend!!.withdrawConsent(c) else backend!!.restoreConsent(c)
                 }.getOrDefault(false)
                 if (ok) { done.add(c); forget(c) } else fail.add(c)
             }

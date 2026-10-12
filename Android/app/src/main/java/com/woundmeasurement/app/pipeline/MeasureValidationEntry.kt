@@ -53,7 +53,7 @@ fun MeasureValidationEntry(
     val baseUrl = remember(backendBaseUrl) {
         backendBaseUrl ?: com.woundmeasurement.app.data.store.AppSettings.backendUrl(ctx)
     }
-    val backend = remember(baseUrl) { BackendClient(baseUrl) }
+    var backend by remember(baseUrl) { mutableStateOf(BackendClient(baseUrl)) }
     var loginState by remember { mutableStateOf("後端登入中…") }
     /** 登入身分。null＝尚未登入 → 一律以「最少權限」呈現（fail-closed）。 */
     var me by remember { mutableStateOf<LoginIdentity?>(null) }
@@ -79,6 +79,7 @@ fun MeasureValidationEntry(
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(baseUrl) {
+        me = null
         // ⚠ 憑證改由「設定」頁存在本機(Keystore 加密),**不再硬編碼**。
         // 先前是 login("admin","woundai-admin")——明文編進 APK,反編譯就拿得到,
         // 帶去醫院等於把後端鑰匙一起帶出門。
@@ -88,7 +89,11 @@ fun MeasureValidationEntry(
         loginState = if (u.isBlank() || p.isBlank()) {
             "⚠️ 尚未設定後端帳密 — 請到主畫面「設定」填入後端位址與帳號密碼"
         } else try {
-            val ok = withContext(Dispatchers.IO) { backend.login(u, p) }
+            val ok = withContext(Dispatchers.IO) {
+                if (com.woundmeasurement.app.BuildConfig.MMH_VALIDATION) {
+                    backend = MedicalSessions.acquire(ctx); backend.identity != null
+                } else backend.login(u, p)
+            }
             // 登入成功本身就把容器叫醒了，順手記下時間，讓下方的冷啟動提示判斷得準。
             if (ok) { me = backend.identity; BackendWarmup.ping(ctx) } else me = null
             // 「連不上」與「帳密錯」是兩種處置,訊息要分開(現場才知道要調網路還是調帳號)

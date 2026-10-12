@@ -60,7 +60,7 @@ fun MeasurementReviewScreen(
     val repo = remember { CaseRepository.from(db) }
     val store = remember { LocalImageStore(ctx) }
     val baseUrl = remember(backendBaseUrl) { backendBaseUrl ?: AppSettings.backendUrl(ctx) }
-    val backend = remember(baseUrl) { BackendClient(baseUrl) }
+    var backend by remember(baseUrl) { mutableStateOf(BackendClient(baseUrl)) }
     val scope = rememberCoroutineScope()
 
     var bmp by remember { mutableStateOf<Bitmap?>(null) }
@@ -136,7 +136,11 @@ fun MeasurementReviewScreen(
         val u = AppSettings.backendUser(ctx)
         val p = AppSettings.backendPassword(ctx)
         loggedIn = if (u.isBlank() || p.isBlank()) false else withContext(Dispatchers.IO) {
-            runCatching { backend.login(u, p) }.getOrDefault(false)
+            runCatching {
+                if (com.woundmeasurement.app.BuildConfig.MMH_VALIDATION) {
+                    backend = MedicalSessions.acquire(ctx); backend.identity != null
+                } else backend.login(u, p)
+            }.getOrDefault(false)
         }
         // 權限要跟著這次登入一起取。只有 loggedIn 這個布林值的話，分不出
         // 「醫師登入」與「護理師登入」——而那正是 doctorVerified 該不該成立的分界。

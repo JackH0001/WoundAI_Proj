@@ -64,7 +64,7 @@ class InstitutionSession private constructor(private val token: String, val subj
 
 object InstitutionRegistry {
     @Volatile private var session: InstitutionSession? = null
-    @Synchronized fun replace(next: InstitutionSession?) { session?.invalidate(); session=next }
+    @Synchronized fun replace(next: InstitutionSession?) { com.woundmeasurement.app.pipeline.MedicalSessionEpoch.invalidate(); session?.invalidate(); session=next }
     fun snapshot() = session
 }
 
