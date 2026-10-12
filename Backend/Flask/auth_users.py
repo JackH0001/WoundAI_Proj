@@ -125,8 +125,15 @@ def verify_password(password: str, rec: dict) -> bool:
 
 def _read_all():
     """回 {identity: 最新紀錄}。append-only，同 id 取最後一筆。"""
+    lines = _store().read_lines(USERS_KEY)
+    if BOUND_ORG is not None:
+        from account_versions import resolve
+        result = resolve(lines)
+        if any(row["org"] != BOUND_ORG for row in result.values()):
+            raise RuntimeError("Foreign institution account found in dedicated store")
+        return result
     out = {}
-    for line in _store().read_lines(USERS_KEY):
+    for line in lines:
         line = line.strip()
         if not line:
             continue
@@ -143,6 +150,7 @@ def _read_all():
 
 def list_users(include_disabled: bool = True):
     """不含密碼雜湊——這個結果會回給管理者的 UI。"""
+    from account_versions import revision
     rows = []
     for ident, r in sorted(_read_all().items()):
         if not include_disabled and r.get("disabled"):
@@ -153,6 +161,7 @@ def list_users(include_disabled: bool = True):
             "display_name": r.get("display_name"),
             "disabled": bool(r.get("disabled")),
             "created_at": r.get("created_at"), "updated_at": r.get("updated_at"),
+            "revision": revision(r) if BOUND_ORG is not None else None,
         })
     return rows
 
@@ -188,10 +197,19 @@ def validate_upsert_user(org: str, user: str, role: str, password: str = None):
     return cur
 
 
+_UNSPECIFIED_REVISION = object()
+
+
 def upsert_user(org: str, user: str, role: str, password: str = None,
-                display_name: str = None, disabled: bool = None, actor: str = "system"):
+                display_name: str = None, disabled: bool = None, actor: str = "system",
+                expected_revision=_UNSPECIFIED_REVISION):
     """新增或更新。**append 一筆新紀錄**，不改寫舊的——帳號的變更歷史本身就是稽核軌跡。"""
     cur = validate_upsert_user(org, user, role, password)
+    from account_versions import revision, AccountConflict
+    parent = revision(cur or None)
+    if BOUND_ORG is not None and expected_revision is not _UNSPECIFIED_REVISION:
+        if expected_revision != parent:
+            raise AccountConflict("stale_account_revision")
     rec = {
         "org": org, "user": user, "role": role,
         "display_name": display_name if display_name is not None else cur.get("display_name"),
@@ -205,8 +223,15 @@ def upsert_user(org: str, user: str, role: str, password: str = None,
     elif cur.get("pw"):
         rec["pw"] = cur["pw"]
 
-    _store().append_line(USERS_KEY, json.dumps(rec, ensure_ascii=False))
-    return {k: v for k, v in rec.items() if k != "pw"}
+    if BOUND_ORG is not None:
+        rec["_account_cas"] = {"parent": parent, "nonce": secrets.token_hex(16)}
+        _store().append_user_version(rec)
+    else:
+        _store().append_line(USERS_KEY, json.dumps(rec, ensure_ascii=False))
+    result = {k: v for k, v in rec.items() if k not in ("pw", "_account_cas")}
+    if BOUND_ORG is not None:
+        result["revision"] = revision(rec)
+    return result
 
 
 def authenticate(org: str, user: str, password: str):

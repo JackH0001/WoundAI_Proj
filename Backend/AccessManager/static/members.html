@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MMH 機構成員管理</title><link rel="stylesheet" href="/static/members.css"><script src="/static/members.js" defer></script></head>
+<body><main>
+<header><p class="eyebrow">WoundAI · MMHPS20261007</p><h1>機構成員管理</h1><p>Google 帳號決定能否進入私有服務；WoundAI 帳號決定進入後可執行的工作。</p></header>
+<p id="demo" class="warning" hidden>本機示範：名單與變更只在記憶體，不會連線 Google 或修改真實帳號。</p>
+<section id="login-panel" hidden aria-labelledby="login-title"><h2 id="login-title">管理者登入</h2>
+<p id="google-status">正在確認 Google 門禁…</p><p id="app-status">WoundAI：尚未登入</p>
+<form id="login-form"><label for="login-user">WoundAI 管理帳號</label><input id="login-user" autocomplete="username" required placeholder="mmhps20261007:admin">
+<label for="login-password">密碼</label><input id="login-password" type="password" autocomplete="current-password" required>
+<button id="login-submit" type="submit">登入並驗證管理權限</button></form>
+<button id="logout" type="button" hidden>登出管理介面</button>
+<p class="hint">Google 帳號是機構門禁；WoundAI 帳號決定管理權限。此管理介面登入最長 15 分鐘，服務重啟後需重新登入。登出會清除這裡的 WoundAI session，不會登出瀏覽器的 Google 帳號。</p></section>
+<div class="toolbar"><p id="actor">正在驗證管理者…</p><button id="refresh" type="button">重新整理</button></div>
+<p id="status" role="status" aria-live="polite">正在讀取門禁與帳號狀態…</p>
+<section aria-labelledby="entry-title"><h2 id="entry-title">1. Google 私有入口</h2>
+<p class="hint">此處顯示 MMH 服務的直接授權。上層、群組及條件授權需另行核對；撤除後仍須驗證入口與既有工作階段。</p>
+<div class="table-wrap"><table><thead><tr><th>Google Email</th><th>直接授權</th><th>其他狀態</th><th>操作</th></tr></thead><tbody id="entries"></tbody></table></div>
+<form id="grant-form"><label for="email">新增具名 Google 帳號</label><div class="row"><input id="email" type="email" autocomplete="off" required placeholder="name@example.com"><button id="grant" disabled>檢視開通內容</button></div></form>
+</section>
+<section aria-labelledby="app-title"><h2 id="app-title">2. WoundAI 操作帳號</h2>
+<p class="hint">兩份名單目前尚未建立人員對應，不依 Email 或帳號相似程度自動配對。</p>
+<div class="table-wrap"><table><thead><tr><th>帳號</th><th>角色</th><th>顯示名稱</th><th>狀態</th><th>操作</th></tr></thead><tbody id="accounts"></tbody></table></div>
+<button id="new-account" type="button" disabled>新增 WoundAI 帳號</button>
+<form id="account-form" hidden><h3 id="account-heading">新增帳號</h3>
+<label for="account-user">帳號代號</label><input id="account-user" required pattern="[a-z0-9][a-z0-9._-]{1,30}" maxlength="31" autocomplete="off">
+<label for="account-name">顯示名稱</label><input id="account-name" maxlength="80" autocomplete="off">
+<label for="account-role">角色</label><select id="account-role"><option value="physician">醫師</option><option value="nurse">護理師</option><option value="assistant">助理</option><option value="engineer">工程師</option><option value="admin">管理者</option></select>
+<label><input id="account-disabled" type="checkbox">停用帳號</label>
+<p>新增帳號時，由後端產生一次性顯示的密碼。更新角色或狀態不變更原密碼。</p>
+<button id="review-account" type="submit">檢視帳號變更</button><button id="close-account" type="button">取消編輯</button></form>
+<section id="account-secret" hidden aria-label="新帳號密碼"><h3>請立即保存新帳號密碼</h3><p>僅顯示這一次，重新整理或隱藏後無法取回。請使用機構核准方式交付本人。</p><output id="new-password"></output><button id="hide-password" type="button">已保存，隱藏密碼</button></section>
+<a id="app-console" hidden target="_blank" rel="noopener noreferrer">開啟現有 WoundAI 帳號管理</a>
+<p class="hint" id="account-help">Google 門禁與 WoundAI 帳號分開保存，不會自動同步。若同頁管理尚未接線，請使用既有帳號管理。</p>
+</section>
+<dialog id="confirm"><form method="dialog"><h2>確認變更</h2><p id="change-description"></p>
+<p id="change-scope">僅修改此帳號的 MMH 直接入口授權。WoundAI 角色與 OAuth 測試名單不會同步變更。</p>
+<div class="row"><button id="cancel" value="cancel">取消</button><button id="apply" type="button">確認執行</button></div></form></dialog>
+</main></body></html>

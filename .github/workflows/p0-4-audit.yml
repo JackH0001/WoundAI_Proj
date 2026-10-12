@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'Backend/Flask/**'
+      - 'Backend/AccessManager/**'
       - 'engineering/phase2/test_audit_chain.py'
       - 'engineering/phase2/test_audit_chain_concurrency.py'
       - 'engineering/phase2/test_mmh_unlocked_audit.py'
@@ -60,6 +61,10 @@ on:
       - 'tools/restrict_mmh_bucket_iam.py'
       - 'tools/test_restrict_mmh_bucket_iam.py'
       - 'tools/test_mmh_institution.py'
+      - 'tools/test_mmh_management_session.py'
+      - 'tools/test_mmh_account_versions.py'
+      - 'tools/check_mmh_account_cutover.py'
+      - 'tools/test_check_mmh_account_cutover.py'
       - 'tools/test_mmh_app_boundary.py'
       - 'tools/protect_mmh_buckets.py'
       - 'tools/test_protect_mmh_buckets.py'
@@ -115,6 +120,7 @@ on:
   pull_request:
     paths:
       - 'Backend/Flask/**'
+      - 'Backend/AccessManager/**'
       - 'engineering/phase2/test_audit_chain.py'
       - 'engineering/phase2/test_audit_chain_concurrency.py'
       - 'engineering/phase2/test_mmh_unlocked_audit.py'
@@ -170,6 +176,10 @@ on:
       - 'tools/restrict_mmh_bucket_iam.py'
       - 'tools/test_restrict_mmh_bucket_iam.py'
       - 'tools/test_mmh_institution.py'
+      - 'tools/test_mmh_management_session.py'
+      - 'tools/test_mmh_account_versions.py'
+      - 'tools/check_mmh_account_cutover.py'
+      - 'tools/test_check_mmh_account_cutover.py'
       - 'tools/test_mmh_app_boundary.py'
       - 'tools/protect_mmh_buckets.py'
       - 'tools/test_protect_mmh_buckets.py'
@@ -312,6 +322,11 @@ jobs:
           python -B tools/test_provision_mmh_foundation.py
           python -B tools/test_restrict_mmh_bucket_iam.py
           python -B tools/test_mmh_institution.py
+          python -B tools/test_mmh_management_session.py
+          python -B tools/test_mmh_account_versions.py
+          python -B tools/test_check_mmh_account_cutover.py
+          python -B -W error::ResourceWarning -m unittest discover -s Backend/AccessManager -t . -v
+          node --test Backend/AccessManager/test_members_ui.cjs
           python -B tools/test_mmh_app_boundary.py
           python -B tools/test_protect_mmh_buckets.py
           python -B tools/test_verify_mmh_effective_iam.py
