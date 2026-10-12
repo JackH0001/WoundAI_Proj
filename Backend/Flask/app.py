@@ -26,7 +26,7 @@ import hashlib
 
 # Signing keys are configuration, not source. See runtime_secrets for why there
 # is no literal fallback here any more.
-from institution_context import BOUND_ORG, token_matches_institution
+from institution_context import BOUND_ORG, token_matches_institution, account_session_claims
 from runtime_secrets import resolve_secret
 from model_preprocessing import load_preprocessing
 from lite_service_profile import service_profile, install_lite_perimeter, health_response as lite_health_response
@@ -500,7 +500,7 @@ def login():
     token = create_access_token(
         identity=ident,
         # role 進 JWT：端點據此授權。org 一併帶著，S2 加機構隔離時不必改 token 格式。
-        additional_claims={'role': rec['role'], 'org': org, 'user': user}
+        additional_claims=account_session_claims(rec, org, user)
     )
     try:
         import api_flywheel as _fw
@@ -531,7 +531,9 @@ def issue_onetime_code():
     code = create_access_token(
         identity=ident,
         additional_claims={'role': c.get('role'), 'org': c.get('org'),
-                           'user': c.get('user'), 'typ': 'otc'},
+                           'user': c.get('user'), 'typ': 'otc',
+                           **({'account_revision': c['account_revision']}
+                              if 'account_revision' in c else {})},
         expires_delta=timedelta(seconds=OTC_TTL_SECONDS))
     try:
         import api_flywheel as _fw
@@ -574,11 +576,12 @@ def exchange_onetime_code():
 
     rec = auth_users.get_user(org, user) if (org and user) else None
     # 發碼到交換之間帳號可能已被停用（管理者剛按下停用）。60 秒也是時間。
-    if rec is None or rec.get('disabled'):
+    if (rec is None or rec.get('disabled') or not token_matches_institution(
+            data, lambda _org, _user: rec)):
         return jsonify({'error': '帳號已停用或不存在'}), 401
 
     token = create_access_token(identity=ident,
-                                additional_claims={'role': rec['role'], 'org': org, 'user': user})
+                                additional_claims=account_session_claims(rec, org, user))
     try:
         import api_flywheel as _fw
         _fw.audit(ident, 'login_otc', '-', f"role={rec['role']}（一次性登入碼）", rec['role'], org)

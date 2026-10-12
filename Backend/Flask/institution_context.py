@@ -1,6 +1,7 @@
 """Dedicated medical-service institution binding; unset preserves legacy behavior."""
 import os
 import re
+from account_versions import revision
 
 
 def configured_org(env):
@@ -35,4 +36,19 @@ def token_matches_institution(claims, lookup):
         return False  # Unavailable account state must not authorize a stale token.
     return (isinstance(row, dict) and row.get('org') == BOUND_ORG and row.get('user') == user
             and not row.get('disabled') and row.get('role') == claims.get('role')
-            and isinstance(row.get('role'), str))
+            and isinstance(row.get('role'), str)
+            # New credentials are bound to the exact current account version.
+            # Legacy credentials retain their existing live role/disabled gate,
+            # but are not eligible for the new session-reuse endpoint.
+            and ('account_revision' not in claims
+                 or claims.get('account_revision') == revision(row)))
+
+
+def account_session_claims(record, org, user):
+    """Bind newly issued institution credentials; leave legacy service unchanged."""
+    claims = {'role': record['role'], 'org': org, 'user': user}
+    if BOUND_ORG is not None:
+        if org != BOUND_ORG or record.get('org') != org or record.get('user') != user:
+            raise ValueError('institution_session_mismatch')
+        claims['account_revision'] = revision(record)
+    return claims
