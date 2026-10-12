@@ -115,13 +115,13 @@ el("account-form").addEventListener("submit",event=>{
 el("confirm").addEventListener("cancel",event=>{if(busy)event.preventDefault();});
 el("apply").addEventListener("click",async()=>{
   if(busy||!pending||!snapshot)return;
-  const change=pending,path=pendingPath;pending=null;hidePassword();lock(true);status("正在保存並讀回設定，請勿重複操作…");
+  const change=pending,path=pendingPath;pending=null;hidePassword();lock(true);status("正在保存帳號或門禁設定並核對稽核，可能需要一分鐘以上；請保持此頁開啟，勿重新整理或重複操作…");
   try{
     const result=await api(path,change);
     if(path==="/api/accounts"){
       if(result.status!=="account_readback_verified"||typeof result.changed!=="boolean"||result.identity!==`mmhps20261007:${change.user}`||(change.action==="create"&&typeof result.generated_password!=="string"))throw new Error(messages.account_change_unconfirmed);
       el("confirm").close();el("account-form").hidden=true;el("accounts").replaceChildren();snapshot=null;
-      if(result.generated_password){el("new-password").textContent=result.generated_password;el("account-secret").hidden=false;}
+      if(result.generated_password){el("new-password").textContent=result.generated_password;el("account-secret").hidden=false;el("account-secret").scrollIntoView({block:"center"});}
       status(`${result.changed?"帳號已保存並讀回確認":"帳號已符合要求，未重複寫入"}。Google 門禁未變更。${result.generated_password?"請先保存新密碼，再重新整理。":"請重新整理名單。"}`,"success");
       return;
     }
@@ -161,12 +161,13 @@ async function checkSession(){
 }
 el("login-form").addEventListener("submit",async event=>{
   event.preventDefault();if(busy||!sessionState?.google_verified)return;
-  lock(true);status("正在登入並確認管理權限，請稍候…");
+  lock(true);status("正在登入並確認管理權限，可能需要數十秒；請保持此頁開啟，勿重複登入…");
   let success=false;
   try{
     const response=await fetch("/api/session/login",{method:"POST",credentials:"same-origin",cache:"no-store",
       headers:{"Content-Type":"application/json","X-MMH-Session-CSRF":sessionState.session_csrf},
       body:JSON.stringify({username:el("login-user").value.trim(),password:el("login-password").value})});
+    if(response.status>=500)throw new Error("後端服務暫時無法完成登入驗證，可能是連線或版本問題；請稍後再試，無須先重設密碼。");
     const result=await response.json();
     if(!response.ok||result.status!=="authenticated")throw new Error("登入未完成，請核對 MMH 管理帳密與管理者權限；連續失敗請稍候再試。");
     success=true;

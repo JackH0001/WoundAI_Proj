@@ -15,7 +15,7 @@ import time
 from flask import jsonify, request
 
 from .accounts import AccountAdapter
-from .authentication import BoundSession, LiveAdminAuthenticator, AuthenticationError
+from .authentication import BoundSession, LiveAdminAuthenticator, AuthenticationError, BackendVerificationUnavailable
 from .web import ORG
 
 COOKIE = "__Host-mmh-management"
@@ -179,11 +179,16 @@ class SessionController:
                     return jsonify(error="invalid_login_fields"),400
                 self.store.begin_login(sid,claims["sub"])
                 begun=True
-                response=self.http.post(LOGIN_URL,json={"username":ORG+":"+user,"password":data["password"]},
-                                        timeout=20,allow_redirects=False)
-                if response.status_code!=200:raise AuthenticationError("app_login_failed")
-                token=response.json().get("access_token")
-                if not isinstance(token,str) or not token or len(token)>16384:raise AuthenticationError("app_login_failed")
+                try:
+                    response=self.http.post(LOGIN_URL,json={"username":ORG+":"+user,"password":data["password"]},
+                                            timeout=60,allow_redirects=False)
+                except Exception:
+                    raise BackendVerificationUnavailable() from None
+                if response.status_code==401:raise AuthenticationError("app_login_failed")
+                if response.status_code!=200:raise BackendVerificationUnavailable()
+                try:token=response.json().get("access_token")
+                except Exception:raise BackendVerificationUnavailable() from None
+                if not isinstance(token,str) or not token or len(token)>16384:raise BackendVerificationUnavailable()
                 provisional=BoundSession(claims["sub"],token,"pending")
                 verify=LiveAdminAuthenticator(verify_iap=self.google,resolve_session=lambda req:provisional,
                                               backend_http=self.http,admin_emails=self.allowed)
@@ -191,6 +196,8 @@ class SessionController:
                 if principal.app_identity!=ORG+":"+user:raise AuthenticationError("identity_mismatch")
                 new_sid=self.store.rotate(sid,claims["sub"],token)
                 return self.cookie(jsonify(status="authenticated",app_identity=principal.app_identity),new_sid)
+            except BackendVerificationUnavailable:
+                return jsonify(error="backend_verification_unavailable"),503
             except Exception:
                 return jsonify(error="app_login_failed"),401
             finally:

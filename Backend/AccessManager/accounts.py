@@ -96,7 +96,7 @@ class AccountAdapter:
         # Once a write starts, even a malformed/failed reply may follow a
         # committed account/audit record. No automatic retry or rollback.
         try:
-            response = self.http.post(URL, json=payload, timeout=30, allow_redirects=False)
+            response = self.http.post(URL, json=payload, timeout=90, allow_redirects=False)
             result = response.json()
             if response.status_code == 409 and result.get("error") == "stale_account_revision":
                 raise AccountError("stale_account_refresh_required")

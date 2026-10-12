@@ -119,6 +119,28 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(all(not value.token for value in self.store.rows.values()))
         self.assertEqual(self.login().status_code,200)
 
+    def test_backend_login_failure_distinct_from_invalid_password(self):
+        original=self.backend.post
+        for failure in (Mock(status_code=503),Mock(status_code=302),Mock(status_code=200,json=lambda:[])):
+            with self.subTest(status=failure.status_code):
+                self.backend.post=Mock(return_value=failure)
+                result=self.login()
+                self.assertEqual(result.status_code,503)
+                self.assertEqual(result.json,{"error":"backend_verification_unavailable"})
+                self.assertTrue(all(not r.token and not r.authenticating for r in self.store.rows.values()))
+                self.backend.post.assert_called_once()
+        self.backend.post=original
+        self.assertEqual(self.login().status_code,200)
+
+    def test_missing_session_endpoint_and_timeout_do_not_blame_credentials(self):
+        for failure in (Mock(return_value=Mock(status_code=404)),Mock(side_effect=TimeoutError("private bearer"))):
+            self.backend.get=failure
+            result=self.login()
+            self.assertEqual(result.status_code,503)
+            self.assertEqual(result.json,{"error":"backend_verification_unavailable"})
+            self.assertNotIn("private",result.get_data(as_text=True))
+            self.assertTrue(all(not r.token and not r.authenticating for r in self.store.rows.values()))
+
     def test_nonadmin_valid_credentials_refused(self):
         self.backend.role="physician"
         self.assertEqual(self.login().status_code,401)

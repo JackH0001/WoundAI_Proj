@@ -3,6 +3,8 @@ import json
 import os
 from pathlib import Path
 import sys
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -97,6 +99,83 @@ class UnlockedAuditTests(unittest.TestCase):
         reads = [c[1] for c in self.fake.calls if c[0] == 'download']
         for n in (0, 1):
             self.assertIn('flywheel/audit.jsonl/%020d.jsonl' % n, reads)
+
+    def seed(self, count):
+        previous = "GENESIS"
+        for seq in range(count):
+            row = record(seq, previous)
+            self.fake.put_object('flywheel/audit.jsonl/%020d.jsonl' % seq,
+                                 json.dumps(row).encode())
+            previous = row['hash']
+
+    def test_parallel_reads_bounded_ordered_and_complete(self):
+        self.seed(9)
+        original = self.st._read_admission_blob
+        lock = threading.Lock()
+        barrier = threading.Barrier(4, timeout=5)
+        active = peak = 0
+        finished = []
+        def read(blob):
+            nonlocal active, peak
+            seq = int(blob.name.rsplit('/', 1)[1].split('.')[0])
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            try:
+                if seq < 4: barrier.wait()
+                # Intentionally finish out of order; validation must remain ordered.
+                time.sleep((4 - seq % 4) * .005)
+                return original(blob)
+            finally:
+                with lock:
+                    finished.append(seq)
+                    active -= 1
+        with patch.object(self.st, '_read_admission_blob', read):
+            self.append()
+        self.assertEqual(peak, 4)
+        self.assertEqual(active, 0)
+        self.assertEqual(sorted(finished), list(range(9)))
+        self.assertEqual(len(self.fake.objects), 10)
+        self.assertEqual(self.st._audit_prefix_cache[next(iter(self.st._audit_prefix_cache))].count, 9)
+
+    def test_parallel_network_failure_never_appends_and_latches(self):
+        self.seed(9)
+        original = self.st._read_admission_blob
+        def read(blob):
+            if blob.name.endswith('00000000000000000002.jsonl'):
+                raise IOError('synthetic unavailable')
+            return original(blob)
+        with patch.object(self.st, '_read_admission_blob', read):
+            with self.assertRaises(IOError): self.append()
+        self.assertEqual(len(self.fake.objects), 9)
+        with self.assertRaises(PermissionError): self.append()
+
+    def test_parallel_middle_broken_link_never_appends(self):
+        self.seed(9)
+        bad = record(5, '0' * 64)
+        self.fake.put_object('flywheel/audit.jsonl/00000000000000000005.jsonl',
+                             json.dumps(bad).encode())
+        with self.assertRaisesRegex(IOError, 'broken link'): self.append()
+        self.assertEqual(len(self.fake.objects), 9)
+
+    def test_parallel_next_batch_tamper_is_not_skipped(self):
+        self.seed(9)
+        self.fake.objects['flywheel/audit.jsonl/00000000000000000008.jsonl'] = b'{}'
+        with self.assertRaises(IOError): self.append()
+        self.assertEqual(len(self.fake.objects), 9)
+
+    def test_parallel_manifest_change_after_reads_still_latches(self):
+        self.seed(9)
+        original = self.st._read_admission_blob
+        def read(blob):
+            data = original(blob)
+            if blob.name.endswith('00000000000000000008.jsonl'):
+                self.fake.put_object(blob.name, data)
+            return data
+        with patch.object(self.st, '_read_admission_blob', read):
+            with self.assertRaises(IOError): self.append()
+        self.assertEqual(len(self.fake.objects), 9)
+        with self.assertRaises(PermissionError): self.append()
 
     def test_formal_gate_still_rejects_unlocked_subclass(self):
         with self.assertRaises(PermissionError): self.st.require_locked_audit_epoch()

@@ -49,6 +49,18 @@ class TransportTests(unittest.TestCase):
                 http.request(method,url,**args)
         self.raw.request.assert_not_called();self.tokens.token.assert_not_called()
 
+    def test_extended_wait_only_for_fixed_backend_posts(self):
+        http=r.ScopedHttp(self.raw,self.tokens,'backend')
+        http.post(r.ACCOUNTS_URL,timeout=90)
+        http.post(r.LOGIN_URL,timeout=60)
+        self.assertEqual(self.raw.request.call_count,2)
+        for method,url,timeout in [('POST',r.ACCOUNTS_URL,91),('POST',r.LOGIN_URL,61),('GET',r.ACCOUNTS_URL,31),('GET',r.SESSION_URL,31)]:
+            with self.assertRaises(r.RuntimeErrorSafe):http.request(method,url,timeout=timeout)
+        self.assertEqual(self.raw.request.call_count,2)
+        self.raw.request.side_effect=TimeoutError('synthetic')
+        with self.assertRaises(r.RuntimeErrorSafe):http.post(r.ACCOUNTS_URL,timeout=90)
+        self.assertEqual(self.raw.request.call_count,3)
+
     def test_cloud_scope_does_not_include_clinical_objects_or_delete(self):
         http=r.ScopedHttp(self.raw,self.tokens,'cloud')
         for method,url,args in [('DELETE',f'https://storage.googleapis.com/storage/v1/b/{BUCKET}/o/x',{}),
