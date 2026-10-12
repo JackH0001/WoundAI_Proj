@@ -20,6 +20,12 @@ class AuthenticationError(RuntimeError):
     pass
 
 
+class BackendVerificationUnavailable(AuthenticationError):
+    """Fixed diagnostic code only; never includes backend bodies or tokens."""
+    def __init__(self):
+        super().__init__("backend_verification_unavailable")
+
+
 @dataclass(frozen=True)
 class BoundSession:
     """Loaded from server storage, never from a client JSON object."""
@@ -80,12 +86,21 @@ class LiveAdminAuthenticator:
                 raise ValueError()
             # The injected transport carries a separately authorized IAP entry
             # credential. The application bearer must not be replaced by it.
-            response = self.http.get(SESSION_URL,
-                headers={"Authorization": "Bearer " + session.app_token},
-                timeout=15, allow_redirects=False)
-            if response.status_code != 200:
+            try:
+                response = self.http.get(SESSION_URL,
+                    headers={"Authorization": "Bearer " + session.app_token},
+                    timeout=15, allow_redirects=False)
+            except Exception:
+                raise BackendVerificationUnavailable() from None
+            if response.status_code in (401, 403):
                 raise ValueError()
-            data = response.json()
+            if response.status_code != 200:
+                raise BackendVerificationUnavailable()
+            try:
+                data = response.json()
+                if not isinstance(data, dict):raise ValueError()
+            except Exception:
+                raise BackendVerificationUnavailable() from None
             if (data.get("org") != ORG or data.get("role") != "admin"
                     or not isinstance(data.get("identity"), str)
                     or not data["identity"].startswith(ORG + ":")
@@ -95,5 +110,7 @@ class LiveAdminAuthenticator:
                 raise ValueError()
             return VerifiedAdmin(email, subject, data["identity"], "admin", ORG,
                                  session.nonce + ":" + data["session_id"])
+        except BackendVerificationUnavailable:
+            raise
         except Exception:
             raise AuthenticationError("administrator_verification_failed") from None

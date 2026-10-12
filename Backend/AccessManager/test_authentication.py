@@ -107,7 +107,7 @@ class AuthenticationTests(unittest.TestCase):
     def test_no_bearer_in_repr_or_exception(self):
         self.assertNotIn(self.session.app_token, repr(self.session))
         self.backend.get.side_effect = RuntimeError(self.session.app_token)
-        with self.assertRaisesRegex(AuthenticationError, "^administrator_verification_failed$"):
+        with self.assertRaisesRegex(AuthenticationError, "^backend_verification_unavailable$"):
             self.auth(self.request())
 
     def test_rotating_session_changes_csrf_binding(self):

@@ -55,6 +55,20 @@ class AccountTests(unittest.TestCase):
         self.assertTrue(result["generated_password"])
         self.assertNotIn("generated_password", self.adapter.list_accounts()[1])
 
+    def test_slow_successful_creation_receipt_not_cut_off_at_thirty_seconds(self):
+        original=self.http.post
+        calls=[]
+        def delayed(*args,**kwargs):
+            calls.append(kwargs["timeout"])
+            if kwargs["timeout"] < 36:raise TimeoutError("synthetic 36-second response")
+            return original(*args,**kwargs)
+        self.http.post=delayed
+        result=self.change()
+        self.assertEqual(calls,[90])
+        self.assertEqual(result["status"],"account_readback_verified")
+        self.assertTrue(result["generated_password"])
+        self.assertEqual(len(self.http.posts),1)
+
     def test_role_disable_enable_preserves_password(self):
         self.change()
         self.change(action="update", role="nurse", disabled=True)

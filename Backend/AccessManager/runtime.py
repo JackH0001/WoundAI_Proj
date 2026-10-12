@@ -147,7 +147,11 @@ class ScopedHttp:
         elif self.purpose == "cloud":
             headers["Authorization"] = "Bearer " + self.tokens.token("cloud")
         timeout = kwargs.pop("timeout", 20)
-        if type(timeout) not in (int, float) or not 0 < timeout <= 30:
+        # MMH unlocked audit writes can exceed 30s. Keep the larger budget
+        # confined to the two fixed backend POSTs; never retry a timed-out write.
+        limit = 90 if self.purpose == "backend" and method == "POST" and url == ACCOUNTS_URL else (
+            60 if self.purpose == "backend" and method == "POST" and url == LOGIN_URL else 30)
+        if type(timeout) not in (int, float) or not 0 < timeout <= limit:
             raise RuntimeErrorSafe("transport_timeout_rejected")
         kwargs["allow_redirects"] = False
         try:
