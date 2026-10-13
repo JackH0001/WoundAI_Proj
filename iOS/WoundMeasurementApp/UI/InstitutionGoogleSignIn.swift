@@ -3,6 +3,43 @@ import SwiftUI
 import GoogleSignIn
 import GoogleSignInSwift
 
+/// SDK boundary is injectable so recovery/identity transitions can be tested without real accounts.
+struct InstitutionGoogleAccount {
+    let subject: String
+    let email: String?
+    let provider: InstitutionRefreshingTokenProvider
+}
+
+@MainActor
+protocol InstitutionGoogleDriver {
+    var hasPreviousSignIn: Bool { get }
+    func authenticate(clientID: String, audience: String, presenting: UIViewController?) async throws -> InstitutionGoogleAccount
+    func signOut()
+}
+
+@MainActor
+final class InstitutionGoogleSDKDriver: InstitutionGoogleDriver {
+    var hasPreviousSignIn: Bool { GIDSignIn.sharedInstance.hasPreviousSignIn() }
+    func signOut() { GIDSignIn.sharedInstance.signOut() }
+    func authenticate(clientID: String, audience: String, presenting: UIViewController?) async throws -> InstitutionGoogleAccount {
+        GIDSignIn.sharedInstance.configuration = GIDConfiguration(clientID: clientID, serverClientID: audience)
+        let user: GIDGoogleUser
+        if let presenting { user = try await GIDSignIn.sharedInstance.signIn(withPresenting: presenting).user }
+        else { user = try await GIDSignIn.sharedInstance.restorePreviousSignIn() }
+        guard let subject = user.userID, !subject.isEmpty else { throw InstitutionEntryError.signInRequired }
+        let provider = InstitutionRefreshingTokenProvider(subject: subject, audience: audience) {
+            guard GIDSignIn.sharedInstance.currentUser?.userID == subject else { throw InstitutionEntryError.signInRequired }
+            let updated = try await user.refreshTokensIfNeeded()
+            guard GIDSignIn.sharedInstance.currentUser?.userID == subject,
+                  updated.userID == subject, let token = updated.idToken?.tokenString else {
+                throw InstitutionEntryError.signInRequired
+            }
+            return token
+        }
+        return InstitutionGoogleAccount(subject: subject, email: user.profile?.email, provider: provider)
+    }
+}
+
 @MainActor
 final class InstitutionGoogleSession: ObservableObject {
     static let shared = InstitutionGoogleSession()
@@ -12,20 +49,35 @@ final class InstitutionGoogleSession: ObservableObject {
     @Published private(set) var message: String?
     private var provider: InstitutionRefreshingTokenProvider?
     private var generation: UInt64 = 0
-
     private let rememberedSubjectKey = "mmh.google.rememberedSubject"
-    private var restoreAttempted = false
+    private let driver: any InstitutionGoogleDriver
+    private let preferences: UserDefaults
+    private let registry: InstitutionTransportRegistry
+    private let clock: () -> TimeInterval
+    private let makeTransport: (URL, String, String, any InstitutionIDTokenProvider) throws -> any InstitutionAuthenticatedTransport
+    private var lastRestoreAt: TimeInterval?
+
+    init(driver: (any InstitutionGoogleDriver)? = nil, preferences: UserDefaults = .standard,
+         registry: InstitutionTransportRegistry = .shared,
+         clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         makeTransport: @escaping (URL, String, String, any InstitutionIDTokenProvider) throws -> any InstitutionAuthenticatedTransport = {
+             try InstitutionIAPTransport(origin: $0, audience: $1, subject: $2, provider: $3)
+         }) {
+        self.driver = driver ?? InstitutionGoogleSDKDriver()
+        self.preferences = preferences; self.registry = registry; self.clock = clock
+        self.makeTransport = makeTransport
+    }
 
     func restoreIfNeeded() async {
-        guard !ready, !busy, !restoreAttempted else { return }
-        restoreAttempted = true
-        guard GIDSignIn.sharedInstance.hasPreviousSignIn() else { return }
+        guard !ready, !busy, driver.hasPreviousSignIn else { return }
+        let now = clock()
+        // A transient offline launch must not permanently disable recovery for this process.
+        if let lastRestoreAt, now - lastRestoreAt < 60 { return }
+        lastRestoreAt = now
         await authenticate(presenting: nil)
     }
 
-    func signIn(presenting: UIViewController) async {
-        await authenticate(presenting: presenting)
-    }
+    func signIn(presenting: UIViewController) async { await authenticate(presenting: presenting) }
 
     private func authenticate(presenting: UIViewController?) async {
         guard !busy else { return }
@@ -40,53 +92,41 @@ final class InstitutionGoogleSession: ObservableObject {
               audience.hasSuffix(".apps.googleusercontent.com"), clientID != audience else {
             message = InstitutionEntryError.unconfigured.localizedDescription; return
         }
-        GIDSignIn.sharedInstance.configuration = GIDConfiguration(clientID: clientID, serverClientID: audience)
+        var candidate: (any InstitutionAuthenticatedTransport)?
         do {
-            let user: GIDGoogleUser
-            if let presenting { user = try await GIDSignIn.sharedInstance.signIn(withPresenting: presenting).user }
-            else { user = try await GIDSignIn.sharedInstance.restorePreviousSignIn() }
+            let account = try await driver.authenticate(clientID: clientID, audience: audience, presenting: presenting)
             try Task.checkCancellation()
-            guard attempt == generation, let subject = user.userID, !subject.isEmpty else {
-                throw InstitutionEntryError.signInRequired
-            }
-            let boundUser = user
-            let fresh = InstitutionRefreshingTokenProvider(subject: subject, audience: audience) {
-                guard GIDSignIn.sharedInstance.currentUser?.userID == subject else { throw InstitutionEntryError.signInRequired }
-                let updated = try await boundUser.refreshTokensIfNeeded()
-                guard GIDSignIn.sharedInstance.currentUser?.userID == subject,
-                      updated.userID == subject, let token = updated.idToken?.tokenString else {
-                    throw InstitutionEntryError.signInRequired
-                }
-                return token
-            }
-            _ = try await fresh.freshToken()
-            guard attempt == generation else { fresh.invalidate(); throw InstitutionEntryError.signInRequired }
-            // Preserve the encrypted application credentials only for the same Google identity.
-            if UserDefaults.standard.string(forKey: rememberedSubjectKey) != subject {
-                AppSettings.clearCredentials()
-            }
-            provider = fresh
-            email = user.profile?.email ?? "Google 帳號已登入"
-            // OAuth can be tested before service IAP activation. Never send tokens to a placeholder.
-            guard let configured = Bundle.main.object(forInfoDictionaryKey: "WoundAIInstitutionBackendURL") as? String,
-                  !configured.isEmpty, let origin = URL(string: configured),
-                  origin.host?.hasSuffix(".run.app") == true else {
-                message = "Google 帳號已登入；機構入口尚未啟用，目前不能連接後端。"
+            guard attempt == generation, !account.subject.isEmpty else { throw InstitutionEntryError.signInRequired }
+            provider = account.provider
+            let previous = preferences.string(forKey: rememberedSubjectKey)
+            if presenting == nil && previous != account.subject {
+                await clearSession(forget: false)
+                message = "無法確認為原 Google 帳號，請由設定明確登入或切換帳號；本機紀錄保留。"
                 return
             }
-            let transport = try InstitutionIAPTransport(origin: origin, audience: audience, subject: subject, provider: fresh)
-            // An SDK login alone is not IAP acceptance. Read only, no App credentials.
+            _ = try await account.provider.freshToken()
+            guard attempt == generation else { throw InstitutionEntryError.signInRequired }
+            guard let configured = Bundle.main.object(forInfoDictionaryKey: "WoundAIInstitutionBackendURL") as? String,
+                  !configured.isEmpty, let origin = URL(string: configured), origin.host?.hasSuffix(".run.app") == true else {
+                throw InstitutionEntryError.unconfigured
+            }
+            let transport = try makeTransport(origin, audience, account.subject, account.provider)
+            candidate = transport
             let probeURL = origin.appendingPathComponent("api/health").appending(queryItems: [URLQueryItem(name: "mmh_native_probe", value: "1")])
             let (data, response) = try await transport.send(URLRequest(url: probeURL))
             try InstitutionEntryHealth.validate(data, response: response, service: "woundai-backend-mmhps20261007")
-            guard attempt == generation else { await transport.invalidate(); throw InstitutionEntryError.signInRequired }
-            InstitutionTransportRegistry.shared.replace(with: transport)
-            UserDefaults.standard.set(subject, forKey: rememberedSubjectKey)
+            guard attempt == generation else { throw InstitutionEntryError.signInRequired }
+            // Change application identity only after IAP accepts the explicitly chosen Google subject.
+            if previous != account.subject { AppSettings.clearCredentials() }
+            registry.replace(with: transport); candidate = nil
+            preferences.set(account.subject, forKey: rememberedSubjectKey)
+            email = account.email ?? "Google 帳號已登入"
             ready = true
             message = "Google 與機構入口驗證通過。原帳號可沿用已儲存的 WoundAI 登入資料；上傳狀態請查看紀錄。"
         } catch {
+            await candidate?.invalidate()
             await clearSession(forget: false)
-            message = (error as? InstitutionEntryError)?.localizedDescription ?? "Google 登入未完成。若已取消可重新操作；請確認網路及機構帳號資格。"
+            message = (error as? InstitutionEntryError)?.localizedDescription ?? "Google 登入未完成。請確認網路與入口資格，稍後可重新進入設定恢復登入；本機紀錄保留。"
         }
     }
 
@@ -102,12 +142,12 @@ final class InstitutionGoogleSession: ObservableObject {
         generation &+= 1
         ready = false; email = nil
         provider?.invalidate(); provider = nil
-        let old = InstitutionTransportRegistry.shared.replace(with: nil)
+        let old = registry.replace(with: nil)
         await old?.invalidate()
         if forget {
             AppSettings.clearCredentials()
-            UserDefaults.standard.removeObject(forKey: rememberedSubjectKey)
-            GIDSignIn.sharedInstance.signOut()
+            preferences.removeObject(forKey: rememberedSubjectKey)
+            driver.signOut()
         }
     }
 }
