@@ -43,12 +43,20 @@ tags = ["password"]
 
   # Only two literal values in the in-memory iOS transport fixture are fake.
   # Both path and exact matched assignment must match; other values still fail.
-  [rules.allowlist]
+  [[rules.allowlists]]
   description = "Exact synthetic iOS transport fixture credentials"
   condition = "AND"
   regexTarget = "match"
   paths = ['''^iOS/WoundAITests/InstitutionIAPTransportTests\.swift$''']
   regexes = ['''^password\s*:\s*"synthetic(?:-password)?"$''']
+
+  # Synthetic in-memory session fixture only; require exact path AND value.
+  [[rules.allowlists]]
+  description = "Exact synthetic management session fixture credential"
+  condition = "AND"
+  regexTarget = "match"
+  paths = ['''^Backend/AccessManager/test_sessions\.py$''']
+  regexes = ['''^password\s*=\s*"synthetic-test"$''']
 
 [allowlist]
 description = "忽略測試/範例與 stub"

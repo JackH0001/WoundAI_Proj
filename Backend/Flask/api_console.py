@@ -613,6 +613,26 @@ async function doRetract(imageId){
 }
 
 /* ───────── 系統狀態 ───────── */
+function auditProtectionRow(h){
+  const r = h.audit_retention || {};
+  const mmh = h.audit_write_mode === "mmh-unlocked-validation";
+  const seconds = r.retention_seconds;
+  let label = "尚未確認", detail = "無法確認稽核桶保留設定，不宣稱 WORM 保護。", cls = "bad";
+  if(r.verified === true && typeof r.locked === "boolean" &&
+     Number.isSafeInteger(seconds) && seconds >= 0){
+    if(r.locked === true && seconds > 0){
+      label = "已鎖定保留政策"; cls = "ok";
+      detail = "已讀回鎖定狀態，保留 " + seconds + " 秒；不代表其他合規條件均已完成。";
+    }else if(r.locked === false){
+      label = mmh ? "MMH 驗證模式・未鎖定" : "未鎖定";
+      detail = seconds > 0 ? "目前有保留期限，但政策可變更；不屬於 WORM 鎖定保護。"
+                           : "目前沒有保留政策；不屬於 WORM 鎖定保護。";
+      if(mmh) detail += " 此模式僅供特案驗證，雜湊鏈無法防止有權者整份重寫。";
+    }
+  }
+  return `<tr><td>稽核保留保護</td><td class="${cls}">${esc(label)}</td>` +
+    `<td style="color:var(--dim)">${esc(detail)}</td></tr>`;
+}
 async function loadSys(){
   // /api/health 不需 token（Cloud Run 探針要用），但這一頁只在有 audit.read 時開放——
   // 降級原因會透露內部模組名稱，沒必要讓臨床角色看到。
@@ -641,8 +661,7 @@ async function loadSys(){
           <code>${esc(h.store||"—")}</code>
           ${isGcs ? "" : "<br><span style='font-size:12px'>不是 GCS：Cloud Run 的容器檔案系統是暫時的，"+
                          "佇列與影像會在實例回收時<b>無聲消失</b></span>"}</td></tr>
-      <tr><td>稽核 WORM 桶</td><td>${ok(/WORM/.test(h.store||""))}</td>
-          <td style="color:var(--dim)">未接上時稽核寫在主桶，刪得掉——雜湊鏈擋不住整份重寫</td></tr>
+      ${auditProtectionRow(h)}
     </table>
     <p class="note">⚠ 若「整體」是 degraded 仍能量測，但<b>面積數值不可作臨床用途</b>。
     這正是把降級狀態拉到檯面上的理由——先前它只寫在日誌裡，前端照樣顯示一個看起來正常的數字。</p>`
@@ -853,7 +872,7 @@ async function renameUser(u){
   if(name === null) return;
   try{
     // 不傳 password → 沿用既有雜湊；不傳 disabled → 沿用目前狀態。
-    await api("/api/v1/users", {body: JSON.stringify({user:u, role:rec.role, display_name:name})});
+    await api("/api/v1/users", {body: JSON.stringify({user:u, expected_revision:rec.revision, role:rec.role, display_name:name})});
     loadUsers(); loaded.audit = false;
   }catch(e){ alert("失敗：" + e.message); }
 }
@@ -890,7 +909,7 @@ async function changeRole(u){
   try{
     // upsert 是整筆覆寫：display_name / disabled 要原樣帶回，否則會被清掉；
     // 不傳 password＝沿用既有雜湊（改角色不該連帶換密碼）。
-    await api("/api/v1/users", {body: JSON.stringify({user:u, role:pick.v,
+    await api("/api/v1/users", {body: JSON.stringify({user:u, expected_revision:rec.revision, role:pick.v,
       display_name:rec.display_name||"", disabled:!!rec.disabled})});
     loadUsers(); loaded.audit = false;
   }catch(e){ alert("失敗：" + e.message); }
@@ -901,7 +920,7 @@ async function toggleUser(u){
   if(!confirm((to?"停用":"啟用") + " " + u + "？")) return;
   try{
     // upsert 是整筆覆寫，role 少傳會被後端拒絕；密碼不傳＝不變更。
-    await api("/api/v1/users", {body: JSON.stringify({user:u, role:rec.role, disabled:to,
+    await api("/api/v1/users", {body: JSON.stringify({user:u, expected_revision:rec.revision, role:rec.role, disabled:to,
                                                       display_name:rec.display_name||""})});
     loadUsers(); loaded.audit = false;
   }catch(e){ alert("失敗：" + e.message); }
@@ -910,11 +929,11 @@ async function resetPw(u){
   const rec = users.find(x => x.user === u); if(!rec) return;
   if(!confirm("重設 " + u + " 的密碼？舊密碼立即失效，新密碼只顯示一次。")) return;
   try{
-    const j = await api("/api/v1/users", {body: JSON.stringify({user:u, role:rec.role,
+    const j = await api("/api/v1/users", {body: JSON.stringify({user:u, expected_revision:rec.revision, role:rec.role,
       display_name:rec.display_name||"", disabled:!!rec.disabled, generate_password:true})});
     banner(`✓ <code>${esc(u)}</code> 新密碼：<span class="pw">${esc(j.generated_password)}</span><br>` +
            `<span style="font-size:12px">舊密碼已失效。${esc(j.note||"")}</span>`);
-    loaded.audit = false;
+    loadUsers(); loaded.audit = false;
   }catch(e){ alert("失敗：" + e.message); }
 }
 

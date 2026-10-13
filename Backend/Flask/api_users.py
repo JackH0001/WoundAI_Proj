@@ -15,6 +15,8 @@ from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 
 import auth_users
 import api_flywheel as fw
+import institution_context
+from account_versions import AccountConflict, EMPTY_REVISION, revision
 
 # 密碼字元集刻意排除 l/1/I、O/0 —— 密碼要靠人抄寫或口述傳遞，
 # 同形字造成的「明明打對卻登不進去」會消耗掉大量支援時間。
@@ -27,6 +29,14 @@ def _gen_password(n: int = 14) -> str:
 users_bp = Blueprint("users", __name__)
 
 
+@users_bp.after_request
+def medical_session_no_store(response):
+    # Include JWT decorator / global-hook failures, not just route responses.
+    if request.path == "/api/v1/auth/session":
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 def _guard():
     """回 (actor, role, org) 或 None 表示無權限。"""
     c = get_jwt() or {}
@@ -36,14 +46,80 @@ def _guard():
     return (get_jwt_identity() or "unknown", role, c.get("org"))
 
 
+@users_bp.get("/api/v1/auth/session")
+@jwt_required()
+def current_user_session():
+    """Read-only self check for medical clients; never grants admin access.
+
+    Require a revision-bound credential before mobile session reuse. A legacy
+    token must log in once to obtain this contract. No audit mutation or token
+    refresh occurs here, and current account state is read on every request.
+    """
+    claims = get_jwt()
+    if institution_context.BOUND_ORG != "mmhps20261007":
+        body, status = jsonify(error="session_reuse_not_configured"), 503
+    elif (claims.get("org") != institution_context.BOUND_ORG
+          or claims.get("typ") == "otc"
+          or not isinstance(claims.get("user"), str)
+          or not auth_users.USER_RE.fullmatch(claims["user"])):
+        body, status = jsonify(error="session_invalid"), 401
+    else:
+        try:
+            row = auth_users.get_user(claims.get("org"), claims.get("user"))
+        except Exception:
+            row = None
+            body, status = jsonify(error="session_verification_unavailable"), 503
+        else:
+            if (claims.get("typ") == "otc" or "account_revision" not in claims
+                    or not institution_context.token_matches_institution(claims, lambda org, user: row)):
+                body, status = jsonify(error="session_invalid"), 401
+            elif not auth_users.can(row["role"], "measure.sample"):
+                body, status = jsonify(error="medical_session_required"), 403
+            else:
+                role = row["role"]
+                body, status = jsonify(identity=get_jwt_identity(), org=row["org"],
+                    user=row["user"], role=role, role_zh=auth_users.ROLES[role],
+                    display_name=row.get("display_name"),
+                    perms=sorted(k for k in auth_users.PERMS if auth_users.can(role, k)),
+                    expires_at=claims["exp"], session_contract="account-revision-v1"), 200
+    body.headers["Cache-Control"] = "no-store"
+    return body, status
+
+
+@users_bp.get("/api/v1/users/session")
+@jwt_required()
+def management_session():
+    """Read-only live admin check for the separate institution manager.
+
+    Repeat the live check here even when the blueprint is mounted without the
+    main application's JWT callback. No password, hash or bearer is returned.
+    """
+    claims = get_jwt()
+    response = None
+    if institution_context.BOUND_ORG != "mmhps20261007":
+        response = jsonify(error="management_not_configured"), 503
+    elif (claims.get("typ") == "otc"
+          or not institution_context.token_matches_institution(claims, auth_users.get_user)):
+        response = jsonify(error="session_invalid"), 401
+    elif claims.get("role") != "admin":
+        response = jsonify(error="administrator_required"), 403
+    else:
+        response = jsonify(identity=get_jwt_identity(), org=claims["org"],
+                           role=claims["role"], session_id=claims["jti"],
+                           expires_at=claims["exp"]), 200
+    body, status = response
+    body.headers["Cache-Control"] = "no-store"
+    return body, status
+
+
 @users_bp.route("/api/v1/users", methods=["GET"])
 @jwt_required()
 def list_users():
     who = _guard()
     if who is None:
         return jsonify({"error": "權限不足", "issues": ["僅管理者可檢視帳號清單。"]}), 403
-    return jsonify({"users": auth_users.list_users(),
-                    "roles": auth_users.ROLES}), 200
+    return jsonify({"users": auth_users.list_users(), "roles": auth_users.ROLES,
+                    "account_versioning": "cas-v1" if institution_context.BOUND_ORG is not None else None}), 200
 
 
 @users_bp.route("/api/v1/users", methods=["POST"])
@@ -71,12 +147,15 @@ def upsert_user():
     # 先做與真正寫入路徑共用的純驗證。格式錯誤不是一個已接受的帳號異動，
     # 不應先污染不可變 audit intent；更不能在鏈已受損時把原本應為 400 的請求變成 503。
     try:
-        auth_users.validate_upsert_user(
+        current = auth_users.validate_upsert_user(
             org=target_org, user=target_user, role=target_role,
             password=d.get("password"),
         )
     except ValueError as e:
         return jsonify({"error": "參數不合", "issues": [str(e)]}), 400
+    expected = d.get("expected_revision", EMPTY_REVISION)
+    if institution_context.BOUND_ORG is not None and expected != revision(current or None):
+        return jsonify(error="stale_account_revision", issues=["帳號已更新或缺少版本，請重新整理後再確認。"]), 409
     # Account state is durable clinical-system security state.  Do not create
     # or alter it unless an immutable audit intent has already landed.  Never
     # put the password (generated or supplied) in the intent detail.
@@ -85,6 +164,7 @@ def upsert_user():
                         "%s:%s" % (target_org, target_user),
                         role, org,
                         {"role": d.get("role"), "disabled": d.get("disabled"),
+                         "expected_revision": expected if institution_context.BOUND_ORG is not None else None,
                          "generated_password": bool(d.get("generate_password"))})
     except fw.AuditUnavailable:
         return jsonify({"error": "audit_unavailable"}), 503
@@ -97,7 +177,10 @@ def upsert_user():
             display_name=d.get("display_name"),
             disabled=d.get("disabled"),
             actor=actor,
+            expected_revision=expected,
         )
+    except AccountConflict:
+        return jsonify(error="stale_account_revision", issues=["另一筆修改已先保存，請重新整理後再確認。"]), 409
     except ValueError as e:
         return jsonify({"error": "參數不合", "issues": [str(e)]}), 400
     except Exception as e:
@@ -105,8 +188,8 @@ def upsert_user():
     # 帳號異動一律進稽核。**誰開了帳號**與**誰用帳號做了什麼**同等重要——
     # 少了前者，一個被濫用的帳號查不出是誰核發的。
     fw.audit(actor, "user_upsert", "%s:%s" % (rec["org"], rec["user"]),
-             "role=%s disabled=%s pw_changed=%s" % (rec["role"], rec["disabled"],
-                                                    bool(d.get("password"))), role, org)
+             "role=%s disabled=%s pw_changed=%s revision=%s" % (rec["role"], rec["disabled"],
+                                                    bool(d.get("password")), rec.get("revision", "legacy")), role, org)
     # 回應形狀與 GET /users 的每一列對齊（補 identity / role_zh）——
     # 兩個端點回不同形狀的同一種物件，前端就得寫兩套解析，那是 bug 的溫床。
     rec = dict(rec, identity="%s:%s" % (rec["org"], rec["user"]),

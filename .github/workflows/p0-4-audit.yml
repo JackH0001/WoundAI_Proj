@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'Backend/Flask/**'
+      - 'Backend/AccessManager/**'
       - 'engineering/phase2/test_audit_chain.py'
       - 'engineering/phase2/test_audit_chain_concurrency.py'
       - 'engineering/phase2/test_mmh_unlocked_audit.py'
@@ -60,6 +61,11 @@ on:
       - 'tools/restrict_mmh_bucket_iam.py'
       - 'tools/test_restrict_mmh_bucket_iam.py'
       - 'tools/test_mmh_institution.py'
+      - 'tools/test_mmh_management_session.py'
+      - 'tools/test_mmh_medical_session.py'
+      - 'tools/test_mmh_account_versions.py'
+      - 'tools/check_mmh_account_cutover.py'
+      - 'tools/test_check_mmh_account_cutover.py'
       - 'tools/test_mmh_app_boundary.py'
       - 'tools/protect_mmh_buckets.py'
       - 'tools/test_protect_mmh_buckets.py'
@@ -89,6 +95,7 @@ on:
       - 'engineering/phase2/Assert-CIGreen.ps1'
       - 'engineering/phase2/test_ci_gate_static.py'
       - 'engineering/phase2/test_audit_console_verdict.py'
+      - 'engineering/phase2/test_audit_status_ui.py'
       - 'engineering/phase2/test_test_isolation_from_cloud.py'
       - 'tools/windows/run_python_tests.py'
       - 'tools/windows/run_backend_http_test.py'
@@ -129,6 +136,7 @@ on:
   pull_request:
     paths:
       - 'Backend/Flask/**'
+      - 'Backend/AccessManager/**'
       - 'engineering/phase2/test_audit_chain.py'
       - 'engineering/phase2/test_audit_chain_concurrency.py'
       - 'engineering/phase2/test_mmh_unlocked_audit.py'
@@ -184,6 +192,11 @@ on:
       - 'tools/restrict_mmh_bucket_iam.py'
       - 'tools/test_restrict_mmh_bucket_iam.py'
       - 'tools/test_mmh_institution.py'
+      - 'tools/test_mmh_management_session.py'
+      - 'tools/test_mmh_medical_session.py'
+      - 'tools/test_mmh_account_versions.py'
+      - 'tools/check_mmh_account_cutover.py'
+      - 'tools/test_check_mmh_account_cutover.py'
       - 'tools/test_mmh_app_boundary.py'
       - 'tools/protect_mmh_buckets.py'
       - 'tools/test_protect_mmh_buckets.py'
@@ -213,6 +226,7 @@ on:
       - 'engineering/phase2/Assert-CIGreen.ps1'
       - 'engineering/phase2/test_ci_gate_static.py'
       - 'engineering/phase2/test_audit_console_verdict.py'
+      - 'engineering/phase2/test_audit_status_ui.py'
       - 'engineering/phase2/test_test_isolation_from_cloud.py'
       - 'tools/windows/run_python_tests.py'
       - 'tools/windows/run_backend_http_test.py'
@@ -295,6 +309,7 @@ jobs:
           python -B engineering/phase2/test_backend_http_safety.py
           python -B engineering/phase2/test_http_launcher_isolation.py
           python -B engineering/phase2/test_audit_console_verdict.py
+          python -B engineering/phase2/test_audit_status_ui.py
           python -B engineering/phase2/test_test_isolation_from_cloud.py
           python -B engineering/phase2/test_backend_url_parity.py
           python -B engineering/phase2/test_manual_consistency.py
@@ -344,6 +359,12 @@ jobs:
           python -B tools/test_provision_mmh_foundation.py
           python -B tools/test_restrict_mmh_bucket_iam.py
           python -B tools/test_mmh_institution.py
+          python -B tools/test_mmh_management_session.py
+          python -B tools/test_mmh_medical_session.py
+          python -B tools/test_mmh_account_versions.py
+          python -B tools/test_check_mmh_account_cutover.py
+          python -B -W error::ResourceWarning -m unittest discover -s Backend/AccessManager -t . -v
+          node --test Backend/AccessManager/test_members_ui.cjs
           python -B tools/test_mmh_app_boundary.py
           python -B tools/test_protect_mmh_buckets.py
           python -B tools/test_verify_mmh_effective_iam.py
