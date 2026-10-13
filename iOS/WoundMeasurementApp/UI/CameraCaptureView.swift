@@ -208,6 +208,7 @@ extension CameraModel: AVCapturePhotoCaptureDelegate {
     nonisolated func photoOutput(_ output: AVCapturePhotoOutput,
                                  didFinishProcessingPhoto photo: AVCapturePhoto,
                                  error: Error?) {
+        let provenance = DepthCapture.CaptureProvenance(observedAt: Date())
         guard error == nil, let d = photo.fileDataRepresentation(),
               let img = UIImage(data: d) else {
             Task { @MainActor in self.error = "拍攝失敗：\(error?.localizedDescription ?? "未知錯誤")" }
@@ -215,7 +216,7 @@ extension CameraModel: AVCapturePhotoCaptureDelegate {
         }
         // 深度在背景緒轉出（320×240 f32 拷貝，毫秒級），失敗不影響照片本身。
         let depth = photo.depthData.flatMap {
-            DepthCapture.fromPhoto($0, imageOrientation: img.imageOrientation)
+            DepthCapture.fromPhoto($0, imageOrientation: img.imageOrientation, captureProvenance: provenance)
         }
         Task { @MainActor in
             self.completion?(img, depth)

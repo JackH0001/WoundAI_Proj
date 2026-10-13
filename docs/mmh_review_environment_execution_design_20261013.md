@@ -1,6 +1,6 @@
 # MMH 外部審查示範環境執行設計
 
-使用者已選定獨立合成示範環境。新版 App 必須提供明確的示範入口，讓審查者可以完成量測、修邊、醫師確認、時間軸、標註與深度保存流程，同時保持 MMH 的資料與 Google 門禁隔離。本設計仍不可部署：示範登入方式待確認，專屬後端模式與 App 環境切換尚未完成，沒有建立新雲端資源的授權。
+使用者已選定獨立合成示範環境。新版 App 必須提供明確的示範入口，讓審查者可以完成量測、修邊、醫師確認、時間軸、標註與深度保存流程，同時保持 MMH 的資料與 Google 門禁隔離。本設計仍不可部署：示範登入方式已確定為獨立 WoundAI 帳號，專屬後端模式與 App 環境切換尚未完成，沒有建立新雲端資源的授權。
 
 ## 本輪確認的阻礙
 
@@ -15,9 +15,9 @@
 
 ## 示範登入決策
 
-目前待確認的建議是：只有獨立示範入口使用 WoundAI 示範帳號，MMH 仍維持 Google IAP 加上 WoundAI 身分。若採用，新的示範 Cloud Run 需要對外可呼叫，但每個資料端點仍須 WoundAI 驗證；這是新的入口權限，必須在具體部署方案中另行確認，不可沿用 MMH IAP 授權推定允許。
+2026-10-13 使用者已確認：只有獨立示範入口使用 WoundAI 示範帳號，MMH 仍維持 Google IAP 加上 WoundAI 身分。新的示範 Cloud Run 需要對外可呼叫，但每個資料端點仍須 WoundAI 驗證；這是新的入口權限，必須在具體部署方案中另行確認，不可沿用 MMH IAP 授權推定允許。
 
-若示範也保留 IAP，則仍需要可供 Apple 自行使用的獨立 Google 審查帳號與 OAuth／IAP 設定。尚未建立該帳號，不能宣稱這個方案已解決審查登入。
+示範不要求 Google 帳號，不複製 MMH 帳密或取消 MMH 門禁。示範供審查及其他場域的合成操作驗證；這項產品方向不等於真實病患收案授權。
 
 Apple 的 Before You Submit 要求提供可用示範帳號或完整示範模式，以及審查期間可用的後端。2.1(a) 另指出，因法律或安全義務無法提供帳號而改用內建示範模式時，需要 Apple 事先同意。因此優先採「可實際登入的獨立示範帳號」，不把只有錄影、靜態畫面或未核准內建模式當成完整審查入口。這是方案依據，不是通過審查的保證。[Apple App Review Guidelines](https://developer.apple.com/app-store/review/guidelines/#app-completeness)
 
@@ -64,7 +64,7 @@ Cloud Build 表列 e2-standard-2 為0.006 USD／分鐘，20分鐘的單次建置
 
 ## 驗收與執行順序
 
-1. 確认示範登入方式；完成後端新 profile、seed／CAS 帳號與 App 固定環境 context。
+1. 示範登入方式已確認；完成後端新 profile、seed／CAS 帳號與 App 固定環境 context。
 2. 本機測試：同名影像／record ID、切換中舊回覆、同意撤回、背景上傳、token audience／org、錯誤 service／origin、修訂與 RGB-D 對應，皆不可跨環境。
 3. 固定來源 SHA，完成覆核／CI；準備精確建置與資源套用命令、secret metadata 與回復步驟，才請求資源及部署授權。
 4. 新資源建立後核對有效 IAM，包括繼承與冒用路徑；先私有驗證，再依所選入口方案確認對外可用範圍。
@@ -74,3 +74,9 @@ Cloud Build 表列 e2-standard-2 為0.006 USD／分鐘，20分鐘的單次建置
 本輪產生機械可讀草案 `synthetic-review-proposed-resources.json`，`deployable=false`，未綁定來源或映像 digest。SHA-256：15232f0def21c23cbd05f0e452bd6990e0627644e096ab911584de1f983b1abc。檔案與成本計算位於 `woundai-institution-evidence-20261007/mmh-iap-update-20261011/store-and-members/reviewer-boundary-20261013/`。
 
 本輪是唯讀雲端查核與執行設計，沒有新增測試通過數字，亦未將前輪測試冒稱為本輪實測。待確認登入選項與既有來源推送問題仍保持待答。
+
+## 2026-10-13 最新決策與整合關卡
+
+使用者要求以最新 MMH 修正版整合兩平台、醫療後端與管理模組，再建立可長期用於合成示範的獨立環境；研究資料完整性是發布前的主要驗收條件。舊資料按用途及證據完整性分級，缺漏資料列隔離封存候選，不等於停用整個舊服務，亦未執行搬移或刪除。詳見 [整合驗證](mmh_full_alignment_research_validation_20261013.md) 與 [研究資料驗收矩陣](research_dataset_acceptance_matrix_20261013.md)。
+
+新決策草案 `synthetic-review-selected-direction-20261013.json` 仍為 `deployable=false`、`apply_authorized=false`；SHA-256：2c550aac8001d39c260de77b16b3f878453a6b7baca9ec6484f02d76e3b8e7d7。舊草案保留作版本證據，不再用其中的待答登入欄位代表目前決策。

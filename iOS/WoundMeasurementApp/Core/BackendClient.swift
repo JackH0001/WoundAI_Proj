@@ -745,10 +745,10 @@ actor BackendClient {
      - 前置條件：該 `image_id` 已有標註且未撤回（孤兒深度後端 400 拒收，是設計）。
      */
     func uploadDepth(imageId: String, raw: Data,
-                     sidecarMeta: [String: Any], annotationRevisionID: String? = nil) async throws -> (depthId: String, replaced: Bool) {
+                     sidecarMeta: [String: Any], annotationRevisionID: String? = nil) async throws -> DepthUploadReceipt {
         let meta = Self.depthUploadMetadata(sidecarMeta)
-        let metaStr = (try? JSONSerialization.data(withJSONObject: meta))
-            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        let metaData = try JSONSerialization.data(withJSONObject: meta, options: [.sortedKeys])
+        let metaStr = String(decoding: metaData, as: UTF8.self)
 
         var r = try request("POST", "/api/v1/depth")
         let boundary = "----WoundAI\(UUID().uuidString)"
@@ -767,16 +767,64 @@ actor BackendClient {
            JSONAny(data: data)?["annotation_receipt_id"].string != annotationRevisionID {
             throw BackendError.badResponse("深度回執與標註修訂不符")
         }
-        return try Self.depthReceipt(data, imageID: imageId, raw: raw)
+        return try Self.depthReceipt(data, imageID: imageId, raw: raw, requestMetadata: metaData,
+                                     annotationRevisionID: annotationRevisionID)
     }
 
-    nonisolated static func depthReceipt(_ data: Data, imageID: String, raw: Data) throws -> (depthId: String, replaced: Bool) {
-        let expected = SHA256.hash(data: raw).prefix(8).map { String(format: "%02x", $0) }.joined()
-        guard let j = JSONAny(data: data), j["status"].string == "stored",
-              j["image_id"].string == imageID, j["depth_id"].string == expected else {
-            throw BackendError.badResponse("原始深度回執與影像／內容雜湊不符")
+    struct DepthUploadReceipt: Codable {
+        let depthId: String
+        let annotationRevisionID: String
+        let metadataSHA256: String
+        let payloadSHA256: String
+        let receiptID: String
+        let replaced: Bool
+    }
+
+    nonisolated static func depthReceipt(_ data: Data, imageID: String, raw: Data,
+                                         requestMetadata: Data,
+                                         annotationRevisionID: String?) throws -> DepthUploadReceipt {
+        func hash(_ bytes: Data) -> String {
+            SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
         }
-        return (expected, j["replaced_previous"].bool(false))
+        func hexBytes(_ value: String) -> Data? {
+            guard value.count == 64, value.allSatisfy({ "0123456789abcdef".contains($0) }) else { return nil }
+            var bytes = Data()
+            var i = value.startIndex
+            while i < value.endIndex {
+                let end = value.index(i, offsetBy: 2)
+                guard let byte = UInt8(value[i..<end], radix: 16) else { return nil }
+                bytes.append(byte); i = end
+            }
+            return bytes
+        }
+        struct Wire: Decodable {
+            let status: String, image_id: String, depth_id: String, depth_sha256: String
+            let request_meta_sha256: String, annotation_receipt_id: String, meta_sha256: String
+            let payload_sha256: String, depth_revision_id: String, depth_receipt_id: String
+            let payload_hash_version: Int
+            let replaced_previous: Bool
+        }
+        let rawHash = hash(raw)
+        guard data.count <= 16_384, let j = try? JSONDecoder().decode(Wire.self, from: data), j.status == "stored",
+              j.image_id == imageID, j.depth_id == String(rawHash.prefix(16)),
+              j.depth_sha256 == rawHash,
+              j.request_meta_sha256 == hash(requestMetadata),
+              j.payload_hash_version == 1,
+              !j.annotation_receipt_id.isEmpty,
+              j.annotation_receipt_id.count == 16, j.annotation_receipt_id.allSatisfy({ "0123456789abcdef".contains($0) }),
+              annotationRevisionID == nil || annotationRevisionID == j.annotation_receipt_id,
+              !j.meta_sha256.isEmpty,
+              let metaBytes = hexBytes(j.meta_sha256), let rawBytes = hexBytes(rawHash),
+              !j.payload_sha256.isEmpty,
+              j.payload_sha256 == hash(Data("woundai-medical-depth-v1\0".utf8) + rawBytes + metaBytes),
+              j.depth_revision_id == String(j.payload_sha256.prefix(16)),
+              j.depth_receipt_id == hash(Data((j.annotation_receipt_id + "|" + j.payload_sha256).utf8)),
+              j.replaced_previous == false else {
+            throw BackendError.badResponse("深度保存回執與影像、標註修訂或完整資料雜湊不符；保留待傳資料")
+        }
+        return DepthUploadReceipt(depthId: String(rawHash.prefix(16)), annotationRevisionID: j.annotation_receipt_id,
+            metadataSHA256: j.meta_sha256, payloadSHA256: j.payload_sha256,
+            receiptID: hash(Data((j.annotation_receipt_id + "|" + j.payload_sha256).utf8)), replaced: false)
     }
 
     /// Pure mapping used by the actual upload path and persistence contract tests.
@@ -795,7 +843,7 @@ actor BackendClient {
         ]
         // 快篩統計與出處照抄（後端驗證器容忍額外鍵；這些是研究端不解檔就能用的資訊）。
         for k in ["accuracy", "filtered", "rgb_w", "rgb_h", "coverage",
-                  "min_m", "max_m", "captured_at", "device"] {
+                  "min_m", "max_m", "captured_at", "capture_id", "capture_time_source", "device"] {
             if let v = sidecarMeta[k] { meta[k] = v }
         }
         // Legacy sidecars must remain unknown; never infer upright from dimensions.

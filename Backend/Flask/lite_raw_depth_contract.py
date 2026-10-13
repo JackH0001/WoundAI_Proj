@@ -4,6 +4,9 @@ Preserves raw IEEE-754 bits, including invalid samples. Structural validation
 cannot prove camera provenance, calibration, consent or authorization.
 """
 import hashlib
+import datetime
+import re
+import uuid
 import io
 import json
 import math
@@ -34,11 +37,27 @@ def validate(metadata, raw_depth, jpeg):
     if not isinstance(jpeg, bytes) or not 0 < len(jpeg) <= MAX_JPEG_BYTES:
         raise ValueError('JPEG size/type')
     m = json.loads(metadata, object_pairs_hook=_unique)
-    if not isinstance(m, dict) or set(m) != _FIELDS:
+    if not isinstance(m, dict):
         raise ValueError('metadata fields')
-    fixed = dict(schema='lite.rgbd/1', format='float32_le', unit='m',
+    version = m.get('schema')
+    time_fields = frozenset(('capture_id', 'captured_at', 'capture_time_source'))
+    expected = _FIELDS | time_fields if version == 'lite.rgbd/2' else _FIELDS
+    if version not in ('lite.rgbd/1', 'lite.rgbd/2') or set(m) != expected:
+        raise ValueError('metadata fields')
+    if version == 'lite.rgbd/2':
+        identity, timestamp = m['capture_id'], m['captured_at']
+        if not isinstance(identity, str) or str(uuid.UUID(identity)) != identity:
+            raise ValueError('capture identity')
+        if (not isinstance(timestamp, str) or not re.fullmatch(
+                r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z', timestamp)):
+            raise ValueError('capture timestamp')
+        datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        if m['capture_time_source'] != 'photo_callback_wall_clock':
+            raise ValueError('capture time source')
+    fixed = dict(schema=version, format='float32_le', unit='m',
                  confidence_kind='validity_only', pose='unavailable',
-                 capture_time='unavailable', registration='not_verified')
+                 capture_time='host_wall_clock' if version == 'lite.rgbd/2' else 'unavailable',
+                 registration='not_verified')
     if any(m[k] != v for k, v in fixed.items()):
         raise ValueError('unsupported semantic contract')
     w, h, rw, rh = (m[k] for k in ('width', 'height', 'rgb_width', 'rgb_height'))

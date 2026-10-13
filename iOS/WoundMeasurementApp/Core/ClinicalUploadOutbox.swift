@@ -203,9 +203,12 @@ final class ClinicalUploadOutbox: ObservableObject {
                             guard let raw = queued.depthRaw, let encoded = queued.depthMetadata,
                                   let metadata = try JSONSerialization.jsonObject(with: encoded) as? [String: Any],
                                   let imageID = queued.measurement.imageId else { throw BackendError.badResponse("depth snapshot") }
-                            _ = try await backend.uploadDepth(imageId: imageID, raw: raw, sidecarMeta: metadata,
+                            let receipt = try await backend.uploadDepth(imageId: imageID, raw: raw, sidecarMeta: metadata,
                                                               annotationRevisionID: queued.annotationRevisionID)
-                            DepthStore.markUploaded(imagePath: queued.measurement.imagePath, store: imageStore)
+                            guard DepthStore.markUploaded(imagePath: queued.measurement.imagePath,
+                                store: imageStore, receipt: receipt) else {
+                                throw BackendError.badResponse("深度保存收據尚未安全寫入本機，請重試同步")
+                            }
                         }, acknowledgeRecord: { snapshot in
                             if let current = await repo.measurement(id: snapshot.id),
                                current.imageId == snapshot.imageId, current.gtPolygon == snapshot.gtPolygon,

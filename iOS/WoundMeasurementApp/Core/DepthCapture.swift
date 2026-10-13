@@ -47,6 +47,25 @@ struct DepthCapture {
     /// nil means legacy/unknown, not proven upright.
     var sourceExifOrientation: Int? = nil
 
+    /// Fixed at the RGB-D photo callback, not when a sidecar is serialized.
+    /// This is a host wall-clock observation, not a sensor exposure timestamp.
+    struct CaptureProvenance {
+        let id: UUID
+        let observedAt: Date
+        init(id: UUID = UUID(), observedAt: Date) {
+            self.id = id
+            self.observedAt = observedAt
+        }
+        var metadata: [String: Any] {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return ["capture_id": id.uuidString.lowercased(),
+                    "captured_at": formatter.string(from: observedAt),
+                    "capture_time_source": "photo_callback_wall_clock"]
+        }
+    }
+    var captureProvenance: CaptureProvenance? = nil
+
     /// 摘要統計（進 meta，供不解檔快篩：例如「深度覆蓋率過低的樣本先排除」）。
     func coverage() -> (valid: Double, minM: Double, maxM: Double) {
         var n = 0
@@ -64,7 +83,7 @@ struct DepthCapture {
     var metaJson: [String: Any] {
         let c = coverage()
         var meta: [String: Any] = [
-            "version": 2,
+            "version": 3,
             "format": "f32_le_meters",
             "width": width, "height": height,
             "intrinsics": ["fx": fx, "fy": fy, "cx": cx, "cy": cy,
@@ -73,12 +92,13 @@ struct DepthCapture {
             "filtered": filtered,
             "rgb_w": rgbWidth, "rgb_h": rgbHeight,
             "coverage": c.valid, "min_m": c.minM, "max_m": c.maxM,
-            "captured_at": ISO8601DateFormatter().string(from: Date()),
             "device": BackendClient.deviceModelString(),
             // Transformation provenance is not a registration/accuracy certificate.
             "registration": "not_verified",
             "orientation_status": "unknown"
         ]
+        meta["capture_time_source"] = "unknown"
+        captureProvenance?.metadata.forEach { meta[$0.key] = $0.value }
         if let exif = sourceExifOrientation, (1...8).contains(exif) {
             meta["source_exif_orientation"] = exif
             meta["normalized_exif_orientation"] = 1
@@ -176,13 +196,21 @@ enum DepthStore {
     }
 
     /// 補傳成功後記旗標（避免重複補傳的 UI 噪音；後端本就冪等，這只是體驗）。
-    static func markUploaded(imagePath: String, store: LocalImageStore) {
+    @discardableResult
+    static func markUploaded(imagePath: String, store: LocalImageStore,
+                             receipt: BackendClient.DepthUploadReceipt? = nil) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard var idx = try? loadIndex(store: store) else { return }
-        guard var e = idx[imagePath] else { return }
+        guard var idx = try? loadIndex(store: store) else { return false }
+        guard var e = idx[imagePath] else { return false }
         e["uploaded"] = "1"
+        if let receipt {
+            e["annotation_receipt_id"] = receipt.annotationRevisionID
+            e["depth_receipt_id"] = receipt.receiptID
+            e["payload_sha256"] = receipt.payloadSHA256
+            e["meta_sha256"] = receipt.metadataSHA256
+        }
         idx[imagePath] = e
-        _ = saveIndex(idx, store: store)
+        return saveIndex(idx, store: store)
     }
 
     /// 影像被 90 天清除時，深度 sidecar 一併清（同一保存政策）。

@@ -136,14 +136,41 @@ final class ClinicalUploadOutboxTests: XCTestCase {
             XCTAssertThrowsError(try BackendClient.annotationReceipt(data, code:"WD", imageID:"image"))
         }
     }
-    func testDepthReceiptRequiresImageAndContentHashMatch() throws {
-        let raw = Data([1,2,3,4])
-        let digest = SHA256.hash(data:raw).prefix(8).map { String(format:"%02x",$0) }.joined()
-        for (image,id) in [("wrong",digest),("image","wrong")] {
-            let body = try JSONSerialization.data(withJSONObject:["status":"stored","image_id":image,"depth_id":id])
-            XCTAssertThrowsError(try BackendClient.depthReceipt(body,imageID:"image",raw:raw))
+    func testDepthReceiptRequiresImageRevisionAndBothPayloadHashes() throws {
+        let raw = Data([1,2,3,4]), metadata = Data("{}".utf8)
+        let revision = "0123456789abcdef"
+        let body = depthReceiptFixture(raw: raw, metadata: metadata, image: "image", revision: revision)
+        let valid = try JSONSerialization.data(withJSONObject: body)
+        let receipt = try BackendClient.depthReceipt(valid, imageID: "image", raw: raw,
+            requestMetadata: metadata, annotationRevisionID: revision)
+        XCTAssertEqual(receipt.annotationRevisionID, revision)
+        for field in ["status", "image_id", "annotation_receipt_id", "depth_id", "depth_sha256",
+                      "request_meta_sha256", "meta_sha256", "payload_sha256", "depth_revision_id",
+                      "depth_receipt_id", "payload_hash_version", "replaced_previous"] {
+            for altered: Any? in [nil, "wrong", true, 0] {
+                var invalid = body
+                invalid[field] = altered
+                let encoded = try JSONSerialization.data(withJSONObject: invalid)
+                XCTAssertThrowsError(try BackendClient.depthReceipt(encoded, imageID: "image", raw: raw,
+                    requestMetadata: metadata, annotationRevisionID: revision), field)
+            }
         }
-        let valid = try JSONSerialization.data(withJSONObject:["status":"stored","image_id":"image","depth_id":digest])
-        XCTAssertEqual(try BackendClient.depthReceipt(valid,imageID:"image",raw:raw).depthId,digest)
+        XCTAssertThrowsError(try BackendClient.depthReceipt(valid, imageID: "image", raw: raw,
+            requestMetadata: Data("{ }".utf8), annotationRevisionID: revision))
+        XCTAssertThrowsError(try BackendClient.depthReceipt(valid, imageID: "image", raw: raw,
+            requestMetadata: metadata, annotationRevisionID: "fedcba9876543210"))
     }
+}
+
+func depthReceiptFixture(raw: Data, metadata: Data, image: String, revision: String) -> [String: Any] {
+    func hash(_ d: Data) -> String { SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined() }
+    let metaHash = SHA256.hash(data: metadata)
+    let rawHash = SHA256.hash(data: raw)
+    let payload = hash(Data("woundai-medical-depth-v1\0".utf8) + Data(rawHash) + Data(metaHash))
+    return ["status": "stored", "image_id": image, "annotation_receipt_id": revision,
+            "depth_id": String(hash(raw).prefix(16)), "depth_sha256": hash(raw),
+            "request_meta_sha256": hash(metadata), "meta_sha256": hash(metadata),
+            "payload_sha256": payload, "payload_hash_version": 1,
+            "depth_revision_id": String(payload.prefix(16)),
+            "depth_receipt_id": hash(Data((revision + "|" + payload).utf8)), "replaced_previous": false]
 }

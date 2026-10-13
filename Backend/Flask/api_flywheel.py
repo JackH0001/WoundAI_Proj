@@ -1681,7 +1681,9 @@ try:
         raw = f.read()
 
         try:
-            meta = json.loads(request.form.get("meta") or "{}")
+            request_meta = (request.form.get("meta") or "{}").encode("utf-8")
+            request_meta_sha = hashlib.sha256(request_meta).hexdigest()
+            meta = json.loads(request_meta)
             if not isinstance(meta, dict):
                 raise ValueError("meta 必須是 JSON 物件")
             ok, issues = validate_depth_payload(raw, meta)
@@ -1749,6 +1751,7 @@ try:
             # 「換了一份蓋掉」——後者在稽核上是完全不同的事件。
             "sha256": raw_sha,
             "meta_sha256": meta_sha,
+            "request_meta_sha256": request_meta_sha,
             "payload_sha256": payload_sha,
             "payload_hash_version": 1,
             "comparison": comparison,
@@ -1767,6 +1770,9 @@ try:
         return jsonify({"status": "stored", "image_id": image_id,
                         "annotation_receipt_id": rid,
                         "depth_id": entry["sha256"][:16],
+                        "depth_sha256": raw_sha,
+                        "depth_receipt_id": depth_receipt,
+                        "request_meta_sha256": request_meta_sha,
                         "depth_revision_id": payload_sha[:16],
                         "meta_sha256": meta_sha,
                         "payload_sha256": payload_sha,

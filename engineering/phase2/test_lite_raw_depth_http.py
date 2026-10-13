@@ -43,6 +43,13 @@ class RawDepthHTTPTests(unittest.TestCase):
         self.assertEqual(meta['camera_intrinsics'],self.f.m['intrinsics'])
         self.assertEqual(body['storage_receipt']['validity_mask'],'not_provided')
         self.assertEqual(receipt['registration'],'not_verified');self.assertEqual(receipt['training_admission'],'not_evaluated')
+    def test_v2_capture_provenance_survives_signed_upload_and_storage_readback(self):
+        self.f.m.update(schema='lite.rgbd/2', capture_time='host_wall_clock',
+                        capture_id='00000000-0000-4000-8000-000000000001',
+                        captured_at='2023-11-14T22:13:20.000Z',
+                        capture_time_source='photo_callback_wall_clock')
+        self.test_signed_upload_persists_exact_bits_metadata_reference_and_receipt()
+
     def test_identical_retry_retains_one_bundle_and_conflict_cannot_rebind_image(self):
         first=self.upload();self.assertEqual(first.status_code,200,first.json)
         repeat=self.upload();self.assertEqual(repeat.status_code,200,repeat.json)

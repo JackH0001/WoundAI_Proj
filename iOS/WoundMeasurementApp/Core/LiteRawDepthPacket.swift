@@ -40,7 +40,7 @@ struct LiteRawDepthPacket {
             var bits = value.bitPattern.littleEndian
             withUnsafeBytes(of: &bits) { raw.append(contentsOf: $0) }
         }
-        let fields: [String: Any] = [
+        var fields: [String: Any] = [
             "schema": "lite.rgbd/1", "format": "float32_le", "unit": "m",
             "width": d.width, "height": d.height,
             "rgb_width": d.rgbWidth, "rgb_height": d.rgbHeight,
@@ -51,6 +51,11 @@ struct LiteRawDepthPacket {
             "filtered": d.filtered, "confidence_kind": "validity_only",
             "pose": "unavailable", "capture_time": "unavailable", "registration": "not_verified"
         ]
+        if let provenance = d.captureProvenance {
+            fields["schema"] = "lite.rgbd/2"
+            fields["capture_time"] = "host_wall_clock"
+            provenance.metadata.forEach { fields[$0.key] = $0.value }
+        }
         let metadata = try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys])
         return Self(jpeg: jpeg, metadata: metadata, rawDepth: raw)
     }

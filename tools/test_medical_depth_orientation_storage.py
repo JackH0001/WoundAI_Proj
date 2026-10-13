@@ -61,6 +61,10 @@ class MedicalDepthOrientationStorageTests(unittest.TestCase):
             data={'image_id':self.iid,'meta':json.dumps(meta),'depth_f32':(io.BytesIO(raw),'depth.f32')},
             content_type='multipart/form-data')
         self.assertEqual(r.status_code,200,r.json)
+        self.assertEqual(r.json["depth_sha256"], hashlib.sha256(raw).hexdigest())
+        self.assertEqual(r.json["request_meta_sha256"], hashlib.sha256(json.dumps(meta).encode()).hexdigest())
+        self.assertEqual(r.json["depth_receipt_id"], hashlib.sha256(
+            (r.json["annotation_receipt_id"] + "|" + r.json["payload_sha256"]).encode()).hexdigest())
         self.last_response = r.json
         rows=self.fw.read_jsonl(self.fw.DEPTH_INDEX)
         row=next(row for row in reversed(rows)
@@ -75,6 +79,20 @@ class MedicalDepthOrientationStorageTests(unittest.TestCase):
         saved=json.loads(self.meta_path.read_text())
         self.assertEqual(saved['camera_intrinsics'],meta['camera_intrinsics'])
         return saved
+
+    def test_capture_time_and_identity_survive_retry_and_revision_binding(self):
+        extra = {'capture_id': '00000000-0000-4000-8000-000000000001',
+                 'captured_at': '2023-11-14T22:13:20.000Z',
+                 'capture_time_source': 'photo_callback_wall_clock'}
+        saved = self.upload(extra); first = dict(self.last_response)
+        for k, v in extra.items(): self.assertEqual(saved[k], v)
+        self.upload(extra)
+        self.assertEqual(self.last_response['comparison'], 'identical')
+        self.assertEqual(self.last_response['payload_sha256'], first['payload_sha256'])
+        changed = dict(extra, captured_at='2023-11-14T22:14:20.000Z')
+        self.upload(changed)
+        self.assertEqual(self.last_response['comparison'], 'changed')
+        self.assertNotEqual(self.last_response['payload_sha256'], first['payload_sha256'])
 
     def test_all_eight_origins_preserved_by_actual_http_and_store(self):
         for orientation in range(1,9):
