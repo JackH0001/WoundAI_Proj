@@ -29,9 +29,9 @@ import java.util.UUID
  * 縮圖策略：**不另存縮圖檔**，一律從同一份加密原檔用 `inSampleSize` 解出來。
  * 兩份檔案遲早會不同步（刪一個忘了刪另一個、修邊後只更新一個），單一來源比較省心。
  */
-class LocalImageStore(context: Context) {
+class LocalImageStore(context: Context, scope: MedicalDataScope = MedicalDataScope.MMH) {
 
-    private val dir = File(context.filesDir, "wound_images").apply { if (!exists()) mkdirs() }
+    private val dir = File(context.filesDir, scope.imageDirectory).apply { if (!exists()) mkdirs() }
 
     /**
      * 存檔並回傳相對檔名（寫進 `MeasurementEntity.imagePath`）。失敗回 null，呼叫端須容許沒有影像。
@@ -46,7 +46,7 @@ class LocalImageStore(context: Context) {
                 null
             } else {
                 val name = "img_${UUID.randomUUID()}.enc"
-                File(dir, name).writeBytes(enc)
+                File(dir, requireNotNull(name)).writeBytes(enc)
                 name
             }
         } catch (e: Exception) {
@@ -72,9 +72,12 @@ class LocalImageStore(context: Context) {
      */
     fun rawBytes(name: String?): ByteArray? = readDecrypted(name)
 
+    private fun validName(name: String?): Boolean = !name.isNullOrBlank() &&
+        !name.startsWith(".") && name.none { it == '/' || it == '\\' || it == '\u0000' }
+
     private fun readDecrypted(name: String?): ByteArray? {
-        if (name.isNullOrBlank()) return null
-        val f = File(dir, name)
+        if (!validName(name)) return null
+        val f = File(dir, requireNotNull(name))
         if (!f.exists()) return null
         return try { PhiCrypto.decryptBytes(f.readBytes()) } catch (e: Exception) { null }
     }
@@ -105,11 +108,11 @@ class LocalImageStore(context: Context) {
     }
 
     fun exists(name: String?): Boolean =
-        !name.isNullOrBlank() && File(dir, name).exists()
+        validName(name) && File(dir, requireNotNull(name)).exists()
 
     /** 刪除單一影像（保存期限清理／撤回同意時用）。回 true 表示有刪到。 */
     fun delete(name: String?): Boolean =
-        !name.isNullOrBlank() && File(dir, name).let { it.exists() && it.delete() }
+        validName(name) && File(dir, requireNotNull(name)).let { it.exists() && it.delete() }
 
     /** 目前佔用位元組數（設定頁顯示用）。 */
     fun totalBytes(): Long = dir.listFiles()?.sumOf { it.length() } ?: 0L

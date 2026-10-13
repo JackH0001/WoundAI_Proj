@@ -68,6 +68,7 @@ targets:
       - path: WoundAITests/TissuePreviewTests.swift
       - path: WoundAITests/InstitutionRestoreTests.swift
       - path: WoundAITests/DepthProvenanceTests.swift
+      - path: WoundAITests/MedicalDataScopeTests.swift
     dependencies:
       - target: WoundAIInstitution
     settings:

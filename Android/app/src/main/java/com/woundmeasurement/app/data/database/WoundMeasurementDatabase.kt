@@ -7,6 +7,7 @@ import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import android.content.Context
+import com.woundmeasurement.app.data.store.MedicalDataScope
 import com.woundmeasurement.app.data.dao.ConsentDao
 import com.woundmeasurement.app.data.dao.PatientDao
 import com.woundmeasurement.app.data.dao.MeasurementDao
@@ -44,8 +45,7 @@ abstract class WoundMeasurementDatabase : RoomDatabase() {
     abstract fun consentDao(): ConsentDao
 
     companion object {
-        @Volatile
-        private var INSTANCE: WoundMeasurementDatabase? = null
+        private val instances = mutableMapOf<String, WoundMeasurementDatabase>()
 
         /**
          * v1 → v2（Sprint N1 個案化醫療紀錄）。
@@ -187,18 +187,20 @@ abstract class WoundMeasurementDatabase : RoomDatabase() {
             }
         }
 
-        fun getDatabase(context: Context): WoundMeasurementDatabase {
-            return INSTANCE ?: synchronized(this) {
+        fun getDatabase(context: Context, scope: MedicalDataScope = MedicalDataScope.MMH): WoundMeasurementDatabase {
+            return synchronized(this) {
+                val key = context.applicationContext.getDatabasePath(scope.databaseName).absolutePath
+                instances[key]?.let { return@synchronized it }
                 val instance = Room.databaseBuilder(
                     context.applicationContext,
                     WoundMeasurementDatabase::class.java,
-                    "wound_measurement_database"
+                    scope.databaseName
                 )
                     .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                     // 刻意不加 fallbackToDestructiveMigration:寧可在開發期因缺 migration 而崩潰,
                     // 也不要在醫護手機上默默刪光病歷。
                     .build()
-                INSTANCE = instance
+                instances[key] = instance
                 instance
             }
         }

@@ -142,7 +142,7 @@ struct ReviewView: View {
         // 深度在拍攝當下已加密存本機（depth_source=lidar_local）；這裡把 f32 原樣
         // 補傳供 3D 研究。後端拒收孤兒深度（必須先有標註綁定），所以未補送標註時
         // 只給引導不給按鈕——按了必失敗的按鈕比沒有按鈕更糟。
-        if let entry = DepthStore.lookup(imagePath: m.imagePath), m.imageId != nil {
+        if let entry = DepthStore.lookup(imagePath: m.imagePath, store: app.imageStore), m.imageId != nil {
             Divider()
             Text("LiDAR 深度補傳").font(.subheadline).bold()
             if entry["uploaded"] == "1" {
@@ -448,12 +448,12 @@ struct ReviewView: View {
                 correctionIou: m.correctionIou,
                 careNote: "resubmit from timeline",
                 source: m.source ?? "clinical",
-                depthSource: DepthStore.lookup(imagePath: m.imagePath) != nil ? "lidar_local" : "none",
+                depthSource: DepthStore.lookup(imagePath: m.imagePath, store: app.imageStore) != nil ? "lidar_local" : "none",
                 consentTrain: trainOk,
                 doctorVerified: m.doctorVerified)
             guard let actor = identity?.identity else { throw BackendError.notLoggedIn }
             let depth = DepthStore.load(imagePath: m.imagePath, store: app.imageStore)
-            let expectsDepth = DepthStore.lookup(imagePath: m.imagePath) != nil
+            let expectsDepth = DepthStore.lookup(imagePath: m.imagePath, store: app.imageStore) != nil
             try uploads.enqueue(measurement: m, payload: payload, server: AppSettings.backendURL(),
                 configuredUser: AppSettings.backendUser(), actor: actor, depth: depth, requiresDepth: expectsDepth)
             uploads.resume(repo: app.repo, imageStore: app.imageStore)

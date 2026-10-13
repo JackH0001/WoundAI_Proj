@@ -524,8 +524,8 @@ final class MeasureViewModel: ObservableObject {
                let b = DepthStore.load(imagePath: old.imagePath, store: imageStore) {
                 sameDepth = ClinicalAnnotationRevision.sameDepth(a, b)
             } else {
-                sameDepth = DepthStore.lookup(imagePath: m.imagePath) == nil
-                    && DepthStore.lookup(imagePath: old.imagePath) == nil
+                sameDepth = DepthStore.lookup(imagePath: m.imagePath, store: imageStore) == nil
+                    && DepthStore.lookup(imagePath: old.imagePath, store: imageStore) == nil
             }
             // Reuse the verified capture and its depth receipt on an unchanged save.
             // Otherwise a new sidecar timestamp would falsely look like a new depth revision.

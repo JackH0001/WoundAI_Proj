@@ -15,15 +15,22 @@ import UIKit
 final class LocalImageStore {
 
     private let dir: URL
+    let depthIndexURL: URL
 
-    init(directory: URL? = nil) {
+    init(directory: URL? = nil, depthIndexURL: URL? = nil) {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         dir = directory ?? base.appendingPathComponent("wound_images", isDirectory: true)
+        self.depthIndexURL = depthIndexURL ?? (directory ?? base).appendingPathComponent("depth_index.json")
         // Existing installations keep the same paths; writes retry and fail closed.
         try? HealthDataFiles.prepareDirectory(dir)
     }
 
     private func url(_ name: String) -> URL { return dir.appendingPathComponent(name) }
+
+    private func validName(_ name: String) -> Bool {
+        !name.isEmpty && !name.hasPrefix(".") && !name.contains("/") && !name.contains("\\")
+            && !name.contains("\0")
+    }
 
     /// - Returns: 檔名（存進 `Measurement.imagePath`），失敗回 nil。
     func save(jpeg: Data) -> String? {
@@ -72,7 +79,7 @@ final class LocalImageStore {
     /// 解密後的原始位元組。柵格 PNG 用這個——走 `UIImage` 會經過色彩管理，
     /// 而我們存在 RGB 通道裡的是**類別碼**，被轉換過就再也還原不回來。
     func rawBytes(_ name: String) -> Data? {
-        guard !name.isEmpty else { return nil }
+        guard validName(name) else { return nil }
         do {
             try HealthDataFiles.prepareDirectory(dir)
             try HealthDataFiles.excludeExistingFile(url(name))
@@ -93,11 +100,11 @@ final class LocalImageStore {
     }
 
     func exists(_ name: String) -> Bool {
-        return !name.isEmpty && FileManager.default.fileExists(atPath: url(name).path)
+        return validName(name) && FileManager.default.fileExists(atPath: url(name).path)
     }
 
     func delete(_ name: String) {
-        guard !name.isEmpty else { return }
+        guard validName(name) else { return }
         try? FileManager.default.removeItem(at: url(name))
     }
 

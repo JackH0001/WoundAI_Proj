@@ -124,47 +124,49 @@ struct DepthCapture {
  */
 enum DepthStore {
 
-    private static var indexURL: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("depth_index.json")
-    }
-
-    private static func loadIndex() -> [String: [String: String]] {
-        guard let d = try? Data(contentsOf: indexURL),
-              let j = try? JSONSerialization.jsonObject(with: d) as? [String: [String: String]]
-        else { return [:] }
-        return j
-    }
-
-    private static func saveIndex(_ idx: [String: [String: String]]) {
-        if let d = try? JSONSerialization.data(withJSONObject: idx) {
-            try? d.write(to: indexURL, options: .atomic)
+    private static let lock = NSRecursiveLock()
+    private static func loadIndex(store: LocalImageStore) throws -> [String: [String: String]] {
+        guard FileManager.default.fileExists(atPath: store.depthIndexURL.path) else { return [:] }
+        let data = try Data(contentsOf: store.depthIndexURL)
+        guard let index = try JSONSerialization.jsonObject(with: data) as? [String: [String: String]] else {
+            throw CocoaError(.fileReadCorruptFile)
         }
+        return index
+    }
+    private static func saveIndex(_ idx: [String: [String: String]], store: LocalImageStore) -> Bool {
+        do {
+            let data = try JSONSerialization.data(withJSONObject: idx)
+            try HealthDataFiles.write(data, to: store.depthIndexURL)
+            return true
+        } catch { return false }
     }
 
     /// 綁定深度到已落地的量測影像。**先寫檔再寫索引**——反過來的話索引會指向不存在的檔。
     @discardableResult
     static func attach(imagePath: String, capture: DepthCapture, store: LocalImageStore) -> Bool {
-        guard !imagePath.isEmpty else { return false }
+        lock.lock(); defer { lock.unlock() }
+        guard !imagePath.isEmpty, var idx = try? loadIndex(store: store) else { return false }
         let raw = capture.map.withUnsafeBufferPointer { Data(buffer: $0) }
-        guard let depthName = store.saveRaw(raw),
-              let metaData = try? JSONSerialization.data(withJSONObject: capture.metaJson),
-              let metaName = store.saveRaw(metaData) else { return false }
-        var idx = loadIndex()
+        guard let metaData = try? JSONSerialization.data(withJSONObject: capture.metaJson),
+              let depthName = store.saveRaw(raw) else { return false }
+        guard let metaName = store.saveRaw(metaData) else { store.delete(depthName); return false }
         idx[imagePath] = ["depth": depthName, "meta": metaName]
-        saveIndex(idx)
+        guard saveIndex(idx, store: store) else {
+            store.delete(depthName); store.delete(metaName); return false
+        }
         return true
     }
 
     /// 有沒有深度（供 `depth_source` 真值與畫面標示）。
-    static func lookup(imagePath: String) -> [String: String]? {
+    static func lookup(imagePath: String, store: LocalImageStore) -> [String: String]? {
         guard !imagePath.isEmpty else { return nil }
-        return loadIndex()[imagePath]
+        lock.lock(); defer { lock.unlock() }
+        return (try? loadIndex(store: store))?[imagePath]
     }
 
     /// 讀回 sidecar 供補傳（`/api/v1/depth`）。回 (f32 原始位元組, 本機 metaJson)。
     static func load(imagePath: String, store: LocalImageStore) -> (raw: Data, meta: [String: Any])? {
-        guard let e = lookup(imagePath: imagePath),
+        guard let e = lookup(imagePath: imagePath, store: store),
               let dn = e["depth"], let mn = e["meta"],
               let raw = store.rawBytes(dn),
               let md = store.rawBytes(mn),
@@ -174,21 +176,23 @@ enum DepthStore {
     }
 
     /// 補傳成功後記旗標（避免重複補傳的 UI 噪音；後端本就冪等，這只是體驗）。
-    static func markUploaded(imagePath: String) {
-        var idx = loadIndex()
+    static func markUploaded(imagePath: String, store: LocalImageStore) {
+        lock.lock(); defer { lock.unlock() }
+        guard var idx = try? loadIndex(store: store) else { return }
         guard var e = idx[imagePath] else { return }
         e["uploaded"] = "1"
         idx[imagePath] = e
-        saveIndex(idx)
+        _ = saveIndex(idx, store: store)
     }
 
     /// 影像被 90 天清除時，深度 sidecar 一併清（同一保存政策）。
     static func purge(imagePath: String, store: LocalImageStore) {
-        guard let e = lookup(imagePath: imagePath) else { return }
+        lock.lock(); defer { lock.unlock() }
+        guard var idx = try? loadIndex(store: store), let e = idx[imagePath] else { return }
+        idx.removeValue(forKey: imagePath)
+        // Preserve readable sidecars if the registry cannot be updated.
+        guard saveIndex(idx, store: store) else { return }
         if let p = e["depth"] { store.delete(p) }
         if let p = e["meta"] { store.delete(p) }
-        var idx = loadIndex()
-        idx.removeValue(forKey: imagePath)
-        saveIndex(idx)
     }
 }

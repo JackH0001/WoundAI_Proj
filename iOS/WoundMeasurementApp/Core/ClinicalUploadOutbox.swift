@@ -205,7 +205,7 @@ final class ClinicalUploadOutbox: ObservableObject {
                                   let imageID = queued.measurement.imageId else { throw BackendError.badResponse("depth snapshot") }
                             _ = try await backend.uploadDepth(imageId: imageID, raw: raw, sidecarMeta: metadata,
                                                               annotationRevisionID: queued.annotationRevisionID)
-                            DepthStore.markUploaded(imagePath: queued.measurement.imagePath)
+                            DepthStore.markUploaded(imagePath: queued.measurement.imagePath, store: imageStore)
                         }, acknowledgeRecord: { snapshot in
                             if let current = await repo.measurement(id: snapshot.id),
                                current.imageId == snapshot.imageId, current.gtPolygon == snapshot.gtPolygon,
