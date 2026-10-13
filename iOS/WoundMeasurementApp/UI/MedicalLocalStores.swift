@@ -9,8 +9,11 @@ final class MedicalLocalStores {
     let images: LocalImageStore
     let outbox: ClinicalUploadOutbox
     let privateExports: URL
+    let accounts: MedicalAccountPreferences
+    let sessionEpoch = MedicalSessionEpoch()
     init(scope: MedicalDataScope, support: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]) throws {
         self.scope = scope
+        accounts = MedicalAccountPreferences(scope: scope, invalidate: { [sessionEpoch] in sessionEpoch.invalidate() })
         try HealthDataFiles.prepareDirectory(scope.root(under: support))
         repo = CaseRepository(store: WoundStore(path: scope.database(under: support).path))
         images = LocalImageStore(directory: scope.images(under: support), depthIndexURL: scope.depthIndex(under: support))

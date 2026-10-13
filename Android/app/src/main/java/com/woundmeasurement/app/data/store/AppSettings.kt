@@ -53,20 +53,11 @@ object AppSettings {
      */
     private const val K_PENDING_WD = "pending_withdrawals"
 
-    fun pendingWithdrawals(ctx: Context): Set<String> =
-        prefs(ctx).getStringSet(K_PENDING_WD, emptySet()) ?: emptySet()
-
-    fun addPendingWithdrawals(ctx: Context, codes: Collection<String>) {
-        if (codes.isEmpty()) return
-        // getStringSet 回的可能是內部共用實例，直接改它的行為未定義——一定要複製一份。
-        val next = pendingWithdrawals(ctx).toMutableSet().apply { addAll(codes) }
-        prefs(ctx).edit().putStringSet(K_PENDING_WD, next).apply()
-    }
-
-    fun clearPendingWithdrawal(ctx: Context, code: String) {
-        val next = pendingWithdrawals(ctx).toMutableSet().apply { remove(code) }
-        prefs(ctx).edit().putStringSet(K_PENDING_WD, next).apply()
-    }
+    private fun accounts(ctx: Context) = MedicalAccountPreferences(ctx,
+        invalidate = { com.woundmeasurement.app.pipeline.MedicalSessionEpoch.invalidate() })
+    fun pendingWithdrawals(ctx: Context): Set<String> = accounts(ctx).pending(MedicalAccountPreferences.ConsentQueue.WITHDRAWAL)
+    fun addPendingWithdrawals(ctx: Context, codes: Collection<String>) = accounts(ctx).add(codes, MedicalAccountPreferences.ConsentQueue.WITHDRAWAL)
+    fun clearPendingWithdrawal(ctx: Context, code: String) = accounts(ctx).remove(code, MedicalAccountPreferences.ConsentQueue.WITHDRAWAL)
 
     /**
      * 尚未成功送到後端的「重新取得同意」代碼。
@@ -81,19 +72,9 @@ object AppSettings {
      */
     private const val K_PENDING_RESTORE = "pending_restores"
 
-    fun pendingRestores(ctx: Context): Set<String> =
-        prefs(ctx).getStringSet(K_PENDING_RESTORE, emptySet()) ?: emptySet()
-
-    fun addPendingRestores(ctx: Context, codes: Collection<String>) {
-        if (codes.isEmpty()) return
-        val next = pendingRestores(ctx).toMutableSet().apply { addAll(codes) }
-        prefs(ctx).edit().putStringSet(K_PENDING_RESTORE, next).apply()
-    }
-
-    fun clearPendingRestore(ctx: Context, code: String) {
-        val next = pendingRestores(ctx).toMutableSet().apply { remove(code) }
-        prefs(ctx).edit().putStringSet(K_PENDING_RESTORE, next).apply()
-    }
+    fun pendingRestores(ctx: Context): Set<String> = accounts(ctx).pending(MedicalAccountPreferences.ConsentQueue.RESTORE)
+    fun addPendingRestores(ctx: Context, codes: Collection<String>) = accounts(ctx).add(codes, MedicalAccountPreferences.ConsentQueue.RESTORE)
+    fun clearPendingRestore(ctx: Context, code: String) = accounts(ctx).remove(code, MedicalAccountPreferences.ConsentQueue.RESTORE)
 
     /**
      * 預設後端位址由建置型別決定（`build.gradle` 的 `buildConfigField`）：
@@ -120,32 +101,11 @@ object AppSettings {
         prefs(ctx).edit().putString(K_URL, normalizeUrl(url)).apply()
     }
 
-    fun backendUser(ctx: Context): String = prefs(ctx).getString(K_USER, "") ?: ""
-
-    /** 解不開就回空字串（金鑰換新＝App 重裝／還原備份）→ 呼叫端會走到「請重新輸入密碼」。 */
-    fun backendPassword(ctx: Context): String {
-        val enc = prefs(ctx).getString(K_PASS_ENC, null) ?: return ""
-        return runCatching { PhiCrypto.decrypt(enc) }.getOrNull() ?: ""
-    }
-
-    /**
-     * 存憑證。加密失敗時**寧可不存也不存明文**——存明文會讓後續每一次讀取都以為它是安全的。
-     * @return true 表示真的存進去了
-     */
-    fun setCredentials(ctx: Context, user: String, password: String): Boolean {
-        val enc = runCatching { PhiCrypto.encrypt(password) }.getOrNull() ?: return false
-        com.woundmeasurement.app.pipeline.MedicalSessionEpoch.invalidate()
-        prefs(ctx).edit().putString(K_USER, user.trim()).putString(K_PASS_ENC, enc).apply()
-        return true
-    }
-
-    fun hasCredentials(ctx: Context): Boolean =
-        backendUser(ctx).isNotBlank() && prefs(ctx).getString(K_PASS_ENC, null) != null
-
-    fun clearCredentials(ctx: Context) {
-        com.woundmeasurement.app.pipeline.MedicalSessionEpoch.invalidate()
-        prefs(ctx).edit().remove(K_USER).remove(K_PASS_ENC).apply()
-    }
+    fun backendUser(ctx: Context): String = accounts(ctx).user()
+    fun backendPassword(ctx: Context): String = accounts(ctx).password()
+    fun setCredentials(ctx: Context, user: String, password: String): Boolean = accounts(ctx).setCredentials(user, password)
+    fun hasCredentials(ctx: Context): Boolean = accounts(ctx).hasCredentials()
+    fun clearCredentials(ctx: Context) = accounts(ctx).clearCredentials()
 
     /**
      * `10.0.2.2` 只在 Android 模擬器裡有意義。真機上留著它，使用者會看到「後端未連線」

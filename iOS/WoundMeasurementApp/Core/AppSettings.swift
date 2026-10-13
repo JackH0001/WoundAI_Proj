@@ -14,7 +14,9 @@ import Foundation
  */
 enum AppSettings {
 
-    private static let suite = "woundai_settings"
+    private static let suite = MedicalDataScope.mmh.settingsSuite
+    private static let accounts = MedicalAccountPreferences(scope: .mmh,
+        invalidate: { MedicalSessionEpoch.shared.invalidate() })
 
     private static var d: UserDefaults {
         return UserDefaults(suiteName: suite) ?? UserDefaults.standard
@@ -88,33 +90,13 @@ enum AppSettings {
         return s
     }
 
-    static func backendUser() -> String { return d.string(forKey: K.user) ?? "" }
-
-    /// 解不開就回空字串——回舊值或 nil 會讓呼叫端拿著壞掉的憑證反覆重試。
-    static func backendPassword() -> String {
-        guard let enc = d.string(forKey: K.passEnc), !enc.isEmpty else { return "" }
-        return PhiCrypto.decrypt(enc) ?? ""
-    }
-
-    /// - Returns: 加密失敗回 `false`，且**不寫入明文**。
+    static func backendUser() -> String { accounts.user() }
+    static func backendPassword() -> String { accounts.password() }
     @discardableResult
     static func setCredentials(user: String, password: String) -> Bool {
-        do {
-            let enc = try PhiCrypto.encrypt(password)
-            MedicalSessionEpoch.shared.invalidate()
-            d.set(user, forKey: K.user)
-            d.set(enc ?? "", forKey: K.passEnc)
-            return true
-        } catch {
-            return false
-        }
+        accounts.setCredentials(user: user, password: password)
     }
-
-    static func clearCredentials() {
-        MedicalSessionEpoch.shared.invalidate()
-        d.removeObject(forKey: K.user)
-        d.removeObject(forKey: K.passEnc)
-    }
+    static func clearCredentials() { accounts.clearCredentials() }
 
     // MARK: - 待重試佇列
     //
@@ -123,30 +105,12 @@ enum AppSettings {
     // 合成一個的話，「先撤回後重簽」與「先重簽後撤回」會得到同樣的待辦清單，
     // 而那兩者的正確結果剛好相反——重播時無從得知病患最後的意思是什麼。
 
-    static func pendingWithdrawals() -> Set<String> { return readSet(K.pendingWithdraw) }
-    static func pendingRestores() -> Set<String>    { return readSet(K.pendingRestore) }
-
-    static func addPendingWithdrawals(_ codes: [String]) { addToSet(K.pendingWithdraw, codes) }
-    static func addPendingRestores(_ codes: [String])    { addToSet(K.pendingRestore, codes) }
-
-    static func clearPendingWithdrawal(_ code: String) { removeFromSet(K.pendingWithdraw, code) }
-    static func clearPendingRestore(_ code: String)    { removeFromSet(K.pendingRestore, code) }
-
-    private static func readSet(_ key: String) -> Set<String> {
-        return Set(d.stringArray(forKey: key) ?? [])
-    }
-
-    private static func addToSet(_ key: String, _ codes: [String]) {
-        var s = readSet(key)
-        for c in codes where !c.trimmingCharacters(in: .whitespaces).isEmpty { s.insert(c) }
-        d.set(Array(s).sorted(), forKey: key)
-    }
-
-    private static func removeFromSet(_ key: String, _ code: String) {
-        var s = readSet(key)
-        s.remove(code)
-        d.set(Array(s).sorted(), forKey: key)
-    }
+    static func pendingWithdrawals() -> Set<String> { accounts.pending(.withdrawal) }
+    static func pendingRestores() -> Set<String> { accounts.pending(.restore) }
+    static func addPendingWithdrawals(_ codes: [String]) { accounts.add(codes, to: .withdrawal) }
+    static func addPendingRestores(_ codes: [String]) { accounts.add(codes, to: .restore) }
+    static func clearPendingWithdrawal(_ code: String) { accounts.remove(code, from: .withdrawal) }
+    static func clearPendingRestore(_ code: String) { accounts.remove(code, from: .restore) }
 
     /// 測試用。
     static func resetAllForTesting() {

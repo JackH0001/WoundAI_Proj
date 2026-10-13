@@ -69,6 +69,7 @@ targets:
       - path: WoundAITests/InstitutionRestoreTests.swift
       - path: WoundAITests/DepthProvenanceTests.swift
       - path: WoundAITests/MedicalDataScopeTests.swift
+      - path: WoundAITests/MedicalAccountPreferencesTests.swift
     dependencies:
       - target: WoundAIInstitution
     settings:
