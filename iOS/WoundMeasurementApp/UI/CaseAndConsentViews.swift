@@ -739,6 +739,11 @@ struct BackendSettingsView: View {
             .onChange(of: url) { _, _ in invalidateApplicationVerification() }
             .onChange(of: entryReady) { _, ready in
                 if !ready { connectionTask?.cancel(); invalidateApplicationVerification() }
+                else {
+                    user = AppSettings.backendUser()
+                    hasSavedCredentials = !user.isEmpty && !AppSettings.backendPassword().isEmpty
+                    if hasSavedCredentials { startConnection() }
+                }
             }
             .onDisappear { connectionTask?.cancel() }
         }

@@ -7,10 +7,10 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -394,14 +394,8 @@ fun WoundEditScreen(
     // 「看得清楚分區」與「看得清楚底下的紋理」——那是同一塊像素的兩種用途。
     // 與其在透明度上折衷到兩邊都不好，不如讓他一鍵切掉去看原圖。
     var showTissue by remember { mutableStateOf(true) }
-    /**
-     * 「按住看原圖」的按壓狀態。宣告在這裡而不是按鈕旁邊，因為畫布的手勢迴圈
-     * （在版面上方）也要讀它——peek 期間**第二根手指不得作畫**。
-     * 手指壓在按鈕上已經擋掉大部分誤觸，但擋不掉另一手；而「看不見卻塗得下去」
-     * 的那一筆會直接進 GT，沒有錯誤也沒有警告。
-     */
-    val peekSrc = remember { MutableInteractionSource() }
-    val peeking by peekSrc.collectIsPressedAsState()
+    // Tap-to-preview preserves layout and tool; painting is disabled until returning to annotation.
+    var peeking by remember { mutableStateOf(false) }
     // 柵格換新（換影像／續編載回）時把圖層旗標同步過去。
     // 宣告位置必須在 showTissue 之後——Kotlin 不允許向前引用區域變數。
     LaunchedEffect(st) { if (st.showTissue != showTissue) { st.showTissue = showTissue; st.syncAll(); version++ } }
@@ -541,7 +535,7 @@ fun WoundEditScreen(
     val livePush = WoundPipeline.push(liveArea, lf, exudate).partial
 
     Column(Modifier.fillMaxSize().navigationBarsPadding().padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("修邊(=GT)  面積 ${liveArea?.let { "%.2f".format(it) } ?: "-"} cm² · PUSH ${livePush ?: "-"}" +
+        Text("修邊標註  面積 ${liveArea?.let { "%.2f".format(it) } ?: "-"} cm² · PUSH ${livePush ?: "-"}" +
              "  [尺度:${if (mmPerPx != null) "ArUco✓" else "AI後備⚠"}]",
             style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
         Text("組織  肉芽${(lf["granulation"]!! * 100).toInt()}% · 腐肉${(lf["slough"]!! * 100).toInt()}% · " +
@@ -651,13 +645,15 @@ fun WoundEditScreen(
                 drawImage(img, srcOffset = IntOffset.Zero, srcSize = IntSize(bw, bh), dstOffset = dstOff, dstSize = dstSz)
                 val ovOff = IntOffset(((st.rx0 - viewOffset.x) * kk).roundToInt(), ((st.ry0 - viewOffset.y) * kk).roundToInt())
                 val ovW = (st.mw / st.mScale * kk).roundToInt(); val ovH = (st.mh / st.mScale * kk).roundToInt()
+                if (!peeking) {
                 drawImage(st.overlay.asImageBitmap(), srcOffset = IntOffset.Zero, srcSize = IntSize(st.mw, st.mh),
                     dstOffset = ovOff, dstSize = IntSize(ovW, ovH))
                 drawRect(Color(0x44888888),
                     topLeft = Offset(ovOff.x.toFloat(), ovOff.y.toFloat()),
                     size = androidx.compose.ui.geometry.Size(ovW.toFloat(), ovH.toFloat()),
                     style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2f))
-                cursor?.let {
+                }
+                cursor?.takeIf { !peeking }?.let {
                     val col = when (tool) {
                         EditTool.B_ERASE -> Color(0xFFFF5050)
                         EditTool.TISSUE -> Color(T_COLORS[curTissue] or -0x1000000)
@@ -670,31 +666,15 @@ fun WoundEditScreen(
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            FilterChip(tool == EditTool.B_PAINT, { tool = EditTool.B_PAINT }, { Text("邊界＋") }, modifier = Modifier.weight(1f))
-            FilterChip(tool == EditTool.B_ERASE, { tool = EditTool.B_ERASE }, { Text("邊界－") }, modifier = Modifier.weight(1f))
-            FilterChip(tool == EditTool.PAN, { tool = EditTool.PAN }, { Text("移動") }, modifier = Modifier.weight(1f))
+            FilterChip(tool == EditTool.B_PAINT, { tool = EditTool.B_PAINT }, { Text("邊界＋") }, leadingIcon = { Icon(Icons.Outlined.Add, null) }, modifier = Modifier.weight(1f))
+            FilterChip(tool == EditTool.B_ERASE, { tool = EditTool.B_ERASE }, { Text("邊界－") }, leadingIcon = { Icon(Icons.Outlined.Remove, null) }, modifier = Modifier.weight(1f))
+            FilterChip(tool == EditTool.PAN, { tool = EditTool.PAN }, { Text("移動") }, leadingIcon = { Icon(Icons.Outlined.PanTool, null) }, modifier = Modifier.weight(1f))
             FilterChip(tool == EditTool.TISSUE, { tool = EditTool.TISSUE },
-                { Text("組織🖌") }, modifier = Modifier.weight(1f))
-            // ── 圖層：**按住才隱藏，放開就回來** ──
-            //
-            // 舊版是切換式，有三個實測回報的問題：
-            //  1. 關掉圖層時強制切到「移動」→ 下面那排組織分類按鈕整列消失
-            //     → Column 重新排版 → 畫布拿到更多高度 → **影像跳一下變大**。
-            //     再切回組織又跳回去。醫師以為是遮罩在動，其實是版面在動。
-            //  2. 關著的時候筆刷仍然可用（切到移動只是降低機率，不是杜絕）——
-            //     看不見自己塗了什麼卻照樣能塗，那一筆會直接進 GT。
-            //  3. 要看一眼原圖得按兩次，而且中間狀態是可以誤操作的。
-            //
-            // 改成 peek 之後三個問題同時消失：工具完全不變（不重排版、不跳動），
-            // 手指壓在這顆鈕上的期間本來就碰不到畫布，放開立刻回到組織圖層。
-            // （peekSrc / peeking 宣告在畫布手勢迴圈之前，見上方。）
-            FilterChip(
-                selected = !peeking,
-                onClick = {},           // 行為在按壓狀態上，不在點擊上
-                label = { Text(if (peeking) "原圖🚫" else "按住看原圖") },
-                interactionSource = peekSrc,
-                modifier = Modifier.weight(1f)
-            )
+                { Text("組織") }, leadingIcon = { Icon(Icons.Outlined.Brush, null) }, modifier = Modifier.weight(1f))
+            FilterChip(selected = peeking, onClick = { peeking = !peeking },
+                label = { Text(if (peeking) "回修邊" else "看原圖") },
+                leadingIcon = { Icon(Icons.Outlined.Visibility, contentDescription = null) },
+                modifier = Modifier.weight(1f))
         }
         // ⚠ 這一列的顯示條件**只看工具，不看 peek**。
         // 若寫成 `tool == TISSUE && !peeking`，peek 期間整列會消失並讓畫布長高，
@@ -736,23 +716,23 @@ fun WoundEditScreen(
             Text("${brushScreen.toInt()}", fontSize = 12.sp)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            OutlinedButton({ zoomBy(1 / 1.3f) }, Modifier.weight(1f), contentPadding = PaddingValues(2.dp)) { Text("－") }
-            OutlinedButton({ zoomBy(1.3f) }, Modifier.weight(1f), contentPadding = PaddingValues(2.dp)) { Text("＋") }
-            OutlinedButton({ fitRoi() }, Modifier.weight(1f), contentPadding = PaddingValues(2.dp)) { Text("ROI") }
-            OutlinedButton({ fitFull() }, Modifier.weight(1f), contentPadding = PaddingValues(2.dp)) { Text("全圖") }
+            OutlinedButton({ zoomBy(1 / 1.3f) }, Modifier.weight(1f), contentPadding = PaddingValues(2.dp)) { Icon(Icons.Outlined.ZoomOut, contentDescription = "縮小") }
+            OutlinedButton({ zoomBy(1.3f) }, Modifier.weight(1f), contentPadding = PaddingValues(2.dp)) { Icon(Icons.Outlined.ZoomIn, contentDescription = "放大") }
+            OutlinedButton({ fitRoi() }, Modifier.weight(1f), contentPadding = PaddingValues(2.dp)) { Icon(Icons.Outlined.CenterFocusStrong, contentDescription = "圈選區") }
+            OutlinedButton({ fitFull() }, Modifier.weight(1f), contentPadding = PaddingValues(2.dp)) { Icon(Icons.Outlined.FitScreen, contentDescription = "全圖") }
             OutlinedButton({
                 if (undo.isNotEmpty()) {
                     val cur = snap()
                     if (restore(undo.removeAt(undo.lastIndex))) { push(redo, cur); version++ }
                 }
-            }, enabled = undo.isNotEmpty(), modifier = Modifier.weight(1f), contentPadding = PaddingValues(2.dp)) { Text("↺") }
+            }, enabled = !peeking && undo.isNotEmpty(), modifier = Modifier.weight(1f), contentPadding = PaddingValues(2.dp)) { Icon(Icons.Outlined.Undo, contentDescription = "復原") }
             OutlinedButton({
                 if (redo.isNotEmpty()) {
                     val cur = snap()
                     // 這裡不能用 pushUndo：它會清掉 redo，等於按一次「重做」就再也重做不了下一步
                     if (restore(redo.removeAt(redo.lastIndex))) { push(undo, cur); version++ }
                 }
-            }, enabled = redo.isNotEmpty(), modifier = Modifier.weight(1f), contentPadding = PaddingValues(2.dp)) { Text("↩") }
+            }, enabled = !peeking && redo.isNotEmpty(), modifier = Modifier.weight(1f), contentPadding = PaddingValues(2.dp)) { Icon(Icons.Outlined.Redo, contentDescription = "重做") }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(onCancel, Modifier.weight(1f)) { Text("取消") }

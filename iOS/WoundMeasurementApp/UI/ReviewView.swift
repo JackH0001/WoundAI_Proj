@@ -96,8 +96,8 @@ struct ReviewView: View {
             let width = image.cgImage?.width ?? Int(image.size.width * image.scale)
             let height = image.cgImage?.height ?? Int(image.size.height * image.scale)
             let matches = m.imageW == width && m.imageH == height
-            WoundImagePreview(image: image, polygons: matches ? m.polygons : [],
-                              imageW: width, imageH: height)
+            MedicalImagePreview(image: image, polygons: matches ? m.polygons : [],
+                              imageW: width, imageH: height, raster: matches ? resumeRaster : nil)
             if !matches {
                 Text("僅顯示原圖：此筆輪廓座標尺寸缺漏或不符，未疊加邊界。")
                     .font(.caption).foregroundStyle(.secondary)

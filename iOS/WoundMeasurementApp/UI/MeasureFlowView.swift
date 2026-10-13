@@ -814,7 +814,7 @@ struct MeasureFlowView: View {
     @MainActor @ViewBuilder
     private func measurementResult(_ r: ClassifyResult, image img: UIImage) -> some View {
     // ★ 安全關鍵：校正框必須畫出來讓醫師看一眼。
-    AnalysisPreview(image: img, result: r)
+    AnalysisPreview(image: img, result: r, raster: vm.raster)
 
     ResultCard(result: r)
 
@@ -1176,18 +1176,20 @@ struct OutlinePressButtonStyle: ButtonStyle {
 struct AnalysisPreview: View {
     let image: UIImage
     let result: ClassifyResult
+    var raster: EditRaster? = nil
     @State private var showWound = true
     @State private var showMarker = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            WoundImagePreview(
+            MedicalImagePreview(
                 image: image,
-                polygons: showWound ? (result.woundPolygons.isEmpty
+                polygons: (result.woundPolygons.isEmpty
                     ? (result.woundPolygon.count >= 3 ? [result.woundPolygon] : [])
-                    : result.woundPolygons) : [],
+                    : result.woundPolygons),
                 imageW: result.imageW, imageH: result.imageH,
-                markerPolygons: showMarker ? (result.markerQuad.map { $0.count == 4 ? [$0] : [] } ?? []) : [])
+                markerPolygons: showMarker ? (result.markerQuad.map { $0.count == 4 ? [$0] : [] } ?? []) : [],
+                raster: raster, wbGains: result.wbGains, allowAutomatic: true, showOutline: showWound)
 
             // 圖層開關：**實心＝顯示中、空心＝已隱藏**，顏色對應圖上的框色
             // （青＝傷口輪廓、綠＝校正框），眼睛圖示雙重編碼——只靠深淺在強光下看不出狀態。

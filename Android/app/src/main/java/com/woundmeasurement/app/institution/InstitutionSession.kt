@@ -78,3 +78,9 @@ class InstitutionInterceptor(private val session: InstitutionSession?) : Interce
         return response
     }
 }
+
+/** Remembering identity never constitutes authorization; IAP is checked before installation. */
+internal object InstitutionIdentityPolicy {
+    fun mayRestore(previous: String?, next: String) = !previous.isNullOrBlank() && next == previous
+    fun preserveAppCredentials(previous: String?, next: String) = mayRestore(previous, next)
+}

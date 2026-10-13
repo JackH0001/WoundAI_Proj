@@ -60,6 +60,15 @@ class RasterProvenanceTest {
                 mmPerPx = 123.0, resume = original, onCancel = {},
                 onDone = { _, _, _, a, _, r -> result = r; area = a })
         } }
+        val before = compose.onNodeWithText("完成修邊").fetchSemanticsNode().boundsInRoot
+        compose.onNodeWithContentDescription("放大").performClick()
+        compose.onNodeWithText("看原圖").performClick()
+        compose.onNodeWithText("回修邊").assertIsDisplayed()
+        compose.onNodeWithContentDescription("復原").assertIsNotEnabled()
+        compose.onNodeWithContentDescription("重做").assertIsNotEnabled()
+        compose.onNodeWithText("回修邊").performClick()
+        val after = compose.onNodeWithText("完成修邊").fetchSemanticsNode().boundsInRoot
+        assertEquals(before, after)
         compose.onNodeWithText("完成修邊").performClick()
         compose.runOnIdle {
             assertSame(original, result)

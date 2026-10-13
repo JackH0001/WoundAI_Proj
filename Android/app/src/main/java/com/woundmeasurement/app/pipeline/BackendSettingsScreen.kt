@@ -127,7 +127,7 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
         } finally { testing = false }
     }
     // Re-entering settings verifies saved credentials; saving is not proof of login.
-    LaunchedEffect(Unit) {
+    LaunchedEffect(googleReady) {
         if (hasSaved && (!mmh || googleReady)) connect(false)
     }
     LaunchedEffect(mmh) {
@@ -160,8 +160,7 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
             onBusy = { googleBusy = it },
             onChanged = { ready ->
                 googleReady = ready
-                AppSettings.clearCredentials(ctx)
-                user=""; pass=""; hasSaved=false; me=null; client=null; stats=null; result=null
+                user=AppSettings.backendUser(ctx); pass=""; hasSaved=AppSettings.hasCredentials(ctx); me=null; client=null; stats=null; result=null
             })
         OutlinedTextField(
             value = url, onValueChange = { url = it; invalidateVerification() },

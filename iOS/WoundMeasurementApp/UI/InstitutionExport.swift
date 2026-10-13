@@ -39,8 +39,7 @@ enum InstitutionExport {
         let textHeight = (caption as NSString).boundingRect(with: CGSize(width: w - 24, height: 10000),
             options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attributes, context: nil).height
         let format = UIGraphicsImageRendererFormat(); format.scale = 1; format.opaque = true
-        let colours: [[UInt8]] = [[0,0,0,0],[0,153,102,115],[204,128,0,115],[51,26,153,115],
-                                 [191,102,128,115],[102,102,102,115]]
+        let colours: [[UInt8]] = EditPalette.rgb.map { [$0.0, $0.1, $0.2, EditPalette.alpha] }
         var rgba = [UInt8](repeating: 0, count: raster.mask.count * 4)
         for i in raster.mask.indices where raster.mask[i] != 0 {
             let c = colours[Int(raster.tissue[i])]

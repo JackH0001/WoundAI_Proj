@@ -13,11 +13,26 @@ final class InstitutionGoogleSession: ObservableObject {
     private var provider: InstitutionRefreshingTokenProvider?
     private var generation: UInt64 = 0
 
+    private let rememberedSubjectKey = "mmh.google.rememberedSubject"
+    private var restoreAttempted = false
+
+    func restoreIfNeeded() async {
+        guard !ready, !busy, !restoreAttempted else { return }
+        restoreAttempted = true
+        guard GIDSignIn.sharedInstance.hasPreviousSignIn() else { return }
+        await authenticate(presenting: nil)
+    }
+
     func signIn(presenting: UIViewController) async {
+        await authenticate(presenting: presenting)
+    }
+
+    private func authenticate(presenting: UIViewController?) async {
         guard !busy else { return }
         busy = true
         defer { busy = false }
-        await clearSession()
+        await clearSession(forget: false)
+        message = presenting == nil ? "正在恢復 Google 登入並確認機構入口…" : "正在登入 Google…"
         let attempt = generation
         guard let clientID = Bundle.main.object(forInfoDictionaryKey: "GIDClientID") as? String,
               let audience = Bundle.main.object(forInfoDictionaryKey: "GIDServerClientID") as? String,
@@ -27,12 +42,14 @@ final class InstitutionGoogleSession: ObservableObject {
         }
         GIDSignIn.sharedInstance.configuration = GIDConfiguration(clientID: clientID, serverClientID: audience)
         do {
-            let result = try await GIDSignIn.sharedInstance.signIn(withPresenting: presenting)
+            let user: GIDGoogleUser
+            if let presenting { user = try await GIDSignIn.sharedInstance.signIn(withPresenting: presenting).user }
+            else { user = try await GIDSignIn.sharedInstance.restorePreviousSignIn() }
             try Task.checkCancellation()
-            guard attempt == generation, let subject = result.user.userID, !subject.isEmpty else {
+            guard attempt == generation, let subject = user.userID, !subject.isEmpty else {
                 throw InstitutionEntryError.signInRequired
             }
-            let boundUser = result.user
+            let boundUser = user
             let fresh = InstitutionRefreshingTokenProvider(subject: subject, audience: audience) {
                 guard GIDSignIn.sharedInstance.currentUser?.userID == subject else { throw InstitutionEntryError.signInRequired }
                 let updated = try await boundUser.refreshTokensIfNeeded()
@@ -44,8 +61,12 @@ final class InstitutionGoogleSession: ObservableObject {
             }
             _ = try await fresh.freshToken()
             guard attempt == generation else { fresh.invalidate(); throw InstitutionEntryError.signInRequired }
+            // Preserve the encrypted application credentials only for the same Google identity.
+            if UserDefaults.standard.string(forKey: rememberedSubjectKey) != subject {
+                AppSettings.clearCredentials()
+            }
             provider = fresh
-            email = result.user.profile?.email ?? "Google 帳號已登入"
+            email = user.profile?.email ?? "Google 帳號已登入"
             // OAuth can be tested before service IAP activation. Never send tokens to a placeholder.
             guard let configured = Bundle.main.object(forInfoDictionaryKey: "WoundAIInstitutionBackendURL") as? String,
                   !configured.isEmpty, let origin = URL(string: configured),
@@ -60,10 +81,11 @@ final class InstitutionGoogleSession: ObservableObject {
             try InstitutionEntryHealth.validate(data, response: response, service: "woundai-backend-mmhps20261007")
             guard attempt == generation else { await transport.invalidate(); throw InstitutionEntryError.signInRequired }
             InstitutionTransportRegistry.shared.replace(with: transport)
+            UserDefaults.standard.set(subject, forKey: rememberedSubjectKey)
             ready = true
-            message = "Google 與機構入口驗證通過。請接著登入 WoundAI 機構帳號；尚未完成資料上傳驗收。"
+            message = "Google 與機構入口驗證通過。原帳號可沿用已儲存的 WoundAI 登入資料；上傳狀態請查看紀錄。"
         } catch {
-            await clearSession()
+            await clearSession(forget: false)
             message = (error as? InstitutionEntryError)?.localizedDescription ?? "Google 登入未完成。若已取消可重新操作；請確認網路及機構帳號資格。"
         }
     }
@@ -72,18 +94,21 @@ final class InstitutionGoogleSession: ObservableObject {
         guard !busy else { return }
         busy = true
         defer { busy = false }
-        await clearSession()
+        await clearSession(forget: true)
         message = "已登出 Google 與此 App 的雲端帳號。本機紀錄已保留；瀏覽器需另行登出。"
     }
 
-    private func clearSession() async {
+    private func clearSession(forget: Bool) async {
         generation &+= 1
         ready = false; email = nil
         provider?.invalidate(); provider = nil
         let old = InstitutionTransportRegistry.shared.replace(with: nil)
-        AppSettings.clearCredentials()
         await old?.invalidate()
-        GIDSignIn.sharedInstance.signOut()
+        if forget {
+            AppSettings.clearCredentials()
+            UserDefaults.standard.removeObject(forKey: rememberedSubjectKey)
+            GIDSignIn.sharedInstance.signOut()
+        }
     }
 }
 
@@ -121,6 +146,7 @@ struct InstitutionGoogleEntrySection: View {
             if entry.busy { ProgressView("正在處理 Google 登入…") }
             if let message = entry.message { Text(message).font(.footnote) }
         }
+        .task { await entry.restoreIfNeeded() }
         .background(InstitutionPresenter { presenter = $0 }.frame(width: 0, height: 0))
     }
 }

@@ -96,6 +96,9 @@ fun WoundMeasurementApp() {
     // 而那頁是全新 composable(病患未選)→ 使用者失去脈絡。
     var backTo by rememberSaveable { mutableStateOf("main") }
     val context = LocalContext.current
+    LaunchedEffect(Unit) {
+        if (BuildConfig.MMH_VALIDATION) com.woundmeasurement.app.institution.InstitutionLogin.restore(context)
+    }
     val repo = remember { CaseRepository.from(WoundMeasurementDatabase.getDatabase(context)) }
     // 個案選定後在畫面間傳遞。**只傳個案不傳同意**——同意是閘門條件,由 MeasureValidationEntry
     // 從 DB 重讀(傳遞只會多一份可能過期的快照,而且會出現「case 屬 A、consent 屬 B」的脆弱狀態)。

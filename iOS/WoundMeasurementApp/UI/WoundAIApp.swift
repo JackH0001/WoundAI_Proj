@@ -97,6 +97,9 @@ struct RootView: View {
         }
         .environmentObject(app)
         .task {
+            #if WOUND_INSTITUTION
+            await InstitutionGoogleSession.shared.restoreIfNeeded()
+            #endif
             // 啟動時做三件事，都吞例外——它們失敗不該擋住 App 開啟。
             //  1. 補做未完成的同意同步（撤回／重新取得）
             //  2. 清除逾期影像
@@ -122,8 +125,11 @@ struct RootView: View {
             // 不該由他決定的事情丟給他。
             _ = await app.repo.purgeExpiredImages(imageStore: app.imageStore)
 
+            #if !WOUND_INSTITUTION
             let backend = BackendClient(baseUrl: AppSettings.backendURL())
             _ = try? await backend.health()
+            #endif
+            // MMH restore already probed IAP health. Avoid a redundant serialized warm-up request.
         }
     }
 }
