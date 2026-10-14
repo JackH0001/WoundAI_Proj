@@ -24,3 +24,9 @@ PR #27 在固定來源整合後暴露的問題，本次保留原失敗日誌並�
 兩個 XCTest 略過的是需先取得系統資料夾選擇授權的跨程序測試；不當成通過。模擬器 iOS 26.5。本輪沒有更新實機、商店、雲端映像或服務；GitHub CI 的另一個 iOS 環境仍需跑完才可宣告來源檢查完成。
 
 證據位於本機 `woundai-institution-evidence-20261007/mmh-iap-update-20261011/integrated-release-validation-20261014`；原始110檔交接 manifest 不變。Mac 為合格提交場域不等於 Windows／PowerShell 已完成驗證。
+
+## CI 的系統資料夾前置條件
+
+一般單元測試不先操作系統資料夾選擇器；跨程序案例因此會明確 skip。CI 只允許 `InstitutionPrivateExportsTests/testPersistedSystemFolderDeliversAfterProcessRestart()` 在 iOS Simulator、且原因完全等於缺少指定 UI 授權時略過，輸出 `system_folder_acceptance_pending: true`。其他 skip、真機 skip、實際失敗、錯誤原因或重複案例一律拒絕。這不是資料夾驗收通過；仍需單獨進行系統選擇器／重新啟動驗收。
+
+驗證工具10/10回歸通過，並對本輪MMH xcresult讀回135 passed（131單元＋4介面）、1 skipped、0 failed，確認真實結果格式也可正確分類。
