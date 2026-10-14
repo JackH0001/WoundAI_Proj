@@ -149,7 +149,7 @@ def main():
         "tissue_frac": {"granulation": 0.62, "necrosis": 0.38},
         "tissue_mask_png": base64.b64encode(make_tissue_png()).decode(),
         "tissue_edited": True, "tissue_edit_px": 12483, "tissue_edit_ratio": 0.21,
-        "tissue_raster": {"mw": 200, "mh": 150, "rx0": 300.0, "ry0": 200.0, "sx": 2.6, "sy": 2.93},
+        "tissue_raster": {"mw": 200, "mh": 150, "rx0": 300.0, "ry0": 200.0, "m_scale": 0.5},
         "quality": {"focus_lapvar": 42.0, "clipped_frac": 0.01,
                     "roi_short_px": 430, "marker_frac": 0.004, "marker_skew": 0.05},
         "capture_device": "Samsung SM-S918",
@@ -204,8 +204,8 @@ def main():
     print("\n── 2b 組織遮罩的定位 ──")
     tr = body["tissue_raster"]
     rx, ry = tr["rx0"], tr["ry0"]
-    rw = tr["mw"] / tr["sx"] if "sx" in tr else None
-    # 本測試的 body 用的是 m_scale 的舊鍵名，統一改成後端實際讀的那個
+    rw = tr["mw"] / tr["m_scale"]
+    # 使用 App 實際傳送的 m_scale；不再靠缺欄位預設尺度。
     check("測試資料含 tissue_raster 定位資訊", all(k in tr for k in ("rx0", "ry0", "mw", "mh")))
     xs = [float(m) for m in re.findall(r'<rect x="([\d.]+)" y="[\d.]+" width="[\d.]+" height="[\d.]+" fill="#', svg)]
     ys = [float(m) for m in re.findall(r'<rect x="[\d.]+" y="([\d.]+)" width="[\d.]+" height="[\d.]+" fill="#', svg)]
@@ -269,7 +269,7 @@ def main():
     _buf = _io.BytesIO(); _im.save(_buf, "PNG")
     b4 = dict(body, code="WD-TISSUENEW",
               tissue_mask_png=base64.b64encode(_buf.getvalue()).decode(),
-              tissue_edit_px=54321)
+              tissue_edit_px=23456)
     r4 = cli.post("/api/v1/annotation", headers=H, json=b4)
     j4 = r4.get_json() or {}
     check("相同輪廓但**組織遮罩不同** → 收下（不是重複，是修訂）",
@@ -278,7 +278,7 @@ def main():
     check("新的組織遮罩確實入列", len(recs4) == 1, "%d 筆" % len(recs4))
     if recs4:
         check("紀錄帶有 tissue_sig（下次比對才拿得到）", bool(recs4[0].get("tissue_sig")))
-        check("新遮罩的醫師修正像素數有落盤", recs4[0].get("tissue_edit_px") == 54321)
+        check("新遮罩的醫師修正像素數有落盤", recs4[0].get("tissue_edit_px") == 23456)
     # 覆蓋後的遮罩檔要是新的那一份
     _stored = open(os.path.join(tmp, recs4[0]["tissue_mask_key"]), "rb").read()
     check("落盤的遮罩已更新為最新送出的那一份",

@@ -9,7 +9,14 @@ import UIKit
 struct ReviewView: View {
     @EnvironmentObject var app: AppState
 
-    @State private var cur: Measurement?
+    let runtime: MedicalRuntime
+    @ObservedObject private var uploads: ClinicalUploadOutbox
+    init(runtime: MedicalRuntime) { self.runtime = runtime; uploads = runtime.local.outbox }
+    @StateObject private var record = ClinicalReviewRecord()
+    private var cur: Measurement? {
+        get { record.measurement }
+        nonmutating set { record.measurement = newValue }
+    }
     @State private var bmp: UIImage?
     @State private var resumeRaster: EditRaster?
     @State private var spaceMismatch: String?
@@ -24,6 +31,9 @@ struct ReviewView: View {
     @State private var seenStatus: String?
     @State private var backend: BackendClient?
     @State private var depthUploading = false
+    @State private var submitting = false
+    @State private var uploadPhase = ""
+    private var uploadBusy: Bool { submitting || depthUploading }
 
     var body: some View {
         NavigationStack {
@@ -33,6 +43,10 @@ struct ReviewView: View {
                 }
                 .padding()
             }
+            .disabled(uploadBusy)
+            .safeAreaInset(edge: .bottom) {
+                if uploadBusy { UploadProgressBanner(message: uploadPhase) }
+            }
             .navigationTitle("紀錄檢視／重修補送標註")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -40,10 +54,19 @@ struct ReviewView: View {
                     Button("返回時間軸") {
                         app.reviewRecord = nil
                         app.screen = .timeline
-                    }
+                    }.disabled(uploadBusy)
                 }
             }
             .task { await load() }
+            .onReceive(uploads.$jobs) { _ in
+                guard let snapshot = cur, !editing else { return }
+                Task {
+                    guard let current = await app.repo.measurement(id: snapshot.id),
+                          cur?.id == current.id, cur?.imagePath == current.imagePath,
+                          cur?.gtPolygon == current.gtPolygon, cur?.rasterPath == current.rasterPath else { return }
+                    cur?.annotationSubmitted = current.annotationSubmitted
+                }
+            }
             .fullScreenCover(isPresented: $editing) { editCover }
             .onChange(of: msg) { _, s in
                 guard let s, s != seenStatus,
@@ -64,6 +87,9 @@ struct ReviewView: View {
              + (m.estimatedArea.map { String(format: "%.2f cm²", $0) } ?? "未校正")
              + "・滲液 \(m.exudate.map(String.init) ?? "—")")
             .font(.subheadline)
+        if let job = uploads.latest(recordID: m.id) {
+            Text("臨床紀錄已保存 · " + job.status).font(.footnote).foregroundStyle(.secondary)
+        }
         if let s = msg { Text(s).font(.footnote).foregroundStyle(.blue) }
         if loading { Text("載入影像中…").font(.footnote).foregroundStyle(.secondary) }
 
@@ -72,8 +98,8 @@ struct ReviewView: View {
             let width = image.cgImage?.width ?? Int(image.size.width * image.scale)
             let height = image.cgImage?.height ?? Int(image.size.height * image.scale)
             let matches = m.imageW == width && m.imageH == height
-            WoundImagePreview(image: image, polygons: matches ? m.polygons : [],
-                              imageW: width, imageH: height)
+            MedicalImagePreview(image: image, polygons: matches ? m.polygons : [],
+                              imageW: width, imageH: height, raster: matches ? resumeRaster : nil)
             if !matches {
                 Text("僅顯示原圖：此筆輪廓座標尺寸缺漏或不符，未疊加邊界。")
                     .font(.caption).foregroundStyle(.secondary)
@@ -101,8 +127,8 @@ struct ReviewView: View {
         Text("補送訓練標註").font(.subheadline).bold()
         Text(submitHint(m))
             .font(.footnote)
-            .foregroundStyle(canSubmit(m) ? Color.secondary : Color.red)
-        Button("補送訓練標註 → 再訓練佇列") { confirmSubmit = true }
+            .foregroundStyle(m.annotationSubmitted ? Color.blue : (canSubmit(m) ? Color.secondary : Color.red))
+        Button(m.annotationSubmitted ? "標註已保存，無需補送" : "補送訓練標註 → 再訓練佇列") { confirmSubmit = true }
             .buttonStyle(.borderedProminent)
             .disabled(!canSubmit(m))
             // 送出前逐欄揭露：資料離開手機是最不可逆的動作，不採「按了就送」。
@@ -118,7 +144,7 @@ struct ReviewView: View {
         // 深度在拍攝當下已加密存本機（depth_source=lidar_local）；這裡把 f32 原樣
         // 補傳供 3D 研究。後端拒收孤兒深度（必須先有標註綁定），所以未補送標註時
         // 只給引導不給按鈕——按了必失敗的按鈕比沒有按鈕更糟。
-        if let entry = DepthStore.lookup(imagePath: m.imagePath), m.imageId != nil {
+        if let entry = DepthStore.lookup(imagePath: m.imagePath, store: app.imageStore), m.imageId != nil {
             Divider()
             Text("LiDAR 深度補傳").font(.subheadline).bold()
             if entry["uploaded"] == "1" {
@@ -128,10 +154,10 @@ struct ReviewView: View {
                 Text("目前帳號無深度上傳權限；本機深度資料仍可檢視。")
                     .font(.footnote).foregroundStyle(.secondary)
             } else if !m.annotationSubmitted {
-                Text("此筆有本機深度側檔。請**先補送訓練標註**——後端不收沒有標註綁定的深度（孤兒資料防護）。")
+                Text("本筆尚未完成上傳。按「補送訓練標註」後會自動接續深度；相同標註已存在也可接續，不需重新修邊。")
                     .font(.footnote).foregroundStyle(.secondary)
             } else {
-                Text("此筆有本機深度側檔（約 300KB），可補傳供 3D 量測研究。")
+                Text("標註已保存，原始深度尚待補傳。資料大小與網路狀況會影響等待時間；只需重試深度。")
                     .font(.footnote).foregroundStyle(.secondary)
                 Button(depthUploading ? "深度補傳中…" : "補傳深度 → 雲端") {
                     Task { await uploadDepth(m) }
@@ -144,30 +170,44 @@ struct ReviewView: View {
 
     @MainActor
     private func uploadDepth(_ m: Measurement) async {
+        guard !uploadBusy else { return }
+        depthUploading = true
+        uploadPhase = "確認深度補傳權限…"
+        defer { depthUploading = false }
         guard await refreshIdentity(), identity?.can("annotation.submit") == true else {
             msg = "⚠️ 目前帳號無深度上傳權限，未送出資料。"
             return
         }
-        guard let backend, let imageId = m.imageId,
+        if let cid = m.caseId, let c = await app.repo.getCase(id: cid) {
+            guard await app.repo.activeConsent(patientId: c.patientId)?.trainEffective == true else {
+                msg = "⚠️ 訓練同意已撤回或失效，已停止深度補傳。"
+                return
+            }
+        } else if (m.source ?? "clinical") == "clinical" {
+            msg = "⚠️ 缺少可核對同意的個案，已停止深度補傳。"
+            return
+        }
+        guard backend != nil, m.imageId != nil,
               let side = DepthStore.load(imagePath: m.imagePath, store: app.imageStore) else {
             msg = "⚠️ 深度側檔讀取失敗（可能已隨影像保存政策清除）"
             return
         }
-        depthUploading = true
-        defer { depthUploading = false }
-        msg = "深度補傳中…"
+        uploadPhase = "傳送原始深度並等待後端保存確認…"
+        msg = nil
         do {
-            let r = try await backend.uploadDepth(imageId: imageId,
-                                                  raw: side.raw, sidecarMeta: side.meta)
-            DepthStore.markUploaded(imagePath: m.imagePath)
-            msg = "✅ 深度已補傳（id \(r.depthId)\(r.replaced ? "，覆蓋前一份" : "")）"
+            guard let actor = identity?.identity else { throw BackendError.notLoggedIn }
+            try uploads.enqueue(measurement: m, payload: Data(), server: runtime.backendURL(),
+                configuredUser: runtime.backendUser(), actor: actor, depth: side,
+                requiresDepth: true, annotationConfirmed: m.annotationSubmitted)
+            runtime.resumeUploads()
+            msg = "ℹ️ 原始深度已加入待傳佇列，可繼續其他工作。不需重新修邊。"
         } catch {
-            msg = "⚠️ 深度補傳失敗：\(error.localizedDescription)"
+            msg = "⚠️ 未能建立深度待傳工作：\(error.localizedDescription)"
         }
     }
 
     private func canSubmit(_ m: Measurement) -> Bool {
-        return !m.annotationSubmitted && m.gtPolygon != nil && m.imageId != nil
+        return !loading && !uploadBusy && !uploads.jobs.contains(where: { $0.measurement.id == m.id && !$0.completed }) && !m.annotationSubmitted && m.gtPolygon != nil && m.imageId != nil
             && m.wdCode != nil && m.doctorVerified && trainOk && loggedIn
             && identity?.canSubmitClinicalTraining == true
     }
@@ -176,7 +216,10 @@ struct ReviewView: View {
         if identity?.canSubmitClinicalTraining != true {
             return "目前帳號無醫師確認／訓練標註權限；可調整輪廓與儲存量測。"
         }
-        if m.annotationSubmitted { return "此筆已送出過訓練標註。重新修邊後可再送（雲端視為醫師修訂版）。" }
+        if uploads.jobs.contains(where: { $0.measurement.id == m.id && !$0.completed }) {
+            return "此筆研究資料已排入待傳佇列，會自動接續；不需重新修邊或重複送出。"
+        }
+        if m.annotationSubmitted { return "此筆標註已獲雲端確認；僅在需要修正輪廓時重新修邊，深度上傳不需改動遮罩。" }
         if m.gtPolygon == nil { return "⚠ 此筆沒有 GT 輪廓，不能補送（請先重新修邊）。" }
         if m.imageId == nil { return "⚠ 此筆沒有後端影像綁定，不能補送。" }
         if !m.doctorVerified { return "⚠ 此筆未經醫師完成修邊確認，不得送訓練標註。請先「重新修邊」並完成（按取消不算）。" }
@@ -240,9 +283,12 @@ struct ReviewView: View {
 
     @MainActor
     private func load() async {
-        guard let m = app.reviewRecord else { return }
-        cur = m
+        guard let selected = app.reviewRecord else { return }
         loading = true
+        await record.refresh(id: selected.id, repo: app.repo)
+        guard let m = cur else {
+            msg = "⚠️ 紀錄已不存在，無法補送。"; loading = false; return
+        }
         let img = await ImageLoadQueue.shared.fullImage(store: app.imageStore, name: m.imagePath)
         guard !Task.isCancelled else { return }
         bmp = img
@@ -263,8 +309,18 @@ struct ReviewView: View {
             // 範例／模擬圖無受試者，不受訓練同意限制。
             trainOk = (m.source ?? "clinical") != "clinical"
         }
-        let c = BackendClient(baseUrl: AppSettings.backendURL())
-        let u = AppSettings.backendUser(), p = AppSettings.backendPassword()
+        #if WOUND_INSTITUTION
+        do {
+            let c = try await runtime.acquire()
+            try Task.checkCancellation()
+            backend = c; identity = await c.currentIdentity(); loggedIn = identity != nil
+        } catch {
+            backend = nil; identity = nil; loggedIn = false
+            msg = "登入狀態尚未驗證：\(error.localizedDescription)"
+        }
+        #else
+        let c = runtime.makeBackend()
+        let u = runtime.backendUser(), p = runtime.backendPassword()
         // ⚠ 不可寫成 `!u.isEmpty && (try? await …)`：`&&` 的右運算元是 @autoclosure，
         //   不支援 async，await 塞進去是編譯錯誤（而且訊息不會指向 &&）。
         if u.isEmpty || p.isEmpty {
@@ -274,6 +330,7 @@ struct ReviewView: View {
         }
         backend = c
         identity = loggedIn ? await c.currentIdentity() : nil
+        #endif
         loading = false
     }
 
@@ -337,15 +394,38 @@ struct ReviewView: View {
     private func refreshIdentity() async -> Bool {
         identity = nil
         loggedIn = false
+        #if WOUND_INSTITUTION
+        do {
+            let refreshed = try await runtime.acquire()
+            backend = refreshed
+            identity = await refreshed.currentIdentity()
+            loggedIn = identity != nil
+        } catch { backend = nil }
+        #else
         guard let backend else { return false }
-        loggedIn = (try? await backend.login(username: AppSettings.backendUser(),
-                                             password: AppSettings.backendPassword())) == true
+        loggedIn = (try? await backend.login(username: runtime.backendUser(), password: runtime.backendPassword())) == true
         if loggedIn { identity = await backend.currentIdentity() }
+        #endif
         return loggedIn
     }
 
     @MainActor
     private func submit(_ m: Measurement) async {
+        guard !uploadBusy, !uploads.jobs.contains(where: { $0.measurement.id == m.id && !$0.completed }) else { return }
+        submitting = true
+        uploadPhase = "確認登入與最新同意…"
+        defer { submitting = false }
+        guard let fresh = await record.prepareSubmission(id: m.id, repo: app.repo) else {
+            msg = cur == nil ? "⚠️ 紀錄已不存在，未送出。" : "ℹ️ 此筆標註已獲雲端確認，無需補送。"
+            return
+        }
+        // Never pair a stale screen raster with a newer persisted measurement.
+        guard fresh.imagePath == m.imagePath, fresh.rasterPath == m.rasterPath,
+              fresh.rasterMeta == m.rasterMeta, fresh.gtPolygon == m.gtPolygon,
+              fresh.exudate == m.exudate else {
+            await load(); msg = "ℹ️ 紀錄已更新，請先檢視最新內容再確認送出。"; return
+        }
+        let m = fresh
         guard await refreshIdentity(), identity?.canSubmitClinicalTraining == true else {
             msg = "⚠️ 目前帳號無醫師確認／訓練標註權限，未送出資料。"
             return
@@ -356,11 +436,11 @@ struct ReviewView: View {
             trainOk = fresh
             guard fresh else { msg = "⚠️ 此病患目前無有效的②訓練同意（可能剛撤回），已停止送出"; return }
         }
-        guard let backend, let imageId = m.imageId, let code = m.wdCode else { return }
-        msg = "送出中…"
+        guard backend != nil, let imageId = m.imageId, let code = m.wdCode else { return }
+        msg = nil
+        let polys = m.polygons
         do {
-            let polys = m.polygons
-            let outcome = try await backend.submitAnnotation(
+            let payload = try BackendClient.annotationPayload(
                 code: code,
                 gtPolygon: PolygonJson.largest(polys),
                 exudate: m.exudate,
@@ -378,23 +458,19 @@ struct ReviewView: View {
                 correctionIou: m.correctionIou,
                 careNote: "resubmit from timeline",
                 source: m.source ?? "clinical",
-                depthSource: DepthStore.lookup(imagePath: m.imagePath) != nil ? "lidar_local" : "none",
+                depthSource: DepthStore.lookup(imagePath: m.imagePath, store: app.imageStore) != nil ? "lidar_local" : "none",
                 consentTrain: trainOk,
                 doctorVerified: m.doctorVerified)
-            switch outcome {
-            case .rejected(let t):
-                msg = "⚠️ 被守門擋下：\(t)"
-            case .duplicateSkipped(let note):
-                msg = "ℹ️ \(note)"
-            case .enqueued:
-                // 本機標記失敗不可假裝成功：畫面顯示已送出而 DB 沒記，重開又變可補送。
-                await app.repo.markAnnotationSubmitted(id: m.id)
-                var u = m; u.annotationSubmitted = true
-                cur = u; app.reviewRecord = u
-                msg = "✅ 已補送訓練標註（\(code)）\n本筆已進入雲端再訓練佇列。"
-            }
+            guard let actor = identity?.identity else { throw BackendError.notLoggedIn }
+            let depth = DepthStore.load(imagePath: m.imagePath, store: app.imageStore)
+            let expectsDepth = DepthStore.lookup(imagePath: m.imagePath, store: app.imageStore) != nil
+            try uploads.enqueue(measurement: m, payload: payload, server: runtime.backendURL(),
+                configuredUser: runtime.backendUser(), actor: actor, depth: depth, requiresDepth: expectsDepth)
+            runtime.resumeUploads()
+            msg = "ℹ️ 研究資料已安全排入待傳佇列，可繼續工作；標註確認後自動接續原始深度。"
+            msg = (msg ?? "") + (await runtime.exportSubmission(m, payload: payload))
         } catch {
-            msg = "⚠️ 送出失敗：\(error.localizedDescription)"
+            msg = "⚠️ 未能建立研究待傳工作：\(error.localizedDescription)"
         }
     }
 }

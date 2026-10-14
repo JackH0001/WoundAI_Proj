@@ -225,6 +225,10 @@ def fetch_local(fw_dir, kind, source, allow_unedited):
 
 
 def main():
+    from review_service_profile import review_environment
+    if review_environment(os.environ):
+        print("Synthetic review deployment cannot export a research training dataset.")
+        return 1
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", help="後端網址（與 --flywheel 二擇一）")
     ap.add_argument("--user")
@@ -297,6 +301,8 @@ def main():
             if raw_img is None or raw_msk is None:
                 why = "影像或遮罩取不到"
             else:
+                from tissue_mask_contract import validate_tissue_mask
+                validate_tissue_mask(raw_msk, it.get("tissue_raster"), it.get("image_w"), it.get("image_h"))
                 img = cv2.imdecode(np.frombuffer(raw_img, np.uint8), cv2.IMREAD_COLOR)
                 mk = cv2.imdecode(np.frombuffer(raw_msk, np.uint8), cv2.IMREAD_COLOR)
                 if img is None or mk is None:

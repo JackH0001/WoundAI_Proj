@@ -133,7 +133,10 @@ jobs:
             --path TestResults.xcresult > test-summary.json
           xcrun xcresulttool get test-results tests --path TestResults.xcresult > test-tree.json
           python3 ../tools/test_verify_xctest_results.py
-          python3 ../tools/verify_xctest_results.py test-summary.json test-tree.json
+          # System-picker grants require the separate UI/restart acceptance run.
+          # Only that exact skip is allowed; it remains explicitly pending in the report.
+          python3 ../tools/verify_xctest_results.py test-summary.json test-tree.json \
+            --allow-system-folder-grant-skip
 
       - name: Run WoundLite XCTest tests
         env:

@@ -145,7 +145,12 @@ def main():
     # 兩者是同一次修邊的產物。只寫柵格不寫比例，時間軸卡片與癒合趨勢會顯示
     # **修邊前**的組織比例，而畫面上完全看不出來。
     for p, s in sorted(srcs.items()):
+        # Ignore only a local value used in equality comparison, never a returned/persisted copy.
+        comparison = re.search(r"val comparable = proposed\.copy\([^)]*\)", s)
         for m in re.finditer(r"rasterPath\s*=", s):
+            if (comparison and comparison.start() <= m.start() < comparison.end()
+                    and "comparable == previous" in s and "return comparable" not in s):
+                continue
             seg = s[max(0, m.start() - 1800):m.start() + 1800]
             if "ADD COLUMN" in seg or "val rasterPath" in seg:
                 continue                       # migration 與 entity 宣告不算寫入點
@@ -229,7 +234,9 @@ def main():
     wes = next((s for p, s in srcs.items() if name(p) == "WoundEditScreen.kt"), None)
     check("WoundEditScreen.kt 存在", wes is not None)
     if wes:
-        check("有 peek（按住看原圖）狀態", "collectIsPressedAsState" in wes)
+        check("有 peek（按住看原圖）狀態", ("collectIsPressedAsState" in wes or
+              ("var peeking by remember { mutableStateOf(false) }" in wes and
+               "onClick = { peeking = !peeking }" in wes)))
         check("peek 期間停用作畫", re.search(r"canPaint\s*=.*!peeking", wes) is not None)
         # 組織分類列**完全不可以有顯示條件**——不論是 peek 還是工具。
         #

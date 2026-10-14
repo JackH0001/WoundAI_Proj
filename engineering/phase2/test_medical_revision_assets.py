@@ -49,16 +49,16 @@ class RevisionAssets(unittest.TestCase):
                  gt_polygon=[[2, 2], [20, 2], [20, 20], [2, 20]], mm_per_px=.5,
                  exudate=0, doctor_verified=True, deidentified=True, consent_train=True,
                  source='sample', route='cloud', tissue_edited=True,
-                 tissue_raster={'mw': 8, 'mh': 8, 'x': 2, 'y': 2, 'w': 18, 'h': 18},
+                 tissue_raster={'mw': 8, 'mh': 8, 'rx0': 2, 'ry0': 2, 'm_scale': 8/18},
                  tissue_mask_png=base64.b64encode(png(value)).decode())
         r = self.client.post('/api/v1/annotation', headers=self.headers[who], json=d)
         self.assertEqual(r.status_code, 200, r.json)
         return r.json['annotation_receipt_id']
 
     def depth(self, rid, value=.3, who='dr1'):
-        raw = struct.pack('<192f', *([value] * 192))
-        meta = dict(width=16, height=12, format='f32_le_meters',
-                    camera_intrinsics=dict(fx=50., fy=50., cx=8., cy=6., ref_width=16, ref_height=12))
+        raw = struct.pack('<256f', *([value] * 256))
+        meta = dict(width=16, height=16, format='f32_le_meters',
+                    camera_intrinsics=dict(fx=50., fy=50., cx=8., cy=8., ref_width=16, ref_height=16))
         data = dict(image_id=self.iid, meta=json.dumps(meta), depth_f32=(io.BytesIO(raw), 'd.f32'))
         if rid is not None: data['annotation_receipt_id'] = rid
         return self.client.post('/api/v1/depth', headers=self.headers[who], data=data)
@@ -77,7 +77,7 @@ class RevisionAssets(unittest.TestCase):
         original['annotation_receipt_id'] = 'a' * 16
         # Reconstruct the exact Android-style payload from persisted metadata.
         payload = {k: original.get(k) for k in fw.REQUIRED + fw.PROVENANCE
-                   if k not in ('tissue_mask_key', 'depth_map_key', 'depth_conf_key')}
+                   if k in original and k not in ('tissue_mask_key', 'depth_map_key', 'depth_conf_key')}
         payload['tissue_mask_png'] = base64.b64encode(png(1)).decode()
         read_original = fw.read_jsonl
         with patch.object(fw, 'read_jsonl', side_effect=lambda path: [original] if path == fw.QUEUE else read_original(path)), \

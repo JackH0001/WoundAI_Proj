@@ -22,6 +22,30 @@ class RawDepthTests(unittest.TestCase):
           intrinsics=dict(fx=50,fy=50,cx=32,cy=32,reference_width=64,reference_height=64),
           source_exif_orientation=1,accuracy='absolute',filtered=False,confidence_kind='validity_only',
           pose='unavailable',capture_time='unavailable',registration='not_verified')
+    def test_capture_v2_preserves_callback_time_without_claiming_sensor_synchrony(self):
+        self.m.update(schema='lite.rgbd/2', capture_time='host_wall_clock',
+                      capture_id='00000000-0000-4000-8000-000000000001',
+                      captured_at='2023-11-14T22:13:20.000Z',
+                      capture_time_source='photo_callback_wall_clock')
+        result = self.run_contract()
+        self.assertEqual(result['metadata'], self.m)
+        self.assertEqual(result['training_admission'], 'not_evaluated')
+        self.assertEqual(result['raw_depth'], self.raw)
+
+    def test_capture_v2_missing_invalid_or_guessed_time_rejected(self):
+        base = dict(self.m, schema='lite.rgbd/2', capture_time='host_wall_clock',
+                    capture_id='00000000-0000-4000-8000-000000000001',
+                    captured_at='2023-11-14T22:13:20.000Z',
+                    capture_time_source='photo_callback_wall_clock')
+        for key, value in [('capture_id',None), ('capture_id','not-a-uuid'),
+                           ('captured_at',None), ('captured_at','2023-02-30T00:00:00.000Z'),
+                           ('captured_at','2023-11-14T22:13:20.000'),
+                           ('capture_time_source','sensor'), ('capture_time','unavailable')]:
+            self.m = dict(base)
+            if value is None: self.m.pop(key)
+            else: self.m[key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError): self.run_contract()
+
     def run_contract(self):return validate(json.dumps(self.m).encode(),self.raw,self.jpeg)
     def parts(self):
         return MultiDict([('raw_depth_metadata',json.dumps(self.m))]), MultiDict([

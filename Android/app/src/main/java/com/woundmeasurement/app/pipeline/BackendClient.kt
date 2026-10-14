@@ -108,18 +108,61 @@ data class LoginIdentity(
     fun label() = "${displayName ?: user}（$roleZh）"
 }
 
-class BackendClient(private val baseUrl: String, jwt: String = "") {
+/** Production construction always applies the MMH gateway and its routing checks. */
+private fun createBackendHttpClient(review: Boolean = false, current: () -> Boolean = { true }): OkHttpClient {
     // escalate 的 classify 需跑 student+A∪U 兩模型,首次冷啟>10s;拉長逾時避免 timeout
-    private val http = OkHttpClient.Builder()
+    return OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(90, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .callTimeout(120, TimeUnit.SECONDS)
+        .apply {
+            if (review || com.woundmeasurement.app.BuildConfig.MMH_VALIDATION) {
+                followRedirects(false); followSslRedirects(false); retryOnConnectionFailure(false)
+                if (review) addInterceptor(com.woundmeasurement.app.institution.SyntheticReviewInterceptor(current))
+                else addInterceptor(com.woundmeasurement.app.institution.InstitutionInterceptor(
+                    com.woundmeasurement.app.institution.InstitutionRegistry.snapshot()))
+            }
+        }
         .build()
+}
+
+class BackendClient internal constructor(
+    private val baseUrl: String,
+    jwt: String,
+    http: OkHttpClient,
+    private val contextCurrent: () -> Boolean = { true },
+    private val bindGoogle: Boolean = true,
+    private val expectedOrg: String = "mmhps20261007"
+) : MedicalSessionClient {
+    // Public app call sites keep the guarded production transport. The internal
+    // overload lets instrumented tests exercise receipt parsing on loopback.
+    constructor(baseUrl: String, jwt: String = "") : this(baseUrl, jwt, createBackendHttpClient())
+    companion object {
+        internal fun forRuntime(origin: String, current: () -> Boolean, review: Boolean) =
+            BackendClient(origin, "", createBackendHttpClient(review, current), current, !review,
+                if (review) "mmh-review-demo" else "mmhps20261007")
+    }
     @Volatile private var jwt: String = jwt
+    private val sessionEpoch = MedicalSessionEpoch.snapshot()
+    private val http = http.newBuilder().apply {
+        interceptors().add(0, okhttp3.Interceptor { chain ->
+            fun checkContext() {
+                if (!contextCurrent() || (bindGoogle && com.woundmeasurement.app.BuildConfig.MMH_VALIDATION && sessionEpoch != MedicalSessionEpoch.snapshot())) {
+                    this@BackendClient.jwt=""; identity=null
+                    throw java.io.IOException("登入設定已變更，請重新驗證；本機紀錄保留")
+                }
+            }
+            checkContext()
+            val response=chain.proceed(chain.request())
+            try { checkContext() } catch (error: Exception) { response.close(); throw error }
+            response
+        })
+    }.build()
+    override val hasSessionToken: Boolean get() = jwt.isNotEmpty()
 
     /** 登入後的身分；未登入為 null。 */
-    @Volatile var identity: LoginIdentity? = null
+    @Volatile override var identity: LoginIdentity? = null
         private set
 
     /** 登入取得 JWT(後端 /api/auth/login)。成功回 true 並存 token 供後續呼叫。同步阻塞,請於 IO 執行。 */
@@ -161,7 +204,9 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
         null      // 連不上與降級是兩件事，這裡只回報「問不到」，由呼叫端區分
     }
 
-    fun login(username: String, password: String): Boolean {
+    override fun login(username: String, password: String): Boolean {
+        jwt = ""
+        identity = null
         val body = JSONObject(mapOf("username" to username, "password" to password)).toString()
             .toRequestBody("application/json".toMediaType())
         val req = Request.Builder().url("$baseUrl/api/auth/login").post(body).build()
@@ -192,6 +237,23 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
      * 特別把 clinical 與其他來源分開顯示——範例/模擬圖走同一條管線收進來,
      * 混在一起看會讓收案進度看起來比實際多。
      */
+    override fun validateMedicalSession(): LoginIdentity {
+        val previous=identity; identity=null
+        val req=Request.Builder().url("$baseUrl/api/v1/auth/session")
+            .header("Authorization", "Bearer $jwt").get().build()
+        http.newCall(req).execute().use { response ->
+            if (response.code != 200) {
+                if (response.code in listOf(401,403)) jwt=""
+                throw java.io.IOException(if (response.code==404) "此後端尚未支援登入狀態驗證，請聯絡管理員更新"
+                    else "登入狀態驗證未完成（HTTP ${response.code}），請稍後重新驗證；本次未送出影像")
+            }
+            val verified=try { MedicalSessionContract.decode(response.body?.string() ?: "",previous, expectedOrg = expectedOrg) }
+            catch (error: Exception) { jwt=""; throw error }
+            identity=verified
+            return verified
+        }
+    }
+
     /**
      * 取一個一次性登入碼，用來把「已登入的身分」交給同一台裝置上的瀏覽器。
      *
@@ -396,9 +458,12 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
          * 於是一筆從未被人看過的 AI 輸出會以「醫師已驗證」的身分進入訓練集。
          * 飛輪的整個前提是 GT 來自人的判斷，這個欄位說謊會讓後續所有模型評估失去意義。
          */
-        doctorVerified: Boolean
+        doctorVerified: Boolean,
+        onResponse: ((Int, String) -> Unit)? = null
     ): Pair<Boolean, String> {
         // 沒有 image_id/尺寸就送出 = 產生孤兒 GT(後端會 400)。提早在端上擋下並給明確訊息。
+        if (tissueRaster?.tissueEditCountKnown == false)
+            return Pair(false, "缺少原始組織分類基準，無法確認修改量；未送出標註")
         if (imageId.isNullOrEmpty() || imageW <= 0 || imageH <= 0) {
             return Pair(false, "缺影像綁定(image_id/尺寸);請重新以後端模式量測一次再送出")
         }
@@ -454,7 +519,21 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
         // 組織分割 GT。**tissue_edited 一定要跟著送**——後端靠它決定這張遮罩
         // 能不能進訓練集。少了它，未經醫師修正的啟發式輸出會安靜地混進去，
         // 而模型就在學習複製它自己已經會做的事（見 EditRaster.tissueEditedPx）。
+        var woundHash: String? = null
+        var tissueHash: String? = null
+        if (tissueMaskPng == null || tissueRaster == null)
+            return false to "傷口與組織遮罩未齊全，請保留本機紀錄"
         if (tissueMaskPng != null && tissueRaster != null) {
+            val wound = WoundMaskCodec.encode(tissueRaster.mask, tissueRaster.mw, tissueRaster.mh)
+                ?: return false to "無法編碼最終傷口遮罩，尚未送出"
+            fun digest(encoded: String) = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(android.util.Base64.decode(encoded, android.util.Base64.DEFAULT))
+                .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+            try { woundHash = digest(wound); tissueHash = digest(tissueMaskPng) }
+            catch (_: Exception) { return false to "遮罩編碼無效，尚未送出" }
+            obj.put("mask_contract", "woundai.annotation-masks/1")
+            obj.put("wound_mask_png", wound)
+            obj.put("wound_mask_sha256", woundHash)
             obj.put("tissue_mask_png", tissueMaskPng)
             obj.put("tissue_raster", JSONObject().apply {
                 put("rx0", tissueRaster.rx0.toDouble()); put("ry0", tissueRaster.ry0.toDouble())
@@ -472,7 +551,8 @@ class BackendClient(private val baseUrl: String, jwt: String = "") {
             val body = resp.body?.string() ?: ""
             // 直接把 raw JSON 丟給醫師看會變成一整串 \uXXXX 逃脫碼(實機截圖確認過,完全不可讀)
             // → 解析出 issues 逐條顯示中文
-            return Pair(resp.isSuccessful, summarize(body))
+            onResponse?.invoke(resp.code, body)
+            return AnnotationReceipt.validate(resp.code, body, code, imageId, woundHash, tissueHash)
         }
     }
 

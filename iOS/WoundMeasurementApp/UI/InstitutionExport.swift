@@ -6,7 +6,7 @@ import CryptoKit
 enum InstitutionExport {
     static let institution = "MMHPS20261007"
     static var enabled: Bool {
-        #if WOUND_INSTITUTION
+        #if WOUND_INSTITUTION && !WOUND_ADMIN_EXPORT_DISABLED
         return true
         #else
         return false
@@ -39,8 +39,7 @@ enum InstitutionExport {
         let textHeight = (caption as NSString).boundingRect(with: CGSize(width: w - 24, height: 10000),
             options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attributes, context: nil).height
         let format = UIGraphicsImageRendererFormat(); format.scale = 1; format.opaque = true
-        let colours: [[UInt8]] = [[0,0,0,0],[0,153,102,115],[204,128,0,115],[51,26,153,115],
-                                 [191,102,128,115],[102,102,102,115]]
+        let colours: [[UInt8]] = EditPalette.rgb.map { [$0.0, $0.1, $0.2, EditPalette.alpha] }
         var rgba = [UInt8](repeating: 0, count: raster.mask.count * 4)
         for i in raster.mask.indices where raster.mask[i] != 0 {
             let c = colours[Int(raster.tissue[i])]
@@ -71,12 +70,13 @@ enum InstitutionExport {
     }
 
     /// Revision hash avoids duplicate output on an identical retry. No patient names or IDs in file names.
-    static func write(image: UIImage, raster: EditRaster, polygons: [[[Int]]], marker: [[Int]]?,
-                      measurementID: Int64, doctorVerified: Bool, exudate: Int?, directory: URL) throws -> URL {
+    static func contents(image: UIImage, raster: EditRaster, polygons: [[[Int]]], marker: [[Int]]?,
+                      measurementID: Int64, doctorVerified: Bool, exudate: Int?, submitted: Measurement? = nil) throws -> [String: Data] {
         try validate(image: image, raster: raster)
-        let fractions = raster.tissueFrac()
-        let push = WoundPipeline.push(cm2: raster.areaCm2, frac: fractions, exudate: exudate)
-        let caption = "\(institution) · 機構驗證副本\n面積 \(raster.areaCm2.map { String(format: "%.2f", $0) } ?? "未校正") cm² · PUSH \(push.full.map(String.init) ?? "未完整")（部分分數 \(push.partial.map(String.init) ?? "—")）\n醫師確認：\(doctorVerified ? "是" : "否") · 組織人工修改：\(raster.tissueEdited ? "是" : "否")\n肉芽／腐肉／壞死／上皮／其他：" + ["granulation","slough","necrosis","epithelial","other"].map { String(format: "%.1f%%", (fractions[$0] ?? 0) * 100) }.joined(separator: " / ") + "\n限機構驗證；不代表已上傳或已核准研究用途。"
+        let fractions = submitted?.tissueFrac ?? raster.tissueFrac()
+        let area = submitted.map { $0.estimatedArea } ?? raster.areaCm2
+        let push = WoundPipeline.push(cm2: area, frac: fractions, exudate: exudate)
+        let caption = "\(institution) · 機構驗證副本\n面積 \(area.map { String(format: "%.2f", $0) } ?? "未校正") cm² · PUSH \(push.full.map(String.init) ?? "未完整")（部分分數 \(push.partial.map(String.init) ?? "—")）\n醫師確認：\(doctorVerified ? "是" : "否") · 組織人工修改：\(raster.tissueEdited ? "是" : "否")\n肉芽／腐肉／壞死／上皮／其他：" + ["granulation","slough","necrosis","epithelial","other"].map { String(format: "%.1f%%", (fractions[$0] ?? 0) * 100) }.joined(separator: " / ") + "\n限機構驗證；不代表已上傳或已核准研究用途。"
         guard measurementID > 0, let original = image.pngData(),
               let combined = try overlay(image: image, raster: raster, polygons: polygons, marker: marker, caption: caption).pngData(),
               let encoded = EditRasterCodec.encode(raster) else { throw Failure.imageEncoding }
@@ -85,7 +85,7 @@ enum InstitutionExport {
         let metadata: [String: Any] = ["schema": "woundai.institution-export/1", "institution": institution,
             "measurement_id": measurementID, "doctor_verified": doctorVerified,
             "tissue_edited": raster.tissueEdited, "tissue_fractions": fractions,
-            "area_cm2": raster.areaCm2 as Any? ?? NSNull(), "exudate": exudate as Any? ?? NSNull(),
+            "area_cm2": area as Any? ?? NSNull(), "exudate": exudate as Any? ?? NSNull(),
             "push_full": push.full as Any? ?? NSNull(), "push_partial": push.partial as Any? ?? NSNull(),
             "polygons": polygons, "marker_quad": marker as Any? ?? NSNull(),
             "cloud_uploaded": false, "depth_included": false]
@@ -93,6 +93,14 @@ enum InstitutionExport {
         let hashes = files.mapValues { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined() }
         let manifest = try JSONSerialization.data(withJSONObject: hashes, options: [.sortedKeys])
         files["sha256.json"] = manifest
+        return files
+    }
+
+    static func write(image: UIImage, raster: EditRaster, polygons: [[[Int]]], marker: [[Int]]?,
+                      measurementID: Int64, doctorVerified: Bool, exudate: Int?, directory: URL) throws -> URL {
+        let files = try contents(image: image, raster: raster, polygons: polygons, marker: marker,
+            measurementID: measurementID, doctorVerified: doctorVerified, exudate: exudate)
+        let manifest = files["sha256.json"]!
         let revision = SHA256.hash(data: manifest).map { String(format: "%02x", $0) }.joined()
         try HealthDataFiles.prepareDirectory(directory)
         let destination = directory.appendingPathComponent("measurement-\(measurementID)-\(revision)", isDirectory: true)

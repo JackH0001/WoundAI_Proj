@@ -62,6 +62,7 @@ on:
       - 'tools/test_restrict_mmh_bucket_iam.py'
       - 'tools/test_mmh_institution.py'
       - 'tools/test_mmh_management_session.py'
+      - 'tools/test_mmh_medical_session.py'
       - 'tools/test_mmh_account_versions.py'
       - 'tools/check_mmh_account_cutover.py'
       - 'tools/test_check_mmh_account_cutover.py'
@@ -77,6 +78,10 @@ on:
       - 'tools/test_medical_image_build.py'
       - 'tools/plan_mmh_runtime.py'
       - 'tools/test_plan_mmh_runtime.py'
+      - 'tools/plan_review_runtime.py'
+      - 'tools/test_plan_review_runtime.py'
+      - 'tools/owner_guard.py'
+      - 'tools/test_owner_guard.py'
       - 'tools/test_mmh_unlocked_deployment.py'
       - 'tools/check_mmh_runtime_preflight.py'
       - 'tools/test_check_mmh_runtime_preflight.py'
@@ -89,11 +94,16 @@ on:
       - 'tools/stage_mmh_iap_revision.py'
       - 'tools/test_stage_mmh_iap_revision.py'
       - 'engineering/phase2/test_medical_revision_assets.py'
+      - 'engineering/phase2/test_research_format_guards.py'
+      - 'engineering/phase2/test_native_wound_mask.py'
+      - 'engineering/phase2/test_review_service_profile.py'
+      - 'engineering/phase2/test_medical_depth_geometry.py'
       - 'tools/test_medical_depth_orientation_storage.py'
       - 'engineering/phase2/verify_audit_chain.py'
       - 'engineering/phase2/Assert-CIGreen.ps1'
       - 'engineering/phase2/test_ci_gate_static.py'
       - 'engineering/phase2/test_audit_console_verdict.py'
+      - 'engineering/phase2/test_audit_status_ui.py'
       - 'engineering/phase2/test_test_isolation_from_cloud.py'
       - 'tools/windows/run_python_tests.py'
       - 'tools/windows/run_backend_http_test.py'
@@ -104,6 +114,22 @@ on:
       - 'engineering/phase2/test_hardening_lifecycle.py'
       - 'engineering/phase2/test_deployment_input_gate.py'
       - 'engineering/phase2/test_backend_url_parity.py'
+      - 'iOS/WoundMeasurementApp/InstitutionInfo.plist'
+      - 'Android/app/src/main/java/com/woundmeasurement/app/institution/InstitutionSession.kt'
+      - 'engineering/phase2/test_manual_consistency.py'
+      - 'Android/app/src/main/assets/manual.html'
+      - 'Android/app/src/main/java/com/woundmeasurement/app/**'
+      - 'iOS/WoundMeasurementApp/Resources/manual.html'
+      - 'iOS/WoundMeasurementApp/Core/BackendClient.swift'
+      - 'tools/parity_check.py'
+      - 'tools/mobile_release_contract.py'
+      - 'tools/test_annotation_parity_boundary.py'
+      - 'tools/plan_mmh_iap_entry.py'
+      - 'tools/test_plan_mmh_iap_entry.py'
+      - 'tools/test_mmh_native_iap_probe.py'
+      - 'docs/PARITY.md'
+      - 'Android/version.properties'
+      - 'iOS/project.yml'
       - 'engineering/phase2/test_secret_key_fail_closed.py'
       - 'engineering/phase2/test_gitleaks_rule_precision.py'
       - 'iOS/WoundMeasurementApp/Core/AppSettings.swift'
@@ -177,6 +203,7 @@ on:
       - 'tools/test_restrict_mmh_bucket_iam.py'
       - 'tools/test_mmh_institution.py'
       - 'tools/test_mmh_management_session.py'
+      - 'tools/test_mmh_medical_session.py'
       - 'tools/test_mmh_account_versions.py'
       - 'tools/check_mmh_account_cutover.py'
       - 'tools/test_check_mmh_account_cutover.py'
@@ -192,6 +219,10 @@ on:
       - 'tools/test_medical_image_build.py'
       - 'tools/plan_mmh_runtime.py'
       - 'tools/test_plan_mmh_runtime.py'
+      - 'tools/plan_review_runtime.py'
+      - 'tools/test_plan_review_runtime.py'
+      - 'tools/owner_guard.py'
+      - 'tools/test_owner_guard.py'
       - 'tools/test_mmh_unlocked_deployment.py'
       - 'tools/check_mmh_runtime_preflight.py'
       - 'tools/test_check_mmh_runtime_preflight.py'
@@ -204,11 +235,16 @@ on:
       - 'tools/stage_mmh_iap_revision.py'
       - 'tools/test_stage_mmh_iap_revision.py'
       - 'engineering/phase2/test_medical_revision_assets.py'
+      - 'engineering/phase2/test_research_format_guards.py'
+      - 'engineering/phase2/test_native_wound_mask.py'
+      - 'engineering/phase2/test_review_service_profile.py'
+      - 'engineering/phase2/test_medical_depth_geometry.py'
       - 'tools/test_medical_depth_orientation_storage.py'
       - 'engineering/phase2/verify_audit_chain.py'
       - 'engineering/phase2/Assert-CIGreen.ps1'
       - 'engineering/phase2/test_ci_gate_static.py'
       - 'engineering/phase2/test_audit_console_verdict.py'
+      - 'engineering/phase2/test_audit_status_ui.py'
       - 'engineering/phase2/test_test_isolation_from_cloud.py'
       - 'tools/windows/run_python_tests.py'
       - 'tools/windows/run_backend_http_test.py'
@@ -219,6 +255,22 @@ on:
       - 'engineering/phase2/test_hardening_lifecycle.py'
       - 'engineering/phase2/test_deployment_input_gate.py'
       - 'engineering/phase2/test_backend_url_parity.py'
+      - 'iOS/WoundMeasurementApp/InstitutionInfo.plist'
+      - 'Android/app/src/main/java/com/woundmeasurement/app/institution/InstitutionSession.kt'
+      - 'engineering/phase2/test_manual_consistency.py'
+      - 'Android/app/src/main/assets/manual.html'
+      - 'Android/app/src/main/java/com/woundmeasurement/app/**'
+      - 'iOS/WoundMeasurementApp/Resources/manual.html'
+      - 'iOS/WoundMeasurementApp/Core/BackendClient.swift'
+      - 'tools/parity_check.py'
+      - 'tools/mobile_release_contract.py'
+      - 'tools/test_annotation_parity_boundary.py'
+      - 'tools/plan_mmh_iap_entry.py'
+      - 'tools/test_plan_mmh_iap_entry.py'
+      - 'tools/test_mmh_native_iap_probe.py'
+      - 'docs/PARITY.md'
+      - 'Android/version.properties'
+      - 'iOS/project.yml'
       - 'engineering/phase2/test_secret_key_fail_closed.py'
       - 'engineering/phase2/test_gitleaks_rule_precision.py'
       - 'iOS/WoundMeasurementApp/Core/AppSettings.swift'
@@ -277,8 +329,13 @@ jobs:
           python -B engineering/phase2/test_backend_http_safety.py
           python -B engineering/phase2/test_http_launcher_isolation.py
           python -B engineering/phase2/test_audit_console_verdict.py
+          python -B engineering/phase2/test_audit_status_ui.py
           python -B engineering/phase2/test_test_isolation_from_cloud.py
           python -B engineering/phase2/test_backend_url_parity.py
+          python -B engineering/phase2/test_manual_consistency.py
+          python -B tools/test_annotation_parity_boundary.py
+          python -B tools/test_plan_mmh_iap_entry.py
+          python -B tools/test_mmh_native_iap_probe.py
           python -B engineering/phase2/test_secret_key_fail_closed.py
           python -B engineering/phase2/test_gitleaks_rule_precision.py
           python -B engineering/phase2/test_inventory_is_read_only.py
@@ -323,6 +380,7 @@ jobs:
           python -B tools/test_restrict_mmh_bucket_iam.py
           python -B tools/test_mmh_institution.py
           python -B tools/test_mmh_management_session.py
+          python -B tools/test_mmh_medical_session.py
           python -B tools/test_mmh_account_versions.py
           python -B tools/test_check_mmh_account_cutover.py
           python -B -W error::ResourceWarning -m unittest discover -s Backend/AccessManager -t . -v
@@ -333,6 +391,8 @@ jobs:
           python -B tools/test_medical_build_smoke.py
           python -B tools/test_medical_image_build.py
           python -B tools/test_plan_mmh_runtime.py
+          python -B tools/test_plan_review_runtime.py
+          python -B tools/test_owner_guard.py
           python -B tools/test_mmh_unlocked_deployment.py
           python -B tools/test_check_mmh_runtime_preflight.py
           python -B tools/test_migrate_mmh_editor.py
@@ -340,6 +400,10 @@ jobs:
           python -B tools/test_stage_mmh_revision.py
           python -B tools/test_stage_mmh_iap_revision.py
           python -B engineering/phase2/test_medical_revision_assets.py
+          python -B engineering/phase2/test_research_format_guards.py
+          python -B engineering/phase2/test_native_wound_mask.py
+          python -B engineering/phase2/test_review_service_profile.py
+          python -B engineering/phase2/test_medical_depth_geometry.py
           python -B tools/test_medical_depth_orientation_storage.py
           python -B engineering/phase2/test_p0_4_staging.py
           python -B engineering/phase2/test_runtime_golden_contract.py

@@ -5,10 +5,12 @@ import UIKit
 /// Apply the same EXIF transform that UIKit applies when drawing the RGB upright.
 /// AVFoundation transforms both the depth map and its calibration, not just pixels.
 extension DepthCapture {
-    static func fromPhoto(_ data: AVDepthData, imageOrientation: UIImage.Orientation) -> DepthCapture? {
+    static func fromPhoto(_ data: AVDepthData, imageOrientation: UIImage.Orientation,
+                          captureProvenance: CaptureProvenance? = nil) -> DepthCapture? {
         guard let exif = exifOrientation(imageOrientation) else { return nil }
         var result = from(data.applyingExifOrientation(exif))
         result?.sourceExifOrientation = Int(exif.rawValue)
+        result?.captureProvenance = captureProvenance
         return result
     }
 

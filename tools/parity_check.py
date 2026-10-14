@@ -172,7 +172,10 @@ for k in sorted(keys_sw - keys_kt - IGNORE):
 
 # ── C. annotation 請求欄位 ────────────────────────────────────────────────
 kt_submit = slice_between(kt, r'fun submitAnnotation\(', r'\n    private fun summarize')
-sw_submit = slice_between(sw, r'func submitAnnotation\(', r'\n    func withdrawConsent')
+# Bound to the payload builder: receipt switch cases are response states, not fields.
+sw_submit = slice_between(sw, r'static func annotationPayload\(', r'\n    func submitAnnotationPayload')
+if not sw_submit or not re.search(r'\n    func submitAnnotationPayload', sw):
+    problems.append({'kind': 'annotation_payload_boundary_missing', 'file': SW})
 
 # Kotlin 送出欄位有三種寫法：obj.put("k",…)、鏈式 .put("k",…)、
 # 以及巢狀 JSONObject().apply { put("k",…) }（tissue_raster 就是這種）。

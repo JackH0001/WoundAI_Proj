@@ -1,5 +1,10 @@
 import XCTest
+import CryptoKit
+#if WOUND_INSTITUTION_TESTS
+@testable import WoundAIInstitution
+#else
 @testable import WoundMeasurementApp
+#endif
 
 final class DepthProvenanceTests: XCTestCase {
     private func capture(_ exif: Int?) -> DepthCapture {
@@ -16,7 +21,7 @@ final class DepthProvenanceTests: XCTestCase {
     func testAllEightOriginsSurviveSidecarAndUploadJSONWithKnownIntrinsics() throws {
         for exif in 1...8 {
             let sidecar = try roundTrip(capture(exif).metaJson)
-            XCTAssertEqual(sidecar["version"] as? Int,2)
+            XCTAssertEqual(sidecar["version"] as? Int,3)
             let upload = try roundTrip(BackendClient.depthUploadMetadata(sidecar))
             XCTAssertEqual(upload["source_exif_orientation"] as? Int,exif)
             XCTAssertEqual(upload["normalized_exif_orientation"] as? Int,1)
@@ -42,6 +47,59 @@ final class DepthProvenanceTests: XCTestCase {
         XCTAssertEqual(BackendClient.depthUploadMetadata(saved.meta)["source_exif_orientation"] as? Int,7)
     }
 
+    func testCaptureIdentityAndTimeSurviveResaveAndNewStoreInstance() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = LocalImageStore(directory: dir)
+        var d = capture(6)
+        d.captureProvenance = .init(id: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,
+                                    observedAt: Date(timeIntervalSince1970: 1_700_000_000))
+        let initial = BackendClient.depthUploadMetadata(d.metaJson)
+        for key in ["first-save", "later-retrim"] {
+            XCTAssertTrue(DepthStore.attach(imagePath: key, capture: d, store: store))
+            let reopened = LocalImageStore(directory: dir)
+            let saved = try XCTUnwrap(DepthStore.load(imagePath: key, store: reopened))
+            let uploaded = BackendClient.depthUploadMetadata(saved.meta)
+            for field in ["capture_id", "captured_at", "capture_time_source"] {
+                XCTAssertEqual(uploaded[field] as? String, initial[field] as? String)
+            }
+            XCTAssertEqual(uploaded["captured_at"] as? String, "2023-11-14T22:13:20.000Z")
+            XCTAssertEqual(uploaded["capture_time_source"] as? String, "photo_callback_wall_clock")
+        }
+    }
+
+    func testDepthReceiptSurvivesIndexReopenWithoutCrossingImages() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = LocalImageStore(directory: dir)
+        XCTAssertTrue(DepthStore.attach(imagePath: "first", capture: capture(6), store: store))
+        XCTAssertTrue(DepthStore.attach(imagePath: "second", capture: capture(6), store: store))
+        let receipt = BackendClient.DepthUploadReceipt(depthId: "0123456789abcdef",
+            annotationRevisionID: "fedcba9876543210", metadataSHA256: String(repeating: "a", count: 64),
+            payloadSHA256: String(repeating: "b", count: 64), receiptID: String(repeating: "c", count: 64), replaced: false)
+        XCTAssertTrue(DepthStore.markUploaded(imagePath: "first", store: store, receipt: receipt))
+        let reopened = LocalImageStore(directory: dir)
+        let entry = try XCTUnwrap(DepthStore.lookup(imagePath: "first", store: reopened))
+        XCTAssertEqual(entry["annotation_receipt_id"], receipt.annotationRevisionID)
+        XCTAssertEqual(entry["payload_sha256"], receipt.payloadSHA256)
+        XCTAssertEqual(entry["meta_sha256"], receipt.metadataSHA256)
+        XCTAssertEqual(entry["depth_receipt_id"], receipt.receiptID)
+        XCTAssertNil(DepthStore.lookup(imagePath: "second", store: reopened)?["uploaded"])
+        XCTAssertFalse(DepthStore.markUploaded(imagePath: "missing", store: reopened, receipt: receipt))
+    }
+
+    func testUnknownCaptureAndLegacySaveTimeAreNeverReplacedByNow() throws {
+        let fresh = capture(nil).metaJson
+        XCTAssertNil(fresh["captured_at"])
+        XCTAssertNil(fresh["capture_id"])
+        XCTAssertEqual(fresh["capture_time_source"] as? String, "unknown")
+        let legacy: [String: Any] = ["version": 2, "captured_at": "2020-01-01T00:00:00Z"]
+        let upload = BackendClient.depthUploadMetadata(legacy)
+        XCTAssertEqual(upload["captured_at"] as? String, legacy["captured_at"] as? String)
+        XCTAssertNil(upload["capture_time_source"])
+        XCTAssertNil(upload["capture_id"])
+    }
+
     func testActualUploadRequestContainsSidecarProvenance() async throws {
         let expected = expectation(description:"multipart metadata")
         OrientationRequestProtocol.inspect = { request in
@@ -59,10 +117,13 @@ final class DepthProvenanceTests: XCTestCase {
             let header = "name=\"meta\"\r\n\r\n"
             if let start = text.range(of:header), let end = text.range(of:"\r\n--",range:start.upperBound..<text.endIndex) {
                 let json = Data(text[start.upperBound..<end.lowerBound].utf8)
+                OrientationRequestProtocol.requestMetadata = json
                 let meta = try? JSONSerialization.jsonObject(with:json) as? [String:Any]
                 XCTAssertEqual(meta?["source_exif_orientation"] as? Int,6)
                 XCTAssertEqual(meta?["normalized_exif_orientation"] as? Int,1)
                 XCTAssertEqual(meta?["registration"] as? String,"not_verified")
+                XCTAssertEqual(meta?["captured_at"] as? String,"2023-11-14T22:13:20.000Z")
+                XCTAssertEqual(meta?["capture_time_source"] as? String,"photo_callback_wall_clock")
             } else { XCTFail("Missing metadata multipart field") }
             expected.fulfill()
         }
@@ -71,8 +132,9 @@ final class DepthProvenanceTests: XCTestCase {
         config.protocolClasses = [OrientationRequestProtocol.self]
         let session = URLSession(configuration:config)
         defer { session.invalidateAndCancel() }
-        let client = BackendClient(baseUrl:"https://orientation-test.invalid",jwt:UUID().uuidString,session:session)
-        let d = capture(6)
+        let client = BackendClient(baseUrl:"https://orientation-test.invalid",jwt:UUID().uuidString,session:session,institutionTransport:OrientationTestTransport(session:session))
+        var d = capture(6)
+        d.captureProvenance = .init(observedAt: Date(timeIntervalSince1970: 1_700_000_000))
         _ = try await client.uploadDepth(imageId:"fixture",raw:d.map.withUnsafeBufferPointer { Data(buffer:$0) },sidecarMeta:try roundTrip(d.metaJson))
         await fulfillment(of:[expected],timeout:2)
     }
@@ -106,14 +168,28 @@ final class DepthProvenanceTests: XCTestCase {
 
 private final class OrientationRequestProtocol: URLProtocol {
     static var inspect: ((URLRequest) -> Void)?
+    static var requestMetadata = Data()
     override class func canInit(with request:URLRequest) -> Bool { true }
     override class func canonicalRequest(for request:URLRequest) -> URLRequest { request }
     override func startLoading() {
         Self.inspect?(request)
         let response = HTTPURLResponse(url:request.url!,statusCode:200,httpVersion:nil,headerFields:nil)!
         client?.urlProtocol(self,didReceive:response,cacheStoragePolicy:.notAllowed)
-        client?.urlProtocol(self,didLoad:Data("{\"status\":\"stored\",\"depth_id\":\"fixture\",\"replaced_previous\":false}".utf8))
+        let raw = [Float](repeating: 0.3, count: 192).withUnsafeBufferPointer { Data(buffer: $0) }
+        let body = try! JSONSerialization.data(withJSONObject: depthReceiptFixture(raw: raw, metadata: Self.requestMetadata,
+            image: "fixture", revision: "0123456789abcdef"))
+        client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
+}
+
+private actor OrientationTestTransport: InstitutionAuthenticatedTransport {
+    let session: URLSession
+    init(session: URLSession) { self.session = session }
+    func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let (data, response) = try await session.data(for: request)
+        return (data, response as! HTTPURLResponse)
+    }
+    func invalidate() async {}
 }

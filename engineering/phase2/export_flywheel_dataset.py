@@ -80,7 +80,42 @@ def rasterize(poly, w, h):
     return np.array(im)
 
 
+def rasterize_record(record, w, h):
+    """Union every declared component. This polygon-derived mask cannot restore holes."""
+    if record.get("mask_contract") or record.get("wound_mask_key"):
+        from PIL import Image
+        raw = fw.verified_wound(record)
+        if raw is None or (w, h) != (record.get("image_w"), record.get("image_h")):
+            raise ValueError("native wound mask frame is not verifiable")
+        with Image.open(io.BytesIO(raw)) as im:
+            source = np.array(im.getchannel("R") if im.mode != "L" else im)
+        grid = record["tissue_raster"]
+        # Image pixel centers -> editing grid. No interpolation of binary labels.
+        ix = np.floor((np.arange(w) + .5 - grid["rx0"]) * grid["m_scale"]).astype(np.int64)
+        iy = np.floor((np.arange(h) + .5 - grid["ry0"]) * grid["m_scale"]).astype(np.int64)
+        vx = np.flatnonzero((ix >= 0) & (ix < grid["mw"]))
+        vy = np.flatnonzero((iy >= 0) & (iy < grid["mh"]))
+        mask = np.zeros((h, w), np.uint8)
+        mask[np.ix_(vy, vx)] = source[np.ix_(iy[vy], ix[vx])] * 255
+        return mask
+    polygons = record.get("gt_polygons")
+    if polygons is None:
+        polygons = [record["gt_polygon"]]
+    if not isinstance(polygons, list) or not polygons:
+        raise ValueError("missing wound polygons")
+    mask = np.zeros((h, w), np.uint8)
+    for polygon in polygons:
+        if not isinstance(polygon, list) or len(polygon) < 3:
+            raise ValueError("invalid wound polygon")
+        mask |= rasterize(polygon, w, h)
+    return mask
+
+
 def main():
+    from review_service_profile import review_environment
+    if review_environment(os.environ):
+        print("Synthetic review deployment cannot export a research training dataset.")
+        return 1
     ap = argparse.ArgumentParser()
     ap.add_argument("--queue", default=fw.QUEUE)
     ap.add_argument("--images", default=fw.IMAGES_DIR)
@@ -151,7 +186,10 @@ def main():
             skipped.append({"code": code, "reason": f"尺寸不符 記錄{w_rec}x{h_rec} vs 實際{w_act}x{h_act}"})
             continue
 
-        mask = rasterize(r["gt_polygon"], w_rec, h_rec)
+        try:
+            mask = rasterize_record(r, w_rec, h_rec)
+        except (ValueError, OSError) as exc:
+            skipped.append({"code": code, "reason": f"遮罩修訂或格點無法驗證: {exc}"}); continue
         px = int((mask > 0).sum())
         if px == 0:
             skipped.append({"code": code, "reason": "柵格化後遮罩為空"}); continue
@@ -170,6 +208,12 @@ def main():
             "mm_per_px": mm, "route": r.get("route"), "seg_model": r.get("seg_model"),
             "correction_iou": r.get("correction_iou"), "exudate": r.get("exudate"),
             "doctor_verified": r.get("doctor_verified"), "consent_train": r.get("consent_train"),
+            "gt_polygon": r.get("gt_polygon"), "gt_polygons": r.get("gt_polygons") or [r["gt_polygon"]],
+            "mask_representation": ("native_binary_nearest_pixel_center" if r.get("mask_contract") else "polygon_union_no_hole_topology"),
+            "native_wound_mask_sha256": r.get("wound_mask_sha256"),
+            "tissue_raster": r.get("tissue_raster"),
+            "n_polygons": len(r.get("gt_polygons") or [r["gt_polygon"]]),
+            "annotation_receipt_id": fw.revision_id(r), "app_version": r.get("app_version"),
             "source": fw.rec_source(r), "actor": r.get("actor"), "received_at": r.get("received_at"),
         })
 
@@ -189,6 +233,8 @@ def main():
     n_scaled = sum(1 for m in manifest if m["mm_per_px"])
     n_edited = sum(1 for m in manifest if m.get("correction_iou") is not None and m["correction_iou"] < 0.99)
     card = f"""# 飛輪訓練集資料卡（自動產生）
+
+有原生二值遮罩時，核對修訂雜湊後以影像像素中心映射到編輯格點，使用最近格點且不插值類別。原生解析度與雜湊保留在 manifest；縮小至影像格點可能消失的細節仍須取用原生資產。舊紀錄使用 gt_polygons 全部輪廓聯集，缺少時才用 gt_polygon；舊輪廓資料不保證孔洞。
 
 - 產生時間：{time.strftime('%Y-%m-%d %H:%M:%S')}
 - 樣本數：**{len(manifest)}**（來源佇列 {stats['total']} 筆）

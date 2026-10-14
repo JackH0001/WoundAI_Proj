@@ -12,7 +12,7 @@ from .web import ORG, VerifiedAdmin
 
 IAP_ISSUER = "https://cloud.google.com/iap"
 IAP_KEYS = "https://www.gstatic.com/iap/verify/public_key"
-SESSION_URL = ("https://candidate---woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app"
+SESSION_URL = ("https://woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app"
                "/api/v1/users/session")
 
 

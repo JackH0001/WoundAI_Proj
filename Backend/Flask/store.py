@@ -1213,6 +1213,20 @@ class MmhUnlockedValidationStore(GcsStore):
         return text
 
 
+class SyntheticReviewValidationStore(MmhUnlockedValidationStore):
+    """Separate scoped demo deployment, sharing the verified append implementation only."""
+    audit_write_mode = "synthetic-review-validation"
+
+    @classmethod
+    def validate_scope(cls, bucket, prefix, audit_bucket, security_bucket):
+        from review_service_profile import validate_review_scope
+        validate_review_scope(os.environ, bucket, prefix, audit_bucket, security_bucket)
+
+    def describe(self, *, retention=None):
+        # Preserve truthful mutable-audit disclosure, without identifying this as MMH.
+        return super().describe(retention=retention).replace("[MMH validation;", "[Synthetic review validation;")
+
+
 _ACTIVE = None
 
 
@@ -1220,11 +1234,15 @@ def get_store(root: str = None) -> Store:
     """依環境變數挑實作。root 只給 LocalStore 用（相容既有的 WOUNDAI_FLYWHEEL_DIR）。"""
     global _ACTIVE
     mode = os.environ.get("WOUNDAI_AUDIT_MODE", "locked-seven-year")
-    if mode not in ("locked-seven-year", "mmh-unlocked-validation"):
+    if mode not in ("locked-seven-year", "mmh-unlocked-validation", "synthetic-review-validation"):
         raise RuntimeError("unknown WOUNDAI_AUDIT_MODE")
+    from review_service_profile import review_environment
+    review_environment(os.environ)
     kind = (os.environ.get("WOUNDAI_STORE") or "local").lower()
-    if mode == "mmh-unlocked-validation":
-        MmhUnlockedValidationStore.validate_scope(
+    scoped_type = {"mmh-unlocked-validation": MmhUnlockedValidationStore,
+                   "synthetic-review-validation": SyntheticReviewValidationStore}.get(mode)
+    if scoped_type is not None:
+        scoped_type.validate_scope(
             os.environ.get("WOUNDAI_GCS_BUCKET"), os.environ.get("WOUNDAI_GCS_PREFIX", "flywheel"),
             os.environ.get("WOUNDAI_AUDIT_BUCKET"), os.environ.get("WOUNDAI_SECURITY_BUCKET"))
     # Check before returning a cache populated before tests started. A later
@@ -1232,8 +1250,8 @@ def get_store(root: str = None) -> Store:
     if kind == "gcs" or getattr(_ACTIVE, "_cloud_client_constructed", False):
         _refuse_cloud_in_test_process()
     if _ACTIVE is not None:
-        if mode == "mmh-unlocked-validation" and not isinstance(_ACTIVE, MmhUnlockedValidationStore):
-            raise RuntimeError("MMH validation cannot reuse a different store")
+        if scoped_type is not None and not isinstance(_ACTIVE, scoped_type):
+            raise RuntimeError("validation cannot reuse a different store")
         if isinstance(_ACTIVE, GcsStore) and _ACTIVE.audit_write_mode != mode:
             raise RuntimeError("audit mode changed after store initialization")
         return _ACTIVE
@@ -1247,7 +1265,7 @@ def get_store(root: str = None) -> Store:
         if BOUND_ORG is not None and (not security or not audit or len({bucket, security, audit}) != 3):
             raise RuntimeError("institution storage requires distinct media, security and audit buckets")
         # Protected-key access refuses a missing audit bucket in _target().
-        store_type = MmhUnlockedValidationStore if mode == "mmh-unlocked-validation" else GcsStore
+        store_type = scoped_type or GcsStore
         _ACTIVE = store_type(bucket, os.environ.get("WOUNDAI_GCS_PREFIX", "flywheel"),
                            audit, security_bucket=security)
     else:

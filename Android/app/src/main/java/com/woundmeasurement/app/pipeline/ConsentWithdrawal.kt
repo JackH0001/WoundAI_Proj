@@ -44,8 +44,8 @@ object ConsentWithdrawal {
      * ⚠ 不丟例外。呼叫端是「病患剛剛撤回同意」的當下，
      * 那一刻拋例外只會讓畫面顯示一個技術訊息，而該做的事一件都沒做。
      */
-    suspend fun pushToBackend(ctx: Context, codes: Collection<String>): Result =
-        sync(ctx, codes, Dir.WITHDRAW)
+    suspend fun pushToBackend(ctx: Context, codes: Collection<String>, runtime: MedicalRuntime = MedicalRuntime(ctx)): Result =
+        sync(ctx, codes, Dir.WITHDRAW, runtime)
 
     /**
      * 重新取得同意 → 解除雲端的撤回封鎖。
@@ -57,49 +57,32 @@ object ConsentWithdrawal {
      * 2026-08-07 實測到這個狀態：test001 撤回後重新簽署，重新修邊都成功，
      * 但補送標註一律被擋，畫面上完全看不出該怎麼辦。
      */
-    suspend fun restoreOnBackend(ctx: Context, codes: Collection<String>): Result =
-        sync(ctx, codes, Dir.RESTORE)
+    suspend fun restoreOnBackend(ctx: Context, codes: Collection<String>, runtime: MedicalRuntime = MedicalRuntime(ctx)): Result =
+        sync(ctx, codes, Dir.RESTORE, runtime)
 
-    private suspend fun sync(ctx: Context, codes: Collection<String>, dir: Dir): Result =
-        withContext(Dispatchers.IO) {
-            val list = codes.filter { it.isNotBlank() }.distinct()
+    private suspend fun sync(ctx: Context, codes: Collection<String>, dir: Dir, runtime: MedicalRuntime): Result {
+        val list = codes.filter { it.isNotBlank() }.distinct()
+        val queue = if (dir == Dir.WITHDRAW) com.woundmeasurement.app.data.store.MedicalAccountPreferences.ConsentQueue.WITHDRAWAL
+            else com.woundmeasurement.app.data.store.MedicalAccountPreferences.ConsentQueue.RESTORE
+        val current = runtime.operation()
+        // Persist before the first suspension; a closed environment must keep its own pending work.
+        if (dir == Dir.WITHDRAW) runtime.addPendingWithdrawals(list) else runtime.addPendingRestores(list)
+        return withContext(Dispatchers.IO) {
             if (list.isEmpty()) return@withContext Result(emptyList(), emptyList())
-
-            val url = AppSettings.backendUrl(ctx)
-            val user = AppSettings.backendUser(ctx)
-            val pass = AppSettings.backendPassword(ctx)
-            fun remember(cs: List<String>) =
-                if (dir == Dir.WITHDRAW) AppSettings.addPendingWithdrawals(ctx, cs)
-                else AppSettings.addPendingRestores(ctx, cs)
-            fun forget(c: String) =
-                if (dir == Dir.WITHDRAW) AppSettings.clearPendingWithdrawal(ctx, c)
-                else AppSettings.clearPendingRestore(ctx, c)
-
-            if (user.isBlank() || pass.isBlank()) {
-                remember(list)
-                return@withContext Result(emptyList(), list)
-            }
-
-            val backend = BackendClient(url)
-            val loggedIn = runCatching { backend.login(user, pass) }.getOrDefault(false)
-            if (!loggedIn) {
-                remember(list)
-                return@withContext Result(emptyList(), list)
-            }
-
-            val done = ArrayList<String>()
-            val fail = ArrayList<String>()
-            for (c in list) {
-                // 逐筆處理而非整批：一個代碼失敗不該讓其他的也留在佇列裡，
-                // 而重試時只重試真正沒完成的那些。
-                val ok = runCatching {
-                    if (dir == Dir.WITHDRAW) backend.withdrawConsent(c) else backend.restoreConsent(c)
+            if (!current()) return@withContext Result(emptyList(), list)
+            val backend = runCatching { runtime.acquire() }.getOrNull()
+                ?: return@withContext Result(emptyList(), list)
+            val done = ArrayList<String>(); val fail = ArrayList<String>()
+            for (code in list) {
+                val ok = current() && runCatching {
+                    if (dir == Dir.WITHDRAW) backend.withdrawConsent(code) else backend.restoreConsent(code)
                 }.getOrDefault(false)
-                if (ok) { done.add(c); forget(c) } else fail.add(c)
+                if (ok && current()) { done.add(code); runtime.accounts.remove(code, queue) }
+                else fail.add(code)
             }
-            if (fail.isNotEmpty()) remember(fail)
             Result(done, fail)
         }
+    }
 
     /**
      * 重試佇列裡所有未完成的撤回。連得上就做，連不上就維持原狀。
@@ -107,20 +90,20 @@ object ConsentWithdrawal {
      * 呼叫時機：進入個案管理頁、設定頁連線測試成功之後。
      * 這兩處都是「使用者剛好有網路而且在等畫面」的時刻，補做不會被感知到。
      */
-    suspend fun retryPending(ctx: Context): Result {
+    suspend fun retryPending(ctx: Context, runtime: MedicalRuntime = MedicalRuntime(ctx)): Result {
         // 兩個方向都要補做。只補撤回的話，重新簽署的病患會永遠卡在「雲端說已撤回」。
-        val wd = AppSettings.pendingWithdrawals(ctx)
-        val rs = AppSettings.pendingRestores(ctx)
+        val wd = runtime.accounts.pending(com.woundmeasurement.app.data.store.MedicalAccountPreferences.ConsentQueue.WITHDRAWAL)
+        val rs = runtime.accounts.pending(com.woundmeasurement.app.data.store.MedicalAccountPreferences.ConsentQueue.RESTORE)
         if (wd.isEmpty() && rs.isEmpty()) return Result(emptyList(), emptyList())
-        val a = if (wd.isEmpty()) Result(emptyList(), emptyList()) else sync(ctx, wd, Dir.WITHDRAW)
-        val b = if (rs.isEmpty()) Result(emptyList(), emptyList()) else sync(ctx, rs, Dir.RESTORE)
+        val a = if (wd.isEmpty()) Result(emptyList(), emptyList()) else sync(ctx, wd, Dir.WITHDRAW, runtime)
+        val b = if (rs.isEmpty()) Result(emptyList(), emptyList()) else sync(ctx, rs, Dir.RESTORE, runtime)
         return Result(a.done + b.done, a.pending + b.pending)
     }
 
     /** 給畫面用的提示。沒有待辦時回 null。 */
-    fun pendingBanner(ctx: Context): String? {
-        val wd = AppSettings.pendingWithdrawals(ctx)
-        val rs = AppSettings.pendingRestores(ctx)
+    fun pendingBanner(ctx: Context, runtime: MedicalRuntime = MedicalRuntime(ctx)): String? {
+        val wd = runtime.accounts.pending(com.woundmeasurement.app.data.store.MedicalAccountPreferences.ConsentQueue.WITHDRAWAL)
+        val rs = runtime.accounts.pending(com.woundmeasurement.app.data.store.MedicalAccountPreferences.ConsentQueue.RESTORE)
         if (wd.isEmpty() && rs.isEmpty()) return null
         // 兩種待辦的後果完全不同，訊息必須分開講：
         //   撤回沒同步 → 病患已撤回但資料還會進訓練集（違反同意書承諾）

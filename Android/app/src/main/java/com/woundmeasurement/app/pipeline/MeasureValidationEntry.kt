@@ -44,16 +44,17 @@ fun MeasureValidationEntry(
     onViewQuickHistory: (() -> Unit)? = null
 ) {
     val ctx = LocalContext.current
-    val db = remember { WoundMeasurementDatabase.getDatabase(ctx) }
+    val runtime = rememberMedicalRuntime()
+    val db = remember(runtime) { runtime.database }
     val dao = remember { db.measurementDao() }
     val repo = remember { com.woundmeasurement.app.data.repo.CaseRepository.from(db) }
-    val imageStore = remember { com.woundmeasurement.app.data.store.LocalImageStore(ctx) }
+    val imageStore = remember(runtime) { runtime.images }
     val seg = remember { OnnxSegmentationModule(ctx) }
     val vm = remember { MeasureViewModel(WoundAnalyzer(seg), null) }
     val baseUrl = remember(backendBaseUrl) {
-        backendBaseUrl ?: com.woundmeasurement.app.data.store.AppSettings.backendUrl(ctx)
+        backendBaseUrl ?: runtime.backendUrl()
     }
-    val backend = remember(baseUrl) { BackendClient(baseUrl) }
+    var backend by remember(baseUrl) { mutableStateOf(runtime.makeBackend(baseUrl)) }
     var loginState by remember { mutableStateOf("後端登入中…") }
     /** 登入身分。null＝尚未登入 → 一律以「最少權限」呈現（fail-closed）。 */
     var me by remember { mutableStateOf<LoginIdentity?>(null) }
@@ -79,18 +80,23 @@ fun MeasureValidationEntry(
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(baseUrl) {
+        me = null
         // ⚠ 憑證改由「設定」頁存在本機(Keystore 加密),**不再硬編碼**。
         // 先前是 login("admin","woundai-admin")——明文編進 APK,反編譯就拿得到,
         // 帶去醫院等於把後端鑰匙一起帶出門。
         val settings = com.woundmeasurement.app.data.store.AppSettings
-        val u = settings.backendUser(ctx)
-        val p = settings.backendPassword(ctx)
+        val u = runtime.backendUser()
+        val p = runtime.backendPassword()
         loginState = if (u.isBlank() || p.isBlank()) {
             "⚠️ 尚未設定後端帳密 — 請到主畫面「設定」填入後端位址與帳號密碼"
         } else try {
-            val ok = withContext(Dispatchers.IO) { backend.login(u, p) }
+            val ok = withContext(Dispatchers.IO) {
+                if (runtime.needsLiveSession) {
+                    backend = runtime.acquire(); backend.identity != null
+                } else backend.login(u, p)
+            }
             // 登入成功本身就把容器叫醒了，順手記下時間，讓下方的冷啟動提示判斷得準。
-            if (ok) { me = backend.identity; BackendWarmup.ping(ctx) } else me = null
+            if (ok) { me = backend.identity; runtime.warmup() } else me = null
             // 「連不上」與「帳密錯」是兩種處置,訊息要分開(現場才知道要調網路還是調帳號)
             if (ok) "✅ 後端已連線($u) @ $baseUrl"
             else "⚠️ 連得到後端但帳密不正確 — 請到「設定」確認帳號密碼"
@@ -151,7 +157,8 @@ fun MeasureValidationEntry(
     // 子畫面各自吃返回鍵:沒有這些的話,在修邊頁按系統返回會直接跳出整個量測流程,
     // 醫師手畫的遮罩全丟且沒有任何確認。
     var confirmDiscardEdit by remember { mutableStateOf(false) }
-    BackHandler(enabled = editing || managingCase) {
+    BackHandler(enabled = editing || managingCase || st.saving || st.annotationSending) {
+        if (st.saving || st.annotationSending) return@BackHandler
         if (editing) confirmDiscardEdit = true else managingCase = false
     }
     if (confirmDiscardEdit) AlertDialog(
@@ -211,7 +218,7 @@ fun MeasureValidationEntry(
                     color = if (case == null) MaterialTheme.colorScheme.error
                             else MaterialTheme.colorScheme.primary
                 )
-                OutlinedButton({ managingCase = true }, Modifier.fillMaxWidth()) {
+                OutlinedButton({ managingCase = true }, Modifier.fillMaxWidth(), enabled = !st.saving && !st.annotationSending) {
                     Text(if (case == null) "選擇個案" else "切換個案")
                 }
             }
@@ -260,7 +267,7 @@ fun MeasureValidationEntry(
 
             // 冷啟動提示。Cloud Run 閒置會縮到零，第一次量測要等容器載入 82MB 模型。
             // 不講的話醫師會以為是 App 當掉——而它其實正在正常運作，只是第一次比較久。
-            if (BackendWarmup.sinceLastOkMs() > 15 * 60 * 1000L) {
+            if (runtime.sinceLastOkMs() > 15 * 60 * 1000L) {
                 Text("ℹ 後端可能處於休眠（雲端閒置會自動縮容）。第一次量測約需 10–30 秒喚醒，之後即正常。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -318,7 +325,7 @@ fun MeasureValidationEntry(
             // 疊圖的提示兩種模式都要顯示——臨床模式的原圖提示在拍攝當下由
             // SamplePickerScreen 給，但疊圖是存檔當下才產生的，這裡是唯一會看到它的地方。
             overlayPath?.let {
-                Text("🖼 量測結果疊圖已存入相簿：$it",
+                Text(if (com.woundmeasurement.app.BuildConfig.MMH_VALIDATION) "量測結果疊圖已建立加密私密副本" else "🖼 量測結果疊圖已存入相簿：$it",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary)
             }
@@ -329,12 +336,12 @@ fun MeasureValidationEntry(
 
             if (!clinicalMode) {
                 galleryPath?.let {
-                    Text("🖼 原始影像已存入相簿：$it",
+                    Text(if (com.woundmeasurement.app.BuildConfig.MMH_VALIDATION) "量測影像已建立加密私密副本" else "🖼 原始影像已存入相簿：$it",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.primary)
                 }
                 onViewQuickHistory?.let { go ->
-                    OutlinedButton(go, Modifier.fillMaxWidth()) { Text("查看快速量測紀錄（未歸戶）") }
+                    OutlinedButton(go, Modifier.fillMaxWidth(), enabled = !st.saving && !st.annotationSending) { Text("查看快速量測紀錄（未歸戶）") }
                 }
                 Text("快速量測的紀錄不屬於任何個案，不會出現在個案時間軸，也不計入臨床收案進度。",
                     style = MaterialTheme.typography.bodySmall,
@@ -345,7 +352,7 @@ fun MeasureValidationEntry(
             SamplePickerScreen(
                 vm = vm, backend = backend,
                 // AI 空遮罩(如印刷OOD/難例全失敗)也可進修邊:醫師從零手畫,ArUco 尺度(mm/px)仍有效
-                onReview = { if (vm.lastBitmap != null) editing = true },
+                onReview = { if (!st.saving && !st.annotationSending && vm.lastBitmap != null) editing = true },
                 // 量測綁個案 → 時間軸才畫得出單一傷口的癒合曲線
                 onSaveToTimeline = {
                     // UI 閘門只是為了給出可讀的理由；真正的拒絕在後端（見 docs/rbac_design.md §5）。
@@ -363,10 +370,10 @@ fun MeasureValidationEntry(
                     // 快速量測：把原始影像另存一份到共用相簿，供事後比對或匯入個案。
                     // ⚠ **只有** sample/phantom 會真的寫入——GalleryExport 自己會拒絕其他來源，
                     // 因為共用相簿不受本 App 的加密、保存期限與撤回同意約束。
-                    if (!clinicalMode) {
+                    if (!clinicalMode && !com.woundmeasurement.app.BuildConfig.MMH_VALIDATION) {
                         vm.lastBitmap?.let { bmp ->
                             val rel = com.woundmeasurement.app.data.store.GalleryExport
-                                .saveForQuickMeasure(ctx, bmp, source)
+                                .saveForQuickMeasure(ctx, bmp, source, runtime.scope)
                             if (rel != null) galleryPath = rel
                         }
                     }
@@ -382,7 +389,8 @@ fun MeasureValidationEntry(
                     //
                     // 放進背景執行緒：疊圖是整張畫布的逐像素合成（2048² 量級），
                     // 在主執行緒做會讓「存檔」那一下明顯卡住。
-                    vm.lastBitmap?.let { bmp ->
+                    // MMH exports only after the database save, from its persisted snapshot.
+                    if (!com.woundmeasurement.app.BuildConfig.MMH_VALIDATION) vm.lastBitmap?.let { bmp ->
                         val polys = vm.lastPolygons.ifEmpty {
                             if (vm.lastPolygon.size >= 3) listOf(vm.lastPolygon) else emptyList()
                         }
@@ -413,7 +421,7 @@ fun MeasureValidationEntry(
                                 val img = WoundOverlayRenderer.render(bmp, raster, polys, quad, info)
                                 img?.let {
                                     val r = com.woundmeasurement.app.data.store.GalleryExport
-                                        .saveOverlay(ctx, it, source)
+                                        .saveOverlay(ctx, it, source, runtime.scope)
                                     it.recycle(); r
                                 }
                             }
@@ -429,9 +437,9 @@ fun MeasureValidationEntry(
                         vm.reportSubmitBlocked("⚠️ 此病患未取得①照護同意(或已撤回),不得存入病歷")
                     else vm.saveToTimeline(dao, exudate, case, source, imageStore)
                 },
-                exudate = exudate, onExudate = { exudate = it },
+                exudate = exudate, onExudate = { if (exudate != it) vm.invalidateSavedDraft(); exudate = it },
                 // 臨床模式 source 已鎖定 → 傳 onSource=null 讓選擇器整組隱藏（少一次必選、也少一次選錯）
-                source = source, onSource = if (clinicalMode) null else ({ s: String -> source = s }),
+                source = source, onSource = if (clinicalMode) null else ({ s: String -> if (source != s) vm.invalidateSavedDraft(); source = s }),
                 careCodeProvider = {
                     val chosen = case
                     if (clinicalMode) {
@@ -444,7 +452,7 @@ fun MeasureValidationEntry(
                 allowClinicalSource = clinicalMode,   // 快速量測不得產生臨床樣本(沒有個案就是孤兒紀錄)
                 // ⚠ 同意閘門放在「真的會產生資料的那一步」,不是只放在入口——
                 // 只擋入口的話,任何新入口(例如最近就診)都可能繞過去。
-                measureEnabled = !clinicalMode || careOk,
+                measureEnabled = !st.saving && !st.annotationSending && (!clinicalMode || careOk),
                 disabledReason = when {
                     !clinicalMode -> null
                     case == null -> "⚠ 請先選擇個案傷口"
@@ -483,14 +491,14 @@ fun MeasureValidationEntry(
                 Divider()
                 if (exudate != null && (st.edited || st.saved)) {
                     DoctorFlywheelSubmit(vm = vm, backend = backend, exudate = exudate,
-                        source = source, case = case, consent = consent, repo = repo)
+                        source = source, case = case, consent = consent, repo = repo, dao = dao, imageStore = imageStore)
                 } else {
                     Text("(輸入滲液並完成「修邊確認」或「存入時間軸」後,將顯示送出訓練標註)",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            OutlinedButton(onBack, Modifier.fillMaxWidth()) { Text("返回主畫面") }
+            OutlinedButton(onBack, Modifier.fillMaxWidth(), enabled = !st.saving && !st.annotationSending) { Text("返回主畫面") }
         }
     }
 }
@@ -505,8 +513,13 @@ private fun DoctorFlywheelSubmit(
     vm: MeasureViewModel, backend: BackendClient, exudate: Int?, source: String?,
     case: com.woundmeasurement.app.data.entity.WoundCaseEntity? = null,
     consent: com.woundmeasurement.app.data.entity.ConsentEntity? = null,
-    repo: com.woundmeasurement.app.data.repo.CaseRepository? = null
+    repo: com.woundmeasurement.app.data.repo.CaseRepository? = null,
+    dao: com.woundmeasurement.app.data.dao.MeasurementDao,
+    imageStore: com.woundmeasurement.app.data.store.LocalImageStore
 ) {
+    val runtime=rememberMedicalRuntime()
+    val researchState by runtime.research.status.collectAsState()
+    LaunchedEffect(researchState.items) { vm.reconcileSavedAcknowledgement(dao) }
     val st by vm.state.collectAsState()
     val scope = rememberCoroutineScope()
     if (st.result == null) return
@@ -532,11 +545,16 @@ private fun DoctorFlywheelSubmit(
         if (caseOk && !trainOk) Text("⚠ 此病患未勾選②訓練同意(或已撤回),不得送出訓練標註",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
 
+        ResearchOutboxPanel(runtime)
+        Text("按確認送出表示由目前登入的醫師確認此已存版本，並允許 App 接續重試。", style=MaterialTheme.typography.bodySmall)
+        if (!st.saved) Text("請先存入時間軸，再送出此修訂的標註。")
         // 送出狀態放按鈕「上方」,按下即可見
         st.submitStatus?.let {
             Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
         }
-        Button(
+        AnnotationSubmitButton(
+            busy = st.annotationSending,
+            label = if (st.annotationSaved) "此修訂標註已保存" else "確認送出已存檔的標註",
             onClick = {
                 // 臨床樣本用個案的**穩定** wdCode(回診沿用同一組);範例/模擬圖沒有個案才另發,
                 // 但同樣不可用 timestamp 尾碼(27.8 小時就循環、跨日必碰撞)。
@@ -554,11 +572,11 @@ private fun DoctorFlywheelSubmit(
                     else trainOk
                     if (!fresh) vm.reportSubmitBlocked("⚠️ 此病患的訓練同意已撤回或失效,不得送出訓練標註")
                     else vm.submitAnnotation(backend, code, exudate,
-                        careNote = "app confirm", source = source, consentTrain = true)
+                        careNote = AnnotationProvenance.CARE_NOTE, source = source, consentTrain = true, dao = dao, imageStore = imageStore,
+                        enqueueResearch = { saved -> runtime.research.enqueue(saved) })
                 }
             },
-            enabled = source != null && caseOk && trainOk,
-            modifier = Modifier.fillMaxWidth()
-        ) { Text("醫師確認・送出標註 → 再訓練佇列") }
+            enabled = !st.loading && !st.saving && !st.annotationSending && st.saved && !st.annotationSaved && source != null && caseOk && trainOk
+        )
     }
 }

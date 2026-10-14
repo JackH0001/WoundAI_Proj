@@ -19,7 +19,7 @@ from .authentication import BoundSession, LiveAdminAuthenticator, Authentication
 from .web import ORG
 
 COOKIE = "__Host-mmh-management"
-LOGIN_URL = "https://candidate---woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app/api/auth/login"
+LOGIN_URL = "https://woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app/api/auth/login"
 
 
 @dataclass

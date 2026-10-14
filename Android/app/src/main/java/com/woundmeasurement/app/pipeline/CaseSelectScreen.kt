@@ -53,6 +53,7 @@ fun CaseSelectScreen(
     var selectedCaseId by remember { mutableStateOf<Long?>(null) }
 
     val ctx = androidx.compose.ui.platform.LocalContext.current
+    val runtime = rememberMedicalRuntime()
     /** 尚未同步到雲端的撤回。沒有完成的撤回必須**一直看得見**，不能只閃一次訊息。 */
     var pendingWd by remember { mutableStateOf<String?>(null) }
     /**
@@ -83,12 +84,12 @@ fun CaseSelectScreen(
         try { patients = repo.listPatients() } catch (e: Exception) { msg = "⚠ 讀取病患失敗:${e.message}" }
         // 補做上次沒送成功的撤回。這裡是「使用者剛好有網路而且在等畫面」的時刻，
         // 補做不會被感知到；而沒有完成的撤回代表病患的資料還留在雲端訓練佇列裡。
-        runCatching { ConsentWithdrawal.retryPending(ctx) }
-        pendingWd = ConsentWithdrawal.pendingBanner(ctx)
+        runCatching { ConsentWithdrawal.retryPending(ctx, runtime = runtime) }
+        pendingWd = ConsentWithdrawal.pendingBanner(ctx, runtime = runtime)
         // 順便問一次健康度。ping 本來就會打 /api/health，這裡只是把它已經解出來的
         // 降級狀態拿來顯示——不會多一次網路往返。
-        runCatching { BackendWarmup.ping(ctx) }
-        degraded = BackendWarmup.degradedBanner()
+        runCatching { runtime.warmup() }
+        degraded = runtime.degradedBanner()
     }
 
     // 返回鍵逐層退出:簽名 → 傷口選取 → 病患選取 → 才真的離開。
@@ -125,7 +126,7 @@ fun CaseSelectScreen(
                         msg = if (!train) base else {
                             val codes = cases.mapNotNull { it.wdCode }
                             if (codes.isEmpty()) base else {
-                                val r = ConsentWithdrawal.restoreOnBackend(ctx, codes)
+                                val r = ConsentWithdrawal.restoreOnBackend(ctx, codes, runtime = runtime)
                                 if (r.allOk)
                                     "$base\n雲端已解除撤回封鎖：${r.done.joinToString("、")}"
                                 else
@@ -134,7 +135,7 @@ fun CaseSelectScreen(
                                     "已記錄待重試，下次連上後端時會自動再試。"
                             }
                         }
-                        pendingWd = ConsentWithdrawal.pendingBanner(ctx)
+                        pendingWd = ConsentWithdrawal.pendingBanner(ctx, runtime = runtime)
                     } catch (e: Exception) { msg = "⚠ 簽署失敗:${e.message}"; signing = false }
                 }
             }
@@ -167,8 +168,8 @@ fun CaseSelectScreen(
                         color = MaterialTheme.colorScheme.onErrorContainer)
                     TextButton(onClick = {
                         scope.launch {
-                            val r = ConsentWithdrawal.retryPending(ctx)
-                            pendingWd = ConsentWithdrawal.pendingBanner(ctx)
+                            val r = ConsentWithdrawal.retryPending(ctx, runtime = runtime)
+                            pendingWd = ConsentWithdrawal.pendingBanner(ctx, runtime = runtime)
                             msg = if (r.allOk) "✅ 待重試的撤回已全部同步到雲端"
                                   else "⚠ 仍有 ${r.pending.size} 筆未完成，請確認網路與後端帳密"
                         }
@@ -269,7 +270,7 @@ fun CaseSelectScreen(
                         //    結果是同意書寫著「撤回後不再納入後續訓練」，
                         //    而系統實際上做不到那件事。
                         msg = "已撤回訓練同意（本機）。正在同步到雲端…"
-                        val r = ConsentWithdrawal.pushToBackend(ctx, codes)
+                        val r = ConsentWithdrawal.pushToBackend(ctx, codes, runtime = runtime)
                         msg = if (r.allOk)
                             "✅ 已撤回訓練同意，雲端也已排除：${r.done.joinToString("、")}\n" +
                             "這些代碼的影像已移入隔離區，不再進入任何訓練集。"
@@ -279,7 +280,7 @@ fun CaseSelectScreen(
                             "⚠ 本機已撤回，但雲端尚未完成：${r.pending.joinToString("、")}\n" +
                             "這些代碼的資料**目前仍在雲端訓練佇列中**。已記錄待重試，" +
                             "下次連上後端時會自動再試；也可請管理者到主控台手動撤回。"
-                        pendingWd = ConsentWithdrawal.pendingBanner(ctx)
+                        pendingWd = ConsentWithdrawal.pendingBanner(ctx, runtime = runtime)
                         } catch (e: Exception) { msg = "⚠ 撤回失敗:${e.message}" }
                     }
                 },

@@ -8,12 +8,13 @@ struct WoundZoomPreview: UIViewRepresentable {
     let imageW: Int
     let imageH: Int
     let resetToken: Int
+    var tissueOverlay: UIImage? = nil
     var markerPolygons: [[[Int]]] = []
 
     func makeUIView(context: Context) -> WoundZoomPreviewView { WoundZoomPreviewView() }
     func updateUIView(_ view: WoundZoomPreviewView, context: Context) {
         view.configure(image: image, polygons: polygons, imageW: imageW, imageH: imageH,
-                       resetToken: resetToken, markerPolygons: markerPolygons)
+                       resetToken: resetToken, markerPolygons: markerPolygons, tissueOverlay: tissueOverlay)
     }
 }
 
@@ -21,6 +22,7 @@ final class WoundZoomPreviewView: UIView, UIScrollViewDelegate {
     let scrollView = UIScrollView()
     let contentView = UIView()
     let imageView = UIImageView()
+    let tissueView = UIImageView()
     let contourLayer = CAShapeLayer()
     let markerLayer = CAShapeLayer()
     private var markerPolygons: [[[Int]]] = []
@@ -46,6 +48,9 @@ final class WoundZoomPreviewView: UIView, UIScrollViewDelegate {
         scrollView.addSubview(contentView)
         contentView.addSubview(imageView)
         imageView.contentMode = .scaleToFill
+        tissueView.contentMode = .scaleToFill
+        tissueView.layer.magnificationFilter = .nearest
+        contentView.addSubview(tissueView)
         contourLayer.fillColor = UIColor.clear.cgColor
         contourLayer.strokeColor = UIColor.cyan.cgColor
         contourLayer.lineJoin = .round
@@ -60,11 +65,12 @@ final class WoundZoomPreviewView: UIView, UIScrollViewDelegate {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func configure(image: UIImage, polygons: [[[Int]]], imageW: Int, imageH: Int, resetToken: Int, markerPolygons: [[[Int]]] = []) {
+    func configure(image: UIImage, polygons: [[[Int]]], imageW: Int, imageH: Int, resetToken: Int, markerPolygons: [[[Int]]] = [], tissueOverlay: UIImage? = nil) {
         let size = CGSize(width: max(imageW, 1), height: max(imageH, 1))
         let changedImage = imageView.image !== image || imageSize != size
         let changedPolygons = self.polygons != polygons || self.markerPolygons != markerPolygons
         imageView.image = image
+        tissueView.image = tissueOverlay
         imageSize = size
         self.polygons = polygons
         self.markerPolygons = markerPolygons
@@ -88,6 +94,7 @@ final class WoundZoomPreviewView: UIView, UIScrollViewDelegate {
         let size = CGSize(width: imageSize.width * fit, height: imageSize.height * fit)
         contentView.frame = CGRect(origin: .zero, size: size)
         imageView.frame = contentView.bounds
+        tissueView.frame = contentView.bounds
         scrollView.contentSize = size
         drawContour()
         centerContent()
@@ -142,12 +149,13 @@ struct WoundImagePreview: View {
     let imageH: Int
     var markerPolygons: [[[Int]]] = []
     var height: CGFloat = 300
+    var tissueOverlay: UIImage? = nil
     @State private var resetToken = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             WoundZoomPreview(image: image, polygons: polygons, imageW: imageW, imageH: imageH,
-                             resetToken: resetToken, markerPolygons: markerPolygons)
+                             resetToken: resetToken, tissueOverlay: tissueOverlay, markerPolygons: markerPolygons)
                 .frame(height: height)
                 .background(Color.black.opacity(0.05))
                 .clipShape(RoundedRectangle(cornerRadius: 8))

@@ -52,16 +52,22 @@ object EditRasterCodec {
     /** @return (PNG 位元組, meta JSON) 或 null。 */
     fun encode(r: EditRaster): Pair<ByteArray, String>? = runCatching {
         val n = r.mw * r.mh
-        if (n <= 0 || r.mask.size < n || r.tissue.size < n) return null
-        val px = IntArray(n)
+        if (r.mw <= 0 || r.mh <= 0 || r.mw.toLong() * r.mh > 4_840_000 ||
+            r.mask.size != n || r.tissue.size != n || r.origMask.size != n) return null
+        val hasBaseline = r.autoBaseline != null
+        r.autoBaseline?.let { require(it.size == n && it.all { v -> v.toInt() in 0..T_MAX }) }
+        // Baseline stays inside the encrypted PNG asset, never in plaintext database metadata.
+        val pngHeight = r.mh * if (hasBaseline) 2 else 1
+        val px = IntArray(n * if (hasBaseline) 2 else 1)
         for (i in 0 until n) {
             val t = r.tissue[i].toInt().let { if (it in 0..T_MAX) it else 0 }
             val m = if (r.mask[i].toInt() != 0) 1 else 0
             val o = if (r.origMask[i].toInt() != 0) 1 else 0
             px[i] = (0xFF shl 24) or (t shl 16) or (m shl 8) or o
         }
-        val bmp = Bitmap.createBitmap(r.mw, r.mh, Bitmap.Config.ARGB_8888)
-        bmp.setPixels(px, 0, r.mw, 0, 0, r.mw, r.mh)
+        r.autoBaseline?.forEachIndexed { i, value -> px[n + i] = (0xFF shl 24) or (value.toInt() shl 16) }
+        val bmp = Bitmap.createBitmap(r.mw, pngHeight, Bitmap.Config.ARGB_8888)
+        bmp.setPixels(px, 0, r.mw, 0, 0, r.mw, pngHeight)
         val out = ByteArrayOutputStream()
         val ok = bmp.compress(Bitmap.CompressFormat.PNG, 100, out)
         bmp.recycle()
@@ -71,6 +77,8 @@ object EditRasterCodec {
             put("mw", r.mw); put("mh", r.mh); put("m_scale", r.mScale.toDouble())
             put("cm2_per_px", r.cm2PerPx ?: JSONObject.NULL)
             put("tissue_edited_px", r.tissueEditedPx); put("mask_px", r.maskPx)
+            put("tissue_edit_count_known", r.tissueEditCountKnown)
+            put("baseline_plane", hasBaseline)
             // 畫布尺寸一起存：續編時若影像尺寸不同（例如換了後端縮圖策略），
             // 柵格座標就對不上——寧可放棄續編也不要用錯的座標畫在病人的傷口上。
             put("canvas_w", r.canvasW); put("canvas_h", r.canvasH)
@@ -91,19 +99,21 @@ object EditRasterCodec {
         if (png == null || meta.isNullOrBlank()) return null
         val j = JSONObject(meta)
         val mw = j.getInt("mw"); val mh = j.getInt("mh")
-        if (mw <= 0 || mh <= 0) return null
+        if (mw <= 0 || mh <= 0 || mw.toLong() * mh > 4_840_000) return null
         // ⚠ 尺寸不符時**不要**縮放遷就。柵格座標是相對於當時那張畫布算的，
         // 縮放後每一個像素都對應到不同的位置，醫師的判斷會被搬到錯的地方。
         val cw = j.optInt("canvas_w", 0); val ch = j.optInt("canvas_h", 0)
         if (cw > 0 && ch > 0 && (cw != canvasW || ch != canvasH)) return null
 
         val bmp = BitmapFactory.decodeByteArray(png, 0, png.size) ?: return null
-        if (bmp.width != mw || bmp.height != mh) { bmp.recycle(); return null }
-        val px = IntArray(mw * mh)
-        bmp.getPixels(px, 0, mw, 0, 0, mw, mh)
+        val hasBaseline = j.optBoolean("baseline_plane", false)
+        val pngHeight = mh * if (hasBaseline) 2 else 1
+        if (bmp.width != mw || bmp.height != pngHeight) { bmp.recycle(); return null }
+        val px = IntArray(mw * pngHeight)
+        bmp.getPixels(px, 0, mw, 0, 0, mw, pngHeight)
         bmp.recycle()
         val tissue = ByteArray(mw * mh); val mask = ByteArray(mw * mh); val orig = ByteArray(mw * mh)
-        for (i in px.indices) {
+        for (i in tissue.indices) {
             tissue[i] = ((px[i] shr 16) and 0xFF).toByte()
             mask[i] = ((px[i] shr 8) and 0xFF).toByte()
             orig[i] = (px[i] and 0xFF).toByte()
@@ -116,6 +126,12 @@ object EditRasterCodec {
             tissueEditedPx = j.optInt("tissue_edited_px", 0),
             maskPx = j.optInt("mask_px", 0),
             canvasW = cw, canvasH = ch,
+            tissueEditCountKnown = j.optBoolean("tissue_edit_count_known", true),
+            autoBaseline = if (hasBaseline) ByteArray(mw * mh) { i ->
+                val value = (px[mw * mh + i] shr 16) and 0xFF
+                require(value in 0..T_MAX)
+                value.toByte()
+            } else null,
             wbGains = j.optJSONArray("wb_gains")?.takeIf { it.length() == 3 }
                 ?.let { a -> DoubleArray(3) { a.getDouble(it) } }
         )

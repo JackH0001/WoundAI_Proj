@@ -63,7 +63,14 @@ class MobileReleaseContractTests(unittest.TestCase):
     def test_profile_mutations_fail_closed(self):
         paths = ['engineering/phase2/test_backend_url_parity.py',
                  'iOS/WoundMeasurementApp/Core/AppSettings.swift', 'Android/app/build.gradle',
-                 'docs/admin_operations.md', '.github/workflows/p0-4-audit.yml']
+                 'docs/admin_operations.md', '.github/workflows/p0-4-audit.yml',
+                 'iOS/WoundMeasurementApp/InstitutionInfo.plist',
+                 'Android/app/src/main/java/com/woundmeasurement/app/institution/InstitutionSession.kt',
+                 'Backend/AccessManager/authentication.py',
+                 'Backend/AccessManager/accounts.py',
+                 'Backend/AccessManager/sessions.py',
+                 'Backend/AccessManager/web.py',
+                 'Backend/AccessManager/static/members.js']
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for path in paths:
@@ -88,6 +95,16 @@ class MobileReleaseContractTests(unittest.TestCase):
                     target.write_text(original.replace(old, new), encoding='utf-8')
                     try: self.assertFalse(backend_profiles(root)[0])
                     finally: target.write_text(original, encoding='utf-8')
+            # Each newly required MMH source must remain mandatory, not skipped
+            # merely because a copied fixture omitted it.
+            for path in paths[5:]:
+                target = root / path; original = target.read_bytes()
+                target.unlink()
+                try:
+                    with self.subTest(missing=path):
+                        self.assertFalse(backend_profiles(root)[0])
+                finally:
+                    target.write_bytes(original)
             (root / paths[0]).write_text("pass\n", encoding='utf-8')
             self.assertFalse(backend_profiles(root)[0], "zero executed checks must not be green")
             (root / paths[0]).unlink()

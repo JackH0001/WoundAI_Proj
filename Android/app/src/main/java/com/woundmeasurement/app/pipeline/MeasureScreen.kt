@@ -33,7 +33,9 @@ fun MeasureScreen(
     preview: @Composable () -> Unit = {}
 ) {
     val st by vm.state.collectAsState()
+    val busy = st.loading || st.saving || st.annotationSending
     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (st.saving) { LinearProgressIndicator(Modifier.fillMaxWidth()); Text("正在保存影像與修訂，請稍候…") }
         Text("量測結果", fontSize = 20.sp, fontWeight = FontWeight.Bold)
         when {
             st.loading -> Box(Modifier.fillMaxWidth().padding(24.dp), Alignment.Center) { CircularProgressIndicator() }
@@ -69,7 +71,7 @@ fun MeasureScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         (0..3).forEach { v ->
-                            FilterChip(selected = exudate == v, onClick = { onExudate(v) }, label = { Text("$v") })
+                            FilterChip(selected = exudate == v, onClick = { onExudate(v) }, enabled = !busy, label = { Text("$v") })
                         }
                     }
                     if (needExudate)
@@ -77,9 +79,9 @@ fun MeasureScreen(
                             fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
                 }
                 if (r.confidence < 0.70)
-                    AssistChip(onClick = onReview, label = { Text("信心度偏低，建議醫師確認") })
-                Button(onReview, Modifier.fillMaxWidth(), enabled = !needExudate) { Text("醫師確認・修邊") }
-                OutlinedButton(onSaveToTimeline, Modifier.fillMaxWidth(), enabled = !needExudate) { Text("存入個案時間軸") }
+                    AssistChip(onClick = onReview, enabled = !busy, label = { Text("信心度偏低，建議醫師確認") })
+                Button(onReview, Modifier.fillMaxWidth(), enabled = !busy && !needExudate) { Text("醫師確認・修邊") }
+                OutlinedButton(onSaveToTimeline, Modifier.fillMaxWidth(), enabled = !busy && !needExudate) { Text("存入個案時間軸") }
                 Text(r.disclaimer, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             else -> Text("尚無結果，請先拍攝。", color = MaterialTheme.colorScheme.onSurfaceVariant)

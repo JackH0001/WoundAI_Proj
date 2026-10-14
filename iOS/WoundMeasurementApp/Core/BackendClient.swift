@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 #if canImport(UIKit)
 import UIKit
@@ -145,11 +146,17 @@ struct ClassifyResult {
 // MARK: - 送出標註的結果
 
 enum AnnotationOutcome: Equatable {
-    case enqueued(note: String?)
+    case enqueued(note: String?, revisionID: String? = nil)
     /// 後端以 200 回覆但實際未入列。**不是錯誤**，但一定要讓醫師看到，
     /// 否則他會以為剛才的修改已經存進去了。
-    case duplicateSkipped(note: String)
+    case duplicateSkipped(note: String, revisionID: String? = nil)
     case rejected(message: String)
+    var revisionID: String? {
+        switch self {
+        case .enqueued(_, let id), .duplicateSkipped(_, let id): return id
+        case .rejected: return nil
+        }
+    }
 }
 
 // MARK: - 錯誤
@@ -179,11 +186,18 @@ enum BackendError: Error, LocalizedError {
 actor BackendClient {
 
     private let baseUrl: String
+    private let expectedMedicalOrg: String
+    private let sessionContext: MedicalSessionEpoch
+    private let sessionEpoch: UInt64
+    private let institutionEpoch: UInt64?
     private var jwt: String
+    private var authGeneration: UInt64 = 0
     private(set) var identity: LoginIdentity?
+    private(set) var lastLoginFailure: String?
 
     private let session: URLSession
     private let liteTransport: (any LiteAuthenticatedTransport)?
+    private let institutionTransport: (any InstitutionAuthenticatedTransport)?
 
     /**
      - Parameter baseUrl: 例如 `https://wound-ai-…run.app`，尾端斜線會被去掉。
@@ -195,9 +209,22 @@ actor BackendClient {
      - `timeoutIntervalForResource = 120s` — 對應 OkHttp 的 callTimeout。
      */
     init(baseUrl: String, jwt: String = "", session: URLSession? = nil,
-         liteTransport: (any LiteAuthenticatedTransport)? = nil) {
+         liteTransport: (any LiteAuthenticatedTransport)? = nil,
+         institutionTransport: (any InstitutionAuthenticatedTransport)? = nil,
+         sessionContext: MedicalSessionEpoch = .shared, bindInstitutionSession: Bool = true,
+         expectedMedicalOrg: String = "mmhps20261007") {
         self.baseUrl = BackendClient.normalize(baseUrl)
+        self.expectedMedicalOrg = expectedMedicalOrg
+        self.sessionContext = sessionContext
+        self.sessionEpoch = sessionContext.snapshot()
+        self.institutionEpoch = bindInstitutionSession ? MedicalSessionEpoch.shared.snapshot() : nil
         self.jwt = jwt
+        #if WOUND_INSTITUTION
+        // Capture this identity's transport once. Never rebind an old client after account switch.
+        self.institutionTransport = institutionTransport ?? InstitutionTransportRegistry.shared.snapshot()
+        #else
+        self.institutionTransport = institutionTransport
+        #endif
         #if WOUND_LITE
         self.liteTransport = liteTransport ?? LiteSignedCloudTransport(baseURL: BackendClient.normalize(baseUrl))
         #else
@@ -240,10 +267,29 @@ actor BackendClient {
         return r
     }
 
+    private func requireCurrentSessionContext() throws {
+        guard sessionContext.isCurrent(sessionEpoch),
+              institutionEpoch.map({ $0 == MedicalSessionEpoch.shared.snapshot() }) ?? true else {
+            authGeneration &+= 1; jwt = ""; identity = nil
+            throw CancellationError()
+        }
+    }
+
     private func send(_ req: URLRequest) async throws -> (Int, Data) {
+        try requireCurrentSessionContext()
+        if let institutionTransport {
+            let (data, response) = try await institutionTransport.send(req)
+            try requireCurrentSessionContext()
+            return (response.statusCode, data)
+        }
+        #if WOUND_INSTITUTION
+        throw InstitutionEntryError.unconfigured
+        #else
         let (data, resp) = try await session.data(for: req)
+        try requireCurrentSessionContext()
         let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
         return (code, data)
+        #endif
     }
 
     /// Registration returns the server-assigned installation. Never substitute the legacy UUID.
@@ -284,18 +330,29 @@ actor BackendClient {
     /// `POST /api/auth/login`。成功回 true 並保存 token 與身分。
     @discardableResult
     func login(username: String, password: String) async throws -> Bool {
+        authGeneration &+= 1
+        let generation = authGeneration
+        jwt = ""
+        identity = nil; lastLoginFailure = nil
         var r = try request("POST", "/api/auth/login", auth: false)
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")
         r.httpBody = try JSONSerialization.data(
             withJSONObject: ["username": username, "password": password])
 
         let (code, data) = try await send(r)
+        guard generation == authGeneration else { throw CancellationError() }
         guard code == 200, let j = JSONAny(data: data) else {
             identity = nil
+            switch code {
+            case 401: lastLoginFailure = "登入回應 HTTP 401：帳號授權未通過，請核對此環境的 WoundAI 帳號與入口資格。"
+            case 403: lastLoginFailure = "登入回應 HTTP 403：目前帳號無入口或應用權限，請聯絡管理員。"
+            case 429: lastLoginFailure = "登入回應 HTTP 429：服務忙碌或請求過於頻繁，請稍候再試。"
+            default: lastLoginFailure = "登入回應 HTTP \(code)：伺服器未完成驗證，請稍後重試。"
+            }
             return false
         }
         let tok = j["access_token"].string("")
-        if tok.isEmpty { identity = nil; return false }
+        if tok.isEmpty { identity = nil; lastLoginFailure = "登入回應缺少有效憑證，請聯絡管理員。"; return false }
         jwt = tok
         identity = LoginIdentity(
             identity:    j["identity"].string(username),
@@ -309,9 +366,45 @@ actor BackendClient {
         return true
     }
 
-    func logout() {
+    /// Read-only live account-version check. Never retries login or writes.
+    func validateMedicalSession() async throws -> LoginIdentity {
+        let generation = authGeneration
+        let previous = identity
+        identity = nil
+        let (status, data) = try await send(request("GET", "/api/v1/auth/session"))
+        guard generation == authGeneration else { throw CancellationError() }
+        guard status == 200 else {
+            if [401, 403].contains(status) { jwt = "" }
+            throw BackendError.http(status: status, message: status == 404
+                ? "此後端尚未支援登入狀態驗證，請聯絡管理員更新。"
+                : "登入狀態驗證未完成（HTTP \(status)），請稍後重新驗證；本次未送出影像。")
+        }
+        guard let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              j["session_contract"] as? String == "account-revision-v1",
+              let actor = j["identity"] as? String,
+              let org = j["org"] as? String, org == expectedMedicalOrg,
+              let user = j["user"] as? String, !user.isEmpty, actor == org + ":" + user,
+              let role = j["role"] as? String,
+              ["physician", "nurse", "assistant", "engineer", "admin"].contains(role),
+              let roleZh = j["role_zh"] as? String,
+              let perms = j["perms"] as? [String], perms.contains("measure.sample"),
+              let expiry = j["expires_at"] as? Double, expiry.isFinite,
+              expiry > Date().timeIntervalSince1970,
+              previous == nil || previous?.identity == actor else {
+            jwt = ""
+            throw BackendError.badResponse("登入狀態回覆不完整或身分不符，未沿用工作階段。")
+        }
+        let verified = LoginIdentity(identity: actor, org: org, user: user, role: role,
+            roleZh: roleZh, displayName: j["display_name"] as? String, perms: Set(perms))
+        identity = verified
+        return verified
+    }
+
+    func logout() async {
+        authGeneration &+= 1
         jwt = ""
         identity = nil
+        await institutionTransport?.invalidate()
     }
 
     // MARK: - ② 健康度
@@ -660,26 +753,86 @@ actor BackendClient {
      - 前置條件：該 `image_id` 已有標註且未撤回（孤兒深度後端 400 拒收，是設計）。
      */
     func uploadDepth(imageId: String, raw: Data,
-                     sidecarMeta: [String: Any]) async throws -> (depthId: String, replaced: Bool) {
+                     sidecarMeta: [String: Any], annotationRevisionID: String? = nil) async throws -> DepthUploadReceipt {
         let meta = Self.depthUploadMetadata(sidecarMeta)
-        let metaStr = (try? JSONSerialization.data(withJSONObject: meta))
-            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        let metaData = try JSONSerialization.data(withJSONObject: meta, options: [.sortedKeys])
+        let metaStr = String(decoding: metaData, as: UTF8.self)
 
         var r = try request("POST", "/api/v1/depth")
         let boundary = "----WoundAI\(UUID().uuidString)"
         r.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        var fields = ["image_id": imageId, "meta": metaStr]
+        if let annotationRevisionID { fields["annotation_receipt_id"] = annotationRevisionID }
         r.httpBody = Self.multipartBody(boundary: boundary,
-                                        fields: ["image_id": imageId, "meta": metaStr],
+                                        fields: fields,
                                         fileField: "depth_f32", fileName: "depth.f32",
                                         mime: "application/octet-stream", fileData: raw)
         let (code, data) = try await send(r)
         guard code == 200 else {
             throw BackendError.http(status: code, message: summarize(data))
         }
-        guard let j = JSONAny(data: data), j["status"].string("") == "stored" else {
-            throw BackendError.badResponse("depth")
+        if let annotationRevisionID,
+           JSONAny(data: data)?["annotation_receipt_id"].string != annotationRevisionID {
+            throw BackendError.badResponse("深度回執與標註修訂不符")
         }
-        return (j["depth_id"].string(""), j["replaced_previous"].bool(false))
+        return try Self.depthReceipt(data, imageID: imageId, raw: raw, requestMetadata: metaData,
+                                     annotationRevisionID: annotationRevisionID)
+    }
+
+    struct DepthUploadReceipt: Codable {
+        let depthId: String
+        let annotationRevisionID: String
+        let metadataSHA256: String
+        let payloadSHA256: String
+        let receiptID: String
+        let replaced: Bool
+    }
+
+    nonisolated static func depthReceipt(_ data: Data, imageID: String, raw: Data,
+                                         requestMetadata: Data,
+                                         annotationRevisionID: String?) throws -> DepthUploadReceipt {
+        func hash(_ bytes: Data) -> String {
+            SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        }
+        func hexBytes(_ value: String) -> Data? {
+            guard value.count == 64, value.allSatisfy({ "0123456789abcdef".contains($0) }) else { return nil }
+            var bytes = Data()
+            var i = value.startIndex
+            while i < value.endIndex {
+                let end = value.index(i, offsetBy: 2)
+                guard let byte = UInt8(value[i..<end], radix: 16) else { return nil }
+                bytes.append(byte); i = end
+            }
+            return bytes
+        }
+        struct Wire: Decodable {
+            let status: String, image_id: String, depth_id: String, depth_sha256: String
+            let request_meta_sha256: String, annotation_receipt_id: String, meta_sha256: String
+            let payload_sha256: String, depth_revision_id: String, depth_receipt_id: String
+            let payload_hash_version: Int
+            let replaced_previous: Bool
+        }
+        let rawHash = hash(raw)
+        guard data.count <= 16_384, let j = try? JSONDecoder().decode(Wire.self, from: data), j.status == "stored",
+              j.image_id == imageID, j.depth_id == String(rawHash.prefix(16)),
+              j.depth_sha256 == rawHash,
+              j.request_meta_sha256 == hash(requestMetadata),
+              j.payload_hash_version == 1,
+              !j.annotation_receipt_id.isEmpty,
+              j.annotation_receipt_id.count == 16, j.annotation_receipt_id.allSatisfy({ "0123456789abcdef".contains($0) }),
+              annotationRevisionID == nil || annotationRevisionID == j.annotation_receipt_id,
+              !j.meta_sha256.isEmpty,
+              let metaBytes = hexBytes(j.meta_sha256), let rawBytes = hexBytes(rawHash),
+              !j.payload_sha256.isEmpty,
+              j.payload_sha256 == hash(Data("woundai-medical-depth-v1\0".utf8) + rawBytes + metaBytes),
+              j.depth_revision_id == String(j.payload_sha256.prefix(16)),
+              j.depth_receipt_id == hash(Data((j.annotation_receipt_id + "|" + j.payload_sha256).utf8)),
+              j.replaced_previous == false else {
+            throw BackendError.badResponse("深度保存回執與影像、標註修訂或完整資料雜湊不符；保留待傳資料")
+        }
+        return DepthUploadReceipt(depthId: String(rawHash.prefix(16)), annotationRevisionID: j.annotation_receipt_id,
+            metadataSHA256: j.meta_sha256, payloadSHA256: j.payload_sha256,
+            receiptID: hash(Data((j.annotation_receipt_id + "|" + j.payload_sha256).utf8)), replaced: false)
     }
 
     /// Pure mapping used by the actual upload path and persistence contract tests.
@@ -698,7 +851,7 @@ actor BackendClient {
         ]
         // 快篩統計與出處照抄（後端驗證器容忍額外鍵；這些是研究端不解檔就能用的資訊）。
         for k in ["accuracy", "filtered", "rgb_w", "rgb_h", "coverage",
-                  "min_m", "max_m", "captured_at", "device"] {
+                  "min_m", "max_m", "captured_at", "capture_id", "capture_time_source", "device"] {
             if let v = sidecarMeta[k] { meta[k] = v }
         }
         // Legacy sidecars must remain unknown; never infer upright from dimensions.
@@ -858,6 +1011,75 @@ actor BackendClient {
         doctorVerified: Bool
     ) async throws -> AnnotationOutcome {
 
+        let payload = try Self.annotationPayload(
+            code: code,
+            gtPolygon: gtPolygon,
+            exudate: exudate,
+            allPolygons: allPolygons,
+            areaCm2: areaCm2,
+            imageId: imageId,
+            imageW: imageW,
+            imageH: imageH,
+            mmPerPx: mmPerPx,
+            route: route,
+            segModel: segModel,
+            tissueFrac: tissueFrac,
+            tissueMaskPngBase64: tissueMaskPngBase64,
+            tissueRaster: tissueRaster,
+            correctionIou: correctionIou,
+            careNote: careNote,
+            source: source,
+            quality: quality,
+            depthSource: depthSource,
+            depthMapPngBase64: depthMapPngBase64,
+            depthConfPngBase64: depthConfPngBase64,
+            cameraIntrinsics: cameraIntrinsics,
+            consentTrain: consentTrain,
+            doctorVerified: doctorVerified)
+        return try await submitAnnotationPayload(payload)
+    }
+
+    nonisolated static func annotationPayload(
+        code: String,
+        gtPolygon: [[Int]],
+        exudate: Int?,
+        /**
+         **所有**傷口輪廓。空的話只送 `gtPolygon`（最大的那一個），而其餘傷口在訓練集裡
+         會被標成背景——那是在教模型「那不是傷口」，比少收一筆資料糟得多。
+         線上欄位名是 `gt_polygons`（僅 >1 個時送出；`gt_polygon` 永遠保留最大者供舊後端）。
+         */
+        allPolygons: [[[Int]]] = [],
+        /**
+         面積（cm²）。來自**遮罩像素數 × 鎖定係數**，是唯一真值。
+         不給的話後端會由多邊形反算，而那個數字與 App 顯示的必然不同：
+         RDP 簡化有損、多輪廓還要合計。兩個都合理、都沒有警告的數字最難查。
+         */
+        areaCm2: Double? = nil,
+        imageId: String?,
+        imageW: Int,
+        imageH: Int,
+        mmPerPx: Double? = nil,
+        route: String? = nil,
+        segModel: String? = nil,
+        tissueFrac: [String: Double]? = nil,
+        tissueMaskPngBase64: String? = nil,
+        tissueRaster: EditRaster? = nil,
+        correctionIou: Double? = nil,
+        careNote: String? = nil,
+        source: String? = nil,
+        quality: [String: Double]? = nil,
+        /// WoundAI3D 深度來源真值：`none`＝沒拍；`lidar_local`＝已加密存本機、未上傳；
+        /// `lidar`＝已上傳（深度端點上線後）。「沒拍」與「拍了沒傳」必須分得出來。
+        depthSource: String = "none",
+        /// 16-bit 灰階 PNG（值=mm、0=無效）base64——契約 docs/depth_capture_contract.md。
+        depthMapPngBase64: String? = nil,
+        depthConfPngBase64: String? = nil,
+        /// **深度圖像素空間**的 {fx, fy, cx, cy}。契約明言：少了它整批深度資料報廢。
+        cameraIntrinsics: [String: Double]? = nil,
+        consentTrain: Bool,
+        doctorVerified: Bool
+    ) throws -> Data {
+
         // 沒有 image_id／尺寸就送出 ＝ 產生孤兒 GT（後端會 400）。提早在端上擋下並給明確訊息。
         guard let imageId = imageId, !imageId.isEmpty, imageW > 0, imageH > 0 else {
             throw BackendError.missingImageBinding
@@ -908,7 +1130,17 @@ actor BackendClient {
         // 組織分割 GT。**tissue_edited 一定要跟著送**——後端靠它決定這張遮罩能不能進訓練集。
         // 少了它，未經醫師修正的啟發式輸出會安靜地混進去，而模型就在學習複製它自己已經
         // 會做的事。
+        if tissueMaskPngBase64 == nil || tissueRaster == nil {
+            throw BackendError.badResponse("傷口與組織遮罩未齊全，請保留本機紀錄")
+        }
         if let png = tissueMaskPngBase64, let r = tissueRaster {
+            guard let wound = WoundMaskCodec.encodeBase64(mask: r.mask, mw: r.mw, mh: r.mh),
+                  let woundData = Data(base64Encoded: wound), Data(base64Encoded: png) != nil else {
+                throw BackendError.badResponse("無法編碼最終傷口遮罩，尚未送出")
+            }
+            obj["mask_contract"] = "woundai.annotation-masks/1"
+            obj["wound_mask_png"] = wound
+            obj["wound_mask_sha256"] = SHA256.hash(data: woundData).map { String(format: "%02x", $0) }.joined()
             obj["tissue_mask_png"] = png
             obj["tissue_raster"] = [
                 "rx0": Double(r.rx0), "ry0": Double(r.ry0),
@@ -919,22 +1151,60 @@ actor BackendClient {
             obj["tissue_edit_ratio"] = r.tissueEditRatio
         }
 
+        return try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
+    }
+
+    /// Replays the exact encrypted outbox payload; never rebuild it from a newer edited record.
+    func submitAnnotationPayload(_ payload: Data) async throws -> AnnotationOutcome {
+        guard let expected = try JSONSerialization.jsonObject(with: payload) as? [String: Any],
+              let code = expected["code"] as? String, let imageID = expected["image_id"] as? String else {
+            throw BackendError.badResponse("annotation payload")
+        }
         var req = try request("POST", "/api/v1/annotation")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try JSONSerialization.data(withJSONObject: obj)
-
+        req.httpBody = payload
         let (httpCode, data) = try await send(req)
-        let msg = summarize(data)
-        guard httpCode == 200 else { return .rejected(message: msg) }
+        guard httpCode == 200 else { return .rejected(message: summarize(data)) }
+        let woundHash = expected["wound_mask_sha256"] as? String
+        let tissueData = (expected["tissue_mask_png"] as? String).flatMap { Data(base64Encoded: $0) }
+        let tissueHash = woundHash == nil ? nil : tissueData.map { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined() }
+        return try Self.annotationReceipt(data, code: code, imageID: imageID,
+                                          woundSHA: woundHash, tissueSHA: tissueHash)
+    }
 
-        guard let j = JSONAny(data: data) else { return .enqueued(note: nil) }
-        // ⚠ duplicate_skipped 是 **HTTP 200**，而且回應裡**沒有** image_id / queue 欄位。
-        //   解析時不可假設欄位存在。
-        if j["status"].string == "duplicate_skipped" {
-            return .duplicateSkipped(note: j["note"].string(
-                "此筆與佇列中既有樣本的影像、傷口輪廓、組織遮罩三者皆相同，已自動略過。"))
+    nonisolated static func annotationReceipt(_ data: Data, code: String, imageID: String,
+                                               woundSHA: String? = nil, tissueSHA: String? = nil) throws -> AnnotationOutcome {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["error"] == nil, object["issues"] == nil,
+              let j = JSONAny(data: data), j["code"].string == code else {
+            throw BackendError.badResponse("標註回執缺漏或個案不符")
         }
-        return .enqueued(note: j["note"].nonBlankString)
+        if woundSHA != nil || tissueSHA != nil {
+            guard let woundSHA, let tissueSHA,
+                  woundSHA.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+                  tissueSHA.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+                  j["mask_contract"].string == "woundai.annotation-masks/1",
+                  j["wound_mask_sha256"].string == woundSHA,
+                  j["tissue_mask_sha256"].string == tissueSHA,
+                  j["annotation_receipt_id"].nonBlankString != nil else {
+                throw BackendError.badResponse("傷口或組織遮罩保存回執不符，請保留本機紀錄後重試")
+            }
+        }
+        let revisionID = j["annotation_receipt_id"].nonBlankString
+        if let revisionID {
+            guard revisionID.range(of: "^[0-9a-f]{16}$", options: .regularExpression) != nil,
+                  j["image_id"].string == imageID else {
+                throw BackendError.badResponse("標註修訂回執格式或影像不符")
+            }
+        }
+        switch j["status"].string {
+        case "duplicate_skipped":
+            return .duplicateSkipped(note: "相同標註已存在，接續核對原始深度。", revisionID: revisionID)
+        case "enqueued":
+            guard j["image_id"].string == imageID else { throw BackendError.badResponse("標註回執影像不符") }
+            return .enqueued(note: j["note"].nonBlankString, revisionID: revisionID)
+        default: throw BackendError.badResponse("標註尚無有效保存回執")
+        }
     }
 
     // MARK: - ⑦ 同意：撤回／重新取得

@@ -26,6 +26,25 @@ final class LiteRawDepthPacketTests: XCTestCase {
         XCTAssertEqual(m["pose"] as? String,"unavailable")
         XCTAssertEqual(m["registration"] as? String,"not_verified")
     }
+    func testCaptureV2IsStableAcrossSerializationAndBindsTimeToPacket() throws {
+        var d = depth()
+        d.captureProvenance = .init(id: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,
+                                    observedAt: Date(timeIntervalSince1970: 1_700_000_000))
+        let image = jpeg()
+        let packet = try LiteRawDepthPacket.make(depth: d, jpeg: image)
+        let metadata = try XCTUnwrap(JSONSerialization.jsonObject(with: packet.metadata) as? [String: Any])
+        XCTAssertEqual(metadata["schema"] as? String, "lite.rgbd/2")
+        XCTAssertEqual(metadata["captured_at"] as? String, "2023-11-14T22:13:20.000Z")
+        XCTAssertEqual(metadata["capture_time_source"] as? String, "photo_callback_wall_clock")
+        XCTAssertEqual(metadata["pose"] as? String, "unavailable")
+        XCTAssertEqual(metadata["registration"] as? String, "not_verified")
+        XCTAssertEqual(try LiteRawDepthPacket.make(depth: d, jpeg: image).metadata, packet.metadata)
+        d.captureProvenance = .init(observedAt: Date(timeIntervalSince1970: 1_700_000_100))
+        let other = try LiteRawDepthPacket.make(depth: d, jpeg: image)
+        XCTAssertNotEqual(other.metadata, packet.metadata)
+        XCTAssertEqual(other.rawDepth, packet.rawDepth)
+    }
+
     func testMissingOrientationAndAspectMismatchRejected() {
         var d = depth();d.sourceExifOrientation = nil
         XCTAssertThrowsError(try LiteRawDepthPacket.make(depth:d,jpeg:jpeg()))

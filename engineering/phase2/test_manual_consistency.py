@@ -21,6 +21,7 @@
 這支測試守的是「字面上對不上」的那一類，那一類佔了實際發生的大多數。
 """
 import os
+from pathlib import Path
 import re
 import sys
 
@@ -57,6 +58,9 @@ def main():
         print("找不到手冊：%s" % MANUAL)
         return 1
     man = open(MANUAL, encoding="utf-8").read()
+    ios_manual = Path(ROOT) / "iOS/WoundMeasurementApp/Resources/manual.html"
+    check("iOS 與 Android 內建手冊內容一致",
+          ios_manual.is_file() and ios_manual.read_text(encoding="utf-8") == man)
     kt = kt_sources()
     allkt = "\n".join(kt.values())
 
@@ -74,8 +78,9 @@ def main():
         "肉芽", "腐肉", "壞死", "上皮", "其他",
         "ROI", "全圖", "取消", "完成修邊",
         "存入個案時間軸", "醫師確認・修邊",
-        "醫師確認・送出標註 → 再訓練佇列",
-        "重新修邊（載回原影像與輪廓）",
+        "確認送出已存檔的標註",
+        "修邊標註（檢視／修正遮罩）",
+        "標註已保存，無需補送",
         "補送訓練標註 → 再訓練佇列",
         "連線測試", "撤回訓練同意",
     ]

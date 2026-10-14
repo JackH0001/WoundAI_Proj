@@ -1,48 +1,8 @@
 #!/usr/bin/env python3
-"""把使用者核定的圖稿匯出成 Android 啟動器圖示，不重畫構圖。
-
-SSOT：iOS/IconSources/medical.png（與 iOS 同一張；來源與核定紀錄見
-iOS/IconSources/provenance.json）。本腳本只做縮放與遮罩，不改顏色、不去背、
-不重新排版——那張圖是 2026-10-01 經使用者核定的，構圖不是我們可以順手調的東西。
-
-## 為什麼需要這支腳本（修掉的原始缺陷）
-
-原本 res/mipmap-hdpi/ic_launcher.xml 是：
-
-    <bitmap android:src="@drawable/ic_launcher_foreground" />
-
-而 ic_launcher_foreground 是一個 <vector>。<bitmap> 要的是可解碼的點陣圖，
-不是向量 XML，所以執行期 BitmapDrawable 取不到圖，logcat 每一兩秒噴一次：
-
-    PackageManager: Failure retrieving resources for com.woundai.app:
-    Drawable com.woundai.app:mipmap/ic_launcher with resource ID #0x7f0d0000
-
-資源條目是存在的（ID 解得出來），壞的是取用那一步。症狀是桌面上沒有可按的
-圖示——2026-10-05 在 iPlay60_mini_Pro 上實測到，當時只能用 adb am start 啟動。
-另外那個 vector 是兩個填 @color/white 的圓角矩形、沒有背景層，白底桌面上
-就算 inflate 成功也是看不見的。兩個獨立缺陷疊在一起。
-
-## adaptive icon 的前景層為什麼是「裁切到主體」而不是整張
-
-Android 8+ 的啟動器會用自己的遮罩（圓形／方圓形／水滴）裁 108dp 的畫布，
-只有內圈 66dp 保證看得見。實測這張圖的主體（十字／鏡頭／傷口示意）佔畫面
-82.8%，整張滿版放進前景層的話，圓形遮罩會削掉十字的臂端。
-
-把整張縮到 73.8% 可以塞進安全區，但桌面上會明顯比旁邊的 App 小一圈。
-所以改成：
-  * 背景層 = 圖稿自己的背景色（邊框像素中位數，不是猜的）
-  * 前景層 = 裁切到主體 bbox 的那一塊，縮到安全區、置中於透明畫布
-兩層顏色相同，主體周圍那圈背景色會無縫融進背景層 → 視覺上是滿版圖示，
-主體維持正常大小，而且**沒有任何一個像素被遮罩裁掉**。
-不需要去背（會產生邊緣光暈），也不需要重組構圖。
-
-## 相容 API 24–25
-
-minSdk 24，而 adaptive icon 是 API 26 起。所以 mipmap-anydpi-v26 放
-<adaptive-icon>，而 mipmap-hdpi 的那兩個 XML 改成合法的 <bitmap> 包住真正的
-PNG——這同時修掉了上面那個原始缺陷，不需要刪檔（沙箱掛載不允許 unlink）。
-
-用法：python3 Android/tools/make_android_icons.py [--source <png>]
+"""Export shared medical artwork to legacy, adaptive and Play icons.
+Source hashes and earlier artwork are retained in iOS/IconSources.
+Adaptive export places the artwork on a transparent foreground and uses
+an edge-sampled background. Launcher masks still vary by device.
 """
 import argparse
 import hashlib
@@ -54,24 +14,14 @@ from PIL import Image, ImageDraw
 
 # provenance.json 記錄的核定圖稿雜湊。對不上就停——這是為了確保匯出的是
 # 經核定的那一張，而不是某次實驗留下來的檔案。
-APPROVED_SHA256 = "1034f119c5c9c59926458adcd8292a49285088fe835fe9c9a95ee73947805a91"
+APPROVED_SHA256 = "e37a8b3fa705c17329f8965d27427aec69084e206858c793ce7a135b49bce988"
 
 # 密度 → 48dp 基準的像素邊長（Android 啟動器圖示的傳統尺寸）
 LEGACY = {"mdpi": 48, "hdpi": 72, "xhdpi": 96, "xxhdpi": 144, "xxxhdpi": 192}
 # adaptive icon 的畫布固定 108dp
 ADAPTIVE = {"mdpi": 108, "hdpi": 162, "xhdpi": 216, "xxhdpi": 324, "xxxhdpi": 432}
-# 前景層裡圖稿佔畫布的比例。
-#
-# **不是 66/108（Google 文件說的「保證可見內圈」）。** 實測用 66/108 匯出後，
-# 桌面上明顯比旁邊的 App 小一圈——因為這張圖稿本身就已經留了邊：青色磚只佔
-# 原圖的 82.8%，再縮到 61.1% 等於在留好邊的設計上又加一圈，變成「圖示裡面
-# 還有一個圖示」。
-#
-# 76/108 = 70.37% 是**幾何上限**：正方形置中、邊長佔畫布 f 時，四角到中心的
-# 距離是 (f/2)·√2；圓形遮罩半徑 0.5，所以不被裁的條件是 f ≤ 1/√2 = 70.71%。
-# 70.37% 剛好卡在裡面，而青磚本身還有圓角，餘裕更多。
-# 換圖稿時這個值要重新判斷——它取決於圖稿自己留了多少邊。
-SAFE_FRACTION = 76 / 108
+# Fit artwork inside the 66dp content region of the 108dp canvas.
+SAFE_FRACTION = 66 / 108
 PLAY_STORE_PX = 512        # Play 商店資訊要的圖示尺寸
 
 

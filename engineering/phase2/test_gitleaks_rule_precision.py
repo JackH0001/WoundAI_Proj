@@ -121,10 +121,61 @@ class SecretKeyRulePrecisionTests(unittest.TestCase):
 
 
 
+class TransportFixtureAllowlistTests(unittest.TestCase):
+    def setUp(self):
+        text = CONFIG.read_text(encoding="utf-8-sig")
+        rule = text.split('id = "woundai-generic-pw-assign"', 1)[1].split("\n[allowlist]", 1)[0]
+        blocks = [b for b in rule.split("[[rules.allowlists]]")[1:]
+                  if 'description = "Exact synthetic iOS transport fixture credentials"' in b]
+        self.assertEqual(len(blocks), 1)
+        self.block = blocks[0]
+        def singleton(name):
+            pattern = r"^  " + name + r" = \[\s*" + "'" * 3 + r"(.+?)" + "'" * 3 + r"\s*\]$"
+            matches = re.findall(pattern, self.block, re.M)
+            self.assertEqual(len(matches), 1, name)
+            return re.compile(matches[0])
+        self.assignment = re.compile(rule_regex("woundai-generic-pw-assign"))
+        self.path = singleton("paths")
+        self.value = singleton("regexes")
+        self.fixture = "iOS/WoundAITests/InstitutionIAPTransportTests.swift"
+
+    def test_allowlist_requires_path_and_full_match(self):
+        self.assertIn('condition = "AND"', self.block)
+        self.assertIn('regexTarget = "match"', self.block)
+        self.assertNotIn("[rules.allowlist]", self.block)
+
+    def test_only_exact_transport_file_is_exempt(self):
+        self.assertIsNotNone(self.path.search(self.fixture))
+        for path in ("iOS/WoundAITests/OtherTests.swift", "iOS/Core/Transport.swift",
+                     "prefix/" + self.fixture, self.fixture + ".bak"):
+            self.assertIsNone(self.path.search(path), path)
+
+    def test_two_synthetic_literals_are_exempt(self):
+        for literal in ("synthetic", "synthetic-password"):
+            self.assertIsNotNone(self.value.search('password: "' + literal + '"'))
+
+    def test_other_values_and_assignment_forms_remain_detectable(self):
+        for field, separator, literal in (
+            ("password", ":", "different-fixture-value"),
+            ("password", ":", "synthetic-password-suffix"),
+            ("password", ":", "prefix-synthetic"),
+            ("passwd", ":", "synthetic"),
+            ("pwd", ":", "synthetic"),
+            ("password", "=", "synthetic"),
+        ):
+            assignment = field + separator + ' "' + literal + '"'
+            self.assertIsNotNone(self.assignment.search(assignment))
+            self.assertIsNone(self.value.search(assignment))
+
+
 class ManagementFixtureAllowlistTests(unittest.TestCase):
     def setUp(self):
         text = CONFIG.read_text(encoding="utf-8-sig")
-        self.block = text.split('id = "woundai-generic-pw-assign"', 1)[1].split("\n[allowlist]", 1)[0]
+        rule = text.split('id = "woundai-generic-pw-assign"', 1)[1].split("\n[allowlist]", 1)[0]
+        blocks = [b for b in rule.split("[[rules.allowlists]]")[1:]
+                  if 'description = "Exact synthetic management session fixture credential"' in b]
+        self.assertEqual(len(blocks), 1)
+        self.block = blocks[0]
         def singleton(name):
             pattern = r"^  " + name + r" = \[\s*" + "'" * 3 + r"(.+?)" + "'" * 3 + r"\s*\]$"
             matches = re.findall(pattern, self.block, re.M)
@@ -138,7 +189,7 @@ class ManagementFixtureAllowlistTests(unittest.TestCase):
     def test_allowlist_requires_path_and_full_match(self):
         self.assertIn('condition = "AND"', self.block)
         self.assertIn('regexTarget = "match"', self.block)
-        self.assertEqual(self.block.count("[rules.allowlist]"), 1)
+        self.assertNotIn("[rules.allowlist]", self.block)
 
     def test_only_exact_management_file_is_exempt(self):
         self.assertIsNotNone(self.path.search(self.fixture))

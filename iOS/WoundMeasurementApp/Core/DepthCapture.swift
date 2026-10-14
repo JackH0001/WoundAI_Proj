@@ -47,6 +47,25 @@ struct DepthCapture {
     /// nil means legacy/unknown, not proven upright.
     var sourceExifOrientation: Int? = nil
 
+    /// Fixed at the RGB-D photo callback, not when a sidecar is serialized.
+    /// This is a host wall-clock observation, not a sensor exposure timestamp.
+    struct CaptureProvenance {
+        let id: UUID
+        let observedAt: Date
+        init(id: UUID = UUID(), observedAt: Date) {
+            self.id = id
+            self.observedAt = observedAt
+        }
+        var metadata: [String: Any] {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return ["capture_id": id.uuidString.lowercased(),
+                    "captured_at": formatter.string(from: observedAt),
+                    "capture_time_source": "photo_callback_wall_clock"]
+        }
+    }
+    var captureProvenance: CaptureProvenance? = nil
+
     /// 摘要統計（進 meta，供不解檔快篩：例如「深度覆蓋率過低的樣本先排除」）。
     func coverage() -> (valid: Double, minM: Double, maxM: Double) {
         var n = 0
@@ -64,7 +83,7 @@ struct DepthCapture {
     var metaJson: [String: Any] {
         let c = coverage()
         var meta: [String: Any] = [
-            "version": 2,
+            "version": 3,
             "format": "f32_le_meters",
             "width": width, "height": height,
             "intrinsics": ["fx": fx, "fy": fy, "cx": cx, "cy": cy,
@@ -73,12 +92,13 @@ struct DepthCapture {
             "filtered": filtered,
             "rgb_w": rgbWidth, "rgb_h": rgbHeight,
             "coverage": c.valid, "min_m": c.minM, "max_m": c.maxM,
-            "captured_at": ISO8601DateFormatter().string(from: Date()),
             "device": BackendClient.deviceModelString(),
             // Transformation provenance is not a registration/accuracy certificate.
             "registration": "not_verified",
             "orientation_status": "unknown"
         ]
+        meta["capture_time_source"] = "unknown"
+        captureProvenance?.metadata.forEach { meta[$0.key] = $0.value }
         if let exif = sourceExifOrientation, (1...8).contains(exif) {
             meta["source_exif_orientation"] = exif
             meta["normalized_exif_orientation"] = 1
@@ -124,47 +144,49 @@ struct DepthCapture {
  */
 enum DepthStore {
 
-    private static var indexURL: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("depth_index.json")
-    }
-
-    private static func loadIndex() -> [String: [String: String]] {
-        guard let d = try? Data(contentsOf: indexURL),
-              let j = try? JSONSerialization.jsonObject(with: d) as? [String: [String: String]]
-        else { return [:] }
-        return j
-    }
-
-    private static func saveIndex(_ idx: [String: [String: String]]) {
-        if let d = try? JSONSerialization.data(withJSONObject: idx) {
-            try? d.write(to: indexURL, options: .atomic)
+    private static let lock = NSRecursiveLock()
+    private static func loadIndex(store: LocalImageStore) throws -> [String: [String: String]] {
+        guard FileManager.default.fileExists(atPath: store.depthIndexURL.path) else { return [:] }
+        let data = try Data(contentsOf: store.depthIndexURL)
+        guard let index = try JSONSerialization.jsonObject(with: data) as? [String: [String: String]] else {
+            throw CocoaError(.fileReadCorruptFile)
         }
+        return index
+    }
+    private static func saveIndex(_ idx: [String: [String: String]], store: LocalImageStore) -> Bool {
+        do {
+            let data = try JSONSerialization.data(withJSONObject: idx)
+            try HealthDataFiles.write(data, to: store.depthIndexURL)
+            return true
+        } catch { return false }
     }
 
     /// 綁定深度到已落地的量測影像。**先寫檔再寫索引**——反過來的話索引會指向不存在的檔。
     @discardableResult
     static func attach(imagePath: String, capture: DepthCapture, store: LocalImageStore) -> Bool {
-        guard !imagePath.isEmpty else { return false }
+        lock.lock(); defer { lock.unlock() }
+        guard !imagePath.isEmpty, var idx = try? loadIndex(store: store) else { return false }
         let raw = capture.map.withUnsafeBufferPointer { Data(buffer: $0) }
-        guard let depthName = store.saveRaw(raw),
-              let metaData = try? JSONSerialization.data(withJSONObject: capture.metaJson),
-              let metaName = store.saveRaw(metaData) else { return false }
-        var idx = loadIndex()
+        guard let metaData = try? JSONSerialization.data(withJSONObject: capture.metaJson),
+              let depthName = store.saveRaw(raw) else { return false }
+        guard let metaName = store.saveRaw(metaData) else { store.delete(depthName); return false }
         idx[imagePath] = ["depth": depthName, "meta": metaName]
-        saveIndex(idx)
+        guard saveIndex(idx, store: store) else {
+            store.delete(depthName); store.delete(metaName); return false
+        }
         return true
     }
 
     /// 有沒有深度（供 `depth_source` 真值與畫面標示）。
-    static func lookup(imagePath: String) -> [String: String]? {
+    static func lookup(imagePath: String, store: LocalImageStore) -> [String: String]? {
         guard !imagePath.isEmpty else { return nil }
-        return loadIndex()[imagePath]
+        lock.lock(); defer { lock.unlock() }
+        return (try? loadIndex(store: store))?[imagePath]
     }
 
     /// 讀回 sidecar 供補傳（`/api/v1/depth`）。回 (f32 原始位元組, 本機 metaJson)。
     static func load(imagePath: String, store: LocalImageStore) -> (raw: Data, meta: [String: Any])? {
-        guard let e = lookup(imagePath: imagePath),
+        guard let e = lookup(imagePath: imagePath, store: store),
               let dn = e["depth"], let mn = e["meta"],
               let raw = store.rawBytes(dn),
               let md = store.rawBytes(mn),
@@ -174,21 +196,31 @@ enum DepthStore {
     }
 
     /// 補傳成功後記旗標（避免重複補傳的 UI 噪音；後端本就冪等，這只是體驗）。
-    static func markUploaded(imagePath: String) {
-        var idx = loadIndex()
-        guard var e = idx[imagePath] else { return }
+    @discardableResult
+    static func markUploaded(imagePath: String, store: LocalImageStore,
+                             receipt: BackendClient.DepthUploadReceipt? = nil) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard var idx = try? loadIndex(store: store) else { return false }
+        guard var e = idx[imagePath] else { return false }
         e["uploaded"] = "1"
+        if let receipt {
+            e["annotation_receipt_id"] = receipt.annotationRevisionID
+            e["depth_receipt_id"] = receipt.receiptID
+            e["payload_sha256"] = receipt.payloadSHA256
+            e["meta_sha256"] = receipt.metadataSHA256
+        }
         idx[imagePath] = e
-        saveIndex(idx)
+        return saveIndex(idx, store: store)
     }
 
     /// 影像被 90 天清除時，深度 sidecar 一併清（同一保存政策）。
     static func purge(imagePath: String, store: LocalImageStore) {
-        guard let e = lookup(imagePath: imagePath) else { return }
+        lock.lock(); defer { lock.unlock() }
+        guard var idx = try? loadIndex(store: store), let e = idx[imagePath] else { return }
+        idx.removeValue(forKey: imagePath)
+        // Preserve readable sidecars if the registry cannot be updated.
+        guard saveIndex(idx, store: store) else { return }
         if let p = e["depth"] { store.delete(p) }
         if let p = e["meta"] { store.delete(p) }
-        var idx = loadIndex()
-        idx.removeValue(forKey: imagePath)
-        saveIndex(idx)
     }
 }

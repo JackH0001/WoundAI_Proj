@@ -20,6 +20,9 @@ import java.io.ByteArrayOutputStream
  */
 data class MeasureUiState(
     val loading: Boolean = false,
+    val annotationSending: Boolean = false,
+    val saving: Boolean = false,
+    val annotationSaved: Boolean = false,
     val result: MeasureResult? = null,
     val error: String? = null,
     val submitStatus: String? = null,   // 飛輪標註送出狀態(醫師修邊→再訓練佇列)
@@ -77,6 +80,7 @@ class MeasureViewModel(
     // 同一次影像去重存檔:影像雜湊 + 已存的 row id(同影像重存→更新同筆,不新增)
     @Volatile private var lastImageHash: Int? = null
     @Volatile private var lastSavedId: Long? = null
+    private var lastSavedSnapshot: MeasurementEntity? = null
     // editRaster 所依附的畫布尺寸(端上=原圖、後端=≤2048 縮圖);尺寸變了柵格座標就對不上
     @Volatile private var lastCanvasW: Int = 0
     @Volatile private var lastCanvasH: Int = 0
@@ -204,6 +208,7 @@ class MeasureViewModel(
         exudate: Int?,
         cloudEscalate: (suspend (Bitmap) -> BooleanArray)? = null
     ) {
+        if (_state.value.loading || _state.value.saving || _state.value.annotationSending) return
         _state.value = _state.value.copy(loading = true, error = null)
         resetBinding(bitmap)   // 端上路徑無後端影像綁定 → 清掉上一次(可能是後端模式)的殘留
         viewModelScope.launch {
@@ -235,6 +240,7 @@ class MeasureViewModel(
         seg: String? = null,           // "color"=印刷模擬圖走色彩分割(不碰模型);null=AI
         careCodeProvider: (suspend () -> String?)? = null
     ) {
+        if (_state.value.loading || _state.value.saving || _state.value.annotationSending) return
         _state.value = _state.value.copy(loading = true, error = null)
         clearBackendBinding()   // 先清舊綁定:失敗時不可留著上一張的 image_id 讓醫師誤送
         viewModelScope.launch {
@@ -339,9 +345,25 @@ class MeasureViewModel(
      * @param code 去識別代碼(WD-*);@param exudate 醫師輸入滲液 0–3
      */
     /** 由 UI 端的守門(如同意已撤回)擋下時,用同一個狀態管道回報,才會走到既有的彈窗流程。 */
+    fun invalidateSavedDraft() {
+        if (_state.value.saving || _state.value.annotationSending) return
+        _state.value = _state.value.copy(saved = false, annotationSaved = false)
+    }
+
     fun reportSubmitBlocked(message: String) {
         _state.value = _state.value.copy(submitStatus = message)
     }
+
+    internal suspend fun reconcileSavedAcknowledgement(dao:MeasurementDao) {
+        val expected=lastSavedSnapshot ?: return
+        val latest=withContext(Dispatchers.IO){dao.getById(expected.id)} ?: return
+        if(latest.annotationSubmitted && latest.copy(annotationSubmitted=expected.annotationSubmitted)==expected) {
+            lastSavedSnapshot=latest
+            if(_state.value.saved) _state.value=_state.value.copy(annotationSaved=true,submitStatus="此修訂研究標註已確認保存。")
+        }
+    }
+
+    private val annotationGate = AnnotationUploadGate()
 
     fun submitAnnotation(
         backend: BackendClient, code: String, exudate: Int?, careNote: String? = null,
@@ -350,8 +372,12 @@ class MeasureViewModel(
          * ②訓練同意真值。臨床個案請帶 `ConsentEntity.trainEffective`;
          * 範例/模擬圖無受試者,視同已同意(它們本來就不含 PHI)。
          */
-        consentTrain: Boolean = true
+        consentTrain: Boolean = true,
+        dao: MeasurementDao,
+        imageStore: com.woundmeasurement.app.data.store.LocalImageStore,
+        enqueueResearch: (suspend (MeasurementEntity) -> String)? = null
     ) {
+        if (_state.value.loading || _state.value.saving || _state.value.annotationSending) return
         val poly = lastPolygon
         if (poly.isEmpty()) {
             _state.value = _state.value.copy(submitStatus = "⚠️ 無傷口輪廓可送(請先量測)"); return
@@ -373,45 +399,79 @@ class MeasureViewModel(
             _state.value = _state.value.copy(
                 submitStatus = "⚠️ 此結果未綁定後端影像(端上模式);請切「後端」重新量測後再送訓練標註"); return
         }
-        _state.value = _state.value.copy(submitStatus = "送出中…")
+        val saved = lastSavedSnapshot
+        val result = _state.value.result
+        if (saved == null || saved.id != lastSavedId || result == null) {
+            reportSubmitBlocked("請先將此修訂存入時間軸，再送出標註。"); return
+        }
+        val draft = saved.copy(
+            wdCode = code, imageId = lastImageId, imageW = lastImageW, imageH = lastImageH,
+            gtPolygon = polygonsToJson(lastPolygons.ifEmpty { listOf(poly) }),
+            estimatedArea = result.areaCm2, exudate = exudate, mmPerPx = lastMmPerPx,
+            route = lastRoute, source = source, correctionIou = lastCorrectionIou,
+            doctorVerified = lastDoctorVerified,
+            annotationProvenance = AnnotationProvenance(lastSegModel, lastQuality, careNote).encode(),
+            tissueGranulation = result.tissueFrac["granulation"], tissueSlough = result.tissueFrac["slough"],
+            tissueNecrosis = result.tissueFrac["necrosis"], tissueEpithelial = result.tissueFrac["epithelial"],
+            tissueOther = result.tissueFrac["other"])
+        if (draft != saved) {
+            reportSubmitBlocked("本次修訂與時間軸不同，請先存入時間軸再送出。"); return
+        }
+        val submittedRaster = editRaster
+        val submittedProvenance = AnnotationProvenance.decode(saved.annotationProvenance)
+        if (submittedProvenance == null) {
+            reportSubmitBlocked("缺少原始標註溯源，未送出；請保留紀錄供核對。"); return
+        }
+        if (!annotationGate.acquire()) return
+        _state.value = _state.value.copy(annotationSending = true, submitStatus = if(enqueueResearch!=null) "正在核對並保存研究待傳資料…" else "正在上傳並確認標註保存，請稍候…")
         viewModelScope.launch {
             try {
-                val (ok, msg) = withContext(Dispatchers.IO) {
+                if(enqueueResearch != null) {
+                    _state.value=_state.value.copy(submitStatus=enqueueResearch(saved),annotationSaved=false)
+                    return@launch
+                }
+                val outcome = withContext(Dispatchers.IO) {
+                    SavedAnnotationUpload.submit(dao, saved, rasterMatches = {
+                        val pair = submittedRaster?.let { EditRasterCodec.encode(it) }
+                        if (pair == null) saved.rasterPath == null && saved.rasterMeta == null
+                        else saved.rasterPath != null && pair.second == saved.rasterMeta &&
+                            pair.first.contentEquals(imageStore.rawBytes(saved.rasterPath))
+                    }, upload = {
                     backend.submitAnnotation(
                         code, poly, exudate,
                         // 多處傷口：只送 poly 的話第二個傷口會被標成背景。
-                        allPolygons = lastPolygons,
+                        allPolygons = parsePolygons(saved.gtPolygon),
                         // 面積以**遮罩像素**為真值，不讓後端由多邊形反算——
                         // RDP 簡化 + 多輪廓合計，兩邊各算一次必然對不上。
-                        areaCm2 = _state.value.result?.areaCm2,
-                        imageId = lastImageId, imageW = lastImageW, imageH = lastImageH,
-                        mmPerPx = lastMmPerPx, route = lastRoute, segModel = lastSegModel,
+                        areaCm2 = saved.estimatedArea,
+                        imageId = saved.imageId, imageW = saved.imageW ?: 0, imageH = saved.imageH ?: 0,
+                        mmPerPx = saved.mmPerPx, route = saved.route, segModel = submittedProvenance.segModel,
                         // 品質指標原樣回送。不送的話這一筆在訓練集匯出時篩不掉——
                         // 缺欄位的紀錄門檻一律放行。
-                        quality = lastQuality,
-                        correctionIou = lastCorrectionIou, careNote = careNote, source = source,
+                        quality = submittedProvenance.quality,
+                        correctionIou = saved.correctionIou, careNote = careNote, source = source,
                         // 醫師修邊後的組織比例（含「其他」）。用 state 裡的值而不是 lastXxx——
                         // 修邊完成時 applyEditedPolygon 已把它寫回 result，那才是醫師確認過的版本。
-                        tissueFrac = _state.value.result?.tissueFrac,
-                        // 組織分割 GT。editRaster 為 null（醫師沒進修邊）時整組不送——
+                        tissueFrac = mapOf("granulation" to saved.tissueGranulation, "slough" to saved.tissueSlough,
+                            "necrosis" to saved.tissueNecrosis, "epithelial" to saved.tissueEpithelial,
+                            "other" to saved.tissueOther).mapNotNull { (key, value) -> value?.let { key to it } }.toMap(),
+                        // 組織分割 GT。submittedRaster 為 null（醫師沒進修邊）時整組不送——
                         // 沒有柵格就沒有遮罩，硬用 AI 輪廓補一張出來只會製造假 GT。
-                        tissueMaskPng = editRaster?.let {
+                        tissueMaskPng = submittedRaster?.let {
                             TissueMaskCodec.encode(it.tissue, it.mask, it.mw, it.mh)
                         },
-                        tissueRaster = editRaster,
-                        consentTrain = consentTrain, doctorVerified = lastDoctorVerified
+                        tissueRaster = submittedRaster,
+                        consentTrain = consentTrain, doctorVerified = saved.doctorVerified
                     )
+                    })
                 }
-                _state.value = _state.value.copy(
-                    submitStatus = when {
-                        !ok -> "⚠️ 被守門擋下:$msg"
-                        msg.contains("duplicate") -> "ℹ️ 相同影像的相同遮罩已在佇列,已自動略過(去重)"
-                        msg.contains("修訂") -> "✅ 已送出($code);同影像已有舊標註,本筆視為修訂版,匯出訓練集時取最新"
-                        else -> "✅ 已送出,進再訓練佇列($code)"
-                    }
-                )
+                if (outcome.acknowledged) lastSavedSnapshot = saved.copy(annotationSubmitted = true)
+                _state.value = _state.value.copy(submitStatus = outcome.message, annotationSaved = outcome.acknowledged)
             } catch (e: Exception) {
                 _state.value = _state.value.copy(submitStatus = "⚠️ 送出失敗:${e.message}")
+            } finally {
+                annotationGate.release()
+                _state.value = _state.value.copy(annotationSending = false)
             }
         }
     }
@@ -434,6 +494,7 @@ class MeasureViewModel(
          */
         canVerify: Boolean
     ) {
+        if (_state.value.saving || _state.value.annotationSending) return
         lastPolygon = edited
         lastPolygons = allPolygons?.takeIf { it.isNotEmpty() }
             ?: (if (edited.size >= 3) listOf(edited) else emptyList())
@@ -453,6 +514,8 @@ class MeasureViewModel(
         _state.value = _state.value.copy(
             result = updated,
             edited = true,
+            saved = false,
+            annotationSaved = false,
             submitStatus = "已套用修邊(面積 ${newArea?.let { "%.2f".format(it) } ?: "-"} cm²,修正 IoU=${correctionIou?.let { "%.2f".format(it) } ?: "-"})"
         )
     }
@@ -475,24 +538,27 @@ class MeasureViewModel(
          * 給了就把 work 影像加密存本機。**這是「回頭修邊」與「補送標註不必重測」的前提**——
          * v2 時 imagePath 一直是空字串,離開量測頁影像與輪廓就都沒了。
          */
-        imageStore: com.woundmeasurement.app.data.store.LocalImageStore? = null
+        imageStore: com.woundmeasurement.app.data.store.LocalImageStore? = null,
+        onSaved: (suspend (MeasurementEntity) -> String?)? = null
     ) {
+        if (_state.value.loading || _state.value.saving || _state.value.annotationSending) return
         val r = _state.value.result ?: return
         if (case != null && lastCareCode != null && case.wdCode != lastCareCode) {
             reportSubmitBlocked("⚠️ 量測後個案已切換，不得把舊影像存入另一個案；請重新量測")
             return
         }
-        _state.value = _state.value.copy(submitStatus = "存入時間軸中…")
+        _state.value = _state.value.copy(saving = true, submitStatus = "存入時間軸中…")
         viewModelScope.launch {
             try {
                 fun pct(k: String) = ((r.tissueFrac[k] ?: 0.0) * 100).toInt()
                 val notes = "PUSH ${r.push.partial ?: "-"}; 肉芽${pct("granulation")}% 腐肉${pct("slough")}% 壞死${pct("necrosis")}%; 滲液${exudate ?: "-"}; route ${r.route}" +
                         (lastCorrectionIou?.let { "; 修邊IoU %.2f".format(it) } ?: "")
                 // 多處傷口要存**全部**輪廓。單一輪廓仍寫成舊格式，DB 裡既有紀錄照樣讀得懂。
+                val provenance = AnnotationProvenance(lastSegModel, lastQuality, AnnotationProvenance.CARE_NOTE).encode()
                 val polyJson = polygonsToJson(lastPolygons.ifEmpty {
                     if (lastPolygon.size >= 3) listOf(lastPolygon) else emptyList()
                 })
-                val (id, updatedRow) = withContext(Dispatchers.IO) {
+                val (id, updatedRow, savedSnapshot) = withContext(Dispatchers.IO) {
                     val imgName = if (imageStore != null) lastBitmap?.let { imageStore.save(it) } else null
                     // v6：把修邊柵格一起存下來。沒有它，從時間軸回頭修邊時醫師畫的組織分區
                     // 會整批消失、面積也會每進出一次漂移 0.5%（見 EditRasterCodec 的說明）。
@@ -502,9 +568,15 @@ class MeasureViewModel(
                     val existId = lastSavedId
                     val exist = existId?.let { dao.getMeasurementById(it) }
                     if (exist != null) {
-                        dao.updateMeasurement(exist.copy(
-                            timestamp = Date(), confidence = r.confidence, estimatedArea = r.areaCm2,
+                        val previousSnapshot = lastSavedSnapshot
+                        check(previousSnapshot != null &&
+                            exist.copy(annotationSubmitted = previousSnapshot.annotationSubmitted) == previousSnapshot) {
+                            "紀錄已在時間軸更新，請返回時間軸核對；未覆寫。"
+                        }
+                        val proposed = exist.copy(
+                            confidence = r.confidence, estimatedArea = r.areaCm2,
                             woundType = "AI(${r.route})", notes = notes,
+                            annotationProvenance = provenance,
                             hasWound = (r.areaCm2 ?: 0.0) > 0.0 || r.tissueFrac.values.any { it > 0.0 },
                             // 先無個案存檔、之後才選個案時要把 patientId 一起補上,
                             // 否則刪病患的 CASCADE 帶不走這筆,會留下孤兒紀錄
@@ -554,19 +626,26 @@ class MeasureViewModel(
                             tissueNecrosis = r.tissueFrac["necrosis"] ?: exist.tissueNecrosis,
                             tissueEpithelial = r.tissueFrac["epithelial"] ?: exist.tissueEpithelial,
                             tissueOther = r.tissueFrac["other"] ?: exist.tissueOther
-                        ))
+                        )
+                        val sameImage = imgName != null && exist.imagePath.isNotEmpty() &&
+                            imageStore!!.rawBytes(imgName).contentEquals(imageStore.rawBytes(exist.imagePath))
+                        val sameRaster = if (rasterPair == null) exist.rasterPath == null && exist.rasterMeta == null
+                            else exist.rasterPath != null && rasterPair.second == exist.rasterMeta &&
+                                rasterPair.first.contentEquals(imageStore!!.rawBytes(exist.rasterPath))
+                        val savedRevision = MeasurementRevision.forResave(exist, proposed, sameImage, sameRaster)
+                        check(dao.updateIfUnchanged(exist, savedRevision)) { "紀錄已更新，請返回時間軸核對；未覆寫。" }
                         // 先寫 DB 再刪舊檔:順序反過來的話,update 失敗就會留下指向不存在檔案的死路徑。
                         if (imgName != null && exist.imagePath.isNotEmpty() && exist.imagePath != imgName) {
-                            imageStore?.delete(exist.imagePath)
+                            runCatching { imageStore?.delete(exist.imagePath) }
                         }
                         // 同上：先寫 DB 再刪舊檔。反過來的話 update 失敗就留下死路徑。
                         if (rasterName != null && !exist.rasterPath.isNullOrEmpty()
                             && exist.rasterPath != rasterName) {
-                            imageStore?.delete(exist.rasterPath)
+                            runCatching { imageStore?.delete(exist.rasterPath) }
                         }
-                        Pair(exist.id, true)
+                        Triple(exist.id, true, savedRevision)
                     } else {
-                        val nid = dao.insertMeasurement(MeasurementEntity(
+                        val newRecord = MeasurementEntity(
                             patientId = case?.patientId,
                             timestamp = Date(),
                             hasWound = (r.areaCm2 ?: 0.0) > 0.0 || r.tissueFrac.values.any { it > 0.0 },
@@ -581,6 +660,7 @@ class MeasureViewModel(
                             rasterMeta = rasterPair?.second,
                             dataPath = "",
                             notes = notes,
+                            annotationProvenance = provenance,
                             // 綁定個案與雲端影像:本機病歷與飛輪樣本靠 wdCode/imageId 對得起來
                             caseId = case?.id, wdCode = lastCareCode ?: case?.wdCode,
                             imageId = lastImageId, mmPerPx = lastMmPerPx,
@@ -598,18 +678,32 @@ class MeasureViewModel(
                             tissueNecrosis = r.tissueFrac["necrosis"],
                             tissueEpithelial = r.tissueFrac["epithelial"],
                             tissueOther = r.tissueFrac["other"]
-                        ))
-                        Pair(nid, false)
+                        )
+                        val nid = dao.insertMeasurement(newRecord)
+                        Triple(nid, false, newRecord.copy(id = nid))
                     }
                 }
                 lastSavedId = id
+                lastSavedSnapshot = savedSnapshot
                 _state.value = _state.value.copy(
                     saved = true,
+                    annotationSaved = savedSnapshot.annotationSubmitted,
                     submitStatus = if (updatedRow) "ℹ️ 同一次影像→已更新同筆紀錄(#$id),未重複新增"
                                    else "✅ 已存入個案時間軸(#$id)"
                 )
-            } catch (e: Exception) {
+                if (onSaved != null) {
+                    _state.value = _state.value.copy(submitStatus = _state.value.submitStatus + "\n正在處理已啟用的行政副本…")
+                    val note = try { onSaved(savedSnapshot) }
+                        catch (e: kotlinx.coroutines.CancellationException) { throw e }
+                        catch (_: Exception) { "時間軸已保存；行政副本未完成。" }
+                    _state.value = _state.value.copy(submitStatus =
+                        (if (updatedRow) "已更新同筆時間軸紀錄。" else "已存入時間軸。") + (note?.let { "\n$it" } ?: ""))
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (e: Exception) {
                 _state.value = _state.value.copy(submitStatus = "⚠️ 存入失敗:${e.message}")
+            } finally {
+                _state.value = _state.value.copy(saving = false)
             }
         }
     }

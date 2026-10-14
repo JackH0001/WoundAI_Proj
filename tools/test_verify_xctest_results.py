@@ -1,5 +1,5 @@
 import unittest
-from verify_xctest_results import verify, PROTECTION_TEST, PROTECTION_REASON
+from verify_xctest_results import verify, PROTECTION_TEST, PROTECTION_REASON, FOLDER_TEST, FOLDER_REASON
 
 class XCTestEvidenceTests(unittest.TestCase):
     def fixture(self):
@@ -41,6 +41,28 @@ class XCTestEvidenceTests(unittest.TestCase):
                             ('totalTestCount',3),('skippedTests',2),('skippedTests',True)]:
             s,t=self.fixture();s[field]=value
             with self.assertRaises(ValueError):verify(s,t,True)
+    def folder_fixture(self):
+        s,t=self.fixture()
+        t[1]['nodeIdentifier']=FOLDER_TEST
+        t[1]['children'][0]['name']=FOLDER_REASON
+        return s,t
+    def test_folder_grant_remains_pending_and_requires_its_own_opt_in(self):
+        s,t=self.folder_fixture()
+        for protection in (False,True):
+            with self.assertRaises(ValueError):verify(s,t,protection)
+        result=verify(s,t,allow_system_folder_grant_skip=True)
+        self.assertTrue(result['system_folder_acceptance_pending'])
+        self.assertFalse(result['physical_file_protection_validation_pending'])
+        with self.assertRaises(ValueError):verify(*self.fixture(),allow_system_folder_grant_skip=True)
+    def test_folder_exception_rejects_wrong_reason_identity_device_or_failure(self):
+        for mutation in ('reason','identity','device','failure','missing_reason'):
+            s,t=self.folder_fixture()
+            if mutation=='reason':t[1]['children'][0]['name']='Folder write failed'
+            if mutation=='identity':t[1]['nodeIdentifier']='Export/testIntegrity()'
+            if mutation=='device':s['devicesAndConfigurations']=[{'device':{'platform':'iOS'}}]
+            if mutation=='failure':t[1]['result']='Failed'
+            if mutation=='missing_reason':t[1]['children']=[]
+            with self.assertRaises(ValueError):verify(s,t,allow_system_folder_grant_skip=True)
     def test_zero_skips_passes_without_exception(self):
         s,t=self.fixture();s.update(skippedTests=0,totalTestCount=1)
         self.assertFalse(verify(s,t[:1])['physical_file_protection_validation_pending'])

@@ -29,6 +29,14 @@ def _gen_password(n: int = 14) -> str:
 users_bp = Blueprint("users", __name__)
 
 
+@users_bp.after_request
+def medical_session_no_store(response):
+    # Include JWT decorator / global-hook failures, not just route responses.
+    if request.path == "/api/v1/auth/session":
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 def _guard():
     """回 (actor, role, org) 或 None 表示無權限。"""
     c = get_jwt() or {}
@@ -36,6 +44,46 @@ def _guard():
     if not auth_users.can(role, "user.manage"):
         return None
     return (get_jwt_identity() or "unknown", role, c.get("org"))
+
+
+@users_bp.get("/api/v1/auth/session")
+@jwt_required()
+def current_user_session():
+    """Read-only self check for medical clients; never grants admin access.
+
+    Require a revision-bound credential before mobile session reuse. A legacy
+    token must log in once to obtain this contract. No audit mutation or token
+    refresh occurs here, and current account state is read on every request.
+    """
+    claims = get_jwt()
+    if institution_context.BOUND_ORG != "mmhps20261007":
+        body, status = jsonify(error="session_reuse_not_configured"), 503
+    elif (claims.get("org") != institution_context.BOUND_ORG
+          or claims.get("typ") == "otc"
+          or not isinstance(claims.get("user"), str)
+          or not auth_users.USER_RE.fullmatch(claims["user"])):
+        body, status = jsonify(error="session_invalid"), 401
+    else:
+        try:
+            row = auth_users.get_user(claims.get("org"), claims.get("user"))
+        except Exception:
+            row = None
+            body, status = jsonify(error="session_verification_unavailable"), 503
+        else:
+            if (claims.get("typ") == "otc" or "account_revision" not in claims
+                    or not institution_context.token_matches_institution(claims, lambda org, user: row)):
+                body, status = jsonify(error="session_invalid"), 401
+            elif not auth_users.can(row["role"], "measure.sample"):
+                body, status = jsonify(error="medical_session_required"), 403
+            else:
+                role = row["role"]
+                body, status = jsonify(identity=get_jwt_identity(), org=row["org"],
+                    user=row["user"], role=role, role_zh=auth_users.ROLES[role],
+                    display_name=row.get("display_name"),
+                    perms=sorted(k for k in auth_users.PERMS if auth_users.can(role, k)),
+                    expires_at=claims["exp"], session_contract="account-revision-v1"), 200
+    body.headers["Cache-Control"] = "no-store"
+    return body, status
 
 
 @users_bp.get("/api/v1/users/session")

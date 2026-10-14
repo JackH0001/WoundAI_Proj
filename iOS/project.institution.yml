@@ -1,7 +1,12 @@
 include:
   - project.yml
 
-# Dedicated medical test product. Backend remains unconfigured until isolated service acceptance.
+packages:
+  GoogleSignIn:
+    url: https://github.com/google/GoogleSignIn-iOS
+    exactVersion: 9.0.0
+
+# Dedicated private medical test product. OAuth/IAP and App RBAC are separate gates.
 targets:
   WoundAIInstitution:
     type: application
@@ -25,9 +30,15 @@ targets:
         buildPhase: resources
       - path: WoundMeasurementApp/Info.plist
         buildPhase: none
+    dependencies:
+      - package: GoogleSignIn
+        product: GoogleSignIn
+      - package: GoogleSignIn
+        product: GoogleSignInSwift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.woundai.app.mmhps20261007
+        CURRENT_PROJECT_VERSION: 33
         INFOPLIST_FILE: WoundMeasurementApp/InstitutionInfo.plist
         # ⚠ 不可同時開 GENERATE_INFOPLIST_FILE 與 INFOPLIST_FILE：舊專案兩者都設，
         #   而 build setting 裡的 NSCameraUsageDescription 與 Info.plist 裡的字串不一致，
@@ -41,13 +52,61 @@ targets:
         Debug:
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WOUND_INSTITUTION DEBUG"
 
+  WoundAIInstitutionTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: WoundAITests/MedicalSessionPoolTests.swift
+      - path: WoundAITests/BackendLoginAndCaptureTests.swift
+      - path: WoundAITests/InstitutionGoogleTokenTests.swift
+      - path: WoundAITests/InstitutionIAPTransportTests.swift
+      - path: WoundAITests/ClinicalReviewRecordTests.swift
+      - path: WoundAITests/ClinicalUploadFlowTests.swift
+      - path: WoundAITests/ClinicalUploadOutboxTests.swift
+      - path: WoundAITests/InstitutionPrivateExportsTests.swift
+      - path: WoundAITests/InstitutionExportTests.swift
+      - path: WoundAITests/TissuePreviewTests.swift
+      - path: WoundAITests/InstitutionRestoreTests.swift
+      - path: WoundAITests/DepthProvenanceTests.swift
+      - path: WoundAITests/MedicalRuntimeTests.swift
+      - path: WoundAITests/MedicalDataScopeTests.swift
+      - path: WoundAITests/MedicalAccountPreferencesTests.swift
+    dependencies:
+      - target: WoundAIInstitution
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.woundai.app.mmhps20261007.tests
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/WoundAIInstitution.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/WoundAIInstitution"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WOUND_INSTITUTION_TESTS"
+
+  WoundAIInstitutionUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: WoundAIInstitutionUITests
+    dependencies:
+      - target: WoundAIInstitution
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.woundai.app.mmhps20261007.uitests
+        TEST_TARGET_NAME: WoundAIInstitution
 
 schemes:
   WoundAIInstitution:
     build:
       targets:
         WoundAIInstitution: all
+        WoundAIInstitutionTests: [test]
+        WoundAIInstitutionUITests: [test]
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - WoundAIInstitutionTests
+        - WoundAIInstitutionUITests
     archive:
       config: Release

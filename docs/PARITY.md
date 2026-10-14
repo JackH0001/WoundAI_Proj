@@ -36,14 +36,14 @@ allow:
 <!-- release-version-exception -->
 ```json
 {
-  "android": 25,
+  "android": 26,
   "ios_medical": 27,
-  "reason": "iOS 27 延續隔離示範服務、登入 UX、量測圖片縮放及修邊工具，新增臨床拍攝導引與多指／ROI 修復；Android 25 已交付 16 KB、RBAC 與機構內測疊圖匯出，但尚未交付全部 iOS UI 功能，不以單純升號宣稱功能一致。",
+  "reason": "iOS 27 延續隔離示範服務、登入 UX、量測圖片縮放及修邊工具，新增臨床拍攝導引與多指／ROI 修復；Android 26 候選延續 16 KB、RBAC 與機構內測疊圖匯出，增加保存收據核對、送件等待／防重複點擊及登入 UX，但尚未交付全部 iOS UI 功能，不以單純升號宣稱功能一致。",
   "alignment_trigger": "下一次 Android 正式 release 交付對應示範連線與登入 UX 並通過 Windows 驗證時，核對當時兩端 build，移除或重新明確登記此差異。任何一端先升號均使本登記失效。"
 }
 ```
 
-此登記只允許 **Android 25 對醫療 iOS 27**。缺理由、缺對齊條件、任一版號改變、重複登記或兩端已同號但未刪除登記，一律拒絕。WoundLite 是不同產品，build 28 不作 Android 醫療版的比較值。這是目前可覆核候選，尚未推送或宣稱 Windows 驗證通過。
+此登記只允許 **Android 26 對醫療 iOS 27**。缺理由、缺對齊條件、任一版號改變、重複登記或兩端已同號但未刪除登記，一律拒絕。WoundLite 是不同產品，build 28 不作 Android 醫療版的比較值。這是目前可覆核候選，尚未推送或宣稱 Windows 驗證通過。
 
 `/api/v1/lite/annotation/revision` 是 Lite 28 的修訂回執端點，仍屬 iOS Lite 產品邊界；Android Lite 若日後建立，必須撤銷相應宣告並實作同一契約。
 
@@ -166,11 +166,11 @@ Android 已在 `BackendClient.health()`、`BackendWarmup.degradedBanner()` 補�
 | 修邊：底稿 `seedAuto` 不卡主執行緒 | ❌ | ✅ | iOS `25cbff7` 註明**實測 >10 秒白凍**，改背景 `runSeed` ＋鎖畫布提示。Android `WoundEditScreen.kt` 的 `seedAuto` 仍在 `remember { }`（＝組合／主執行緒）。<br>諷刺的是 Android 自己在 `stamp()` 裡已寫明 seedAuto「在 2200² 上是近千萬次寫入，跑在筆畫進行中的主執行緒上」並為此限定只在 B_PAINT 呼叫——**但開畫面那一次仍是同步的** |
 | 結果頁：組織圖層 | ✅ | ❌ | Android 參照圖三層（輪廓／組織／校正框）且等比全寬；iOS `AnalysisPreview` 使用可雙指操作的 `WoundImagePreview`、僅輪廓＋校正框兩個開關。**此列 Android 領先** |
 | 結果頁：組織層取自醫師修邊柵格 | ✅ | ❌ | Android 2026-10-06 起優先用 `EditRaster`（修改前無條件重跑色彩啟發式 → 百分比更新了圖沒更新）。iOS 無組織層，不適用 |
-| 結果頁：雙指縮放平移檢視細節 | ❌ | ✅（本機保全 commit） | **2026-10-06 當日更正。** 本列第一版寫「兩端都待補」是錯的：iOS 已實作於 `iOS/WoundMeasurementApp/UI/WoundImagePreview.swift`（`WoundZoomPreview`，UIScrollView 1–6×，`panGestureRecognizer` 限定雙指，單指滑動留給結果頁），`AnalysisPreview` 已改用它。<br>⚠ 這份工作已保全於本機 `a162b1c`，原始開發目錄為 `~/Documents/Codex/2026-06-28/woundai-ios-release-20261001` 的工作目錄。<br>錯在哪：盤點時 grep 的是 SwiftUI 的 `MagnificationGesture`／`MagnifyGesture`，而它是 UIKit scroll-view 縮放，名稱完全不同。**拿實作手法的關鍵字去找功能，找不到不代表沒有**——判斷「有沒有這個功能」要看畫面或看 diff |
-| 紀錄檢視（時間軸）：疊加已存輪廓 | ❌ | ✅（本機保全 commit） | 已保全於本機 `a162b1c`。同一支 `WoundImagePreview`；`ReviewView` 疊上該筆存下的輪廓，並在 `imageW/imageH` 與實際影像尺寸不符時**只顯示原圖**並說明原因——與 Android 當天在 `AnalysisPreview` 採用的判準相同（寧可不畫，也不要畫在錯的位置）。Android 的時間軸檢視沒有對應預覽 |
+| 結果頁：雙指縮放平移檢視細節 | ✅ 本機候選 | ✅ | Android `AnalysisPreview` 已加入雙指縮放／平移及重設；iOS `WoundZoomPreview` 使用 UIScrollView。Android r5 尚待實機／Play 分發驗收，不能以契約通過當成手勢等價。 |
+| 紀錄檢視（時間軸）：疊加已存輪廓 | ✅ 本機候選 | ✅ | Android `MeasurementReviewScreen` 已接上 `AnalysisPreview` 與保存的輪廓／修邊柵格；iOS `ReviewView` 使用共用預覽。座標尺寸不符時不畫誤位疊圖；仍需實機驗收。 |
 | 結果頁：圖層開關的狀態編碼 | ❌ | ✅ | iOS 實心＝顯示／空心＝隱藏，底色對應圖上框色，再加眼睛圖示（雙重編碼，強光下仍可辨）。Android 為 Material `FilterChip`，只有深淺差 |
 | 校正框顏色 | 綠 `0xFF39FF6A` | 綠 | ⚠ 同一個安全檢查，兩個 App 教使用者看**兩種顏色**（文案也各自寫「綠框」／「黃框」）。同院同時發兩個平台時，換機就會認錯。<br>**2026-10-06 決議：統一為綠**——黃在黃色膠帶、反光與膚色上辨識度較差，且綠已在 Android 實機驗過。**iOS 已改為綠框與一致文案**（2026-10-07 本機候選；尚未發行） |
-| 匯出量測結果疊圖到共用相簿 | ✅ | ❌ | Android 2026-10-06 特殊內測版：原圖＋**醫師修邊的**組織層＋輪廓＋ArUco 框＋下方結果標註帶（面積／PUSH／組織％／尺度／驗證狀態／免責）。<br>綁 `ALLOW_CLINICAL_GALLERY_EXPORT`，只有 internalTest 建置會寫入臨床相簿。<br>iOS 已依 Jack 指定新增 MMHPS20261007 專用 target，改輸出至 App「檔案」資料夾，不寫系統相簿；尚待專用後端與實機端到端驗收 |
+| 匯出量測結果疊圖 | internalTest 可寫共用相簿；MMH 配置關閉 | MMH 可選加密私密副本／手動匯出 | Android MMH `mmhValidation`／`mmhInternal` 未對齊 iOS 私密副本開關；不得以一般 internalTest 的共用相簿功能冒充 MMH 安全輸出。 |
 
 
 ## 加新功能時的流程
@@ -179,6 +179,6 @@ Android 已在 `BackendClient.health()`、`BackendWarmup.degradedBanner()` 補�
 2. 另一端跟上；跟不上的話，在上面的表裡寫一列，註明原因與預計時程
 3. 核對兩端發布版號；有意不同步時，在上方登記精確版號、原因與對齊條件，不能默默跳過檢查。
 
-## MMHPS20261007 機構特殊內測（2026-10-07）
+## MMHPS20261007 機構特殊內測（2026-10-11 更新）
 
-只比較醫療端 WoundAI Android/iOS；WoundLite 不納入機構版。Android internalTest 目前仍指向既有正式服務，並未完成機構隔離；在專用服務、桶、身分及同意範圍核對前，不得把目前建置稱為已隔離機構版。iOS 目標為 App「檔案」的機構專用輸出資料夾，非系統相簿。
+只比較醫療端 WoundAI Android/iOS；WoundLite 不納入機構版。一般 Android internalTest 仍指向舊服務，不可當成 MMH 版。新增 mmhValidation 與 mmhInternal 固定 MMH 私有 candidate，Google 門禁與 WoundAI 角色分別驗證。iOS MMH 1.0(33) 已啟用 TestFlight 內測；外測未提交，Android Play 內測未啟用。Android 此路徑未實作完整深度採集，不能宣稱與 iOS RGB-D 等價。iOS 私密副本預設關閉、需手動匯出；Android 對應功能仍待實作。各項實測範圍見 `android_revision_ack_validation_20261011.md`、`ios_mmh_login_upload_validation_20261011.md` 與 `mmh_store_release_checkpoint_20261011.md`。

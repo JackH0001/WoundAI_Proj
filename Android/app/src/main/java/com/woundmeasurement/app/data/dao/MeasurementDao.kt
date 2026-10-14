@@ -84,6 +84,24 @@ interface MeasurementDao {
     @Query("UPDATE measurements SET annotationSubmitted = 1 WHERE id = :id")
     suspend fun markAnnotationSubmitted(id: Long)
 
+    /** A delayed upload acknowledgement must never mark a newer local revision as saved. */
+    @Transaction
+    suspend fun acknowledgeAnnotationIfUnchanged(expected: MeasurementEntity): Boolean {
+        val current = getById(expected.id) ?: return false
+        // An acknowledgement of the same snapshot is itself idempotent.
+        if (current.copy(annotationSubmitted = expected.annotationSubmitted) != expected) return false
+        markAnnotationSubmitted(expected.id)
+        return true
+    }
+
+    /** Reject stale editor snapshots instead of overwriting a concurrent save/acknowledgement. */
+    @Transaction
+    suspend fun updateIfUnchanged(expected: MeasurementEntity, updated: MeasurementEntity): Boolean {
+        if (expected.id != updated.id || getById(expected.id) != expected) return false
+        updateMeasurement(updated)
+        return true
+    }
+
     /** 最近有量測的個案 id（依最後量測時間排序）。主畫面「最近就診」用。 */
     @Query("""SELECT caseId FROM measurements WHERE caseId IS NOT NULL
               GROUP BY caseId ORDER BY MAX(timestamp) DESC LIMIT :limit""")
