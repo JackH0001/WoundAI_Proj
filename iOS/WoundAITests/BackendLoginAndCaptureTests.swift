@@ -77,15 +77,25 @@ final class BackendLoginAndCaptureTests: XCTestCase {
         return MeasureViewModel(credentials: { ("dr01", "fixture") },
                                 sessionProvider: { try await pool.acquire() })
     }
-    func testEditedResultUsesExactRasterAreaInsteadOfRoundedEditorSummary() async throws {
+    func testEditedResultKeepsConfirmedAreaInsteadOfRecalculatingRaster() async throws {
         let vm = sharedModel(CaptureTransportFixture())
+        vm.source = "phantom" // Match the quick-measurement UI's explicit source selection.
         await vm.analyze(image(), phantom:true)
         let raster = EditRaster(mask:[1,1,1,1],tissue:[1,1,1,4],origMask:[1,1,1,1],
             rx0:0,ry0:0,mw:2,mh:2,mScale:1,cm2PerPx:0.0034034715225,canvasW:32,canvasH:32)
         vm.applyEdited(polygon:[[0,0],[2,0],[2,2]],all:[],iou:1,newArea:0.01,
                        tissue:raster.tissueFrac(),raster:raster)
-        XCTAssertEqual(vm.result?.areaCm2,raster.areaCm2)
-        XCTAssertNotEqual(vm.result?.areaCm2,0.01)
+        XCTAssertEqual(vm.result?.areaCm2,0.01)
+        XCTAssertNotEqual(vm.result?.areaCm2,raster.areaCm2)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = CaseRepository(store: WoundStore(path: ":memory:"))
+        let saved = await vm.saveToTimeline(repo: repo, imageStore: LocalImageStore(directory: root), woundCase: nil)
+        XCTAssertTrue(saved)
+        let id = try XCTUnwrap(vm.lastSavedId)
+        let row = await repo.measurement(id: id)
+        XCTAssertEqual(row?.estimatedArea, 0.01)
+
     }
     func testSharedSessionTenCapturesKeepImageBindingsWithoutTenLogins() async throws {
         let transport = CaptureTransportFixture(); let vm = sharedModel(transport)

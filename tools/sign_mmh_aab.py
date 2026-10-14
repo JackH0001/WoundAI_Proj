@@ -2,7 +2,7 @@
 """Sign a previously verified MMH AAB locally; passwords stay out of argv/files.
 
 Does not build, generate/alter keys, upload, change version or install an App.
-Run interactively on the owner's Mac. --check only validates the unsigned input.
+Run interactively on the owner's computer. --check only validates the unsigned input.
 """
 import argparse
 import getpass
@@ -50,7 +50,7 @@ def check_input(bundle, expected):
 
 
 def tool(java_home, name):
-    result = java_home / 'bin' / name
+    result = java_home / 'bin' / (name + ('.exe' if sys.platform == 'win32' else ''))
     if not result.is_file():
         raise SigningError('Missing JDK tool: ' + name)
     return str(result)
@@ -137,7 +137,7 @@ def main():
     p.add_argument('--sha256', required=True)
     p.add_argument('--keystore', type=Path)
     p.add_argument('--output', type=Path)
-    p.add_argument('--java-home', type=Path, default=Path('/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home'))
+    p.add_argument('--java-home', type=Path, default=Path(os.environ.get('JAVA_HOME', '/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home')))
     p.add_argument('--check', action='store_true')
     args = p.parse_args()
     check_input(args.input, args.sha256)

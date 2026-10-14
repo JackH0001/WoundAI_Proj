@@ -315,7 +315,7 @@ fun WoundEditScreen(
                 if (resume.autoBaseline?.size == auto.size)
                     System.arraycopy(resume.autoBaseline, 0, auto, 0, auto.size)
                 else seedAuto(this, bitmap, wbGains) // Display fallback only; not a proven historical baseline.
-                cm2PerPx = resume.cm2PerPx
+                cm2PerPx = mmPerPx?.let { (it * it / 100.0) / (mScale * mScale).toDouble() } ?: resume.cm2PerPx
                 recount(); syncAll()
             }
         } else {
@@ -354,6 +354,9 @@ fun WoundEditScreen(
             }
         }
     }
+    fun areaRaster(copyMask: Boolean = false) = EditRaster(if (copyMask) st.mask.copyOf() else st.mask, byteArrayOf(), byteArrayOf(),
+        st.rx0, st.ry0, st.mw, st.mh, st.mScale, st.cm2PerPx, canvasW = bw, canvasH = bh)
+    val entryAreaRaster = remember(st) { resume ?: areaRaster(copyMask = true) }
     val initOrigCount = remember(st) { st.orig.count { it.toInt() != 0 } }
 
     // ---- 視圖 ----
@@ -530,7 +533,7 @@ fun WoundEditScreen(
         )
     }
     @Suppress("UNUSED_EXPRESSION") version
-    val liveArea = st.cm2PerPx?.let { it * st.maskCount } ?: originalArea
+    val liveArea = EditAreaPolicy.area(originalArea, entryAreaRaster, areaRaster())
     val lf = liveFrac()
     val livePush = WoundPipeline.push(liveArea, lf, exudate).partial
 
@@ -752,7 +755,7 @@ fun WoundEditScreen(
                             if (a && b) intersection++
                         }
                         val iou = if (union == 0) 1.0 else intersection.toDouble() / union
-                        onDone(PolygonJson.largest(initPolys), initPolys, iou, originalArea, tissueFrac, resume)
+                        onDone(PolygonJson.largest(initPolys), initPolys, iou, liveArea, tissueFrac, resume)
                         return@Button
                     }
                     // 追**所有**連通元件。同一肢體多處傷口是臨床常態，
@@ -793,8 +796,7 @@ fun WoundEditScreen(
                         // 每進出一次面積就漂移約 0.5%。醫師什麼都沒改卻看到面積變了，
                         // 那個數字就失去意義——而一個會自己緩慢變動的臨床數值
                         // 比明顯的錯誤更難察覺。
-                        val areaOut = if (iou >= 0.9999 && originalArea != null) originalArea
-                                      else liveArea
+                        val areaOut = liveArea
                         onDone(poly, polys, iou, areaOut, liveFrac(), raster)
                     }
                 } catch (_: Exception) { onCancel() }

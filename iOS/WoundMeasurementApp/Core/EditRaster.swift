@@ -343,3 +343,31 @@ enum WoundMaskCodec {
         return TissueMaskCodec.encodeBase64(tissue: mask, mask: mask, mw: mw, mh: mh)
     }
 }
+
+/// Compare this edit session's boundary, never the historical AI IoU.
+/// Empty ROI padding and tissue-only edits do not change physical area.
+enum EditAreaPolicy {
+    static func sameBoundaryAndScale(_ a: EditRaster, _ b: EditRaster) -> Bool {
+        guard a.mw > 0, a.mh > 0, b.mw > 0, b.mh > 0,
+              a.mask.count == a.mw * a.mh, b.mask.count == b.mw * b.mh,
+              a.canvasW == b.canvasW, a.canvasH == b.canvasH,
+              a.mScale > 0, a.mScale == b.mScale, a.cm2PerPx == b.cm2PerPx else { return false }
+        if a.rx0 == b.rx0 && a.ry0 == b.ry0 && a.mw == b.mw && a.mh == b.mh {
+            return a.mask == b.mask
+        }
+        let dx = (a.rx0 - b.rx0) * a.mScale, dy = (a.ry0 - b.ry0) * a.mScale
+        guard dx.isFinite, dy.isFinite, abs(dx) <= Double(a.mw + b.mw), abs(dy) <= Double(a.mh + b.mh),
+              abs(dx - dx.rounded()) < 0.0001, abs(dy - dy.rounded()) < 0.0001 else { return false }
+        let ox = Int(dx.rounded()), oy = Int(dy.rounded())
+        guard a.mask.reduce(0, { $0 + ($1 != 0 ? 1 : 0) }) == b.mask.reduce(0, { $0 + ($1 != 0 ? 1 : 0) }) else { return false }
+        for i in a.mask.indices where a.mask[i] != 0 {
+            let x = i % a.mw + ox, y = i / a.mw + oy
+            if x < 0 || y < 0 || x >= b.mw || y >= b.mh || b.mask[y * b.mw + x] == 0 { return false }
+        }
+        return true
+    }
+    static func area(original: Double?, entry: EditRaster, current: EditRaster) -> Double? {
+        if let original, sameBoundaryAndScale(entry, current) { return original }
+        return current.areaCm2
+    }
+}

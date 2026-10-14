@@ -87,9 +87,11 @@ if (-not $SkipAndroid) {
     }
 }
 
-if (-not $SkipWoundAI3D -and (Test-Path -LiteralPath $WoundAI3DRoot)) {
+if (-not $SkipWoundAI3D) {
     Run-Stage "WoundAI3D Windows-portable tests" {
-        & $python (Join-Path $WoundAI3DRoot "scripts\phantom_validation\test_phantom_validation_analyzer.py")
+        & $python (Join-Path $PSScriptRoot "run_3d_portable_tests.py") `
+            --test (Join-Path $WoundAI3DRoot "scripts\phantom_validation\test_phantom_validation_analyzer.py") `
+            --out (Join-Path $out "woundai3d")
     }
 }
 
