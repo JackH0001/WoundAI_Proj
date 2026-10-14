@@ -5,6 +5,7 @@ release approval. A deployment must separately bind reviewed source, IAM and
 image digest. No recursive copy of runtime data or arbitrary models is allowed.
 """
 import argparse
+import ast
 import hashlib
 import json
 from pathlib import Path
@@ -17,6 +18,7 @@ FLASK_FILES = (
     'app.py', 'model_preprocessing.py', 'runtime_golden.py', 'image_canonical.py', 'runtime_secrets.py',
     'api_lite.py', 'api_flywheel.py', 'api_users.py', 'api_console.py', 'auth_users.py', 'institution_context.py', 'account_versions.py',
     'store.py', 'audit_chain_contract.py', 'consent_staging.py',
+    'annotation_masks.py', 'tissue_mask_contract.py', 'medical_depth_geometry.py', 'review_service_profile.py',
     'lite_attest_assertion.py', 'lite_attest_budget.py', 'lite_attest_config.py',
     'lite_attest_enrollment.py', 'lite_attest_http.py', 'lite_attest_receipt.py',
     'lite_attest_registration.py', 'lite_attest_request.py', 'lite_attest_state.py',
@@ -57,6 +59,32 @@ def checked_source(base, relative):
     return path
 
 
+def validate_runtime_imports(root):
+    """Reject local Python dependencies missing from the explicit allowlist.
+
+    Never auto-discover/copy files: expanding the manifest still needs review.
+    This covers ordinary imports, including imports inside request handlers;
+    dynamic imports and runtime model behavior need separate image acceptance.
+    """
+    flask = Path(root) / 'Backend/Flask'
+    allowed = set(FLASK_FILES)
+    for name in FLASK_FILES:
+        if not name.endswith('.py'):
+            continue
+        source = checked_source(flask, name)
+        try:
+            tree = ast.parse(source.read_text(encoding='utf-8-sig'), filename=name)
+        except (SyntaxError, UnicodeError) as exc:
+            raise ValueError('invalid Python build source: ' + name) from exc
+        for node in ast.walk(tree):
+            modules = ([alias.name.split('.')[0] for alias in node.names] if isinstance(node, ast.Import)
+                       else [node.module.split('.')[0]] if isinstance(node, ast.ImportFrom) and node.module else [])
+            for module in modules:
+                dependency = module + '.py'
+                if (flask / dependency).is_file() and dependency not in allowed:
+                    raise ValueError('runtime import missing from build allowlist: ' + name + ' -> ' + dependency)
+
+
 def stage(root, models, destination):
     root, models = Path(root).resolve(), Path(models).resolve()
     destination = Path(destination).absolute()
@@ -69,6 +97,7 @@ def stage(root, models, destination):
     mapping.update({'models/' + name: (models, name) for name in MODEL_SHA256})
     # Validate all inputs before creating an output directory.
     sources = {name: checked_source(base, rel) for name, (base, rel) in mapping.items()}
+    validate_runtime_imports(root)
     for name, expected in MODEL_SHA256.items():
         if digest(sources['models/' + name]) != expected:
             raise ValueError('model digest mismatch: ' + name)

@@ -231,3 +231,21 @@ extension ClinicalUploadOutboxTests {
         }
     }
 }
+
+// PNG class labels must survive embedded color profiles without rendering transforms.
+extension ClinicalUploadOutboxTests {
+    func testLabelPNGPreservesAllChannelsWithLinearGamma() throws {
+        let data = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAABGdBTUEAAYagMeiWXwAAABtJREFUeJwFwQcBAAAAwqD5+lcWYKhyTJyqYwcBnQAuflVlkwAAAABJRU5ErkJggg=="))
+        let rgba = try XCTUnwrap(EditRasterCodec.rgbaFromPNG(data, expectW: 3, expectH: 2))
+        for i in 0..<6 {
+            XCTAssertEqual(Array(rgba[(i * 4)..<(i * 4 + 4)]), [UInt8(i), UInt8(5-i), UInt8(i), 255])
+        }
+        let roundTrip = try XCTUnwrap(EditRasterCodec.pngFromRGBA(rgba, width: 3, height: 2))
+        XCTAssertEqual(EditRasterCodec.rgbaFromPNG(roundTrip, expectW: 3, expectH: 2), rgba)
+        XCTAssertNil(EditRasterCodec.rgbaFromPNG(data, expectW: 2, expectH: 3))
+    }
+    func testLabelPNGRejectsTranslucentLabels() throws {
+        let data = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAYAAACddGYaAAAABGdBTUEAAYagMeiWXwAAAB5JREFUeJwFwYcBAAAIAiDn331uABRjOFkHywuzons/+AWpDDDniwAAAABJRU5ErkJggg=="))
+        XCTAssertNil(EditRasterCodec.rgbaFromPNG(data, expectW: 3, expectH: 2))
+    }
+}

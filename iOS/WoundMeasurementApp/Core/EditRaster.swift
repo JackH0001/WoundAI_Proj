@@ -2,6 +2,7 @@ import Foundation
 import CoreGraphics
 #if canImport(UIKit)
 import UIKit
+import ImageIO
 #endif
 
 /**
@@ -230,29 +231,60 @@ enum EditRasterCodec {
     // MARK: - 像素 ↔ PNG
 
     #if canImport(UIKit)
-    /// ⚠ 一定要用 `.noneSkipLast`（不預乘）。預乘 alpha 會在 alpha<255 時改寫顏色分量，
-    ///   而我們的「顏色」是類別碼——被乘過就再也還原不回來。
+    /// Label bytes are data, not display colors. Never draw them through a color-converting context.
     static func pngFromRGBA(_ rgba: [UInt8], width: Int, height: Int) -> Data? {
-        guard width > 0, height > 0, rgba.count >= width * height * 4 else { return nil }
-        var buf = rgba
-        let cs = CGColorSpaceCreateDeviceRGB()
-        guard let ctx = CGContext(data: &buf, width: width, height: height,
-                                  bitsPerComponent: 8, bytesPerRow: width * 4, space: cs,
-                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
-              let cg = ctx.makeImage() else { return nil }
-        return UIImage(cgImage: cg).pngData()
+        guard (1...4096).contains(width), (1...4096).contains(height),
+              rgba.count == width * height * 4 else { return nil }
+        guard let provider = CGDataProvider(data: Data(rgba) as CFData),
+              let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let cg = CGImage(width: width, height: height, bitsPerComponent: 8,
+                  bitsPerPixel: 32, bytesPerRow: width * 4, space: space,
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                  provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+        else { return nil }
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(output, "public.png" as CFString, 1, nil)
+        else { return nil }
+        CGImageDestinationAddImage(destination, cg, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return output as Data
     }
 
     static func rgbaFromPNG(_ data: Data, expectW: Int, expectH: Int) -> [UInt8]? {
-        guard let img = UIImage(data: data), let cg = img.cgImage else { return nil }
-        guard cg.width == expectW, cg.height == expectH else { return nil }
-        var buf = [UInt8](repeating: 0, count: expectW * expectH * 4)
-        let cs = CGColorSpaceCreateDeviceRGB()
-        guard let ctx = CGContext(data: &buf, width: expectW, height: expectH,
-                                  bitsPerComponent: 8, bytesPerRow: expectW * 4, space: cs,
-                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
-        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: expectW, height: expectH))
-        return buf
+        guard (1...4096).contains(expectW), (1...4096).contains(expectH),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetType(source) as String? == "public.png",
+              CGImageSourceGetCount(source) == 1,
+              let cg = CGImageSourceCreateImageAtIndex(source, 0, nil),
+              cg.width == expectW, cg.height == expectH, cg.bitsPerComponent == 8,
+              let raw = cg.dataProvider?.data else { return nil }
+        let bytes = raw as Data
+        let stride = cg.bitsPerPixel / 8
+        let alpha = cg.alphaInfo
+        let little = cg.bitmapInfo.intersection(.byteOrderMask) == .byteOrder32Little
+        let offsets: (Int, Int, Int, Int?)
+        switch (cg.colorSpace?.model, stride, alpha) {
+        case (.rgb, 3, .none): offsets = (0, 1, 2, nil)
+        case (.rgb, 4, .noneSkipLast): offsets = little ? (3, 2, 1, nil) : (0, 1, 2, nil)
+        case (.rgb, 4, .noneSkipFirst): offsets = little ? (2, 1, 0, nil) : (1, 2, 3, nil)
+        case (.rgb, 4, .last), (.rgb, 4, .premultipliedLast):
+            offsets = little ? (3, 2, 1, 0) : (0, 1, 2, 3)
+        case (.rgb, 4, .first), (.rgb, 4, .premultipliedFirst):
+            offsets = little ? (2, 1, 0, 3) : (1, 2, 3, 0)
+        case (.monochrome, 1, .none): offsets = (0, 0, 0, nil)
+        default: return nil // Unsupported representations must not silently alter class codes.
+        }
+        guard cg.bytesPerRow >= expectW * stride, bytes.count >= cg.bytesPerRow * expectH else { return nil }
+        var result = [UInt8](repeating: 255, count: expectW * expectH * 4)
+        for y in 0..<expectH { for x in 0..<expectW {
+            let src = y * cg.bytesPerRow + x * stride
+            if let a = offsets.3, bytes[src + a] != 255 { return nil }
+            let dst = (y * expectW + x) * 4
+            result[dst] = bytes[src + offsets.0]
+            result[dst + 1] = bytes[src + offsets.1]
+            result[dst + 2] = bytes[src + offsets.2]
+        } }
+        return result
     }
     #endif
 }

@@ -268,13 +268,11 @@ actor BackendClient {
     }
 
     private func requireCurrentSessionContext() throws {
-        #if WOUND_INSTITUTION
         guard sessionContext.isCurrent(sessionEpoch),
               institutionEpoch.map({ $0 == MedicalSessionEpoch.shared.snapshot() }) ?? true else {
             authGeneration &+= 1; jwt = ""; identity = nil
             throw CancellationError()
         }
-        #endif
     }
 
     private func send(_ req: URLRequest) async throws -> (Int, Data) {
@@ -288,6 +286,7 @@ actor BackendClient {
         throw InstitutionEntryError.unconfigured
         #else
         let (data, resp) = try await session.data(for: req)
+        try requireCurrentSessionContext()
         let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
         return (code, data)
         #endif

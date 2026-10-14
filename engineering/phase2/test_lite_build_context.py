@@ -15,7 +15,7 @@ class ContextTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.base=Path(self.tmp.name);self.repo=self.base/'repo';self.models=self.base/'models';self.output=self.base/'output'
-        for name in stager.FLASK_FILES:self.write(self.repo/'Backend/Flask'/name,b'reviewed source')
+        for name in stager.FLASK_FILES:self.write(self.repo/'Backend/Flask'/name,b'# reviewed source\n')
         for name in stager.VENDOR_FILES:self.write(self.repo/'engineering'/name,b'vendor source')
         self.hashes={}
         for name in stager.MODEL_SHA256:
@@ -35,6 +35,23 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(len(manifest['files']),len(stager.FLASK_FILES)+len(stager.VENDOR_FILES)+3)
         self.assertFalse(manifest['release_approved']);self.assertTrue(manifest['working_tree_dirty'])
         for name,item in manifest['files'].items():self.assertEqual(hashlib.sha256((self.output/name).read_bytes()).hexdigest(),item['sha256'])
+    def test_real_runtime_imports_are_closed_over_the_allowlist(self):
+        stager.validate_runtime_imports(ROOT)
+        for missing in ('annotation_masks.py', 'tissue_mask_contract.py', 'medical_depth_geometry.py', 'review_service_profile.py'):
+            with self.subTest(missing=missing), patch.object(stager, 'FLASK_FILES', tuple(n for n in stager.FLASK_FILES if n != missing)):
+                with self.assertRaisesRegex(ValueError, 'missing from build allowlist'):
+                    stager.validate_runtime_imports(ROOT)
+    def test_unlisted_nested_runtime_import_stops_before_output(self):
+        self.write(self.repo/'Backend/Flask/app.py', b'def handler():\n    from unreviewed import value\n')
+        self.write(self.repo/'Backend/Flask/unreviewed.py', b'value = 1\n')
+        with self.assertRaisesRegex(ValueError, 'missing from build allowlist'):
+            self.run_stage()
+        self.assertFalse(self.output.exists())
+    def test_invalid_python_source_stops_before_output(self):
+        self.write(self.repo/'Backend/Flask/app.py', b'def invalid syntax!\n')
+        with self.assertRaisesRegex(ValueError, 'invalid Python build source'):
+            self.run_stage()
+        self.assertFalse(self.output.exists())
     def test_missing_source_and_bad_model_never_publish_partial_context(self):
         source=self.repo/'Backend/Flask/app.py';source.unlink()
         with self.assertRaises(ValueError):self.run_stage()
