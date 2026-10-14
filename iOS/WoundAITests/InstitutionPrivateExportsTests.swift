@@ -63,8 +63,8 @@ final class InstitutionPrivateExportsTests: XCTestCase {
         try XCTSkipIf(prefs.data(forKey: InstitutionPrivateExports.folderKey) == nil, "Requires a system-picker grant from testSelectLocalFolderForRestartValidation")
         let bookmark = try XCTUnwrap(prefs.data(forKey: InstitutionPrivateExports.folderKey))
         let bytes = Data("synthetic-local-folder-validation".utf8)
-        let hashes = ["fixture.json": SHA256.hash(data:bytes).map{String(format:"%02x",$0)}.joined()]
-        let files = ["fixture.json":bytes,"sha256.json":try JSONSerialization.data(withJSONObject:hashes)]
+        let hashes = ["image.png": SHA256.hash(data:bytes).map{String(format:"%02x",$0)}.joined(), "overlay.png": SHA256.hash(data:bytes).map{String(format:"%02x",$0)}.joined()]
+        let files = ["image.png":bytes,"overlay.png":bytes,"sha256.json":try JSONSerialization.data(withJSONObject:hashes)]
         let name = "synthetic-folder-check-" + UUID().uuidString
         try InstitutionPrivateExports.deliver(files:files,name:name,bookmark:bookmark)
         var stale=false
@@ -74,7 +74,7 @@ final class InstitutionPrivateExportsTests: XCTestCase {
         let own = try FileManager.default.contentsOfDirectory(at:folder,includingPropertiesForKeys:nil).filter{$0.lastPathComponent.hasPrefix(name)}
         XCTAssertEqual(own.count,1)
         for item in own {
-            for (file,data) in files {XCTAssertEqual(try Data(contentsOf:item.appendingPathComponent(file)),data)}
+            for (file,data) in try InstitutionPrivateExports.deliveryImages(files) {XCTAssertEqual(try Data(contentsOf:item.appendingPathComponent(file)),data)}
             try FileManager.default.removeItem(at:item)
         }
         prefs.removeObject(forKey:InstitutionPrivateExports.folderKey)

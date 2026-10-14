@@ -36,3 +36,14 @@ iOS 與 Android 的機構／示範醫療 runtime 共用確認送件觸發點：�
 - [整體完成條件](research_dataset_acceptance_matrix_20261013.md#2026-10-14-使用者確認的共同完成條件)
 - 兩平台 App 內 manual.html 已更新輸出時機、資料夾選擇及兩項完成狀態。
 - 凍結證據：woundai-institution-evidence-20261007/mmh-iap-update-20261011/submission-exports-validation-20261014；包含補丁、前置 SHA、重建比對、測試與雜湊清單。
+
+
+## 2026-10-14 晚間作業格式調整
+
+使用者已確認 iOS 35 可輸出，另要求臨床交付僅保留 image 與 overlay 兩張影像。兩端自訂資料夾／手動交付現採相同規則：image 是保存的傷口工作影像，overlay 含最終遮罩、面積及分數；不交付額外 JSON、原生遮罩或 manifest。App 內加密封包及研究上傳完整性校驗保留，交付前仍驗證內部雜湊。
+
+資料夾命名為 `病歷號_yyyyMMdd_HHmmss_SSS_短碼`，使用台北輸出時間，沒有病歷號則使用「無病歷號」。病歷號只透過各環境的病患 Repository 取得，存在本機加密行政封包，絕不加入研究 payload。移除路徑字元、限制長度並使用短隨機碼保留同一時間的各次輸出。舊副本不搬移或刪除；舊完整封包再次匯出時同樣僅交付兩張圖，未含完整影像配對的更早期副本則拒絕假造缺少的影像。
+
+實測結果見本次 two-image-export-20261014 驗證報告；本節不沿用先前測試數作為本次實測。
+
+本次驗證：iOS 11項通過、1項系統資料夾重啟測試因未提供picker授權而跳過；Android 22項匯出／快照測試＋2項系統資料夾測試全部通過。Android MMH validation APK／test APK與MMH internal Kotlin編譯成功；iOS36 Release開發簽章建置、嚴格簽章核對、保留資料安裝與版本讀回成功。Android本次沒有實機連線，因此未更新平板或Play；iOS36不等於TestFlight發布。

@@ -40,7 +40,7 @@ class PrivateExportsTest {
     @Test fun encryptedNoBackupStorageAndExplicitExportHaveMatchingBytesAndHashes() = fixture {ctx,a,b ->
         a.enabled=true
         val payload="synthetic-administrative-image".toByteArray()
-        val name=requireNotNull(a.save(mapOf("capture.jpg" to payload)))
+        val name=requireNotNull(a.save(mapOf("capture.jpg" to payload, "overlay.jpg" to payload, "result.json" to "{}".toByteArray())))
         assertTrue(a.directory.canonicalPath.startsWith(ctx.noBackupFilesDir.canonicalPath+"/"))
         assertFalse(File(a.directory,name).readBytes().toString(Charsets.UTF_8).contains("synthetic-administrative-image"))
         assertArrayEquals(payload,a.read(name)["capture.jpg"])
@@ -50,10 +50,17 @@ class PrivateExportsTest {
         ZipInputStream(out.toByteArray().inputStream()).use { zip ->
             while(true) {val entry=zip.nextEntry?:break;files[entry.name]=zip.readBytes()}
         }
-        assertEquals(setOf("capture.jpg","sha256.json"),files.keys)
-        assertArrayEquals(payload,files["capture.jpg"])
-        val expected=java.security.MessageDigest.getInstance("SHA-256").digest(payload).joinToString(""){"%02x".format(it)}
-        assertEquals(expected,org.json.JSONObject(String(files.getValue("sha256.json"))).getString("capture.jpg"))
+        assertEquals(setOf("image.jpg","overlay.jpg"),files.keys)
+        assertArrayEquals(payload,files["image.jpg"])
+        assertArrayEquals(payload,files["overlay.jpg"])
+
+    }
+    @Test fun folderNamesUseRecordNumberAndTaipeiExportTimeWithSafeFallback() {
+        fun files(mrn:String)=mapOf("delivery.json" to org.json.JSONObject().put("medical_record_number",mrn).toString().toByteArray())
+        assertEquals("MRN123_19700101_080000_000",PrivateExports.deliveryName(files(" MRN123 "),java.util.Date(0)))
+        assertEquals("______A_123_19700101_080000_000",PrivateExports.deliveryName(files("../../A:123"),java.util.Date(0)))
+        assertEquals("無病歷號_19700101_080000_000",PrivateExports.deliveryName(emptyMap(),java.util.Date(0)))
+        assertThrows(IllegalArgumentException::class.java){PrivateExports.deliveryImages(mapOf("image.jpg" to byteArrayOf(1)))}
     }
     @Test fun tamperingCannotExportAnyPlaintext() = fixture {_,a,_ ->
         a.enabled=true;val name=requireNotNull(a.save(mapOf("capture.jpg" to byteArrayOf(1,2,3))))

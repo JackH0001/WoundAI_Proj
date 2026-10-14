@@ -43,11 +43,10 @@ class PrivateExports(context: Context, private val scope: MedicalDataScope) {
         val tree = requireNotNull(outputFolder)
         val resolver = app.contentResolver
         check(resolver.persistedUriPermissions.any { it.uri == tree && it.isReadPermission && it.isWritePermission })
-        val files = read(name).toMutableMap()
-        val hashes = JSONObject(); files.forEach { (key,bytes) -> hashes.put(key,hash(bytes)) }
-        files["sha256.json"] = hashes.toString().toByteArray(Charsets.UTF_8)
+        val verified = read(name)
+        val files = deliveryImages(verified)
         val parent = DocumentsContract.buildDocumentUriUsingTree(tree,DocumentsContract.getTreeDocumentId(tree))
-        val finalName = "WoundAI-${name.removeSuffix(".enc")}-${UUID.randomUUID()}"
+        val finalName = deliveryName(verified) + "_" + UUID.randomUUID().toString().take(8)
         val destination = requireNotNull(DocumentsContract.createDocument(resolver,parent,DocumentsContract.Document.MIME_TYPE_DIR,
             "$finalName-partial"))
         try {
@@ -109,7 +108,24 @@ class PrivateExports(context: Context, private val scope: MedicalDataScope) {
             name
         } else save(files,name)
     }
-    companion object { private val revisionLock = Any() }
+    fun suggestedDeliveryName(name: String): String = deliveryName(read(name))
+    companion object {
+        private val revisionLock = Any()
+        internal fun deliveryImages(files: Map<String, ByteArray>): Map<String, ByteArray> {
+            val image = requireNotNull(files["measurement.jpg"] ?: files["image.jpg"] ?: files["capture.jpg"])
+            val overlay = requireNotNull(files["overlay.jpg"])
+            require(image.isNotEmpty() && overlay.isNotEmpty())
+            return mapOf("image.jpg" to image, "overlay.jpg" to overlay)
+        }
+        internal fun deliveryName(files: Map<String, ByteArray>, at: java.util.Date = java.util.Date()): String {
+            val raw = files["delivery.json"]?.let { JSONObject(String(it, Charsets.UTF_8)).optString("medical_record_number", "") } ?: ""
+            val safe = raw.trim().replace(Regex("[^A-Za-z0-9_-]"), "_").take(64)
+            val label = safe.takeIf { it.any { ch -> ch != '_' && ch != '-' } } ?: "無病歷號"
+            val formatter = java.text.SimpleDateFormat("yyyyMMdd_HHmmss_SSS", java.util.Locale.US)
+            formatter.timeZone = java.util.TimeZone.getTimeZone("Asia/Taipei")
+            return label + "_" + formatter.format(at)
+        }
+    }
 
     internal fun read(name: String): Map<String, ByteArray> {
         require(available && valid(name))
@@ -126,13 +142,11 @@ class PrivateExports(context: Context, private val scope: MedicalDataScope) {
 
     /** Caller obtained the destination with ACTION_CREATE_DOCUMENT after an explicit user action. */
     fun export(name: String, destination: OutputStream) {
-        val files = read(name) // Fully validate before writing any plaintext.
+        val files = deliveryImages(read(name)) // Validate private envelope before selecting the two images.
         ZipOutputStream(destination).use { zip ->
-            val hashes = JSONObject()
             files.toSortedMap().forEach { (key, bytes) ->
-                hashes.put(key, hash(bytes)); zip.putNextEntry(ZipEntry(key)); zip.write(bytes); zip.closeEntry()
+                zip.putNextEntry(ZipEntry(key)); zip.write(bytes); zip.closeEntry()
             }
-            zip.putNextEntry(ZipEntry("sha256.json")); zip.write(hashes.toString().toByteArray(Charsets.UTF_8)); zip.closeEntry()
         }
     }
 }

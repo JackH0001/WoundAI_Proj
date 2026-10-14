@@ -22,7 +22,7 @@ class SavedMeasurementExport(private val runtime: MedicalRuntime, private val ex
         check(careAllowed(row)) { "Care consent unavailable" }
         val image = requireNotNull(runtime.images.rawBytes(row.imagePath))
         val raster = row.rasterPath?.let { requireNotNull(runtime.images.rawBytes(it)) }
-        val files = build(row, image, raster)
+        val files = localDeliveryMetadata(row, build(row, image, raster))
         check(runtime.isOpen() && careAllowed(row))
         val revision = digest(files.toSortedMap().entries.joinToString("\n") { "${it.key}:${digest(it.value)}" }.toByteArray())
         exports.saveRevision(files, row.id, revision)
@@ -31,17 +31,23 @@ class SavedMeasurementExport(private val runtime: MedicalRuntime, private val ex
     suspend fun submitSnapshot(row: MeasurementEntity, image: ByteArray, raster: ByteArray): String? = withContext(Dispatchers.IO) {
         if (!exports.enabled) return@withContext null
         check(runtime.isOpen() && row.doctorVerified && careAllowed(row))
-        val files = build(row, image, raster)
+        val files = localDeliveryMetadata(row, build(row, image, raster))
         check(runtime.isOpen() && careAllowed(row))
         val revision = digest(files.toSortedMap().entries.joinToString("\n") { "${it.key}:${digest(it.value)}" }.toByteArray())
         val name = requireNotNull(exports.saveRevision(files, row.id, revision))
         try {
             if (exports.outputFolder != null) {
                 exports.deliver(name)
-                "行政影像、遮罩與結果已輸出至自訂資料夾；研究上傳狀態請另行確認。"
+                "image 與 overlay 兩張影像已輸出至自訂資料夾；研究上傳狀態請另行確認。"
             } else "行政影像、遮罩與結果已保存於 App 私密空間；研究上傳狀態請另行確認。"
         } catch (e: kotlinx.coroutines.CancellationException) { throw e }
         catch (_: Exception) { "研究資料已入列；自訂資料夾輸出失敗。私密副本保留，可在設定重新選擇資料夾或匯出。" }
+    }
+
+    private suspend fun localDeliveryMetadata(row: MeasurementEntity, files: Map<String, ByteArray>): Map<String, ByteArray> {
+        val mrn = row.patientId?.let { runtime.repo.getPatient(it)?.medicalRecordNumber }.orEmpty()
+        // Encrypted local metadata only: never part of the research upload payload.
+        return files + ("delivery.json" to JSONObject().put("medical_record_number", mrn).toString().toByteArray(Charsets.UTF_8))
     }
 
     private suspend fun careAllowed(row: MeasurementEntity): Boolean {

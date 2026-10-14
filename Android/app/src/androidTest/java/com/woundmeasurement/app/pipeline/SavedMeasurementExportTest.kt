@@ -51,7 +51,7 @@ class SavedMeasurementExportTest {
         val first=requireNotNull(writer.save(row));assertEquals(first,writer.save(row));assertEquals(1,exports.list().size)
         val files=exports.read(first)
         assertArrayEquals(runtime.images.rawBytes(row.imagePath),files["measurement.jpg"])
-        assertEquals(setOf("measurement.jpg","overlay.jpg","result.json","wound.png","tissue.png"),files.keys)
+        assertEquals(setOf("measurement.jpg","overlay.jpg","result.json","wound.png","tissue.png","delivery.json"),files.keys)
         val json=JSONObject(String(files.getValue("result.json")))
         assertEquals(row.id,json.getLong("local_record_id"));assertEquals(row.timestamp.time,json.getLong("record_created_at_ms"))
         assertTrue(json.isNull("captured_at"));assertEquals(6.3,json.getDouble("area_cm2"),0.0)
