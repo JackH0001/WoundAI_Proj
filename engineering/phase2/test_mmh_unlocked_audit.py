@@ -138,6 +138,42 @@ class UnlockedAuditTests(unittest.TestCase):
         self.assertEqual(len(self.fake.objects), 10)
         self.assertEqual(self.st._audit_prefix_cache[next(iter(self.st._audit_prefix_cache))].count, 9)
 
+    def test_slow_first_read_does_not_block_next_group(self):
+        self.seed(12)
+        original = self.st._read_admission_blob
+        next_group_started = threading.Event()
+        def read(blob):
+            seq = int(blob.name.rsplit('/', 1)[1].split('.')[0])
+            if seq == 0:
+                self.assertTrue(next_group_started.wait(3),
+                                "reader waited for the entire first group")
+            if seq == 4:
+                next_group_started.set()
+            return original(blob)
+        with patch.object(self.st, '_read_admission_blob', read):
+            self.append()
+        self.assertEqual(len(self.fake.objects), 13)
+
+    def test_pending_window_is_bounded_when_consumer_pauses(self):
+        self.seed(40)
+        blobs = self.fake.list_blobs(self.st._audit_bucket_name,
+                                    prefix='flywheel/audit.jsonl/')
+        original = self.st._read_admission_blob
+        started = []
+        lock = threading.Lock()
+        def read(blob):
+            with lock:
+                started.append(blob.name)
+            return original(blob)
+        with patch.object(self.st, '_read_admission_blob', read):
+            stream = self.st._read_admission_batch(blobs, 0)
+            next(stream)
+            # One consumed result plus a window of no more than eight reads.
+            time.sleep(.05)
+            self.assertLessEqual(len(started), 9)
+            stream.close()
+        self.assertLessEqual(len(started), 9)
+
     def test_parallel_network_failure_never_appends_and_latches(self):
         self.seed(9)
         original = self.st._read_admission_blob

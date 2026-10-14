@@ -48,6 +48,7 @@
                                    # （該桶應設保留政策/WORM，見 harden_bucket.ps1）
 """
 import io
+from collections import deque
 from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
@@ -1171,16 +1172,30 @@ class MmhUnlockedValidationStore(GcsStore):
         return blob.download_as_bytes(if_generation_match=int(blob.generation))
 
     def _read_admission_batch(self, blobs, start):
-        # Only overlap network reads. Every byte is still read on every append,
-        # generation-pinned, and verified in sequence by the caller. Batches
-        # bound queued work/memory; do not submit the entire growing chain.
-        # The append lock and the final fresh manifest check remain in force.
+        # Keep four readers busy across slow responses without an unbounded
+        # executor queue. At most eight generation-pinned reads are outstanding.
+        # Consume in chain order; all bytes, links, and the final fresh manifest
+        # are still verified on every append, under the existing append lock.
+        pending = deque()
+        remaining = iter(blobs[start:])
         with ThreadPoolExecutor(max_workers=4, thread_name_prefix="mmh-audit-read") as pool:
-            for offset in range(start, len(blobs), 4):
-                batch = blobs[offset:offset + 4]
-                bodies = list(pool.map(self._read_admission_blob, batch))
-                for blob, body in zip(batch, bodies):
+            def enqueue():
+                blob = next(remaining, None)
+                if blob is not None:
+                    pending.append((blob, pool.submit(self._read_admission_blob, blob)))
+            try:
+                for _ in range(8):
+                    enqueue()
+                while pending:
+                    blob, future = pending.popleft()
+                    body = future.result()
+                    enqueue()
                     yield blob, body
+            finally:
+                # On a failed read/chain check, do not start queued tail reads.
+                # Running reads finish before this method exits; no writes occur.
+                for _, future in pending:
+                    future.cancel()
 
     def _verified_audit_prefix(self, key):
         started = time.monotonic()
