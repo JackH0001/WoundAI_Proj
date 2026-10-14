@@ -15,6 +15,13 @@ FILES = [
     'docs/admin_operations.md', '.github/workflows/p0-4-audit.yml',
     'Android/version.properties', 'iOS/project.yml', SWIFT,
     'Android/app/src/main/java/com/woundmeasurement/app/pipeline/BackendClient.kt',
+    'iOS/WoundMeasurementApp/InstitutionInfo.plist',
+    'Android/app/src/main/java/com/woundmeasurement/app/institution/InstitutionSession.kt',
+    'Backend/AccessManager/authentication.py',
+    'Backend/AccessManager/accounts.py',
+    'Backend/AccessManager/sessions.py',
+    'Backend/AccessManager/web.py',
+    'Backend/AccessManager/static/members.js',
 ]
 
 class AnnotationParityBoundaryTests(unittest.TestCase):
