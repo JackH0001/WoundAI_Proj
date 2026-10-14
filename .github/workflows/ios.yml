@@ -162,6 +162,27 @@ jobs:
           python3 ../tools/verify_xctest_results.py lite-test-summary.json lite-test-tree.json \
             --allow-simulator-protection-skip
 
+      - name: Run institution XCTest unit tests
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+              -project WoundMeasurementApp.xcodeproj \
+              -scheme WoundAIInstitution \
+              -configuration Release \
+              -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+              -only-testing:WoundAIInstitutionTests \
+              CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- ENABLE_TESTABILITY=YES \
+              -resultBundlePath InstitutionTestResults.xcresult \
+              2>&1 | tee institution-test-results.log
+          xcrun xcresulttool get test-results summary \
+            --path InstitutionTestResults.xcresult > institution-test-summary.json
+          xcrun xcresulttool get test-results tests \
+            --path InstitutionTestResults.xcresult > institution-test-tree.json
+          python3 ../tools/verify_xctest_results.py institution-test-summary.json institution-test-tree.json \
+            --allow-system-folder-grant-skip
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
@@ -173,6 +194,10 @@ jobs:
             iOS/test-summary.json
             iOS/test-tree.json
             iOS/build-*.log
+            iOS/InstitutionTestResults.xcresult
+            iOS/institution-test-results.log
+            iOS/institution-test-summary.json
+            iOS/institution-test-tree.json
             iOS/LiteTestResults.xcresult
             iOS/lite-test-results.log
             iOS/lite-test-summary.json

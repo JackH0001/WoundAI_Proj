@@ -9,7 +9,6 @@ import CryptoKit
 final class InstitutionPrivateExportsTests: XCTestCase {
     @MainActor
     func testExportFailureRemainsVisibleAfterReturningToSettings() async throws {
-        try XCTSkipUnless(InstitutionExport.enabled)
         let prefs = UserDefaults.standard
         let keys = [InstitutionPrivateExports.preferenceKey, InstitutionPrivateExports.lastResultKey, InstitutionPrivateExports.lastAttemptKey]
         let previous = keys.map { prefs.object(forKey:$0) }
@@ -21,12 +20,20 @@ final class InstitutionPrivateExportsTests: XCTestCase {
             try? FileManager.default.removeItem(at:root)
         }
         prefs.set(true,forKey:InstitutionPrivateExports.preferenceKey)
+        prefs.removeObject(forKey:InstitutionPrivateExports.lastResultKey)
+        prefs.removeObject(forKey:InstitutionPrivateExports.lastAttemptKey)
         let runtime = try MedicalRuntime(scope:.mmh,support:root)
+        defer { runtime.deactivate() }
         let note = await runtime.exportSubmission(Measurement(),payload:Data())
+        if !InstitutionExport.enabled {
+            XCTAssertEqual(note, "")
+            XCTAssertNil(prefs.object(forKey:InstitutionPrivateExports.lastResultKey))
+            XCTAssertNil(prefs.object(forKey:InstitutionPrivateExports.lastAttemptKey))
+            return
+        }
         XCTAssertTrue(note.contains("輸出資料不完整"))
         XCTAssertEqual(prefs.string(forKey:InstitutionPrivateExports.lastResultKey), note.trimmingCharacters(in:.whitespacesAndNewlines))
         XCTAssertGreaterThan(prefs.double(forKey:InstitutionPrivateExports.lastAttemptKey),0)
-        runtime.deactivate()
     }
     func testExportToggleDefaultsOffAndHonoursBuildCapability() {
         let d = UserDefaults.standard, key = InstitutionPrivateExports.preferenceKey
