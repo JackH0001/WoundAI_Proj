@@ -10,11 +10,11 @@ import androidx.compose.ui.Modifier
 internal fun AnnotationSubmitButton(busy: Boolean, enabled: Boolean, label: String, onClick: () -> Unit) {
     Column {
         Button(onClick = onClick, enabled = enabled && !busy, modifier = Modifier.fillMaxWidth()) {
-            Text(if (busy) "正在確認標註保存…" else label)
+            Text(if (busy) "正在保存研究待傳資料…" else label)
         }
         if (busy) {
             LinearProgressIndicator(Modifier.fillMaxWidth())
-            Text("正在上傳並等待後端確認，請留在此頁；完成前不要重複送出。", style = MaterialTheme.typography.bodySmall)
+            Text("正在核對並保存待傳工作，請等候入列完成；尚未確認雲端保存。", style = MaterialTheme.typography.bodySmall)
         }
     }
 }

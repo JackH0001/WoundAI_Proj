@@ -1,6 +1,6 @@
 # MMH 外部審查示範環境執行設計
 
-使用者已選定獨立合成示範環境。新版 App 必須提供明確的示範入口，讓審查者可以完成量測、修邊、醫師確認、時間軸、標註與深度保存流程，同時保持 MMH 的資料與 Google 門禁隔離。本設計仍不可部署：示範登入方式已確定為獨立 WoundAI 帳號，專屬後端模式與 App 環境切換尚未完成，沒有建立新雲端資源的授權。
+使用者已選定獨立合成示範環境。新版 App 必須提供明確的示範入口，讓審查者可以完成量測、修邊、醫師確認、時間軸、標註與深度保存流程，同時保持 MMH 的資料與 Google 門禁隔離。本設計仍不可部署：示範登入方式已確定為獨立 WoundAI 帳號，專屬後端模式已完成本機驗證，iOS 環境切換已通過本機測試，Android 與雲端仍未驗收，沒有建立新雲端資源的授權。
 
 ## 本輪確認的阻礙
 
@@ -80,3 +80,27 @@ Cloud Build 表列 e2-standard-2 為0.006 USD／分鐘，20分鐘的單次建置
 使用者要求以最新 MMH 修正版整合兩平台、醫療後端與管理模組，再建立可長期用於合成示範的獨立環境；研究資料完整性是發布前的主要驗收條件。舊資料按用途及證據完整性分級，缺漏資料列隔離封存候選，不等於停用整個舊服務，亦未執行搬移或刪除。詳見 [整合驗證](mmh_full_alignment_research_validation_20261013.md) 與 [研究資料驗收矩陣](research_dataset_acceptance_matrix_20261013.md)。
 
 新決策草案 `synthetic-review-selected-direction-20261013.json` 仍為 `deployable=false`、`apply_authorized=false`；SHA-256：2c550aac8001d39c260de77b16b3f878453a6b7baca9ec6484f02d76e3b8e7d7。舊草案保留作版本證據，不再用其中的待答登入欄位代表目前決策。
+
+## 獨立後端模式的本機驗證更新
+
+`synthetic-review-validation` 已有精確服務／機構／三桶隔離與 fail-closed 啟動檢查。全套工程 111/111 檔、新模式 33/33、變異 9/9 通過。實作共用已驗證的條件式追加與稽核鏈核對，未修改 MMH 模式的允許範圍。示範 JWT、成對遮罩、去重與深度綁定已在隔離 HTTP fixture 驗證；沒有建立新服務、公開入口或示範帳號。
+
+iOS 環境 context 與無 Google 示範傳輸已通過本機 127 項單元與 3 項介面測試；Android、雲端與商店仍未驗收，故本設計仍不可部署／提交審查。詳見 [iOS 環境隔離驗證](mmh_ios_review_context_validation_20261013.md)。部署預算沿用前文未核准試算，不能視為本輪重新查價或實測。詳見 [示範後端模式與驗證](mmh_review_service_profile_validation_20261013.md)。
+
+## Android context 本機驗證更新
+
+Android 的環境 context 已完成本機編譯、105 項 JVM 與 15 項模擬器測試；前文「Android 未驗收」現在仍適用於實機／商店與雲端端到端流程。持久上傳 outbox 及私密可選匯出未完成，不能宣告整體完成。詳見 [Android 環境隔離驗證](mmh_android_review_context_validation_20261013.md)。本更新不授權新增雲端資源或發布。
+
+## 2026-10-14 本機整合進度與發布關卡更新
+
+前文歷史段落中的 Android outbox／私密輸出未完成狀態已由後續本機修正更新：兩平台確認送件共用同版快照輸出，系統自訂資料夾已取得本機供應商與程序重啟驗證。參照 [輸出修改](mmh_submission_export_validation_20261014.md) 與 [系統資料夾驗證](mmh_output_folder_system_validation_20261014.md)。這不代表新示範環境已建立，也不代表手機與後端已成對更新。
+
+來源發布關卡仍未滿足：公開庫 PR #24 為舊手機 head 且 Draft／DIRTY，公開庫及母庫 main 尚未包含完整本機補丁鏈。Backend／engineering 延續 Windows 覆核提交安排；不能沿用先前其他 SHA 的推送／合併／部署授權。準備可檢查的固定來源與完整方案後才進行各自授權範圍的發布。
+
+## 精確離線部署規格產生器（2026-10-14）
+
+新增 `tools/plan_review_runtime.py`：綁定固定 review service／org／三桶／四個獨立密文名稱、最小桶層授權、min=0/max=1、2 CPU/4GiB。產生部署審查規格時必須提供完整來源 SHA、建置 manifest SHA、映像 digest 與四個明確 secret version；不能用 latest、MMH 密文或可變 image tag。K_SERVICE 由 Cloud Run 依固定 service 名注入，不透過一般環境變數覆寫。
+
+規格明確區分「先私有建立驗收」與「驗收後經另行批准的單一服務 allUsers/run.invoker」。示範免 Google，但資料端點仍需獨立 WoundAI 身分與角色；MMH 的 IAP／帳號／流量完全不在計畫範圍。規格不能藉由重算 hash 來放寬資源或權限，也不能把 deployable/apply_authorized 改成 true；產生器沒有 cloud call 或 apply 功能。
+
+尚未產生有真實新映像 digest 的可執行提案：最新來源仍待分工提交／CI，不能拿舊映像或假的示例 SHA 代填。7 個測試方法通過，涵蓋 backend profile 的實際常數比對及 21 項重算 hash 後的政策竄改拒絕。已加入既有 p0-4-audit 的 paths 與測試步驟；本輪 CI 尚未推送執行。

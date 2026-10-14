@@ -73,7 +73,7 @@ function render(data){
     button.addEventListener("click",()=>editAccount(account));td(row,"").append(button);el("accounts").append(row);});
   if(!data.accounts.length){const row=document.createElement("tr");td(row,"目前沒有 WoundAI 操作帳號。").colSpan=5;el("accounts").append(row);}
   // Never use a server-supplied arbitrary URL as a credential-bearing destination.
-  el("app-console").href="https://candidate---woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app/console#users";
+  el("app-console").href="https://woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app/console#users";
   el("app-console").hidden=data.demonstration;
 }
 async function refresh(){

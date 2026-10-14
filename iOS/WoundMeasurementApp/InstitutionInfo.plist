@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>WoundAIReviewBackendURL</key>
+	<string>https://woundai-mmh-review-demo-421209514056.asia-east1.run.app</string>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleExecutable</key>
@@ -80,7 +82,7 @@
 	<key>WoundAIInstitutionCode</key>
 	<string>MMHPS20261007</string>
 	<key>WoundAIInstitutionBackendURL</key>
-	<string>https://candidate---woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app</string>
+	<string>https://woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app</string>
 	<key>GIDClientID</key>
 	<string>421209514056-j72bu49ou8kh31s61na1v4t817lecsmq.apps.googleusercontent.com</string>
 	<key>GIDServerClientID</key>

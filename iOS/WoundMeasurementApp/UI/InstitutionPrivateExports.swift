@@ -3,9 +3,76 @@ import UniformTypeIdentifiers
 import CryptoKit
 
 /// Private review copies are encrypted inside Application Support, never Documents/iCloud.
-/// Decryption into a FileDocument occurs only after an explicit export action.
+/// Readable copies leave private storage only via explicit export or an opted-in submission folder.
 enum InstitutionPrivateExports {
     static let preferenceKey = "institution.administrativeExport.enabled"
+    static let folderKey = "institution.administrativeExport.folderBookmark"
+    static let folderLabelKey = "institution.administrativeExport.folderLabel"
+    static func revisionName(rowID: Int64, files: [String: Data]) -> String {
+        let digest = SHA256.hash(data: files["sha256.json"]!).map { String(format: "%02x", $0) }.joined()
+        return "measurement-\(rowID)-\(digest)"
+    }
+    static func submissionContents(row: Measurement, image: Data, raster: Data, payload: Data) throws -> [String: Data] {
+        guard row.doctorVerified, let bitmap = UIImage(data: image), let cg = bitmap.cgImage,
+              row.imageW == cg.width, row.imageH == cg.height,
+              let edit = EditRasterCodec.decode(png: raster, meta: row.rasterMeta, canvasW: cg.width, canvasH: cg.height),
+              let body = try JSONSerialization.jsonObject(with: payload) as? [String: Any],
+              row.imageId != nil, body["image_id"] as? String == row.imageId,
+              body["code"] as? String == row.wdCode,
+              body["image_w"] as? Int == row.imageW, body["image_h"] as? Int == row.imageH,
+              (body["gt_polygons"] as? [[[Int]]] ?? (body["gt_polygon"] as? [[Int]]).map { [$0] } ?? []) == row.polygons,
+              (body["tissue_frac"] as? [String: Double]) == row.tissueFrac,
+              body["doctor_verified"] as? Bool == true,
+              (body["area_cm2"] as? NSNumber)?.doubleValue == row.estimatedArea,
+              (body["exudate"] as? NSNumber)?.intValue == row.exudate,
+              let wound = body["wound_mask_png"] as? String,
+              let tissue = body["tissue_mask_png"] as? String,
+              wound == WoundMaskCodec.encodeBase64(mask: edit.mask, mw: edit.mw, mh: edit.mh),
+              tissue == TissueMaskCodec.encodeBase64(tissue: edit.tissue, mask: edit.mask, mw: edit.mw, mh: edit.mh)
+        else { throw InstitutionExport.Failure.inconsistentExistingExport }
+        var files = try InstitutionExport.contents(image: bitmap, raster: edit, polygons: row.polygons,
+            marker: nil, measurementID: row.id, doctorVerified: true, exudate: row.exudate, submitted: row)
+        files["measurement-image.jpg"] = image
+        files["submission.json"] = payload
+        files["wound.png"] = Data(base64Encoded: wound)
+        files["tissue.png"] = Data(base64Encoded: tissue)
+        files.removeValue(forKey: "sha256.json")
+        let hashes = files.mapValues { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined() }
+        files["sha256.json"] = try JSONSerialization.data(withJSONObject: hashes, options: [.sortedKeys])
+        try validate(files)
+        return files
+    }
+    static func folderBookmark(_ folder: URL) throws -> Data {
+        guard folder.startAccessingSecurityScopedResource() else { throw CocoaError(.fileReadNoPermission) }
+        defer { folder.stopAccessingSecurityScopedResource() }
+        return try folder.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
+    }
+    static func deliver(files: [String: Data], name: String, bookmark: Data) throws {
+        var stale = false
+        let folder = try URL(resolvingBookmarkData: bookmark, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &stale)
+        guard !stale, folder.startAccessingSecurityScopedResource() else { throw CocoaError(.fileReadNoPermission) }
+        defer { folder.stopAccessingSecurityScopedResource() }
+        var coordinationError: NSError?
+        var writingError: Error?
+        NSFileCoordinator().coordinate(writingItemAt: folder, options: .forMerging, error: &coordinationError) { location in
+            do { try writeDelivery(files: files, name: name, folder: location) } catch { writingError = error }
+        }
+        if let error = coordinationError { throw error }
+        if let error = writingError { throw error }
+    }
+    static func writeDelivery(files: [String: Data], name: String, folder: URL) throws {
+        try validate(files)
+        guard !name.contains("/"), !name.contains("\\"), !name.hasPrefix(".") else { throw CocoaError(.fileWriteInvalidFileName) }
+        let stage = folder.appendingPathComponent(".WoundAI-partial-" + UUID().uuidString, isDirectory: true)
+        let destination = folder.appendingPathComponent(name + "-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: stage) }
+        for (key, bytes) in files { try bytes.write(to: stage.appendingPathComponent(key), options: .atomic) }
+        for (key, bytes) in files where try Data(contentsOf: stage.appendingPathComponent(key)) != bytes {
+            _ = key; throw InstitutionExport.Failure.inconsistentExistingExport
+        }
+        try FileManager.default.moveItem(at: stage, to: destination)
+    }
     static var automaticEnabled: Bool {
         InstitutionExport.enabled && UserDefaults.standard.bool(forKey: preferenceKey)
     }
@@ -68,22 +135,53 @@ struct InstitutionExportDocument: FileDocument {
 }
 
 struct InstitutionExportSettingsSection: View {
-    @AppStorage(InstitutionPrivateExports.preferenceKey) private var enabled = false
+    let runtime: MedicalRuntime
+    @AppStorage private var enabled: Bool
+    @State private var selectingFolder = false
+    @State private var folderLabel = ""
+    @State private var folderIssue: String?
+    init(runtime: MedicalRuntime) {
+        self.runtime = runtime
+        _enabled = AppStorage(wrappedValue: false, InstitutionPrivateExports.preferenceKey, store: runtime.exportPreferences)
+    }
     var body: some View {
         if InstitutionExport.enabled {
             Section("行政影像匯出（本機）") {
-                Toggle("建立行政影像與結果副本", isOn: $enabled)
-                Text("預設關閉。開啟後於存檔時產生量測影像、遮罩疊圖與結果，加密保存在 App 私密空間並排除系統備份，不會自動同步。關閉不影響時間軸或已同意的研究上傳，也不會刪除既有副本。")
+                Toggle("確認上傳時輸出影像與結果", isOn: $enabled)
+                if enabled {
+                    Text(folderLabel.isEmpty ? "輸出位置：App 私密空間" : "輸出位置：\(folderLabel)")
+                    Button("選擇輸出資料夾…") { selectingFolder = true }
+                    if !folderLabel.isEmpty {
+                        Button("改用 App 私密空間") {
+                            runtime.exportPreferences.removeObject(forKey: InstitutionPrivateExports.folderKey)
+                            runtime.exportPreferences.removeObject(forKey: InstitutionPrivateExports.folderLabelKey)
+                            folderLabel = ""
+                        }
+                    }
+                }
+                if let folderIssue { Text(folderIssue).foregroundStyle(.red) }
+                Text("預設關閉。開啟後於確認上傳時，使用同一份已確認修訂產生影像、遮罩疊圖與結果；只存時間軸不輸出，加密保存在 App 私密空間並排除系統備份，未選自訂資料夾時不會自動同步。關閉不影響時間軸或已同意的研究上傳，也不會刪除既有副本。")
                     .font(.caption).foregroundStyle(.secondary)
-                NavigationLink("選擇副本並匯出…") { InstitutionExportsView() }
+                NavigationLink("選擇副本並匯出…") { InstitutionExportsView(directory: runtime.local.privateExports) }
                 Text("需交付時由你選擇匯出位置；匯出後為可讀取的檔案，目的地可能自行同步。舊版已放在「檔案」的副本不會自動搬移或刪除。")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            .task { folderLabel = runtime.exportPreferences.string(forKey: InstitutionPrivateExports.folderLabelKey) ?? "" }
+            .fileImporter(isPresented: $selectingFolder, allowedContentTypes: [.folder]) { result in
+                do {
+                    let url = try result.get()
+                    let bookmark = try InstitutionPrivateExports.folderBookmark(url)
+                    runtime.exportPreferences.set(bookmark, forKey: InstitutionPrivateExports.folderKey)
+                    runtime.exportPreferences.set(url.lastPathComponent, forKey: InstitutionPrivateExports.folderLabelKey)
+                    folderLabel = url.lastPathComponent; folderIssue = nil
+                } catch { folderIssue = "資料夾未設定，請重新選擇可寫入的位置。" }
             }
         }
     }
 }
 
 struct InstitutionExportsView: View {
+    let directory: URL
     @State private var files: [URL] = []
     @State private var document: InstitutionExportDocument?
     @State private var exporting = false
@@ -91,7 +189,7 @@ struct InstitutionExportsView: View {
     @State private var issue: String?
     var body: some View {
         List {
-            if files.isEmpty { Text("尚無行政匯出副本。開啟選項後，下次存入或更新時間軸時建立。") }
+            if files.isEmpty { Text("尚無行政匯出副本。開啟選項後，下次確認上傳時建立。") }
             if let issue { Text(issue).foregroundStyle(.red) }
             ForEach(files, id: \.self) { file in
                 Button(file.deletingPathExtension().lastPathComponent) {
@@ -106,8 +204,8 @@ struct InstitutionExportsView: View {
         .navigationTitle("行政副本")
         .task {
             do {
-                try HealthDataFiles.prepareDirectory(InstitutionPrivateExports.directory)
-                files = try FileManager.default.contentsOfDirectory(at: InstitutionPrivateExports.directory,
+                try HealthDataFiles.prepareDirectory(directory)
+                files = try FileManager.default.contentsOfDirectory(at: directory,
                     includingPropertiesForKeys:nil).filter { $0.pathExtension == "enc" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
             } catch { issue = "無法讀取私密副本目錄。" }
         }

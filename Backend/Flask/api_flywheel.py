@@ -733,6 +733,13 @@ def validate_depth_payload(raw: bytes, meta: dict):
             if finite_number(ci.get(k)) and not 0 <= ci[k] < bound:
                 issues.append("camera_intrinsics.%s 必須位於宣告的參考影像範圍內" % k)
 
+    if not issues:
+        from medical_depth_geometry import aspect, intrinsics
+        try:
+            intrinsics(ci, (rw, rh))
+            aspect((rw, rh), (w, h), "intrinsics-depth")
+        except ValueError as exc:
+            issues.append(str(exc))
     if issues:
         return False, issues
 
@@ -788,6 +795,10 @@ def annotation_revision_signature(data, actor, org):
     for name in ("tissue_mask_png", "depth_map_png", "depth_conf_png"):
         value = data.get(name)
         body[name] = hashlib.sha256(base64.b64decode(value, validate=True)).hexdigest() if value else None
+    # Add only for the new contract: legacy request identities stay byte-for-byte stable.
+    if data.get("mask_contract"):
+        body["mask_contract"] = data["mask_contract"]
+        body["wound_mask_sha256"] = data.get("wound_mask_sha256")
     return hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False,
                                     separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
@@ -832,6 +843,24 @@ def verified_tissue(rec):
         valid = bool(rec.get("tissue_sig")) and tissue_sig(base64.b64encode(raw).decode()) == rec["tissue_sig"]
     if not valid:
         raise ValueError("tissue revision unverifiable")
+    from tissue_mask_contract import validate_tissue_mask
+    validate_tissue_mask(raw, rec.get("tissue_raster"), rec.get("image_w"), rec.get("image_h"))
+    return raw
+
+
+def verified_wound(rec):
+    from annotation_masks import validate_wound_bytes, validate_pair, CONTRACT
+    key = rec.get("wound_mask_key")
+    if rec.get("mask_contract") != CONTRACT:
+        if key or rec.get("mask_contract") or rec.get("wound_mask_sha256"):
+            raise ValueError("unknown wound mask contract")
+        return None
+    if not key: raise ValueError("wound mask missing")
+    raw = _store().get_blob(_key(os.path.join(FLYWHEEL_DIR, key)))
+    if raw is None or hashlib.sha256(raw).hexdigest() != rec.get("wound_mask_sha256"):
+        raise ValueError("wound mask revision unverifiable")
+    validate_wound_bytes(raw, rec)
+    validate_pair(raw, verified_tissue(rec))
     return raw
 
 
@@ -1398,6 +1427,19 @@ try:
             audit(actor, "annotation_rejected", d.get("code", "?"), ";".join(issues), role, org)
             return jsonify({"error": "標註不符上傳規範", "issues": issues}), 400
 
+        from tissue_mask_contract import validate_tissue_payload
+        ok, issues = validate_tissue_payload(d)
+        if not ok:
+            audit(actor, "tissue_mask_rejected", d.get("code", "?"), ";".join(issues), role, org)
+            return jsonify({"error": "tissue_mask_invalid", "issues": issues}), 400
+
+        from annotation_masks import decode_wound, receipt_fields
+        try:
+            wound_raw = decode_wound(d)
+        except (ValueError, TypeError) as exc:
+            audit(actor, "wound_mask_rejected", d.get("code", "?"), str(exc), role, org)
+            return jsonify({"error": "wound_mask_invalid", "issues": [str(exc)]}), 400
+
         image_id = str(d.get("image_id"))
 
         # ⚠ 同意檢查必須排在「影像是否存在」**之前**。
@@ -1443,6 +1485,7 @@ try:
         if exact is not None and exact.get("code") not in wd_codes:
             try:
                 verified_tissue(exact)
+                verified_wound(exact)
             except ValueError:
                 return jsonify({"error": "historical_tissue_revision_unverifiable"}), 409
             try:
@@ -1458,6 +1501,7 @@ try:
                   f"同影像、同輪廓、同組織遮罩已在佇列({exact.get('code')})", role, org)
             return jsonify({"status": "duplicate_skipped", "code": d.get("code"),
                             "image_id": image_id, "annotation_receipt_id": revision_id(exact),
+                            **receipt_fields(exact),
                             "note": "此筆與佇列中既有樣本的**影像、傷口輪廓、組織遮罩三者皆相同**，"
                                     "已自動略過（避免重複樣本）。若您剛才有修改，請確認是否按下了「完成修邊」。"}), 200
 
@@ -1466,6 +1510,9 @@ try:
         for k in PROVENANCE:
             if d.get(k) is not None and k not in ("tissue_mask_key", "depth_map_key", "depth_conf_key"):
                 rec[k] = d.get(k)
+        from review_service_profile import review_environment
+        if review_environment(os.environ):
+            rec["deployment_environment"] = "synthetic-review"
         rec["asset_schema"] = 2
         rec["revision_signature"] = signature
         rec["annotation_receipt_id"] = rid
@@ -1508,6 +1555,14 @@ try:
                 audit(actor, "tissue_mask_rejected", rec["code"], str(e), role, org)
                 return jsonify({"error": "tissue_asset_not_saved"}), 409
 
+        if wound_raw is not None:
+            try:
+                rec["wound_mask_key"], rec["wound_mask_sha256"] = store_revision_asset(
+                    "wound_masks", image_id, wound_raw, ".png", "image/png")
+                rec["mask_contract"] = d["mask_contract"]
+            except Exception:
+                return jsonify({"error": "wound_asset_not_saved"}), 409
+
         # ── 深度圖落盤（WoundAI3D）──────────────────────────────────────
         #
         # 同樣**不阻擋標註**：沒有深度只是少一個 3D 樣本，讓整筆失敗會連 2D 的
@@ -1516,28 +1571,12 @@ try:
         if d.get("depth_map_png"):
             try:
                 raw = base64.b64decode(d["depth_map_png"], validate=True)
-                if len(raw) > 16 * 1024 * 1024:
-                    raise ValueError("深度圖超過 16MB")
-                if raw[:8] != b"\x89PNG\r\n\x1a\n":
-                    raise ValueError("不是 PNG")
-                # ⚠ 位元深度必須是 16。8-bit 會把深度壓進 0–255 mm，
-                # 而臨床攝距是 200–600 mm——整張圖飽和成同一個值，
-                # 反投影出一個平面，表面積看起來完全正常。這是最惡性的一種錯。
-                # PNG IHDR：位元組 24 是 bit depth，25 是 colour type（0＝灰階）。
-                bit_depth, colour_type = raw[24], raw[25]
-                if bit_depth != 16 or colour_type != 0:
-                    raise ValueError(
-                        "深度圖必須是 16-bit 灰階 PNG（實際 bit_depth=%d colour_type=%d）。"
-                        "8-bit 只表示得了 0–255 mm，臨床攝距會整片飽和而**不會有任何錯誤**"
-                        % (bit_depth, colour_type))
-                # 內參缺席 → 深度圖無法反投影，等於一堆沒有單位的數字。
-                # 這裡**必須擋**：存下來只會製造「有資料但不能用」的假庫存。
-                ci = d.get("camera_intrinsics") or {}
-                miss = [k for k in ("fx", "fy", "cx", "cy")
-                        if not isinstance(ci.get(k), (int, float))]
-                if miss:
-                    raise ValueError("camera_intrinsics 缺 %s。沒有內參就無法反投影，"
-                                     "深度圖存下來也用不了，而那些值事後查不到" % "、".join(miss))
+                from medical_depth_geometry import validate_png_depth
+                craw = (base64.b64decode(d["depth_conf_png"], validate=True)
+                        if d.get("depth_conf_png") else None)
+                ci = d.get("camera_intrinsics")
+                grid = validate_png_depth(raw, ci, d.get("image_w"), d.get("image_h"), craw)
+                rec["camera_intrinsics_grid"] = grid
                 rec["depth_map_key"], rec["depth_map_sha256"] = store_revision_asset(
                     "depth_maps", image_id, raw, ".png", "image/png")
                 rec["depth_format"] = d.get("depth_format") or "png16_mm"
@@ -1559,6 +1598,7 @@ try:
                 rec["depth_source"] = "rejected"
                 rec.pop("depth_map_key", None)
                 rec.pop("depth_conf_key", None)
+                rec.pop("camera_intrinsics_grid", None)
 
         rec["received_at"] = utc_now()
         rec["revision_order_ns"] = time.time_ns()
@@ -1573,7 +1613,7 @@ try:
             logger.warning("staging cleanup deferred to retry/TTL")
         if not inserted:
             return jsonify({"status": "duplicate_skipped", "code": rec["code"],
-                            "image_id": image_id, "annotation_receipt_id": rid}), 200
+                            "image_id": image_id, "annotation_receipt_id": rid, **receipt_fields(rec)}), 200
         note = None
         if same_img:
             # ⚠ 措辭要正確，而且**兩件事可能同時成立**：
@@ -1598,7 +1638,7 @@ try:
                   rec["code"], note, role, org)
         audit(actor, "annotation_enqueued", rec["code"], "ok", role, org)
         return jsonify({"status": "enqueued", "code": rec["code"], "queue": "retrain",
-                        "image_id": image_id, "annotation_receipt_id": rid, "note": note}), 200
+                        "image_id": image_id, "annotation_receipt_id": rid, "note": note, **receipt_fields(rec)}), 200
 
 
     @flywheel_bp.route("/api/v1/depth", methods=["POST"])
@@ -1687,6 +1727,9 @@ try:
             if not isinstance(meta, dict):
                 raise ValueError("meta 必須是 JSON 物件")
             ok, issues = validate_depth_payload(raw, meta)
+            if ok:
+                from medical_depth_geometry import validate_rgb_depth
+                validate_rgb_depth(meta, rec.get("image_w"), rec.get("image_h"))
             if not ok:
                 raise ValueError("；".join(issues))
         except Exception as e:
@@ -2140,6 +2183,7 @@ try:
                               "Content-Disposition": "inline"})
 
 
+    @flywheel_bp.route("/api/v1/flywheel/record/<image_id>/wound_mask.png", methods=["GET"])
     @flywheel_bp.route("/api/v1/flywheel/record/<image_id>/tissue_mask.png", methods=["GET"])
     @jwt_required()
     def get_record_tissue_mask(image_id):
@@ -2174,7 +2218,7 @@ try:
                   f"image_id={image_id} 已撤回訓練同意", role, org)
             return jsonify({"error": "已依撤回同意隔離，不提供"}), 410
         try:
-            raw = verified_tissue(rec)
+            raw = verified_wound(rec) if request.path.endswith("/wound_mask.png") else verified_tissue(rec)
         except ValueError:
             return jsonify({"error": "tissue_revision_unverifiable"}), 409
         if raw is None:
@@ -2209,6 +2253,11 @@ try:
         actor, role, org = _who()
         if not _can(role, "audit.read"):
             return jsonify({"error": "權限不足", "issues": ["僅工程師／管理者可匯出資料集。"]}), 403
+
+        from review_service_profile import review_environment
+        if review_environment(os.environ):
+            return jsonify({"error": "review_dataset_export_disabled",
+                            "issues": ["示範環境供操作驗證，不提供研究訓練資料集匯出。"]}), 403
 
         kind = request.args.get("kind", "tissue")          # tissue | wound | interrater
         want_edited = request.args.get("require_edited", "1") not in ("0", "false", "no")
@@ -2247,11 +2296,16 @@ try:
                     continue          # 沒有經人修正的遮罩，比較的是演算法跟自己
                 try:
                     verified_tissue(r)
+                    verified_wound(r)
                 except ValueError:
                     continue
                 by_img.setdefault(r["image_id"], []).append({
                     "annotation_receipt_id": revision_id(r),
                     "tissue_mask_sha256": r.get("tissue_mask_sha256"),
+                    "gt_polygons": r.get("gt_polygons"),
+                    "mask_contract": r.get("mask_contract"),
+                    "wound_mask_key": r.get("wound_mask_key"),
+                    "wound_mask_sha256": r.get("wound_mask_sha256"),
                     "actor": r.get("actor"), "role": r.get("role"), "code": r.get("code"),
                     "tissue_mask_key": r.get("tissue_mask_key"),
                     "tissue_raster": r.get("tissue_raster"),
@@ -2280,6 +2334,10 @@ try:
 
         depth_refs = depth_index_map()
         for r in recs:
+            try:
+                verified_wound(r)
+            except ValueError:
+                drop("wound_revision_unverifiable"); continue
             q = r.get("quality") or {}
             if kind == "tissue":
                 if not r.get("tissue_mask_key"):
@@ -2289,7 +2347,7 @@ try:
                 try:
                     verified_tissue(r)
                 except ValueError:
-                    drop("tissue_revision_unverifiable"); continue
+                    drop("tissue_geometry_or_revision_invalid"); continue
             # 品質門檻。缺指標（舊紀錄）**不擋**——那些影像本身沒問題，
             # 只是收集時還沒有這個欄位；擋掉會把早期樣本整批丟掉。
             if q.get("focus_lapvar") is not None and q["focus_lapvar"] < min_focus:
@@ -2304,6 +2362,18 @@ try:
                 drop("roi_too_small"); continue
             items.append({
                 "annotation_receipt_id": revision_id(r),
+                "mask_contract": r.get("mask_contract"),
+                "wound_mask_key": r.get("wound_mask_key"),
+                "wound_mask_sha256": r.get("wound_mask_sha256"),
+                "gt_polygon": r.get("gt_polygon"),
+                "gt_polygons": r.get("gt_polygons"),
+                "area_cm2": r.get("area_cm2"),
+                "exudate": r.get("exudate"),
+                "capture_device": r.get("capture_device"),
+                "depth_source": r.get("depth_source"),
+                "doctor_verified": r.get("doctor_verified"),
+                "app_version": r.get("app_version"),
+                "seg_model": r.get("seg_model"),
                 "image_sha256": r.get("image_sha256"),
                 "tissue_mask_sha256": r.get("tissue_mask_sha256"),
                 "depth_map_key": r.get("depth_map_key"),
@@ -2311,6 +2381,7 @@ try:
                 "depth_conf_key": r.get("depth_conf_key"),
                 "depth_conf_sha256": r.get("depth_conf_sha256"),
                 "camera_intrinsics": r.get("camera_intrinsics"),
+                "camera_intrinsics_grid": r.get("camera_intrinsics_grid", "unknown"),
                 "raw_depth": depth_for_record(r, depth_refs) or None,
                 "image_id": r.get("image_id"), "code": r.get("code"),
                 "image_key": "images/%s.jpg" % r.get("image_id"),

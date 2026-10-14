@@ -16,8 +16,8 @@ class AnnotationSubmitButtonTest {
             AnnotationSubmitButton(busy.value, true, "送出") { requests++; busy.value = true }
         } }
         compose.onNodeWithText("送出").performClick()
-        compose.onNodeWithText("正在確認標註保存…").assertIsNotEnabled().performClick()
-        compose.onNodeWithText("正在上傳並等待後端確認，請留在此頁；完成前不要重複送出。").assertIsDisplayed()
+        compose.onNodeWithText("正在保存研究待傳資料…").assertIsNotEnabled().performClick()
+        compose.onNodeWithText("正在核對並保存待傳工作，請等候入列完成；尚未確認雲端保存。").assertIsDisplayed()
         compose.runOnIdle { assertEquals(1, requests); busy.value = false }
         compose.onNodeWithText("送出").assertIsEnabled().performClick()
         compose.runOnIdle { assertEquals(2, requests) }

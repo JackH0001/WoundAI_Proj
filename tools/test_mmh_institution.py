@@ -36,8 +36,12 @@ class InstitutionTests(unittest.TestCase):
         path=Path(__file__).resolve().parent/'windows'/'run_python_tests.py'
         spec=importlib.util.spec_from_file_location('mmh_runner',path)
         runner=importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)
-        result=runner.sanitized_test_environment({'WOUNDAI_INSTITUTION_ORG':ORG,'woundai_security_bucket':'s','KEEP':'yes'})
+        result=runner.sanitized_test_environment({'WOUNDAI_INSTITUTION_ORG':ORG,'woundai_security_bucket':'s',
+            'WOUNDAI_DEPLOYMENT_ENVIRONMENT':'synthetic-review',
+            'woundai_deployment_environment':'synthetic-review','KEEP':'yes'})
         self.assertNotIn('WOUNDAI_INSTITUTION_ORG',result);self.assertNotIn('woundai_security_bucket',result)
+        self.assertNotIn('WOUNDAI_DEPLOYMENT_ENVIRONMENT',result)
+        self.assertNotIn('woundai_deployment_environment',result)
         self.assertEqual(result['KEEP'],'yes')
     def test_config_rejects_empty_uppercase_default_whitespace_and_lite(self):
         self.assertIsNone(context.configured_org({}))

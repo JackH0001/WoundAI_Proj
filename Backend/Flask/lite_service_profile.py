@@ -14,6 +14,8 @@ POST_ROUTES = frozenset({
 
 
 def service_profile(environment):
+    from review_service_profile import review_environment
+    review_environment(environment)
     value = environment.get('WOUNDAI_SERVICE_PROFILE', 'medical')
     if value not in ('medical', 'lite'):
         raise ValueError('unknown WoundAI service profile')

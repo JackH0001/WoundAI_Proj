@@ -71,11 +71,12 @@ enum InstitutionExport {
 
     /// Revision hash avoids duplicate output on an identical retry. No patient names or IDs in file names.
     static func contents(image: UIImage, raster: EditRaster, polygons: [[[Int]]], marker: [[Int]]?,
-                      measurementID: Int64, doctorVerified: Bool, exudate: Int?) throws -> [String: Data] {
+                      measurementID: Int64, doctorVerified: Bool, exudate: Int?, submitted: Measurement? = nil) throws -> [String: Data] {
         try validate(image: image, raster: raster)
-        let fractions = raster.tissueFrac()
-        let push = WoundPipeline.push(cm2: raster.areaCm2, frac: fractions, exudate: exudate)
-        let caption = "\(institution) · 機構驗證副本\n面積 \(raster.areaCm2.map { String(format: "%.2f", $0) } ?? "未校正") cm² · PUSH \(push.full.map(String.init) ?? "未完整")（部分分數 \(push.partial.map(String.init) ?? "—")）\n醫師確認：\(doctorVerified ? "是" : "否") · 組織人工修改：\(raster.tissueEdited ? "是" : "否")\n肉芽／腐肉／壞死／上皮／其他：" + ["granulation","slough","necrosis","epithelial","other"].map { String(format: "%.1f%%", (fractions[$0] ?? 0) * 100) }.joined(separator: " / ") + "\n限機構驗證；不代表已上傳或已核准研究用途。"
+        let fractions = submitted?.tissueFrac ?? raster.tissueFrac()
+        let area = submitted.map { $0.estimatedArea } ?? raster.areaCm2
+        let push = WoundPipeline.push(cm2: area, frac: fractions, exudate: exudate)
+        let caption = "\(institution) · 機構驗證副本\n面積 \(area.map { String(format: "%.2f", $0) } ?? "未校正") cm² · PUSH \(push.full.map(String.init) ?? "未完整")（部分分數 \(push.partial.map(String.init) ?? "—")）\n醫師確認：\(doctorVerified ? "是" : "否") · 組織人工修改：\(raster.tissueEdited ? "是" : "否")\n肉芽／腐肉／壞死／上皮／其他：" + ["granulation","slough","necrosis","epithelial","other"].map { String(format: "%.1f%%", (fractions[$0] ?? 0) * 100) }.joined(separator: " / ") + "\n限機構驗證；不代表已上傳或已核准研究用途。"
         guard measurementID > 0, let original = image.pngData(),
               let combined = try overlay(image: image, raster: raster, polygons: polygons, marker: marker, caption: caption).pngData(),
               let encoded = EditRasterCodec.encode(raster) else { throw Failure.imageEncoding }
@@ -84,7 +85,7 @@ enum InstitutionExport {
         let metadata: [String: Any] = ["schema": "woundai.institution-export/1", "institution": institution,
             "measurement_id": measurementID, "doctor_verified": doctorVerified,
             "tissue_edited": raster.tissueEdited, "tissue_fractions": fractions,
-            "area_cm2": raster.areaCm2 as Any? ?? NSNull(), "exudate": exudate as Any? ?? NSNull(),
+            "area_cm2": area as Any? ?? NSNull(), "exudate": exudate as Any? ?? NSNull(),
             "push_full": push.full as Any? ?? NSNull(), "push_partial": push.partial as Any? ?? NSNull(),
             "polygons": polygons, "marker_quad": marker as Any? ?? NSNull(),
             "cloud_uploaded": false, "depth_included": false]

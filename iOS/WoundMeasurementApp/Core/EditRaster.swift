@@ -278,8 +278,7 @@ enum EditRasterCodec {
 enum TissueMaskCodec {
 
     /// - Returns: base64 PNG，失敗回 nil。
-    ///   失敗時呼叫端應照常送出其餘欄位——遮罩缺席只是少一個訓練樣本，
-    ///   讓整筆標註失敗才是真的損失。
+    ///   新標註契約要求傷口與組織遮罩齊全；失敗時保留本機紀錄，不送出不完整標註。
     static func encodeBase64(tissue: [UInt8], mask: [UInt8], mw: Int, mh: Int) -> String? {
         #if canImport(UIKit)
         guard mw >= 2, mh >= 2, tissue.count >= mw * mh, mask.count >= mw * mh else { return nil }
@@ -301,5 +300,14 @@ enum TissueMaskCodec {
         #else
         return nil
         #endif
+    }
+}
+
+/// Final edited membership, independent of tissue class 0 (unknown).
+enum WoundMaskCodec {
+    static func encodeBase64(mask: [UInt8], mw: Int, mh: Int) -> String? {
+        guard (2...4096).contains(mw), (2...4096).contains(mh),
+              mask.count == mw * mh, mask.allSatisfy({ $0 <= 1 }), mask.contains(1) else { return nil }
+        return TissueMaskCodec.encodeBase64(tissue: mask, mask: mask, mw: mw, mh: mh)
     }
 }

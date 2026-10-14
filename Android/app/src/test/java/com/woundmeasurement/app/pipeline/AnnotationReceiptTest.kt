@@ -36,4 +36,20 @@ class AnnotationReceiptTest {
         val r=AnnotationReceipt.validate(200,valid.dropLast(1)+",\"note\":\"duplicate\"}","WD-test","image-test")
         assertTrue(r.first); assertFalse(r.second.contains("duplicate"))
     }
+
+    @Test fun pairedMasksNeedExactHashesOnBothSavedAndDuplicate() {
+        val wound = "a".repeat(64); val tissue = "b".repeat(64)
+        for (status in listOf("enqueued", "duplicate_skipped")) {
+            val obj = com.google.gson.JsonParser.parseString(valid.replace("enqueued",status)).asJsonObject
+            obj.addProperty("mask_contract", "woundai.annotation-masks/1")
+            obj.addProperty("wound_mask_sha256", wound); obj.addProperty("tissue_mask_sha256", tissue)
+            fun accepts(body: String) = AnnotationReceipt.validate(200,body,"WD-test","image-test",wound,tissue).first
+            assertTrue(accepts(obj.toString()))
+            for (field in listOf("mask_contract","wound_mask_sha256","tissue_mask_sha256","annotation_receipt_id")) {
+                val invalid=obj.deepCopy();invalid.remove(field);assertFalse(accepts(invalid.toString()))
+                invalid.addProperty(field,"wrong");assertFalse(accepts(invalid.toString()))
+            }
+            assertFalse(AnnotationReceipt.validate(200,obj.toString(),"WD-test","image-test",wound,null).first)
+        }
+    }
 }

@@ -138,7 +138,7 @@ android {
             applicationIdSuffix ".mmhps20261007.validation"
             versionNameSuffix "-mmh-validation-r5"
             buildConfigField "boolean", "MMH_VALIDATION", "true"
-            buildConfigField "String", "DEFAULT_BACKEND_URL", '"https://candidate---woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app"'
+            buildConfigField "String", "DEFAULT_BACKEND_URL", '"https://woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app"'
         }
 
         // Play internal testing for the separate MMH product, never the general production endpoint.
@@ -152,7 +152,7 @@ android {
             jniDebuggable false
             buildConfigField "boolean", "MMH_VALIDATION", "true"
             buildConfigField "boolean", "ALLOW_CLINICAL_GALLERY_EXPORT", "false"
-            buildConfigField "String", "DEFAULT_BACKEND_URL", '"https://candidate---woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app"'
+            buildConfigField "String", "DEFAULT_BACKEND_URL", '"https://woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app"'
             signingConfig rootProject.file("keystore.properties").exists() ? signingConfigs.release : null
         }
 

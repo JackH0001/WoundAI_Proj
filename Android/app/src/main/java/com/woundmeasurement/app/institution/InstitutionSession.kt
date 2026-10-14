@@ -9,7 +9,7 @@ import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 
 object InstitutionConfig {
-    const val ORIGIN = "https://candidate---woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app"
+    const val ORIGIN = "https://woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app"
     const val AUDIENCE = "421209514056-c62hg9vv5p7g2l96n2efig269kcsads6.apps.googleusercontent.com"
     const val SERVICE = "woundai-backend-mmhps20261007"
 }

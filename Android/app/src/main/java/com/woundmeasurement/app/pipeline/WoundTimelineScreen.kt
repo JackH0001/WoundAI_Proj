@@ -59,8 +59,9 @@ fun WoundTimelineScreen(
     onOpenRecord: ((MeasurementEntity) -> Unit)? = null
 ) {
     val ctx = LocalContext.current
-    val dao = remember { WoundMeasurementDatabase.getDatabase(ctx).measurementDao() }
-    val imageStore = remember { LocalImageStore(ctx) }
+    val runtime = rememberMedicalRuntime()
+    val dao = remember(runtime) { runtime.database.measurementDao() }
+    val imageStore = remember(runtime) { runtime.images }
     val flow = remember(caseId, unassignedOnly) {
         when {
             caseId != null -> dao.getMeasurementsByCase(caseId)
@@ -75,7 +76,7 @@ fun WoundTimelineScreen(
     // 單筆刪除。**確認對話框放在這一層而不是每一列**——放在列裡的話，
     // 清單一長就有幾十個 AlertDialog 掛在 composition 上；而且 LazyColumn 回收列時
     // 對話框會跟著消失，使用者滑一下手指、確認框就不見了。
-    val repo = remember { CaseRepository.from(WoundMeasurementDatabase.getDatabase(ctx)) }
+    val repo = remember(runtime) { runtime.repo }
     val scope = rememberCoroutineScope()
     var pendingDelete by remember { mutableStateOf<MeasurementEntity?>(null) }
     var msg by remember { mutableStateOf<String?>(null) }

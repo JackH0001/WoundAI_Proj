@@ -35,6 +35,21 @@ struct ClinicalUploadJob: Codable, Identifiable {
 /// and a foreground retry reuses the exact payload under the original server/actor.
 @MainActor
 final class ClinicalUploadOutbox: ObservableObject {
+    struct Connection {
+        let origin: () -> String
+        let user: () -> String
+        let acquire: () async throws -> BackendClient
+        let active: () -> Bool
+        static let legacy = Connection(origin: { AppSettings.backendURL() }, user: { AppSettings.backendUser() }, acquire: {
+            #if WOUND_INSTITUTION
+            return try await MedicalSessionPool.shared.acquire()
+            #else
+            let c = BackendClient(baseUrl: AppSettings.backendURL())
+            guard try await c.login(username: AppSettings.backendUser(), password: AppSettings.backendPassword()) else { throw BackendError.notLoggedIn }
+            return c
+            #endif
+        }, active: { true })
+    }
     static let shared = ClinicalUploadOutbox()
     @Published private(set) var jobs: [ClinicalUploadJob] = []
     @Published private(set) var activeID: String?
@@ -107,9 +122,9 @@ final class ClinicalUploadOutbox: ObservableObject {
         job.server == server && job.configuredUser == user && job.actor == actor
     }
 
-    private func permitted(_ job: ClinicalUploadJob, repo: CaseRepository) async -> Bool {
-        guard !Task.isCancelled, job.server == AppSettings.backendURL(),
-              job.configuredUser == AppSettings.backendUser(),
+    private func permitted(_ job: ClinicalUploadJob, repo: CaseRepository, connection: Connection) async -> Bool {
+        guard !Task.isCancelled, connection.active(), job.server == connection.origin(),
+              job.configuredUser == connection.user(),
               await repo.measurement(id: job.measurement.id) != nil else { return false }
         if let cid = job.measurement.caseId, let c = await repo.getCase(id: cid) {
             return await repo.activeConsent(patientId: c.patientId)?.trainEffective == true
@@ -156,7 +171,15 @@ final class ClinicalUploadOutbox: ObservableObject {
         try persist(job)
     }
 
-    func resume(repo: CaseRepository, imageStore: LocalImageStore, force: Bool = false) {
+    func suspend() { worker?.cancel() }
+    func waitUntilSuspended() async {
+        let current = worker
+        current?.cancel()
+        await current?.value
+    }
+
+    func resume(repo: CaseRepository, imageStore: LocalImageStore, force: Bool = false, connection: Connection? = nil) {
+        let connection = connection ?? .legacy
         guard worker == nil, storageIssue == nil, pendingCount > 0 else { return }
         worker = Task {
             backgroundID = UIApplication.shared.beginBackgroundTask(withName: "ClinicalResearchUpload") {
@@ -182,22 +205,16 @@ final class ClinicalUploadOutbox: ObservableObject {
                         jobs.removeAll { $0.id == job.id }
                         continue
                     }
-                    guard await permitted(job, repo: repo) else {
+                    guard await permitted(job, repo: repo, connection: connection) else {
                         job.lastIssue = "研究資料暫停：請核對原帳號、後端、紀錄及有效同意。"
                         try persist(job); blockedRecords.insert(job.measurement.id); continue
                     }
                     activeID = job.id; phase = "驗證研究資料上傳身分…"
-                    #if WOUND_INSTITUTION
-                    let backend = try await MedicalSessionPool.shared.acquire()
-                    #else
-                    let backend = BackendClient(baseUrl: job.server)
-                    guard try await backend.login(username: job.configuredUser, password: AppSettings.backendPassword())
-                    else { throw BackendError.notLoggedIn }
-                    #endif
+                    let backend = try await connection.acquire()
                     guard let identity = await backend.currentIdentity(), identity.canSubmitClinicalTraining,
-                          Self.bindingMatches(job, server: AppSettings.backendURL(), user: AppSettings.backendUser(), actor: identity.identity)
+                          connection.active(), Self.bindingMatches(job, server: connection.origin(), user: connection.user(), actor: identity.identity)
                     else { throw BackendError.badResponse("請用原送件醫師帳號登入") }
-                    try await process(id: job.id, allowed: { await self.permitted(job, repo: repo) },
+                    try await process(id: job.id, allowed: { await self.permitted(job, repo: repo, connection: connection) },
                         annotate: { try await backend.submitAnnotationPayload($0) },
                         sendDepth: { queued in
                             guard let raw = queued.depthRaw, let encoded = queued.depthMetadata,

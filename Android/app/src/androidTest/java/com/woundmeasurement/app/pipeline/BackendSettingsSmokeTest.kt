@@ -10,6 +10,17 @@ import org.junit.Test
 
 class BackendSettingsSmokeTest {
     @get:Rule val compose=createComposeRule()
+    @Test fun isolatedReviewSettingsDoesNotRequireGoogle() {
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val runtime = MedicalRuntime(context, com.woundmeasurement.app.data.store.MedicalDataScope.SYNTHETIC_REVIEW)
+        compose.setContent { androidx.compose.runtime.CompositionLocalProvider(LocalMedicalRuntime provides runtime) {
+            MaterialTheme { BackendSettingsScreen {} }
+        } }
+        compose.onNodeWithText("合成示範環境").assertIsDisplayed()
+        compose.onNodeWithText("Sign in with Google").assertDoesNotExist()
+        compose.onNodeWithText("儲存並登入").performScrollTo().assertIsEnabled()
+        compose.onNodeWithText("登出 WoundAI 帳號").assertDoesNotExist()
+    }
     @Test fun opensSettingsAndReturnsWithoutCredentials() {
         var returned=false
         compose.setContent { MaterialTheme { BackendSettingsScreen { returned=true } } }

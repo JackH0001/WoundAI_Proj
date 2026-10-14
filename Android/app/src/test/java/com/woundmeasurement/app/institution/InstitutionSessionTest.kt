@@ -27,6 +27,10 @@ class InstitutionSessionTest {
     @Test fun rejectsExpiredToken() { reject { session(claims.replace("2000","1029")) } }
     @Test fun rejectsStringExpiry() { reject { session(claims.replace(":2000",":\"2000\"")) } }
     @Test fun rejectsMalformedJwt() { reject { InstitutionSession.parse("broken","test-nonce") } }
+    @Test fun rejectsCandidateEvenAfterGoogleVerified() {
+        val s=session(); s.markVerified()
+        reject { s.authorize(request("https://candidate---woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app/api/auth/login")) }
+    }
     @Test fun rejectsCrossOrigin() { reject { session().authorize(request("https://evil.example/api/health")) } }
     @Test fun rejectsHttp() { reject { session().authorize(request(InstitutionConfig.ORIGIN.replace("https:","http:")+"/api/health")) } }
     @Test fun rejectsWrongPort() { reject { session().authorize(request(InstitutionConfig.ORIGIN+":8443/api/health")) } }

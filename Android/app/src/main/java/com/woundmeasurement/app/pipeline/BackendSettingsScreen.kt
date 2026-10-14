@@ -52,14 +52,15 @@ private fun openUrl(ctx: android.content.Context, url: String) {
 @Composable
 fun BackendSettingsScreen(onBack: () -> Unit) {
     val ctx = LocalContext.current
+    val runtime = rememberMedicalRuntime()
     val scope = rememberCoroutineScope()
     val focus = LocalFocusManager.current
 
-    var url by remember { mutableStateOf(AppSettings.backendUrl(ctx)) }
-    var user by remember { mutableStateOf(AppSettings.backendUser(ctx)) }
+    var url by remember { mutableStateOf(runtime.backendUrl()) }
+    var user by remember { mutableStateOf(runtime.backendUser()) }
     var pass by remember { mutableStateOf("") }
     // 已存過憑證但密碼欄留空 → 代表「沿用已存的密碼」，不要讓使用者以為沒存到
-    var hasSaved by remember { mutableStateOf(AppSettings.hasCredentials(ctx)) }
+    var hasSaved by remember { mutableStateOf(runtime.hasCredentials()) }
     var testing by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<String?>(null) }
     var stats by remember { mutableStateOf<String?>(null) }
@@ -68,7 +69,7 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
     var client by remember { mutableStateOf<BackendClient?>(null) }
     var opening by remember { mutableStateOf(false) }
 
-    val mmh = com.woundmeasurement.app.BuildConfig.MMH_VALIDATION
+    val mmh = runtime.needsGoogle
     var googleBusy by remember { mutableStateOf(false) }
     var googleReady by remember { mutableStateOf(com.woundmeasurement.app.institution.InstitutionRegistry.snapshot()?.ready()==true) }
     val onEmulator = remember { AppSettings.looksLikeEmulator() }
@@ -84,8 +85,8 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
         val u = user.trim()
         // Never reuse a saved password with another account or server.
         val p = pass.ifEmpty {
-            if (u == AppSettings.backendUser(ctx) && norm == AppSettings.backendUrl(ctx))
-                AppSettings.backendPassword(ctx) else ""
+            if (u == runtime.backendUser() && norm == runtime.backendUrl())
+                runtime.backendPassword() else ""
         }
         if (u.isBlank() || p.isBlank()) {
             invalidateVerification(); result = "請輸入帳號與密碼；切換帳號或位址時需要重新輸入密碼。"; return
@@ -93,16 +94,16 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
         testing = true; invalidateVerification()
         try {
             if (saveInput) {
-                if (!AppSettings.setCredentials(ctx, u, p)) {
+                if (!runtime.setCredentials(u, p)) {
                     result = "密碼未能安全儲存，請重試；本機量測紀錄保留。"; return
                 }
-                AppSettings.setBackendUrl(ctx, norm)
+                runtime.setBackendUrl(norm)
                 url = norm; user = u; pass = ""; hasSaved = true
             }
             val c = withContext(Dispatchers.IO) {
-                if (mmh) MedicalSessions.acquire(ctx) else BackendClient(norm)
+                if (runtime.needsLiveSession) runtime.acquire() else runtime.makeBackend(norm)
             }
-            val ok = if (mmh) c.identity != null else withContext(Dispatchers.IO) { c.login(u, p) }
+            val ok = if (runtime.needsLiveSession) c.identity != null else withContext(Dispatchers.IO) { c.login(u, p) }
             if (!ok) {
                 result = "登入未通過，請確認 WoundAI 帳號、密碼與機構入口。"; return
             }
@@ -110,6 +111,7 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
                 result = "Google 門禁已到期，請重新登入。"; return
             }
             me = c.identity; client = c
+            runtime.research.wake()
             result = "✅ WoundAI 已登入（${c.identity?.label() ?: u}）"
             val health = withContext(Dispatchers.IO) { c.health() }
             if (health?.degraded == true)
@@ -146,6 +148,7 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Text("後端連線設定", style = MaterialTheme.typography.titleLarge)
+        if (runtime.fixedOrigin) Text(runtime.title, style = MaterialTheme.typography.titleMedium)
         // App 版本。排錯的第一個問題永遠是「你裝的是哪一版」——
         // 沒有這一行，答案只能靠測試者回去翻手機的應用程式資訊，而多數人不會翻。
         Text("App ${com.woundmeasurement.app.BuildConfig.VERSION_NAME} " +
@@ -160,17 +163,18 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
             onBusy = { googleBusy = it },
             onChanged = { ready ->
                 googleReady = ready
-                user=AppSettings.backendUser(ctx); pass=""; hasSaved=AppSettings.hasCredentials(ctx); me=null; client=null; stats=null; result=null
+                user=runtime.backendUser(); pass=""; hasSaved=runtime.hasCredentials(); me=null; client=null; stats=null; result=null
             })
         OutlinedTextField(
             value = url, onValueChange = { url = it; invalidateVerification() },
             label = { Text("後端位址") },
             placeholder = { Text("http://192.168.1.50:5000") },
-            singleLine = true, enabled = !mmh && !testing && !opening, modifier = Modifier.fillMaxWidth(),
+            singleLine = true, enabled = !runtime.fixedOrigin && !testing && !opening, modifier = Modifier.fillMaxWidth(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next)
         )
         Text(
-            if (mmh) "MMH 合成驗收專用入口，位址固定；此版不供真實個案使用。"
+            if (runtime.scope == com.woundmeasurement.app.data.store.MedicalDataScope.SYNTHETIC_REVIEW) "合成示範固定入口，請使用專用 WoundAI 示範帳號；不需要 Google，MMH 帳號不能用於此環境。"
+            else if (mmh) "MMH 合成驗收專用入口，位址固定；此版不供真實個案使用。"
             else if (onEmulator)
                 "模擬器：10.0.2.2 對映到你開發機的 127.0.0.1，維持預設即可。"
             else
@@ -206,13 +210,15 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done)
         )
 
+        ResearchOutboxPanel(runtime)
+
         BackendSignInActions(
             busy = testing, authenticated = me != null && (!mmh || googleReady),
             identityLabel = me?.label(), hasSaved = hasSaved,
             entryReady = !mmh || googleReady, enabled = !opening && !googleBusy,
             onSignIn = { focus.clearFocus(); scope.launch { connect(true) } },
             onSignOut = {
-                AppSettings.clearCredentials(ctx)
+                runtime.clearCredentials()
                 user = ""; pass = ""; hasSaved = false; invalidateVerification()
                 result = "已登出此裝置的 WoundAI 帳號。本機量測紀錄保留；瀏覽器需另行登出。"
                 focus.clearFocus()
@@ -224,7 +230,7 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
             Text("正在連線並確認帳號；雲端主機啟動可能需要一點時間，請勿重複送出。")
         }
         TextButton({ focus.clearFocus() }) { Text("收起鍵盤") }
-        if (!mmh) Text("MMH 私有入口另需 Google 授權。本 Android 版本尚未接入 Google/IAP，不能只改後端網址就當成 MMH 專用版。", style = MaterialTheme.typography.bodySmall)
+        if (!runtime.needsLiveSession) Text("MMH 私有入口另需 Google 授權。本 Android 版本尚未接入 Google/IAP，不能只改後端網址就當成 MMH 專用版。", style = MaterialTheme.typography.bodySmall)
 
         me?.let { u ->
             Divider()
@@ -319,7 +325,7 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
             Divider()
             OutlinedButton(
                 enabled = !testing && !opening && !googleBusy,
-                onClick = { AppSettings.clearCredentials(ctx); hasSaved = false; user = ""; pass = ""; invalidateVerification()
+                onClick = { runtime.clearCredentials(); hasSaved = false; user = ""; pass = ""; invalidateVerification()
                             result = "已清除本機儲存的後端帳密" },
                 modifier = Modifier.fillMaxWidth()
             ) { Text("清除已儲存的帳密") }
@@ -331,6 +337,7 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+        PrivateExportSettings(runtime)
         OutlinedButton(onBack, Modifier.fillMaxWidth(), enabled = !testing && !opening && !googleBusy) { Text("返回") }
     }
 }

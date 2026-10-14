@@ -32,8 +32,7 @@ object TissueMaskCodec {
 
     /**
      * @return base64 編碼的 PNG，或 null（尺寸不合、編碼失敗）。
-     *   失敗時呼叫端應照常送出其餘欄位——遮罩缺席只是少一個訓練樣本，
-     *   讓整筆標註失敗才是真的損失。
+     *   新標註必須有完整的傷口與組織遮罩；失敗時保留本機紀錄，不送出不完整標註。
      */
     fun encode(tissue: ByteArray, mask: ByteArray, mw: Int, mh: Int): String? {
         if (mw < 2 || mh < 2 || tissue.size < mw * mh || mask.size < mw * mh) return null
@@ -54,5 +53,14 @@ object TissueMaskCodec {
             if (!ok) return null
             Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
         }.getOrNull()
+    }
+}
+
+/** Preserve holes and unknown tissue membership in the original editing grid. */
+object WoundMaskCodec {
+    fun encode(mask: ByteArray, mw: Int, mh: Int): String? {
+        if (mw !in 2..4096 || mh !in 2..4096 || mask.size != mw * mh ||
+            mask.any { it.toInt() !in 0..1 } || !mask.contains(1.toByte())) return null
+        return TissueMaskCodec.encode(mask, mask, mw, mh)
     }
 }

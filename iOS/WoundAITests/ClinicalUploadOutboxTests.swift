@@ -174,3 +174,60 @@ func depthReceiptFixture(raw: Data, metadata: Data, image: String, revision: Str
             "depth_revision_id": String(payload.prefix(16)),
             "depth_receipt_id": hash(Data((revision + "|" + payload).utf8)), "replaced_previous": false]
 }
+
+
+extension ClinicalUploadOutboxTests {
+    func testNativeWoundPayloadPreservesHoleIslandAndUnknownTissue() throws {
+        var mask = [UInt8](repeating: 0, count: 64)
+        for y in 1...6 { for x in 1...6 { mask[y * 8 + x] = 1 } }
+        mask[27] = 0; mask[0] = 1
+        var tissue = mask.map { $0 * 3 }; tissue[9] = 0
+        let raster = EditRaster(mask: mask, tissue: tissue, origMask: mask, rx0: 0, ry0: 0,
+                                mw: 8, mh: 8, mScale: 0.25, cm2PerPx: nil)
+        let png = try XCTUnwrap(TissueMaskCodec.encodeBase64(tissue: tissue, mask: mask, mw: 8, mh: 8))
+        let data = try BackendClient.annotationPayload(code: "WD", gtPolygon: [[0,0],[31,0],[31,31]],
+            exudate: 0, imageId: "image", imageW: 32, imageH: 32,
+            tissueMaskPngBase64: png, tissueRaster: raster, consentTrain: true, doctorVerified: true)
+        // Synthetic codec evidence for independent server-side decoding (no patient data).
+        try data.write(to: FileManager.default.temporaryDirectory.appendingPathComponent("native-mask-contract-ios.json"))
+        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(obj["mask_contract"] as? String, "woundai.annotation-masks/1")
+        let raw = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(obj["wound_mask_png"] as? String)))
+        let pixels = try XCTUnwrap(EditRasterCodec.rgbaFromPNG(raw, expectW: 8, expectH: 8))
+        for i in 0..<64 { XCTAssertEqual(pixels[i * 4], mask[i], "pixel \(i)") }
+        XCTAssertEqual(obj["wound_mask_sha256"] as? String, SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined())
+        XCTAssertEqual(pixels[9 * 4], 1) // Unknown tissue is still inside the wound.
+    }
+    func testNativeWoundEncoderRejectsTruncationInvalidValuesAndEmptyMask() {
+        for mask in [[UInt8](repeating: 0, count: 64), [UInt8](repeating: 2, count: 64),
+                     [UInt8](repeating: 1, count: 63)] {
+            XCTAssertNil(WoundMaskCodec.encodeBase64(mask: mask, mw: 8, mh: 8))
+        }
+    }
+    func testPairedMaskReceiptRequiresBothHashesAndRevisionForDuplicateToo() throws {
+        let wound = String(repeating: "a", count: 64), tissue = String(repeating: "b", count: 64)
+        for status in ["enqueued", "duplicate_skipped"] {
+            let body = ["status":status, "code":"WD", "image_id":"image",
+                        "annotation_receipt_id":"0123456789abcdef", "mask_contract":"woundai.annotation-masks/1",
+                        "wound_mask_sha256":wound, "tissue_mask_sha256":tissue]
+            XCTAssertNoThrow(try BackendClient.annotationReceipt(JSONSerialization.data(withJSONObject: body),
+                code:"WD", imageID:"image", woundSHA:wound, tissueSHA:tissue))
+            for field in ["annotation_receipt_id", "mask_contract", "wound_mask_sha256", "tissue_mask_sha256"] {
+                for value: String? in [nil, "wrong"] {
+                    var invalid = body; invalid[field] = value
+                    XCTAssertThrowsError(try BackendClient.annotationReceipt(JSONSerialization.data(withJSONObject: invalid),
+                        code:"WD", imageID:"image", woundSHA:wound, tissueSHA:tissue), field)
+                }
+            }
+        }
+    }
+    func testNewSubmissionRequiresPairedRasterAndRejectsErrorSuccess() throws {
+        XCTAssertThrowsError(try BackendClient.annotationPayload(code:"WD",gtPolygon:[[0,0],[8,0],[8,8]],
+            exudate:0,imageId:"image",imageW:32,imageH:32,consentTrain:true,doctorVerified:true))
+        for key in ["error", "issues"] {
+            let data = try JSONSerialization.data(withJSONObject:["status":"enqueued","code":"WD",
+                "image_id":"image",key:"unexpected"])
+            XCTAssertThrowsError(try BackendClient.annotationReceipt(data,code:"WD",imageID:"image"))
+        }
+    }
+}

@@ -354,6 +354,15 @@ class MeasureViewModel(
         _state.value = _state.value.copy(submitStatus = message)
     }
 
+    internal suspend fun reconcileSavedAcknowledgement(dao:MeasurementDao) {
+        val expected=lastSavedSnapshot ?: return
+        val latest=withContext(Dispatchers.IO){dao.getById(expected.id)} ?: return
+        if(latest.annotationSubmitted && latest.copy(annotationSubmitted=expected.annotationSubmitted)==expected) {
+            lastSavedSnapshot=latest
+            if(_state.value.saved) _state.value=_state.value.copy(annotationSaved=true,submitStatus="此修訂研究標註已確認保存。")
+        }
+    }
+
     private val annotationGate = AnnotationUploadGate()
 
     fun submitAnnotation(
@@ -365,7 +374,8 @@ class MeasureViewModel(
          */
         consentTrain: Boolean = true,
         dao: MeasurementDao,
-        imageStore: com.woundmeasurement.app.data.store.LocalImageStore
+        imageStore: com.woundmeasurement.app.data.store.LocalImageStore,
+        enqueueResearch: (suspend (MeasurementEntity) -> String)? = null
     ) {
         if (_state.value.loading || _state.value.saving || _state.value.annotationSending) return
         val poly = lastPolygon
@@ -413,9 +423,13 @@ class MeasureViewModel(
             reportSubmitBlocked("缺少原始標註溯源，未送出；請保留紀錄供核對。"); return
         }
         if (!annotationGate.acquire()) return
-        _state.value = _state.value.copy(annotationSending = true, submitStatus = "正在上傳並確認標註保存，請稍候…")
+        _state.value = _state.value.copy(annotationSending = true, submitStatus = if(enqueueResearch!=null) "正在核對並保存研究待傳資料…" else "正在上傳並確認標註保存，請稍候…")
         viewModelScope.launch {
             try {
+                if(enqueueResearch != null) {
+                    _state.value=_state.value.copy(submitStatus=enqueueResearch(saved),annotationSaved=false)
+                    return@launch
+                }
                 val outcome = withContext(Dispatchers.IO) {
                     SavedAnnotationUpload.submit(dao, saved, rasterMatches = {
                         val pair = submittedRaster?.let { EditRasterCodec.encode(it) }
@@ -524,7 +538,8 @@ class MeasureViewModel(
          * 給了就把 work 影像加密存本機。**這是「回頭修邊」與「補送標註不必重測」的前提**——
          * v2 時 imagePath 一直是空字串,離開量測頁影像與輪廓就都沒了。
          */
-        imageStore: com.woundmeasurement.app.data.store.LocalImageStore? = null
+        imageStore: com.woundmeasurement.app.data.store.LocalImageStore? = null,
+        onSaved: (suspend (MeasurementEntity) -> String?)? = null
     ) {
         if (_state.value.loading || _state.value.saving || _state.value.annotationSending) return
         val r = _state.value.result ?: return
@@ -676,7 +691,16 @@ class MeasureViewModel(
                     submitStatus = if (updatedRow) "ℹ️ 同一次影像→已更新同筆紀錄(#$id),未重複新增"
                                    else "✅ 已存入個案時間軸(#$id)"
                 )
-            } catch (e: Exception) {
+                if (onSaved != null) {
+                    _state.value = _state.value.copy(submitStatus = _state.value.submitStatus + "\n正在處理已啟用的行政副本…")
+                    val note = try { onSaved(savedSnapshot) }
+                        catch (e: kotlinx.coroutines.CancellationException) { throw e }
+                        catch (_: Exception) { "時間軸已保存；行政副本未完成。" }
+                    _state.value = _state.value.copy(submitStatus =
+                        (if (updatedRow) "已更新同筆時間軸紀錄。" else "已存入時間軸。") + (note?.let { "\n$it" } ?: ""))
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (e: Exception) {
                 _state.value = _state.value.copy(submitStatus = "⚠️ 存入失敗:${e.message}")
             } finally {
                 _state.value = _state.value.copy(saving = false)

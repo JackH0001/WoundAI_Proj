@@ -186,7 +186,10 @@ enum BackendError: Error, LocalizedError {
 actor BackendClient {
 
     private let baseUrl: String
+    private let expectedMedicalOrg: String
+    private let sessionContext: MedicalSessionEpoch
     private let sessionEpoch: UInt64
+    private let institutionEpoch: UInt64?
     private var jwt: String
     private var authGeneration: UInt64 = 0
     private(set) var identity: LoginIdentity?
@@ -207,9 +210,14 @@ actor BackendClient {
      */
     init(baseUrl: String, jwt: String = "", session: URLSession? = nil,
          liteTransport: (any LiteAuthenticatedTransport)? = nil,
-         institutionTransport: (any InstitutionAuthenticatedTransport)? = nil) {
+         institutionTransport: (any InstitutionAuthenticatedTransport)? = nil,
+         sessionContext: MedicalSessionEpoch = .shared, bindInstitutionSession: Bool = true,
+         expectedMedicalOrg: String = "mmhps20261007") {
         self.baseUrl = BackendClient.normalize(baseUrl)
-        self.sessionEpoch = MedicalSessionEpoch.shared.snapshot()
+        self.expectedMedicalOrg = expectedMedicalOrg
+        self.sessionContext = sessionContext
+        self.sessionEpoch = sessionContext.snapshot()
+        self.institutionEpoch = bindInstitutionSession ? MedicalSessionEpoch.shared.snapshot() : nil
         self.jwt = jwt
         #if WOUND_INSTITUTION
         // Capture this identity's transport once. Never rebind an old client after account switch.
@@ -261,7 +269,8 @@ actor BackendClient {
 
     private func requireCurrentSessionContext() throws {
         #if WOUND_INSTITUTION
-        guard sessionEpoch == MedicalSessionEpoch.shared.snapshot() else {
+        guard sessionContext.isCurrent(sessionEpoch),
+              institutionEpoch.map({ $0 == MedicalSessionEpoch.shared.snapshot() }) ?? true else {
             authGeneration &+= 1; jwt = ""; identity = nil
             throw CancellationError()
         }
@@ -336,7 +345,7 @@ actor BackendClient {
         guard code == 200, let j = JSONAny(data: data) else {
             identity = nil
             switch code {
-            case 401: lastLoginFailure = "登入回應 HTTP 401：帳號授權未通過，請核對 Google 門禁與 WoundAI 帳號。"
+            case 401: lastLoginFailure = "登入回應 HTTP 401：帳號授權未通過，請核對此環境的 WoundAI 帳號與入口資格。"
             case 403: lastLoginFailure = "登入回應 HTTP 403：目前帳號無入口或應用權限，請聯絡管理員。"
             case 429: lastLoginFailure = "登入回應 HTTP 429：服務忙碌或請求過於頻繁，請稍候再試。"
             default: lastLoginFailure = "登入回應 HTTP \(code)：伺服器未完成驗證，請稍後重試。"
@@ -374,7 +383,7 @@ actor BackendClient {
         guard let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               j["session_contract"] as? String == "account-revision-v1",
               let actor = j["identity"] as? String,
-              let org = j["org"] as? String, org == "mmhps20261007",
+              let org = j["org"] as? String, org == expectedMedicalOrg,
               let user = j["user"] as? String, !user.isEmpty, actor == org + ":" + user,
               let role = j["role"] as? String,
               ["physician", "nurse", "assistant", "engineer", "admin"].contains(role),
@@ -1122,7 +1131,17 @@ actor BackendClient {
         // 組織分割 GT。**tissue_edited 一定要跟著送**——後端靠它決定這張遮罩能不能進訓練集。
         // 少了它，未經醫師修正的啟發式輸出會安靜地混進去，而模型就在學習複製它自己已經
         // 會做的事。
+        if tissueMaskPngBase64 == nil || tissueRaster == nil {
+            throw BackendError.badResponse("傷口與組織遮罩未齊全，請保留本機紀錄")
+        }
         if let png = tissueMaskPngBase64, let r = tissueRaster {
+            guard let wound = WoundMaskCodec.encodeBase64(mask: r.mask, mw: r.mw, mh: r.mh),
+                  let woundData = Data(base64Encoded: wound), Data(base64Encoded: png) != nil else {
+                throw BackendError.badResponse("無法編碼最終傷口遮罩，尚未送出")
+            }
+            obj["mask_contract"] = "woundai.annotation-masks/1"
+            obj["wound_mask_png"] = wound
+            obj["wound_mask_sha256"] = SHA256.hash(data: woundData).map { String(format: "%02x", $0) }.joined()
             obj["tissue_mask_png"] = png
             obj["tissue_raster"] = [
                 "rx0": Double(r.rx0), "ry0": Double(r.ry0),
@@ -1147,12 +1166,30 @@ actor BackendClient {
         req.httpBody = payload
         let (httpCode, data) = try await send(req)
         guard httpCode == 200 else { return .rejected(message: summarize(data)) }
-        return try Self.annotationReceipt(data, code: code, imageID: imageID)
+        let woundHash = expected["wound_mask_sha256"] as? String
+        let tissueData = (expected["tissue_mask_png"] as? String).flatMap { Data(base64Encoded: $0) }
+        let tissueHash = woundHash == nil ? nil : tissueData.map { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined() }
+        return try Self.annotationReceipt(data, code: code, imageID: imageID,
+                                          woundSHA: woundHash, tissueSHA: tissueHash)
     }
 
-    nonisolated static func annotationReceipt(_ data: Data, code: String, imageID: String) throws -> AnnotationOutcome {
-        guard let j = JSONAny(data: data), j["code"].string == code else {
+    nonisolated static func annotationReceipt(_ data: Data, code: String, imageID: String,
+                                               woundSHA: String? = nil, tissueSHA: String? = nil) throws -> AnnotationOutcome {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["error"] == nil, object["issues"] == nil,
+              let j = JSONAny(data: data), j["code"].string == code else {
             throw BackendError.badResponse("標註回執缺漏或個案不符")
+        }
+        if woundSHA != nil || tissueSHA != nil {
+            guard let woundSHA, let tissueSHA,
+                  woundSHA.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+                  tissueSHA.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+                  j["mask_contract"].string == "woundai.annotation-masks/1",
+                  j["wound_mask_sha256"].string == woundSHA,
+                  j["tissue_mask_sha256"].string == tissueSHA,
+                  j["annotation_receipt_id"].nonBlankString != nil else {
+                throw BackendError.badResponse("傷口或組織遮罩保存回執不符，請保留本機紀錄後重試")
+            }
         }
         let revisionID = j["annotation_receipt_id"].nonBlankString
         if let revisionID {

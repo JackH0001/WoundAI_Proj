@@ -137,7 +137,7 @@ def main():
     #
     # 遮罩缺席只是少一個組織訓練樣本；讓整筆標註失敗會連傷口分割的 GT 一起丟掉。
     s, r = post("/api/v1/annotation", "physician", anno("bad", "WD-BAD", make_jpeg()))
-    check("2  送 JPEG 當遮罩 → 不得誤報成功", s == 409 and r.get("error") == "tissue_asset_not_saved", (s, r))
+    check("2  送 JPEG 當遮罩 → 不得誤報成功", s == 400 and r.get("error") == "tissue_mask_invalid", (s, r))
     check("2b 但遮罩沒落盤",
           not os.path.exists(os.path.join(tmp, "tissue_masks", ids["bad"] + ".png")))
     aud = [json.loads(l) for l in open(os.path.join(tmp, "audit.jsonl"), encoding="utf-8")]
@@ -146,7 +146,7 @@ def main():
 
     s, _ = post("/api/v1/annotation", "physician",
                 anno("big", "WD-BIG", make_png() + b"\x00" * (5 * 1024 * 1024)))
-    check("2d 超大遮罩拒收整筆待重試", s == 409)
+    check("2d 超大遮罩拒收整筆待重試", s == 400)
     aud = [json.loads(l) for l in open(os.path.join(tmp, "audit.jsonl"), encoding="utf-8")]
     check("2e 超大拒收留痕", any(a["action"] == "tissue_mask_rejected" and "4MB" in a["result"] for a in aud))
 

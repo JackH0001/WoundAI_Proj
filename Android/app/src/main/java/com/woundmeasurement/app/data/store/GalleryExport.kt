@@ -12,7 +12,7 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 把影像寫進**手機共用相簿**（快速量測專用）。
+ * MMH 改用明確 opt-in 的加密私密副本；以下相簿規則僅適用既有非 MMH 建置。
  *
  * ## 為什麼要有
  *
@@ -73,12 +73,13 @@ object GalleryExport {
      *
      * @return 顯示用相對路徑；被政策拒絕或寫入失敗皆回 null。
      */
-    fun saveCapture(ctx: Context, bitmap: Bitmap, source: String?): String? {
+    fun saveCapture(ctx: Context, bitmap: Bitmap, source: String?, scope: MedicalDataScope = MedicalDataScope.MMH): String? {
+        if (BuildConfig.MMH_VALIDATION) return null // Export only after explicit research submission.
         // fail-closed：來源不明（null）一律拒絕。預設放行才是危險的那一邊。
         val album = when {
             source == null -> return null
-            source in ALLOWED_SOURCES -> ALBUM
-            source == "clinical" && clinicalExportAllowed -> ALBUM_CLINICAL
+            source in ALLOWED_SOURCES -> if (scope == MedicalDataScope.SYNTHETIC_REVIEW) "WoundAI_合成示範" else ALBUM
+            source == "clinical" && clinicalExportAllowed -> if (scope == MedicalDataScope.SYNTHETIC_REVIEW) "WoundAI_合成示範" else ALBUM_CLINICAL
             else -> return null
         }
         return write(ctx, bitmap, source, album)
@@ -88,8 +89,8 @@ object GalleryExport {
      * 舊名稱，保留給既有呼叫端（MeasureValidationEntry 的「存入時間軸」）。
      * 政策與 [saveCapture] 完全相同——不要在這裡重複判斷，否則兩處遲早會分岔。
      */
-    fun saveForQuickMeasure(ctx: Context, bitmap: Bitmap, source: String?): String? =
-        saveCapture(ctx, bitmap, source)
+    fun saveForQuickMeasure(ctx: Context, bitmap: Bitmap, source: String?, scope: MedicalDataScope = MedicalDataScope.MMH): String? =
+        saveCapture(ctx, bitmap, source, scope)
 
     /**
      * 匯出**量測結果疊圖**（原圖＋醫師確認的組織分區＋輪廓＋校正框＋結果標註帶）。
@@ -101,11 +102,13 @@ object GalleryExport {
      * 疊圖本身由 [com.woundmeasurement.app.pipeline.WoundOverlayRenderer] 產生；
      * 這裡只負責政策與 I/O。
      */
-    fun saveOverlay(ctx: Context, bitmap: Bitmap, source: String?): String? {
+    fun saveOverlay(ctx: Context, bitmap: Bitmap, source: String?, scope: MedicalDataScope = MedicalDataScope.MMH,
+                    metadata: org.json.JSONObject = org.json.JSONObject(), attachments: Map<String, ByteArray> = emptyMap()): String? {
+        if (BuildConfig.MMH_VALIDATION) return null // Export only after explicit research submission.
         val album = when {
             source == null -> return null
-            source in ALLOWED_SOURCES -> ALBUM
-            source == "clinical" && clinicalExportAllowed -> ALBUM_CLINICAL
+            source in ALLOWED_SOURCES -> if (scope == MedicalDataScope.SYNTHETIC_REVIEW) "WoundAI_合成示範" else ALBUM
+            source == "clinical" && clinicalExportAllowed -> if (scope == MedicalDataScope.SYNTHETIC_REVIEW) "WoundAI_合成示範" else ALBUM_CLINICAL
             else -> return null
         }
         return write(ctx, bitmap, "${source}_overlay", album)

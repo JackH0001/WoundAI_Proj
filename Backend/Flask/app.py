@@ -32,6 +32,8 @@ from model_preprocessing import load_preprocessing
 from lite_service_profile import service_profile, install_lite_perimeter, health_response as lite_health_response
 
 SERVICE_PROFILE = service_profile(os.environ)
+from review_service_profile import review_environment
+REVIEW_SERVICE = review_environment(os.environ)
 LITE_SERVICE = SERVICE_PROFILE == "lite"
 
 # ImageJ和深度學習相關
@@ -661,6 +663,7 @@ def health_check():
                 or (not canonicalization_golden_ok))
     status = {
         'status': 'degraded' if degraded else 'healthy',
+        'deployment_environment': 'synthetic-review' if REVIEW_SERVICE else None,
         'timestamp': datetime.now().isoformat(),
         'services': {
             'imagej': IMAGEJ_AVAILABLE and imagej_instance is not None,

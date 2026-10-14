@@ -47,16 +47,22 @@ final class MeasureViewModel: ObservableObject {
     @Published var identity: LoginIdentity?
     var canVerifyEdits: Bool { identity?.canVerifyClinicalEdits == true }
 
+    private let runtime: MedicalRuntime?
+    private var uploads: ClinicalUploadOutbox { runtime?.local.outbox ?? .shared }
+    private func backendURL() -> String { runtime?.backendURL() ?? AppSettings.backendURL() }
+    private func backendUser() -> String { runtime?.backendUser() ?? AppSettings.backendUser() }
+    private func markBackendOk() { if let runtime { runtime.markBackendOk() } else { AppSettings.markBackendOk() } }
     private let backendFactory: () -> BackendClient
     private let credentials: () -> (String, String)
     private let sessionProvider: (() async throws -> BackendClient)?
     init(backendFactory: (() -> BackendClient)? = nil,
-         credentials: @escaping () -> (String, String) = { (AppSettings.backendUser(), AppSettings.backendPassword()) },
-         sessionProvider: (() async throws -> BackendClient)? = nil) {
-        self.backendFactory = backendFactory ?? { BackendClient(baseUrl: AppSettings.backendURL()) }
-        self.credentials = credentials
+         credentials: (() -> (String, String))? = nil,
+         sessionProvider: (() async throws -> BackendClient)? = nil, runtime: MedicalRuntime? = nil) {
+        self.runtime = runtime
+        self.backendFactory = backendFactory ?? { runtime?.makeBackend() ?? BackendClient(baseUrl: AppSettings.backendURL()) }
+        self.credentials = credentials ?? { (runtime?.backendUser() ?? AppSettings.backendUser(), runtime?.backendPassword() ?? AppSettings.backendPassword()) }
         #if WOUND_INSTITUTION
-        self.sessionProvider = sessionProvider ?? (backendFactory == nil ? { try await MedicalSessionPool.shared.acquire() } : nil)
+        self.sessionProvider = sessionProvider ?? (backendFactory == nil ? { if let runtime { return try await runtime.acquire() }; return try await MedicalSessionPool.shared.acquire() } : nil)
         #else
         self.sessionProvider = sessionProvider
         #endif
@@ -197,7 +203,7 @@ final class MeasureViewModel: ObservableObject {
         defer { loading = false }
         guard await ensureLogin(), let backend else { mark("登入驗證"); return }
         mark("登入驗證")
-        AppSettings.markBackendOk()
+        markBackendOk()
         loadingHint = "正在準備本次影像…"
         // 12MP 重畫＋JPEG 編碼是秒級 CPU 工作——放背景緒，轉圈圈才轉得動
         // （之前在 MainActor 同步做，spinner 畫不出來，看起來像當機）。
@@ -231,7 +237,7 @@ final class MeasureViewModel: ObservableObject {
                 error = "後端影像座標空間不一致"; return
             }
             boundCareCode = receipt != nil && r.persisted ? careCode : nil
-            AppSettings.markBackendOk()
+            markBackendOk()
             // ArUco 認到貼紙時，把「大部分落在貼紙上的傷口輪廓」自動排除——
             // 印刷黑白方塊常被分割當成壞死組織（實機 2026-08-09 發生：貼紙被當成多傷口之一）。
             // 排除必須**說出來**且可挽回：門檻取「≥70% 的點落在貼紙外擴 15% 框內」
@@ -420,11 +426,6 @@ final class MeasureViewModel: ObservableObject {
                 return false
             }
         }
-        let exportRaster = raster
-        let exportPolygons = effectivePolygons
-        let exportVerified = doctorVerified
-        let exportExudate = exudate
-
         // (1) 影像重存。失敗時 imagePath 留空字串而非中止——量測數字本身仍有病歷價值，
         //     沒有照片的紀錄比沒有紀錄好。
         let newImagePath = imageStore.save(image: img, quality: 0.9) ?? ""
@@ -548,9 +549,6 @@ final class MeasureViewModel: ObservableObject {
             }
             if let op = old.rasterPath, op != m.rasterPath { imageStore.delete(op) }
             saveNote = "已更新這一筆時間軸紀錄。"
-            await exportInstitutionCopy(id: id, image: img, raster: exportRaster,
-                polygons: exportPolygons, marker: r.markerQuad,
-                verified: exportVerified, exudate: exportExudate)
             return true
         }
 
@@ -563,31 +561,7 @@ final class MeasureViewModel: ObservableObject {
         }
         lastSavedId = newId
         saveNote = "已存入時間軸。" + depthNote
-        await exportInstitutionCopy(id: newId, image: img, raster: exportRaster,
-            polygons: exportPolygons, marker: r.markerQuad,
-            verified: exportVerified, exudate: exportExudate)
         return true
-    }
-
-    private func exportInstitutionCopy(id: Int64, image: UIImage, raster: EditRaster?,
-                                       polygons: [[[Int]]], marker: [[Int]]?, verified: Bool, exudate: Int?) async {
-        guard InstitutionPrivateExports.automaticEnabled else { return }
-        guard let raster else {
-            saveNote = (saveNote ?? "") + " 尚未完成修邊，未匯出機構遮罩副本。"
-            return
-        }
-        let note = await Task.detached(priority: .utility) { () -> String in
-            do {
-                let files = try InstitutionExport.contents(image: image, raster: raster, polygons: polygons,
-                    marker: marker, measurementID: id, doctorVerified: verified, exudate: exudate)
-                let digest = SHA256.hash(data: files["sha256.json"]!).map { String(format: "%02x", $0) }.joined()
-                _ = try InstitutionPrivateExports.save(files: files, name: "measurement-\(id)-\(digest)")
-                return " 行政副本已加密保存於 App 私密空間，可從設定手動匯出；此副本不表示雲端已收到。"
-            } catch {
-                return " 機構圖像匯出失敗（座標、遮罩或檔案檢查未通過），時間軸紀錄已保留。"
-            }
-        }.value
-        saveNote = (saveNote ?? "") + note
     }
 
     /// 送出條件。任何一項不成立都不該讓按鈕可按——而且要說得出是哪一項。
@@ -614,7 +588,7 @@ final class MeasureViewModel: ObservableObject {
     func submitTraining(repo: CaseRepository, imageStore: LocalImageStore,
                         woundCase: WoundCase?, clinicalMode: Bool) async {
         guard !loading && !saving else { return }
-        if let id = lastSavedId, ClinicalUploadOutbox.shared.jobs.contains(where: { $0.measurement.id == id && !$0.completed }) {
+        if let id = lastSavedId, uploads.jobs.contains(where: { $0.measurement.id == id && !$0.completed }) {
             submitStatus = "ℹ️ 此筆研究資料已在待傳佇列，請先等候確認；不需重複修邊或送出。"
             return
         }
@@ -714,11 +688,15 @@ final class MeasureViewModel: ObservableObject {
                 doctorVerified: doctorVerified)
             guard let actor = identity?.identity else { throw BackendError.notLoggedIn }
             let depth = DepthStore.load(imagePath: saved.imagePath, store: imageStore)
-            try ClinicalUploadOutbox.shared.enqueue(measurement: saved, payload: payload,
-                server: AppSettings.backendURL(), configuredUser: AppSettings.backendUser(),
+            try uploads.enqueue(measurement: saved, payload: payload,
+                server: backendURL(), configuredUser: backendUser(),
                 actor: actor, depth: depth, requiresDepth: dep != nil)
-            ClinicalUploadOutbox.shared.resume(repo: repo, imageStore: imageStore)
+            uploads.resume(repo: repo, imageStore: imageStore, connection: runtime?.connection)
             submitStatus = "ℹ️ 臨床紀錄已保存；研究資料已安全排入待傳佇列，可繼續下一個案。進度會持續顯示，未確認完整前不算研究上傳完成。"
+            if let runtime {
+                let note = await runtime.exportSubmission(saved, payload: payload)
+                submitStatus = (submitStatus ?? "") + note
+            }
         } catch {
             submitStatus = "⚠️ 臨床紀錄已保存，但未能建立研究待傳工作：\(error.localizedDescription)"
         }
@@ -728,8 +706,13 @@ final class MeasureViewModel: ObservableObject {
 struct MeasureFlowView: View {
     let clinicalMode: Bool
     @EnvironmentObject var app: AppState
-    @StateObject private var vm = MeasureViewModel()
-    @ObservedObject private var uploads = ClinicalUploadOutbox.shared
+    @StateObject private var vm: MeasureViewModel
+    @ObservedObject private var uploads: ClinicalUploadOutbox
+    init(clinicalMode: Bool, runtime: MedicalRuntime) {
+        self.clinicalMode = clinicalMode
+        _vm = StateObject(wrappedValue: MeasureViewModel(runtime: runtime))
+        uploads = runtime.local.outbox
+    }
     @State private var pick: PhotosPickerItem?
     @State private var phantom = false
     @State private var showCamera = false

@@ -36,6 +36,31 @@ final class InstitutionPrivateExportsTests: XCTestCase {
         XCTAssertThrowsError(try InstitutionPrivateExports.read(first))
         XCTAssertThrowsError(try InstitutionPrivateExports.save(folder:staging,directory:vault))
     }
+    /// Run after the system folder UI test. An unprovisioned simulator is not a provider acceptance.
+    func testPersistedSystemFolderDeliversAfterProcessRestart() throws {
+        let prefs = UserDefaults.standard
+        try XCTSkipIf(prefs.data(forKey: InstitutionPrivateExports.folderKey) == nil, "Requires a system-picker grant from testSelectLocalFolderForRestartValidation")
+        let bookmark = try XCTUnwrap(prefs.data(forKey: InstitutionPrivateExports.folderKey))
+        let bytes = Data("synthetic-local-folder-validation".utf8)
+        let hashes = ["fixture.json": SHA256.hash(data:bytes).map{String(format:"%02x",$0)}.joined()]
+        let files = ["fixture.json":bytes,"sha256.json":try JSONSerialization.data(withJSONObject:hashes)]
+        let name = "synthetic-folder-check-" + UUID().uuidString
+        try InstitutionPrivateExports.deliver(files:files,name:name,bookmark:bookmark)
+        var stale=false
+        let folder = try URL(resolvingBookmarkData:bookmark,options:.withoutUI,relativeTo:nil,bookmarkDataIsStale:&stale)
+        XCTAssertFalse(stale); XCTAssertTrue(folder.startAccessingSecurityScopedResource())
+        defer {folder.stopAccessingSecurityScopedResource()}
+        let own = try FileManager.default.contentsOfDirectory(at:folder,includingPropertiesForKeys:nil).filter{$0.lastPathComponent.hasPrefix(name)}
+        XCTAssertEqual(own.count,1)
+        for item in own {
+            for (file,data) in files {XCTAssertEqual(try Data(contentsOf:item.appendingPathComponent(file)),data)}
+            try FileManager.default.removeItem(at:item)
+        }
+        prefs.removeObject(forKey:InstitutionPrivateExports.folderKey)
+        prefs.removeObject(forKey:InstitutionPrivateExports.folderLabelKey)
+        prefs.set(false,forKey:InstitutionPrivateExports.preferenceKey)
+    }
+
     func testTamperedPlaintextSourceCannotBecomePrivateExport() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at:root) }

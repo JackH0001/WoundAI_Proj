@@ -20,11 +20,18 @@ class InstitutionTransportBoundaryTest {
         ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { server ->
             server.soTimeout = 200
             val client = BackendClient("http://127.0.0.1:${server.localPort}", "synthetic-backend-token")
+            // A valid paired-mask payload must reach the transport boundary;
+            // missing masks are rejected locally before any HTTP interceptor.
+            val mask = ByteArray(64) { 1 }; val tissue = ByteArray(64) { 1 }
+            val raster = EditRaster(mask,tissue,mask.copyOf(),0f,0f,8,8,.8f,null,
+                maskPx=64,canvasW=10,canvasH=10,autoBaseline=tissue.copyOf())
+            val tissuePng = requireNotNull(TissueMaskCodec.encode(tissue,mask,8,8))
             val error = assertThrows(IOException::class.java) {
                 client.submitAnnotation(code = "WD-synthetic",
                     gtPolygon = listOf(listOf(1,1), listOf(8,1), listOf(1,8)),
                     exudate = 0, imageId = "aaaaaaaaaaaaaaaa", imageW = 10, imageH = 10,
-                    consentTrain = true, doctorVerified = true, source = "phantom")
+                    consentTrain = true, doctorVerified = true, source = "phantom",
+                    tissueMaskPng = tissuePng, tissueRaster = raster)
             }
             assertTrue(error.message.orEmpty().contains(expected))
             assertThrows(SocketTimeoutException::class.java) { server.accept().use { } }

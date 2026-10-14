@@ -6,8 +6,11 @@ final class MedicalSessionEpoch: @unchecked Sendable {
     static let shared = MedicalSessionEpoch()
     private let lock = NSLock()
     private var value: UInt64 = 0
+    private var closed = false
     func snapshot() -> UInt64 { lock.lock(); defer { lock.unlock() }; return value }
     func invalidate() { lock.lock(); defer { lock.unlock() }; value &+= 1 }
+    func close() { lock.lock(); defer { lock.unlock() }; closed = true; value &+= 1 }
+    func isCurrent(_ epoch: UInt64) -> Bool { lock.lock(); defer { lock.unlock() }; return !closed && value == epoch }
 }
 
 @MainActor

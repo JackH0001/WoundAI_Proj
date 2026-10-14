@@ -200,7 +200,7 @@ struct CaseSelectView: View {
             .task {
                 patients = await app.repo.listPatients()
                 // 進入這一頁時補做未完成的雲端同步——使用者剛好有網路而且在等畫面。
-                _ = await ConsentSync.retryPending()
+                _ = await ConsentSync.retryPending(context: app.runtime.consent)
                 // 不加 await：`refreshBanner()` 與 `.task` 閉包同隔離，沒有 actor hop。
                 // （`app.repo` 是 actor，那些 await 才是真的。理由同 WoundAIApp.swift）
                 app.refreshBanner()
@@ -273,7 +273,7 @@ struct CaseSelectView: View {
                 //   少了這一步就是死局：App 顯示「訓練同意 ✓」而雲端持續擋下每一次送出，
                 //   錯誤訊息還會把內部端點路徑印給醫師看，而他沒有辦法自己呼叫它。
                 let codes = await app.repo.wdCodes(patientId: p.id)
-                let r = await ConsentSync.restoreOnBackend(codes: codes)
+                let r = await ConsentSync.restoreOnBackend(codes: codes, context: app.runtime.consent)
                 if !r.allOK { message = "部分代碼尚未同步到雲端，已排入重試佇列。" }
                 app.refreshBanner()
             }
@@ -286,7 +286,7 @@ struct CaseSelectView: View {
         // 本機先撤回——病患的撤回是立即生效的權利，不能因為沒訊號就拒絕。
         let codes = await app.repo.withdrawTraining(patientId: p.id, reason: "患者要求")
         consent = await app.repo.activeConsent(patientId: p.id)
-        let r = await ConsentSync.pushToBackend(codes: codes)
+        let r = await ConsentSync.pushToBackend(codes: codes, context: app.runtime.consent)
         message = r.allOK
             ? "已撤回，雲端同步完成。"
             : "本機已撤回；雲端尚有 \(r.pending.count) 筆未完成，已排入重試佇列。"
@@ -424,7 +424,8 @@ extension View {
  東西就永遠沒有人看得到，那和不存沒有兩樣。
  */
 struct TimelineView: View {
-    @ObservedObject private var uploads = ClinicalUploadOutbox.shared
+    @ObservedObject private var uploads: ClinicalUploadOutbox
+    init(runtime: MedicalRuntime) { uploads = runtime.local.outbox }
     @EnvironmentObject var app: AppState
     @State private var rows: [Measurement] = []
     @State private var caseTitle: String?
@@ -586,8 +587,9 @@ struct BackendSettingsView: View {
     @ObservedObject private var institutionEntry = InstitutionGoogleSession.shared
     #endif
     @EnvironmentObject var app: AppState
-    @State private var url = AppSettings.backendURL()
-    @State private var user = AppSettings.backendUser()
+    let runtime: MedicalRuntime
+    @State private var url: String
+    @State private var user: String
     @State private var pass = ""
     @State private var status: String?
     @State private var me: LoginIdentity?
@@ -595,21 +597,27 @@ struct BackendSettingsView: View {
     @State private var opening = false
     @State private var progress: String?
     @State private var connectionTask: Task<Void, Never>?
-    @State private var hasSavedCredentials = !AppSettings.backendUser().isEmpty
+    @State private var hasSavedCredentials: Bool
+    init(runtime: MedicalRuntime) {
+        self.runtime = runtime
+        _url = State(initialValue: runtime.backendURL())
+        _user = State(initialValue: runtime.backendUser())
+        _hasSavedCredentials = State(initialValue: !runtime.backendUser().isEmpty)
+    }
     private enum Field: Hashable { case url, user, password }
     @FocusState private var focusedField: Field?
     @Environment(\.openURL) private var openURL
 
     private var busy: Bool {
         #if WOUND_INSTITUTION
-        return progress != nil || opening || institutionEntry.busy
+        return progress != nil || opening || (runtime.needsGoogle && institutionEntry.busy)
         #else
         return progress != nil || opening
         #endif
     }
     private var entryReady: Bool {
         #if WOUND_INSTITUTION
-        return institutionEntry.ready
+        return !runtime.needsGoogle || institutionEntry.ready
         #else
         return true
         #endif
@@ -634,10 +642,14 @@ struct BackendSettingsView: View {
                         .textSelection(.enabled)
                 }
                 #if WOUND_INSTITUTION
+                if runtime.needsGoogle {
                 InstitutionGoogleEntrySection(connectionBusy: progress != nil || opening) {
                     connectionTask?.cancel()
                     user = ""; pass = ""; me = nil; client = nil
                     hasSavedCredentials = false; status = nil
+                }
+                } else {
+                    Section("合成示範登入") { Text("使用專屬 WoundAI 示範帳號，不需要 Google。MMH 帳號不能用於此環境。") }
                 }
                 #endif
                 Section("後端連線") {
@@ -702,14 +714,14 @@ struct BackendSettingsView: View {
                         Button("登出 WoundAI 帳號", role: .destructive) { Task { await signOut() } }
                             .disabled(busy)
                     } footer: {
-                        Text("清除此 App 儲存的帳密，保留本機紀錄及後端網址；機構版也會登出 Google 門禁。瀏覽器主控台需另行登出。")
+                        Text(runtime.needsGoogle ? "清除 MMH 帳密並登出 Google 門禁，本機紀錄保留。瀏覽器需另行登出。" : "只清除此環境的 WoundAI 帳密，本機紀錄及另一環境登入不受影響。瀏覽器需另行登出。")
                     }
                 }
                 if hasSavedCredentials && me == nil {
                     Button("清除已儲存帳密", role: .destructive) { Task { await signOut() } }
                         .disabled(busy)
                 }
-                InstitutionExportSettingsSection()
+                InstitutionExportSettingsSection(runtime: runtime)
                 if let s = status {
                     Section("狀態") { Text(s).font(.footnote).accessibilityAddTraits(.updatesFrequently) }
                 }
@@ -731,7 +743,7 @@ struct BackendSettingsView: View {
                 }
             }
             .task {
-                hasSavedCredentials = !AppSettings.backendUser().isEmpty && !AppSettings.backendPassword().isEmpty
+                hasSavedCredentials = !runtime.backendUser().isEmpty && !runtime.backendPassword().isEmpty
                 if hasSavedCredentials && entryReady { startConnection() }
             }
             .onChange(of: user) { _, _ in invalidateApplicationVerification() }
@@ -740,8 +752,8 @@ struct BackendSettingsView: View {
             .onChange(of: entryReady) { _, ready in
                 if !ready { connectionTask?.cancel(); invalidateApplicationVerification() }
                 else {
-                    user = AppSettings.backendUser()
-                    hasSavedCredentials = !user.isEmpty && !AppSettings.backendPassword().isEmpty
+                    user = runtime.backendUser()
+                    hasSavedCredentials = !user.isEmpty && !runtime.backendPassword().isEmpty
                     if hasSavedCredentials { startConnection() }
                 }
             }
@@ -772,7 +784,7 @@ struct BackendSettingsView: View {
         guard !busy else { return }
         focusedField = nil
         let previousClient = client
-        AppSettings.clearCredentials()
+        runtime.clearCredentials()
         user = ""
         pass = ""
         me = nil
@@ -782,7 +794,7 @@ struct BackendSettingsView: View {
         status = "已登出此 App 的雲端帳號。本機紀錄已保留。"
         await previousClient?.logout()
         #if WOUND_INSTITUTION
-        await institutionEntry.signOut()
+        if runtime.needsGoogle { await institutionEntry.signOut() }
         #endif
     }
 
@@ -791,27 +803,27 @@ struct BackendSettingsView: View {
         defer { progress = nil; connectionTask = nil }
         // Never send an existing password to a different account or server.
         if pass.isEmpty && !BackendLoginPresentation.mayReusePassword(inputUser: user,
-            savedUser: AppSettings.backendUser(), inputURL: url, savedURL: AppSettings.backendURL()) {
+            savedUser: runtime.backendUser(), inputURL: url, savedURL: runtime.backendURL()) {
             status = "更換帳號或位址時請重新輸入密碼。"
             return
         }
-        if !pass.isEmpty, !AppSettings.setCredentials(user: user, password: pass) {
+        if !pass.isEmpty, !runtime.setCredentials(user: user, password: pass) {
             status = "密碼加密失敗，未儲存。"
             return
         }
-        AppSettings.setBackendURL(url)
-        hasSavedCredentials = !AppSettings.backendUser().isEmpty && !AppSettings.backendPassword().isEmpty
+        runtime.setBackendURL(url)
+        hasSavedCredentials = !runtime.backendUser().isEmpty && !runtime.backendPassword().isEmpty
         guard hasSavedCredentials else { status = "請輸入帳號與密碼。"; return }
         do {
             try Task.checkCancellation()
             var lines: [String] = []
             progress = "正在驗證 WoundAI 帳號…"
             #if WOUND_INSTITUTION
-            let c = try await MedicalSessionPool.shared.acquire()
+            let c = try await runtime.acquire()
             let ok = true
             #else
-            let c = BackendClient(baseUrl: AppSettings.backendURL())
-            let ok = try await c.login(username: AppSettings.backendUser(), password: AppSettings.backendPassword())
+            let c = runtime.makeBackend()
+            let ok = try await c.login(username: runtime.backendUser(), password: runtime.backendPassword())
             #endif
             try Task.checkCancellation()
             lines.append(ok ? "登入成功" : (await c.lastLoginFailure ?? "登入未成功，請檢查帳號與機構入口。"))
@@ -822,7 +834,7 @@ struct BackendSettingsView: View {
             app.identity = me
             if ok {
                 pass = ""
-                AppSettings.markBackendOk()
+                runtime.markBackendOk()
                 progress = "登入成功，正在讀取同步狀態…"
                 status = lines.joined(separator: "\n")
                 let h = try await c.health()
@@ -832,7 +844,7 @@ struct BackendSettingsView: View {
                 let (_, text, _) = await c.flywheelStats(source: nil)
                 try Task.checkCancellation()
                 lines.append(text)
-                let r = await ConsentSync.retryPending()
+                let r = await ConsentSync.retryPending(context: app.runtime.consent)
                 try Task.checkCancellation()
                 if !r.done.isEmpty { lines.append("已補做 \(r.done.count) 筆同意同步。") }
                 app.refreshBanner()

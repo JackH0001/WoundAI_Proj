@@ -25,7 +25,18 @@ import Foundation
  3. **待辦要持久化並反覆出現。** 一次性的錯誤訊息會被滑掉；沒有完成的撤回必須一直
     看得見，直到它真的完成。
  */
+@MainActor
 enum ConsentSync {
+    struct Context {
+        let accounts: MedicalAccountPreferences
+        let acquire: () async throws -> BackendClient
+        let active: () -> Bool
+        static let legacy = Context(accounts: MedicalAccountPreferences(scope: .mmh), acquire: {
+            let c = BackendClient(baseUrl: AppSettings.backendURL())
+            guard try await c.login(username: AppSettings.backendUser(), password: AppSettings.backendPassword()) else { throw BackendError.notLoggedIn }
+            return c
+        }, active: { true })
+    }
 
     /// 單次同步結果。`pending` 非空代表那些代碼已進入待重試佇列。
     struct Result {
@@ -48,54 +59,43 @@ enum ConsentSync {
      ⚠ 不丟例外。呼叫端是「病患剛剛撤回同意」的當下，那一刻拋例外只會讓畫面顯示一個
      技術訊息，而該做的事一件都沒做。
      */
-    static func pushToBackend(codes: [String]) async -> Result {
-        return await sync(codes, .withdraw)
+    static func pushToBackend(codes: [String], context: Context? = nil) async -> Result {
+        return await sync(codes, .withdraw, context ?? .legacy)
     }
 
     /// 重新取得同意 → 解除雲端的撤回封鎖。沒有這一步，撤回就是死局。
-    static func restoreOnBackend(codes: [String]) async -> Result {
-        return await sync(codes, .restore)
+    static func restoreOnBackend(codes: [String], context: Context? = nil) async -> Result {
+        return await sync(codes, .restore, context ?? .legacy)
     }
 
-    private static func sync(_ codes: [String], _ dir: Dir) async -> Result {
+    private static func sync(_ codes: [String], _ dir: Dir, _ context: Context) async -> Result {
         var seen = Set<String>()
         let list = codes
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty && seen.insert($0).inserted }
         if list.isEmpty { return .empty }
 
-        func remember(_ cs: [String]) {
-            dir == .withdraw ? AppSettings.addPendingWithdrawals(cs)
-                             : AppSettings.addPendingRestores(cs)
-        }
-        func forget(_ c: String) {
-            dir == .withdraw ? AppSettings.clearPendingWithdrawal(c)
-                             : AppSettings.clearPendingRestore(c)
-        }
-
-        let user = AppSettings.backendUser()
-        let pass = AppSettings.backendPassword()
-        guard !user.isEmpty, !pass.isEmpty else {
-            remember(list)
-            return Result(done: [], pending: list)
-        }
-
-        let backend = BackendClient(baseUrl: AppSettings.backendURL())
-        let loggedIn = (try? await backend.login(username: user, password: pass)) ?? false
-        guard loggedIn else {
-            remember(list)
-            return Result(done: [], pending: list)
-        }
+        let queue: MedicalAccountPreferences.ConsentQueue = dir == .withdraw ? .withdrawal : .restore
+        func remember(_ codes: [String]) { context.accounts.add(codes, to: queue) }
+        func forget(_ code: String) { context.accounts.remove(code, from: queue) }
+        // Persist before awaiting: switching environments or terminating during
+        // a request must not lose the requested consent change.
+        remember(list)
+        guard context.active() else { return Result(done: [], pending: list) }
+        let backend: BackendClient
+        do { backend = try await context.acquire() }
+        catch { return Result(done: [], pending: list) }
 
         var done: [String] = []
         var fail: [String] = []
         for c in list {
             // 逐筆處理而非整批：一個代碼失敗不該讓其他的也留在佇列裡，
             // 而重試時只重試真正沒完成的那些。
+            guard context.active(), !Task.isCancelled else { fail.append(c); continue }
             let ok = dir == .withdraw
                 ? await backend.withdrawConsent(code: c)
                 : await backend.restoreConsent(code: c)
-            if ok { done.append(c); forget(c) } else { fail.append(c) }
+            if ok && context.active() && !Task.isCancelled { done.append(c); forget(c) } else { fail.append(c) }
         }
         if !fail.isEmpty { remember(fail) }
         return Result(done: done, pending: fail)
@@ -107,20 +107,22 @@ enum ConsentSync {
      呼叫時機：進入個案管理頁、設定頁連線測試成功之後。這兩處都是「使用者剛好有網路
      而且在等畫面」的時刻，補做不會被感知到。
      */
-    static func retryPending() async -> Result {
+    static func retryPending(context: Context? = nil) async -> Result {
+        let context = context ?? .legacy
         // 兩個方向都要補做。只補撤回的話，重新簽署的病患會永遠卡在「雲端說已撤回」。
-        let wd = Array(AppSettings.pendingWithdrawals())
-        let rs = Array(AppSettings.pendingRestores())
+        let wd = Array(context.accounts.pending(.withdrawal))
+        let rs = Array(context.accounts.pending(.restore))
         if wd.isEmpty && rs.isEmpty { return .empty }
-        let a = wd.isEmpty ? Result.empty : await sync(wd, .withdraw)
-        let b = rs.isEmpty ? Result.empty : await sync(rs, .restore)
+        let a = wd.isEmpty ? Result.empty : await sync(wd, .withdraw, context)
+        let b = rs.isEmpty ? Result.empty : await sync(rs, .restore, context)
         return Result(done: a.done + b.done, pending: a.pending + b.pending)
     }
 
     /// 給畫面用的常駐提示。沒有待辦時回 nil。
-    static func pendingBanner() -> String? {
-        let wd = AppSettings.pendingWithdrawals().sorted()
-        let rs = AppSettings.pendingRestores().sorted()
+    static func pendingBanner(context: Context? = nil) -> String? {
+        let context = context ?? .legacy
+        let wd = context.accounts.pending(.withdrawal).sorted()
+        let rs = context.accounts.pending(.restore).sorted()
         if wd.isEmpty && rs.isEmpty { return nil }
 
         // 兩種待辦的後果完全不同，訊息必須分開講：

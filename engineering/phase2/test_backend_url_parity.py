@@ -9,6 +9,7 @@ switch fail-closed and compare each profile with a named runbook entry.
 """
 from pathlib import Path
 import re
+import plistlib
 import unittest
 from unittest.mock import patch
 
@@ -28,6 +29,22 @@ GUARDED = (
     "Android/app/build.gradle",
     "docs/admin_operations.md",
 )
+
+MMH_STABLE = "https://woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app"
+MMH_SOURCES = (
+    "Android/app/src/main/java/com/woundmeasurement/app/institution/InstitutionSession.kt",
+    "Backend/AccessManager/authentication.py", "Backend/AccessManager/accounts.py",
+    "Backend/AccessManager/sessions.py", "Backend/AccessManager/web.py",
+    "Backend/AccessManager/static/members.js",
+)
+
+
+def assert_mmh_stable_sources(sources):
+    for name, source in sources.items():
+        origins = re.findall(r"https://[A-Za-z0-9.\-]+\.run\.app", source)
+        if not origins or set(origins) != {MMH_STABLE}:
+            raise AssertionError("MMH stable origin drift: " + name)
+
 
 RUN_APP = re.compile(r"https://[A-Za-z0-9.\-]+\.run\.app")
 LOOPBACK = ("localhost", "127.0.0.1", "10.0.2.2", "0.0.0.0", "::1")
@@ -198,29 +215,52 @@ class BackendUrlParityTests(unittest.TestCase):
             "Android release resolves to [%s]" % urls["release"])
         self.assertTrue(urls["release"].startswith("https://"))
 
-    def test_mmh_validation_is_separate_and_private_candidate(self):
+    def test_mmh_validation_is_separate_and_private_stable(self):
         urls = android_backend_urls()
-        self.assertEqual(urls["mmhValidation"], "https://candidate---woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app")
+        self.assertEqual(urls["mmhValidation"], "https://woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app")
         self.assertNotEqual(urls["release"], urls["mmhValidation"])
         src = text(GRADLE)
         self.assertIn('applicationIdSuffix ".mmhps20261007.validation"', src)
         self.assertIn('"MMH_VALIDATION", "true"', src)
 
-    def test_mmh_internal_is_separate_and_private_candidate(self):
+    def test_mmh_internal_is_separate_and_private_stable(self):
         urls = android_backend_urls()
-        self.assertEqual(urls["mmhInternal"], "https://candidate---woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app")
+        self.assertEqual(urls["mmhInternal"], "https://woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app")
         self.assertNotEqual(urls["release"], urls["mmhInternal"])
+
+    def test_mmh_mobile_and_manager_use_same_stable_origin(self):
+        assert_mmh_stable_sources({name: text(ROOT / name) for name in MMH_SOURCES})
+        info = plistlib.loads((ROOT / "iOS/WoundMeasurementApp/InstitutionInfo.plist").read_bytes())
+        self.assertEqual(info["WoundAIInstitutionBackendURL"], MMH_STABLE)
+
+    def test_candidate_drift_in_each_transport_is_rejected(self):
+        sources = {name: text(ROOT / name) for name in MMH_SOURCES}
+        for name in sources:
+            changed = dict(sources)
+            changed[name] = changed[name].replace(MMH_STABLE, MMH_STABLE.replace("https://", "https://candidate---"))
+            with self.subTest(source=name), self.assertRaises(AssertionError):
+                assert_mmh_stable_sources(changed)
+
+    def test_candidate_drift_in_each_android_build_is_rejected(self):
+        original = text(GRADLE)
+        for build, check in (("mmhValidation", self.test_mmh_validation_is_separate_and_private_stable),
+                             ("mmhInternal", self.test_mmh_internal_is_separate_and_private_stable)):
+            before, marker, after = original.partition("        " + build + " {")
+            self.assertTrue(marker)
+            changed = before + marker + after.replace(MMH_STABLE, MMH_STABLE.replace("https://", "https://candidate---"), 1)
+            with self.subTest(build=build), patch(__name__ + ".text", return_value=changed), self.assertRaises(AssertionError):
+                check()
 
     def test_wrong_mmh_internal_address_is_rejected(self):
         original = text(GRADLE)
         before, marker, after = original.partition("        mmhInternal {")
         self.assertTrue(marker)
         changed = before + marker + after.replace(
-            "https://candidate---woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app",
+            "https://woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app",
             "https://woundai-backend-421209514056.asia-east1.run.app", 1)
         with patch(__name__ + ".text", return_value=changed):
             with self.assertRaises(AssertionError):
-                self.test_mmh_internal_is_separate_and_private_candidate()
+                self.test_mmh_internal_is_separate_and_private_stable()
 
     def test_missing_or_unknown_mmh_internal_profile_is_rejected(self):
         original = text(GRADLE)

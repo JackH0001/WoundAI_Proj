@@ -190,3 +190,12 @@ memory 記載的既有驗證結果：
 App 送標註時帶上 `depth_source: "none"` 與 `capture_device`。
 `capture_device` 現在就有值，而且它日後是分析「跨裝置差異」的唯一依據——
 若某個機型的面積系統性偏高，沒有這個欄位就查不出來。
+
+
+## 2026-10-13 格式／幾何守門（本機候選，尚未部署）
+
+- 原始 f32 端點：內參使用 `ref_width/ref_height` 參考格點；參考／深度與 RGB／深度長寬比例差均不得超過 1%。若 metadata 有 `rgb_w/rgb_h` 或 `rgb_width/rgb_height`，必須與綁定標註尺寸完全相同。失敗回 400，沒有深度資產或索引寫入。
+- annotation 的 16-bit 灰階 PNG：現行 iOS 未送參考尺寸時，fx/fy/cx/cy 位於深度 PNG 格點，伺服器保存 `camera_intrinsics_grid=depth_png`；明確提供參考尺寸則驗證後標 `reference`。不改写原內參值。manifest 的歷史未標記紀錄輸出 `unknown`。
+- 置信度 PNG 必須是相同尺寸的 8/16-bit 灰階；所有幾何檢查在深度資產寫入前完成。無效深度保持既有「2D 可保存、depth_source=rejected」語意。
+- 比例相同僅能排除部分尺寸錯置，不能證明鏡像、180°、RGB-D 配準或畸變已正確；仍需不對稱實體標靶驗收。
+- 這一輪不改 MMH 的資料來源分級／同意政策。未補猜历史資料的方向、時間、重力或內參。

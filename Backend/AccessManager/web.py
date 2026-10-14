@@ -19,7 +19,7 @@ from .iap_policy import (ChangeUnconfirmed, ENTRY_ROLE, PolicyError,
 from .accounts import AccountError, AccountUnconfirmed, account_snapshot
 
 ORG = "mmhps20261007"
-CONSOLE = "https://candidate---woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app/console#users"
+CONSOLE = "https://woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app/console#users"
 
 
 @dataclass(frozen=True)

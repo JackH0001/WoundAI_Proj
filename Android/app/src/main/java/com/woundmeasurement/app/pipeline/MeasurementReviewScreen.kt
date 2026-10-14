@@ -55,21 +55,28 @@ fun MeasurementReviewScreen(
     onBack: () -> Unit
 ) {
     val ctx = LocalContext.current
-    val db = remember { WoundMeasurementDatabase.getDatabase(ctx) }
+    val runtime = rememberMedicalRuntime()
+    val db = remember(runtime) { runtime.database }
     val dao = remember { db.measurementDao() }
     val repo = remember { CaseRepository.from(db) }
-    val store = remember { LocalImageStore(ctx) }
-    val baseUrl = remember(backendBaseUrl) { backendBaseUrl ?: AppSettings.backendUrl(ctx) }
-    var backend by remember(baseUrl) { mutableStateOf(BackendClient(baseUrl)) }
+    val store = remember(runtime) { runtime.images }
+    val baseUrl = remember(backendBaseUrl) { backendBaseUrl ?: runtime.backendUrl() }
+    var backend by remember(baseUrl) { mutableStateOf(runtime.makeBackend(baseUrl)) }
     val scope = rememberCoroutineScope()
 
     var bmp by remember { mutableStateOf<Bitmap?>(null) }
     var submitting by remember { mutableStateOf(false) }
+    var savingRevision by remember { mutableStateOf(false) }
     val annotationGate = remember { AnnotationUploadGate() }
     var loading by remember { mutableStateOf(true) }
     var editing by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf<String?>(null) }
     var cur by remember { mutableStateOf(record) }
+    val researchState by runtime.research.status.collectAsState()
+    LaunchedEffect(researchState.items) {
+        val latest=withContext(Dispatchers.IO){dao.getById(cur.id)}
+        if(latest!=null && latest.annotationSubmitted && latest.copy(annotationSubmitted=cur.annotationSubmitted)==cur) cur=latest
+    }
     var trainOk by remember { mutableStateOf(false) }
     var loggedIn by remember { mutableStateOf(false) }
     var me by remember { mutableStateOf<LoginIdentity?>(null) }
@@ -133,12 +140,12 @@ fun MeasurementReviewScreen(
         }
         trainOk = readTrainConsent(repo, cur)
         // 憑證來自「設定」頁（Keystore 加密存本機），不再硬編碼 admin/woundai-admin。
-        val u = AppSettings.backendUser(ctx)
-        val p = AppSettings.backendPassword(ctx)
+        val u = runtime.backendUser()
+        val p = runtime.backendPassword()
         loggedIn = if (u.isBlank() || p.isBlank()) false else withContext(Dispatchers.IO) {
             runCatching {
-                if (com.woundmeasurement.app.BuildConfig.MMH_VALIDATION) {
-                    backend = MedicalSessions.acquire(ctx); backend.identity != null
+                if (runtime.needsLiveSession) {
+                    backend = runtime.acquire(); backend.identity != null
                 } else backend.login(u, p)
             }.getOrDefault(false)
         }
@@ -148,8 +155,8 @@ fun MeasurementReviewScreen(
         loading = false
     }
 
-    BackHandler(enabled = editing || submitting) {
-        if (!submitting) editing = false
+    BackHandler(enabled = editing || submitting || savingRevision) {
+        if (!submitting && !savingRevision) editing = false
     }
 
     val b = bmp
@@ -187,9 +194,13 @@ fun MeasurementReviewScreen(
             //   3. 沒有柵格就送不出組織遮罩 → 補送標註只送得出傷口輪廓，
             //      醫師花時間標的組織分區從來沒有進過訓練集
             // 三個後果都是安靜的。修邊當下看起來完全正常。
-            onDone = { newPoly, allPolys, iou, newArea, tis, raster ->
+            onDone = done@ { newPoly, allPolys, iou, newArea, tis, raster ->
+                if (savingRevision || submitting) return@done
                 val editorSnapshot = cur
+                savingRevision = true
+                editing = false
                 scope.launch {
+                    try {
                     if (raster != null && raster === resumeRaster) {
                         // Editor proved exact content equality; do not rewrite assets, notes or receipt state.
                         val verified = editorSnapshot.doctorVerified || me?.can("gt.verify") == true
@@ -197,7 +208,8 @@ fun MeasurementReviewScreen(
                         runCatching { withContext(Dispatchers.IO) { check(dao.updateIfUnchanged(editorSnapshot, updated)) { "紀錄已在其他操作中更新，請返回時間軸重新開啟；本次未覆寫。" } } }
                             .onSuccess { cur = updated; msg = if (verified)
                                 "遮罩與量測資料未變，已完成確認；保留原修訂與上傳狀態。"
-                                else "遮罩與量測資料未變；目前身分未產生醫師確認。" }
+                                else "遮罩與量測資料未變；目前身分未產生醫師確認。"
+                            }
                             .onFailure { msg = "⚠️ 確認未能保存，請返回時間軸重新核對。" }
                         editing = false
                         return@launch
@@ -300,6 +312,7 @@ fun MeasurementReviewScreen(
                             msg = "⚠️ 更新失敗：${it.message}"
                         }
                     editing = false
+                    } finally { savingRevision = false }
                 }
             }
         )
@@ -317,6 +330,10 @@ fun MeasurementReviewScreen(
         msg?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
 
         if (loading) Text("正在載入影像與驗證登入權限，請稍候…", style = MaterialTheme.typography.bodySmall)
+        if (savingRevision) {
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+            Text("正在保存修訂與已啟用的行政副本…", style = MaterialTheme.typography.bodySmall)
+        }
 
         val noImage = !loading && bmp == null
         if (noImage) Text(
@@ -339,10 +356,12 @@ fun MeasurementReviewScreen(
                 polygons = if (spaceMismatch == null) polys else emptyList(),
                 markerQuad = null, mmPerPx = cur.mmPerPx, calibMethod = null,
                 editRaster = if (spaceMismatch == null) resumeRaster else null,
+                wbGains = resumeRaster?.wbGains,
                 allowTissueEstimate = false, showCalibration = false
             )
         }
-        ReviewEditEntry(loading, submitting, bmp != null && spaceMismatch == null,
+        ResearchOutboxPanel(runtime,cur.id)
+        ReviewEditEntry(loading, submitting || savingRevision, bmp != null && spaceMismatch == null,
             loggedIn && me?.can("gt.verify") == true) { editing = true }
 
         Divider()
@@ -379,12 +398,12 @@ fun MeasurementReviewScreen(
             busy = submitting,
             label = if (cur.annotationSubmitted) "標註已保存，無需補送" else "補送訓練標註 → 再訓練佇列",
             onClick = { confirmSubmit = true },
-            enabled = !loading && !submitting && provenance != null && resumeRaster?.tissueEditCountKnown != false && me?.can("gt.verify") == true && !cur.annotationSubmitted && cur.gtPolygon != null && cur.imageId != null &&
+            enabled = !loading && !submitting && !savingRevision && provenance != null && resumeRaster?.tissueEditCountKnown != false && me?.can("gt.verify") == true && !cur.annotationSubmitted && cur.gtPolygon != null && cur.imageId != null &&
                       cur.wdCode != null && cur.doctorVerified && trainOk && loggedIn
         )
 
         Divider()
-        OutlinedButton(onBack, Modifier.fillMaxWidth(), enabled = !submitting) { Text("返回時間軸") }
+        OutlinedButton(onBack, Modifier.fillMaxWidth(), enabled = !submitting && !savingRevision) { Text("返回時間軸") }
     }
 
     // ---- 送出前的人工確認 ----
@@ -395,7 +414,7 @@ fun MeasurementReviewScreen(
     // 同時明確標示 PII 不在其中:這是雙層同意書對病患的承諾,醫師要能當場看見它成立。
     if (confirmSubmit) AlertDialog(
         onDismissRequest = { confirmSubmit = false },
-        title = { Text("確認送出訓練標註？") },
+        title = { Text("以目前登入醫師確認並送出此版本？") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("以下內容將離開本機、進入雲端再訓練佇列：", style = MaterialTheme.typography.bodyMedium)
@@ -469,57 +488,10 @@ fun MeasurementReviewScreen(
                         msg = ReviewTrainingConsent.blockedMessage(cur.source, cur.caseId)
                         return@launch
                     }
-                    val res = runCatching {
-                        withContext(Dispatchers.IO) {
-                            backend.submitAnnotation(
-                                code = submittedSnapshot.wdCode!!, gtPolygon = submittedPoly, exudate = submittedSnapshot.exudate,
-                                imageId = submittedSnapshot.imageId, imageW = submittedSnapshot.imageW ?: 0, imageH = submittedSnapshot.imageH ?: 0,
-                                // 多處傷口：只送 poly 的話其餘傷口在訓練集裡是背景。
-                                allPolygons = submittedPolys,
-                                // 面積以本機紀錄為真值（來自遮罩像素數），不讓後端由多邊形反算。
-                                areaCm2 = submittedSnapshot.estimatedArea,
-                                mmPerPx = submittedSnapshot.mmPerPx, route = submittedSnapshot.route, segModel = submittedProvenance?.segModel,
-                                quality = submittedProvenance?.quality,
-                                correctionIou = submittedSnapshot.correctionIou, careNote = submittedProvenance?.careNote,
-                                source = submittedSnapshot.source ?: "clinical", consentTrain = okNow,
-                                // 組織比例與分割 GT。這裡曾經**完全沒送**——醫師從時間軸修好的
-                                // 組織分區永遠進不了訓練集，而畫面照樣顯示「✅ 已補送」。
-                                // 失敗方向是安全的（沒送假 GT），但等於白做。
-                                tissueFrac = mapOf(
-                                    "granulation" to (submittedSnapshot.tissueGranulation ?: 0.0),
-                                    "slough" to (submittedSnapshot.tissueSlough ?: 0.0),
-                                    "necrosis" to (submittedSnapshot.tissueNecrosis ?: 0.0),
-                                    "epithelial" to (submittedSnapshot.tissueEpithelial ?: 0.0),
-                                    "other" to (submittedSnapshot.tissueOther ?: 0.0)
-                                ).takeIf { m -> m.values.any { it > 0.0 } },
-                                // 沒有柵格就整組不送。硬用輪廓補一張遮罩出來只會製造假 GT，
-                                // 而 tissue_edited 由 BackendClient 從柵格自己算——
-                                // 未經醫師修正的啟發式輸出後端會擋在訓練集外。
-                                tissueMaskPng = submittedRaster?.let {
-                                    TissueMaskCodec.encode(it.tissue, it.mask, it.mw, it.mh)
-                                },
-                                tissueRaster = submittedRaster,
-                                // 真值來自本機紀錄。v3 以前的舊紀錄一律 false（當時系統沒記錄
-                                // 醫師是否確認過，填 true 等於憑空捏造一個驗證事實）。
-                                doctorVerified = submittedSnapshot.doctorVerified
-                            )
-                        }
-                    }
-                    res.onSuccess { (ok, m) ->
-                        if (ok) {
-                            // 本機標記失敗時**不可**假裝成功:畫面顯示「已送出」而 DB 沒記,
-                            // 重開這頁又變成可補送,醫師會以為系統壞了(雲端會去重,但人不知道)。
-                            val marked = runCatching {
-                                withContext(Dispatchers.IO) { dao.acknowledgeAnnotationIfUnchanged(submittedSnapshot) }
-                            }.getOrDefault(false)
-                            if (marked) cur = submittedSnapshot.copy(annotationSubmitted = true)
-                            val base = if (m.contains("duplicate")) "ℹ️ 相同影像的相同遮罩已在佇列（去重），未重複新增"
-                                       else "✅ 已補送訓練標註（${cur.wdCode}）\n本筆已進入雲端再訓練佇列。"
-                            msg = if (marked) base
-                                  else "$base\n⚠️ 本機紀錄可能已變更或無法更新狀態；未標記其他修訂，請返回時間軸重新核對。"
-                        } else msg = "⚠️ 被守門擋下：$m"
-                    }.onFailure { msg = "⚠️ 送出失敗：${it.message}" }
-                  } finally { annotationGate.release(); submitting = false }
+                    msg = runtime.research.enqueue(submittedSnapshot)
+                  } catch (cancelled:kotlinx.coroutines.CancellationException) { throw cancelled }
+                    catch (_:Exception) { msg="未能建立研究待傳工作，請確認登入、同意與已存遮罩；本機紀錄保留。" }
+                    finally { annotationGate.release(); submitting = false }
                 }
             }) { Text("確認送出") }
         },

@@ -9,6 +9,8 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -28,6 +30,9 @@ import com.woundmeasurement.app.camera.ImageQualityAssessor
 import com.woundmeasurement.app.data.database.WoundMeasurementDatabase
 import com.woundmeasurement.app.data.entity.WoundCaseEntity
 import com.woundmeasurement.app.data.repo.CaseRepository
+import com.woundmeasurement.app.pipeline.MedicalRuntime
+import com.woundmeasurement.app.pipeline.LocalMedicalRuntime
+import com.woundmeasurement.app.data.store.MedicalDataScope
 import com.woundmeasurement.app.pipeline.BackendSettingsScreen
 import com.woundmeasurement.app.pipeline.CaseSelectScreen
 import com.woundmeasurement.app.data.entity.MeasurementEntity
@@ -90,6 +95,28 @@ class MainActivity : ComponentActivity() {
  */
 @Composable
 fun WoundMeasurementApp() {
+    val context = LocalContext.current
+    val prefs = remember { context.applicationContext.getSharedPreferences("medical_environment_selection", android.content.Context.MODE_PRIVATE) }
+    var environment by rememberSaveable { mutableStateOf(
+        if (BuildConfig.MMH_VALIDATION) prefs.getString("selected", MedicalDataScope.MMH.name) ?: MedicalDataScope.MMH.name
+        else MedicalDataScope.MMH.name) }
+    val dataScope = MedicalDataScope.entries.firstOrNull { it.name == environment } ?: MedicalDataScope.MMH
+    val runtime = remember(dataScope) { MedicalRuntime(context, dataScope) }
+    DisposableEffect(runtime) { onDispose { runtime.deactivate() } }
+    com.woundmeasurement.app.pipeline.ResearchOutboxLifecycle(runtime)
+    CompositionLocalProvider(LocalMedicalRuntime provides runtime) {
+        key(dataScope) {
+            MedicalAppScreens(runtime) { next ->
+                runtime.deactivate()
+                prefs.edit().putString("selected", next.name).apply()
+                environment = next.name
+            }
+        }
+    }
+}
+
+@Composable
+private fun MedicalAppScreens(runtime: MedicalRuntime, switchEnvironment: (MedicalDataScope) -> Unit) {
     // rememberSaveable:轉螢幕會重建 Activity,用 remember 的話畫面直接跳回主選單
     var currentScreen by rememberSaveable { mutableStateOf("main") }
     // 從哪裡進來的就回哪裡去。硬寫 "cases" 的話,從「最近就診」進來按返回會掉到個案管理頁,
@@ -97,9 +124,9 @@ fun WoundMeasurementApp() {
     var backTo by rememberSaveable { mutableStateOf("main") }
     val context = LocalContext.current
     LaunchedEffect(Unit) {
-        if (BuildConfig.MMH_VALIDATION) com.woundmeasurement.app.institution.InstitutionLogin.restore(context)
+        if (runtime.needsGoogle) com.woundmeasurement.app.institution.InstitutionLogin.restore(context)
     }
-    val repo = remember { CaseRepository.from(WoundMeasurementDatabase.getDatabase(context)) }
+    val repo = runtime.repo
     // 個案選定後在畫面間傳遞。**只傳個案不傳同意**——同意是閘門條件,由 MeasureValidationEntry
     // 從 DB 重讀(傳遞只會多一份可能過期的快照,而且會出現「case 屬 A、consent 屬 B」的脆弱狀態)。
     // rememberSaveable(需 @Parcelize):轉螢幕若丟了 case,量測到一半的結果會被靜默彈回個案清單
@@ -107,7 +134,7 @@ fun WoundMeasurementApp() {
     // 從時間軸點進來要檢視/重修的那一筆。刻意用 remember(不 saveable):
     // MeasurementEntity 未 Parcelable,轉螢幕就退回時間軸重新點,比硬塞序列化安全。
     var reviewRecord by remember { mutableStateOf<MeasurementEntity?>(null) }
-    val imageStore = remember { LocalImageStore(context) }
+    val imageStore = runtime.images
 
     // 保存期限清理:結案逾 90 天者刪影像但**保留面積與趨勢**(病歷不可因逾期而毀)。
     // 放 App 啟動時跑一次;失敗不影響使用(下次啟動再試)。
@@ -116,7 +143,7 @@ fun WoundMeasurementApp() {
         // 背景喚醒 Cloud Run（min-instances=0 時冷啟動 10–30 秒）。
         // 放在**開 App 的當下**而不是量測前：使用者接下來要選病患、確認同意、選傷口，
         // 那段時間足夠容器啟動完成。量測前才喚醒等於把等待搬到最不能等的那一刻。
-        runCatching { com.woundmeasurement.app.pipeline.BackendWarmup.ping(context) }
+        runCatching { runtime.warmup() }
     }
 
     // 系統返回鍵:沒有這個的話,在任何子畫面按返回都直接結束 App
@@ -191,6 +218,7 @@ fun WoundMeasurementApp() {
         else -> Column(
             modifier = Modifier
                 .fillMaxSize()
+                .verticalScroll(rememberScrollState())
                 .padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -200,6 +228,15 @@ fun WoundMeasurementApp() {
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(bottom = 24.dp)
             )
+            if (BuildConfig.MMH_VALIDATION) {
+                Text(runtime.title, style = MaterialTheme.typography.titleMedium)
+                if (runtime.scope == MedicalDataScope.SYNTHETIC_REVIEW) {
+                    Text("獨立合成示範，不使用 MMH 帳號與紀錄。", style = MaterialTheme.typography.bodySmall)
+                    OutlinedButton({ switchEnvironment(MedicalDataScope.MMH) }) { Text("返回 MMH 機構服務") }
+                } else OutlinedButton({ switchEnvironment(MedicalDataScope.SYNTHETIC_REVIEW) }) {
+                    Text("進入合成示範（不需 Google）")
+                }
+            }
             MainButton("個案（病患・同意書・個案傷口・量測）") { currentScreen = "cases" }
             MainButton("最近就診") { currentScreen = "recent" }
             MainButton("快速量測（範例／模擬圖・不綁個案）") { currentScreen = "quick" }

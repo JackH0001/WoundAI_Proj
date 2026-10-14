@@ -50,6 +50,7 @@ fun SamplePickerScreen(
     preview: @Composable () -> Unit = {}
 ) {
     val ctx = LocalContext.current
+    val runtime = rememberMedicalRuntime()
     val captureScope = rememberCoroutineScope()
     // 模式:false=端上、true=後端。有後端時預設走後端(端上 ONNX 原生庫在模擬器可能不相容)
     var useBackend by remember { mutableStateOf(backend != null) }
@@ -98,9 +99,13 @@ fun SamplePickerScreen(
                         captureInfo = "⚠ 照護同意已失效或無法確認，未匯出影像或啟動量測。"
                         return@launch
                     }
-                    val rel = GalleryExport.saveCapture(ctx, bmp, source)
+                    val rel = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { GalleryExport.saveCapture(ctx, bmp, source, runtime.scope) }
                     captureInfo = "已擷取 ${bmp.width}×${bmp.height}（%.1f MP）".format(mp) +
-                        if (rel != null) " · 已存入相簿 $rel" else " · 未存入相簿（此來源或此建置不允許）"
+                        if (com.woundmeasurement.app.BuildConfig.MMH_VALIDATION) {
+                            if (rel != null) " · 已建立加密私密副本"
+                            else if (com.woundmeasurement.app.data.store.PrivateExports(ctx, runtime.scope).enabled) " · 行政副本未能保存；量測可繼續"
+                            else " · 行政副本功能關閉"
+                        } else if (rel != null) " · 已存入相簿 $rel" else " · 未存入相簿（此來源或此建置不允許）"
                     dispatch(bmp)
                 }
             },

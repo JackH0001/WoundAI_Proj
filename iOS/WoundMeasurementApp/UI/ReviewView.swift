@@ -9,7 +9,9 @@ import UIKit
 struct ReviewView: View {
     @EnvironmentObject var app: AppState
 
-    @ObservedObject private var uploads = ClinicalUploadOutbox.shared
+    let runtime: MedicalRuntime
+    @ObservedObject private var uploads: ClinicalUploadOutbox
+    init(runtime: MedicalRuntime) { self.runtime = runtime; uploads = runtime.local.outbox }
     @StateObject private var record = ClinicalReviewRecord()
     private var cur: Measurement? {
         get { record.measurement }
@@ -194,10 +196,10 @@ struct ReviewView: View {
         msg = nil
         do {
             guard let actor = identity?.identity else { throw BackendError.notLoggedIn }
-            try uploads.enqueue(measurement: m, payload: Data(), server: AppSettings.backendURL(),
-                configuredUser: AppSettings.backendUser(), actor: actor, depth: side,
+            try uploads.enqueue(measurement: m, payload: Data(), server: runtime.backendURL(),
+                configuredUser: runtime.backendUser(), actor: actor, depth: side,
                 requiresDepth: true, annotationConfirmed: m.annotationSubmitted)
-            uploads.resume(repo: app.repo, imageStore: app.imageStore)
+            runtime.resumeUploads()
             msg = "ℹ️ 原始深度已加入待傳佇列，可繼續其他工作。不需重新修邊。"
         } catch {
             msg = "⚠️ 未能建立深度待傳工作：\(error.localizedDescription)"
@@ -309,7 +311,7 @@ struct ReviewView: View {
         }
         #if WOUND_INSTITUTION
         do {
-            let c = try await MedicalSessionPool.shared.acquire()
+            let c = try await runtime.acquire()
             try Task.checkCancellation()
             backend = c; identity = await c.currentIdentity(); loggedIn = identity != nil
         } catch {
@@ -317,8 +319,8 @@ struct ReviewView: View {
             msg = "登入狀態尚未驗證：\(error.localizedDescription)"
         }
         #else
-        let c = BackendClient(baseUrl: AppSettings.backendURL())
-        let u = AppSettings.backendUser(), p = AppSettings.backendPassword()
+        let c = runtime.makeBackend()
+        let u = runtime.backendUser(), p = runtime.backendPassword()
         // ⚠ 不可寫成 `!u.isEmpty && (try? await …)`：`&&` 的右運算元是 @autoclosure，
         //   不支援 async，await 塞進去是編譯錯誤（而且訊息不會指向 &&）。
         if u.isEmpty || p.isEmpty {
@@ -392,10 +394,18 @@ struct ReviewView: View {
     private func refreshIdentity() async -> Bool {
         identity = nil
         loggedIn = false
+        #if WOUND_INSTITUTION
+        do {
+            let refreshed = try await runtime.acquire()
+            backend = refreshed
+            identity = await refreshed.currentIdentity()
+            loggedIn = identity != nil
+        } catch { backend = nil }
+        #else
         guard let backend else { return false }
-        loggedIn = (try? await backend.login(username: AppSettings.backendUser(),
-                                             password: AppSettings.backendPassword())) == true
+        loggedIn = (try? await backend.login(username: runtime.backendUser(), password: runtime.backendPassword())) == true
         if loggedIn { identity = await backend.currentIdentity() }
+        #endif
         return loggedIn
     }
 
@@ -454,10 +464,11 @@ struct ReviewView: View {
             guard let actor = identity?.identity else { throw BackendError.notLoggedIn }
             let depth = DepthStore.load(imagePath: m.imagePath, store: app.imageStore)
             let expectsDepth = DepthStore.lookup(imagePath: m.imagePath, store: app.imageStore) != nil
-            try uploads.enqueue(measurement: m, payload: payload, server: AppSettings.backendURL(),
-                configuredUser: AppSettings.backendUser(), actor: actor, depth: depth, requiresDepth: expectsDepth)
-            uploads.resume(repo: app.repo, imageStore: app.imageStore)
+            try uploads.enqueue(measurement: m, payload: payload, server: runtime.backendURL(),
+                configuredUser: runtime.backendUser(), actor: actor, depth: depth, requiresDepth: expectsDepth)
+            runtime.resumeUploads()
             msg = "ℹ️ 研究資料已安全排入待傳佇列，可繼續工作；標註確認後自動接續原始深度。"
+            msg = (msg ?? "") + (await runtime.exportSubmission(m, payload: payload))
         } catch {
             msg = "⚠️ 未能建立研究待傳工作：\(error.localizedDescription)"
         }

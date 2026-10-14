@@ -8,7 +8,7 @@ import json
 import re
 
 ORG = "mmhps20261007"
-URL = "https://candidate---woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app/api/v1/users"
+URL = "https://woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app/api/v1/users"
 ROLES = {"physician", "nurse", "assistant", "engineer", "admin"}
 FIELDS = ("identity", "org", "user", "role", "role_zh", "display_name", "disabled", "created_at", "updated_at", "revision")
 
