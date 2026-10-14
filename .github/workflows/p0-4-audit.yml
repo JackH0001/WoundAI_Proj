@@ -80,6 +80,8 @@ on:
       - 'tools/test_plan_mmh_runtime.py'
       - 'tools/plan_review_runtime.py'
       - 'tools/test_plan_review_runtime.py'
+      - 'tools/owner_guard.py'
+      - 'tools/test_owner_guard.py'
       - 'tools/test_mmh_unlocked_deployment.py'
       - 'tools/check_mmh_runtime_preflight.py'
       - 'tools/test_check_mmh_runtime_preflight.py'
@@ -219,6 +221,8 @@ on:
       - 'tools/test_plan_mmh_runtime.py'
       - 'tools/plan_review_runtime.py'
       - 'tools/test_plan_review_runtime.py'
+      - 'tools/owner_guard.py'
+      - 'tools/test_owner_guard.py'
       - 'tools/test_mmh_unlocked_deployment.py'
       - 'tools/check_mmh_runtime_preflight.py'
       - 'tools/test_check_mmh_runtime_preflight.py'
@@ -388,6 +392,7 @@ jobs:
           python -B tools/test_medical_image_build.py
           python -B tools/test_plan_mmh_runtime.py
           python -B tools/test_plan_review_runtime.py
+          python -B tools/test_owner_guard.py
           python -B tools/test_mmh_unlocked_deployment.py
           python -B tools/test_check_mmh_runtime_preflight.py
           python -B tools/test_migrate_mmh_editor.py

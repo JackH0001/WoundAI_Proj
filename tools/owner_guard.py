@@ -7,7 +7,9 @@
 
 ## 為什麼需要一支程式，而不是一條約定
 
-2026-08-09 定下分工：**Mac＝iOS 唯一寫者，Windows＝Android／後端／訓練**。
+2026-08-09 原始分工：**Mac＝iOS 唯一寫者，Windows＝Android／後端／訓練**。
+2026-10-14 Jack 明確授權 Mac 亦為 Backend／engineering 合格提交場域；
+這兩個目錄改為 shared，與 Android 一樣。不免除各平台的實際驗證。
 理由很硬：Swift 只有 Mac 編得起來，Windows 寫 iOS 永遠是「沒編譯過的猜測」。
 
 而這條約定在**同一天之內就被違反了兩次**：
@@ -59,13 +61,12 @@ OWNERS = [
     #   3. 本機分支落後 origin/main 的三個 commit（#13/#14/#15）**零筆**觸及 Android/。
     #      也就是沒有「對方推了新東西而我沒拉」的情況。
     #
-    # ⚠ Backend/ 與 engineering/ **刻意維持 windows**。「兩邊能力相當」在 Android 上
-    # 已經驗證，在這兩個目錄沒有：部署與驗證走的是 PowerShell（deploy_cloudrun.ps1、
-    # harden_bucket.ps1、Run-WindowsValidation.ps1），Mac 跑不完整。把沒驗證過的
-    # 東西一起放寬，就是這條守門存在的理由本身。
-    ("Android/", "both"),
-    ("Backend/", "windows"),
-    ("engineering/", "windows"),
+    # 2026-10-14：Jack 明確授權「本機也改為合格提交場域」。
+    # Backend／engineering 可由 Mac 或 Windows 修改、驗證與提交。
+    # 這是提交分工更新，不是 Windows／PowerShell 驗收已完成；每項測試
+    # 仍須標示實際執行平台。Windows 應用與平台專屬 workflow 維持原分工。
+    ("Backend/", "both"),
+    ("engineering/", "both"),
     ("Windows/", "windows"),
     ("tools/", "both"),
     ("docs/", "both"),
