@@ -41,3 +41,7 @@
 本次排程尚未部署。iOS 36 是本機實機安裝；Android 新兩圖輸出已經模擬器驗證，但不是商店交付。須先完成候選雲端 A/B、兩端同筆重送去重／完整回執、匯入無深度與相機 RGB-D 分別驗收，再更新內測。獨立免 Google 示範服務仍須部署與完整資料驗收；不能把 MMH 驗收等同公開版可正式收案。
 
 證據（repo 外）：`woundai-institution-evidence-20261007/mmh-iap-update-20261011/latency-pipeline-20261014/`，含 benchmark.py/json、隔離 runner、tools、logic、parity、Claude 呼叫錯誤。既有手機驗證在 `two-image-export-20261014/report.md` 與 `iphone34-live-acceptance-20261014/validation-report.md`。
+
+## 後續同輪補驗
+
+Android 現已補上與 iOS 相同的 GET health 429/503 有限重試（最多3次，等待2秒／4秒），不重播登入／上傳 POST；401/403、導向、非預期JSON、網路錯誤不自動重試。新增取消與失敗案例，MMH JVM **112/112 通過**，validation APK 及 internal Kotlin 建置成功，尚未實機／Play交付。使用者確認 Claude 工作流在 Windows，本機 CLI 的401不代表 Windows 登入失效；改以 GitHub 分支交付覆核，詳見 `claude_windows_review_20261014.md`。

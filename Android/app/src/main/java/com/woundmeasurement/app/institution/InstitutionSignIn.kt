@@ -55,9 +55,11 @@ object InstitutionLogin {
                 val http=OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)
                     .retryOnConnectionFailure(false).callTimeout(90,TimeUnit.SECONDS)
                     .addInterceptor(InstitutionInterceptor(session)).build()
-                http.newCall(Request.Builder().url(InstitutionConfig.ORIGIN+"/api/health?android_entry_probe=1").build()).execute().use {
-                    InstitutionSession.verifyHealth(it.code,it.body?.string() ?: "")
-                }
+                InstitutionEntryProbe.verify(probe = {
+                    http.newCall(Request.Builder().url(InstitutionConfig.ORIGIN+"/api/health?android_entry_probe=1").build()).execute().use {
+                        it.code to (it.body?.string() ?: "")
+                    }
+                }, onBusy = { status="Google 已登入，機構入口忙碌，正在重試…" })
             }
             if(!InstitutionIdentityPolicy.preserveAppCredentials(previous, session.subject)) AppSettings.clearCredentials(ctx)
             session.markVerified(); InstitutionRegistry.replace(session); next=null
