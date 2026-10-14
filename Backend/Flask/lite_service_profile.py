@@ -4,6 +4,7 @@ The route fence is installed before any other request hook, and rejects before
 body parsing, JWT handling, storage or inference. It does not replace App Attest.
 """
 import os
+import posixpath
 import re
 from flask import jsonify, request
 
@@ -38,7 +39,10 @@ def validate_lite_environment(environment):
     if media == security:
         raise ValueError('Lite media and security buckets must be distinct')
     runtime = environment.get('WOUNDAI_RUNTIME_DIR')
-    if type(runtime) is not str or not os.path.isabs(runtime) or os.path.dirname(runtime) == runtime:
+    # This is a Linux container path, even when the plan is checked on Windows.
+    if (type(runtime) is not str or not posixpath.isabs(runtime)
+            or runtime.startswith('//') or '\\' in runtime or '\x00' in runtime
+            or posixpath.normpath(runtime) != runtime or runtime == '/'):
         raise ValueError('Lite service requires a dedicated absolute runtime directory')
     salt = environment.get('LITE_IP_SALT')
     if type(salt) is not str or len(salt) < 32 or salt.strip() != salt:

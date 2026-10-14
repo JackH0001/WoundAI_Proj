@@ -21,6 +21,9 @@ ROOT=Path(__file__).resolve().parents[2]
 
 
 def lite_environment(runtime):
+    # Configuration describes a container; startup probes still use this drive's temp folder.
+    local = Path(runtime)
+    runtime = local.as_posix()[len(local.drive):]
     env=environment()
     env.update(WOUNDAI_SERVICE_PROFILE='lite',WOUNDAI_ENABLE_LITE_API='1',WOUNDAI_STORE='gcs',
                WOUNDAI_GCS_PREFIX='lite-public-v1',WOUNDAI_GCS_BUCKET='synthetic-media',
@@ -49,6 +52,17 @@ class ProfileConfigurationTests(unittest.TestCase):
                           ('WOUNDAI_RUNTIME_DIR','relative')]:
             env=dict(self.env);env[key]=value
             with self.subTest(key=key),self.assertRaises(ValueError):service_profile(env)
+    def test_container_runtime_paths_do_not_depend_on_host_path_rules(self):
+        # Simulate Python 3.13 Windows native-path behavior without requiring that host.
+        with patch('lite_service_profile.os') as host_os:
+            host_os.path.isabs.return_value = False
+            self.assertEqual(service_profile(dict(self.env, WOUNDAI_RUNTIME_DIR='/tmp/lite-runtime')), 'lite')
+        for runtime in ('/', '//server/share', '/tmp/..', '/tmp/../root', '/tmp/./lite',
+                        '/tmp/lite/', 'relative', r'C:\tmp\lite', 'C:/tmp/lite',
+                        r'/tmp\lite', '/tmp/lite\x00', None):
+            with self.subTest(runtime=runtime), self.assertRaises(ValueError):
+                service_profile(dict(self.env, WOUNDAI_RUNTIME_DIR=runtime))
+
     def test_clinical_and_demo_settings_rejected(self):
         for key in ('ADMIN_PASSWORD','JWT_SECRET_KEY','FLASK_SECRET_KEY','CARE_RECEIPT_SECRET',
                     'WOUNDAI_AUDIT_BUCKET','WOUNDAI_DEMO_SEED_USER','WOUNDAI_DEMO_SEED_FUTURE'):

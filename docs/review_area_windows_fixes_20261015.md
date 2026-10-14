@@ -48,3 +48,16 @@ if ($LASTEXITCODE -ne 0) { throw '3D portable tests failed' }
 尤其檢查：歷史 AI 遮罩不同但本次無修改、只改組織、單像素差異、畫筆復原、校正倍率改變、ROI 空白邊距、相同已確認面積走完時間軸／送件／overlay。沒有合併 main、部署或更新商店。
 
 證據：repo 外 `woundai-institution-evidence-20261007/mmh-iap-update-20261011/review-fixes-20261015/`。
+
+## Windows 107/111 回報後的追加修正
+
+- `lite_service_profile` 以 `posixpath` 驗證 Linux 容器的 runtime 路徑，不依規劃工具執行主機的 `os.path`。拒絕根目錄、UNC、反斜線、NUL、相對路徑及未正規化的 `..`／`.` 路徑。
+- 兩個 Lite 打包／部署清單測試改用 `.as_posix()` 比對跨平台 manifest。啟動測試的本機暫存路徑轉為同磁碟的 POSIX 表示，仍在各自隔離暫存目錄內。
+- 模擬 Windows 原生 `isabs` 不接受 `/tmp/...` 的測試，以及不合法路徑拒絕案例均已加入。第一輪測試替身誤改共用 `posixpath.isabs`，修正為只替換模組的主機 OS 參照後重跑；初次失敗日誌保留。
+- `open_mmh_console` 的三個 POSIX process-group 清理測試在無 `os.killpg` 的 Windows 跳過；其餘政策、參數與服務檢查仍跑。這沒有讓該 POSIX 工具宣稱支援 Windows。
+- 稽核 UI 的 Node 測試仍為必要檢查，沒有為了全綠而跳過；Windows 請先確認 `node --version` 能成功。
+- 簽章 CI 增加 Windows Server 2022，與 Ubuntu 同跑 Python 3.13 + JDK 17 的一次性測試金鑰；原生 Windows 結果以本次新 head 的 CI 為準。
+
+本次 Mac 重跑：工程111/111檔、tools363項（362通過／1個PowerShell缺環境跳過）、logic50/50、parity無未宣告落差。iOS／Android程式碼未於本次追加修改，上節197／139與117項結果屬前一筆面積修正驗證，並非再次實機執行。
+
+追加證據：`woundai-institution-evidence-20261007/mmh-iap-update-20261011/windows-portability-20261015/`。Windows全套仍需Claude以新的固定SHA重跑；不能把舊版本107/111改寫為已通過。PR維持Draft，完成覆核及CI後才提出固定SHA合併；尚未部署或更新商店。

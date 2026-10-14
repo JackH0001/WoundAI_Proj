@@ -1,6 +1,7 @@
 import argparse
 import copy
 import signal
+import os
 import subprocess
 import unittest
 from unittest.mock import Mock, patch
@@ -77,6 +78,7 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(m.command(),['gcloud','run','services','proxy',m.SERVICE,
             '--project=woundai-jackh001','--region=asia-east1','--port=8765','--quiet','--verbosity=error'])
 
+    @unittest.skipUnless(hasattr(os, 'killpg'), 'POSIX proxy process-group cleanup; unavailable on Windows')
     @patch('open_mmh_console.os.killpg')
     @patch('open_mmh_console.subprocess.Popen')
     def test_timeout_closes_entire_own_process_group(self, popen, kill):
@@ -85,12 +87,14 @@ class ProxyTests(unittest.TestCase):
         kill.assert_called_once_with(123,signal.SIGTERM)
         self.assertTrue(popen.call_args.kwargs['start_new_session'])
 
+    @unittest.skipUnless(hasattr(os, 'killpg'), 'POSIX proxy process-group cleanup; unavailable on Windows')
     @patch('open_mmh_console.os.killpg')
     @patch('open_mmh_console.subprocess.Popen')
     def test_interruption_cleans_up(self,popen,kill):
         child=Mock(pid=123);child.wait.side_effect=[KeyboardInterrupt(),0];popen.return_value=child
         self.assertEqual(m.run_proxy(1,{}),130);kill.assert_called_once_with(123,signal.SIGTERM)
 
+    @unittest.skipUnless(hasattr(os, 'killpg'), 'POSIX proxy process-group cleanup; unavailable on Windows')
     @patch('open_mmh_console.os.killpg')
     @patch('open_mmh_console.subprocess.Popen')
     def test_failed_proxy_exit_is_not_success(self,popen,kill):
