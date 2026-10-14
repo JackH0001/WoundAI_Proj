@@ -346,7 +346,7 @@ final class MeasureViewModel: ObservableObject {
         self.correctionIou = iou
         self.doctorVerified = canVerifyEdits
         if var r = result {
-            let area = newArea ?? r.areaCm2
+            let area = raster.areaCm2 ?? newArea ?? r.areaCm2
             r.areaCm2 = area
             r.tissueFrac = tissue
             // 也要覆寫單輪廓欄位：AnalysisPreview 的舊路徑讀它。
@@ -662,11 +662,11 @@ final class MeasureViewModel: ObservableObject {
                 allPolygons: polys,
                 // 面積以遮罩像素為真值，不讓後端由多邊形反算（RDP 有損＋多輪廓要合計，
                 // 兩邊各算一次必然對不上——兩個都合理、都沒警告的數字最難查）。
-                areaCm2: r.areaCm2,
+                areaCm2: saved.estimatedArea,
                 imageId: imageId, imageW: r.imageW, imageH: r.imageH,
                 mmPerPx: r.mmPerPx, route: r.route, segModel: r.segModel,
                 // 修邊完成時 applyEdited 已把醫師確認過的比例寫回 result。
-                tissueFrac: r.tissueFrac,
+                tissueFrac: saved.tissueFrac,
                 // 柵格為 nil（理論上不會，doctorVerified 已保證修過）就整組不送——
                 // 硬用輪廓補一張遮罩只會製造假 GT。
                 tissueMaskPngBase64: tissueMaskB64,

@@ -6,6 +6,8 @@ import CryptoKit
 /// Readable copies leave private storage only via explicit export or an opted-in submission folder.
 enum InstitutionPrivateExports {
     static let preferenceKey = "institution.administrativeExport.enabled"
+    static let lastResultKey = "institution.administrativeExport.lastResult"
+    static let lastAttemptKey = "institution.administrativeExport.lastAttempt"
     static let folderKey = "institution.administrativeExport.folderBookmark"
     static let folderLabelKey = "institution.administrativeExport.folderLabel"
     static func revisionName(rowID: Int64, files: [String: Data]) -> String {
@@ -137,12 +139,16 @@ struct InstitutionExportDocument: FileDocument {
 struct InstitutionExportSettingsSection: View {
     let runtime: MedicalRuntime
     @AppStorage private var enabled: Bool
+    @AppStorage private var lastResult: String
+    @AppStorage private var lastAttempt: Double
     @State private var selectingFolder = false
     @State private var folderLabel = ""
     @State private var folderIssue: String?
     init(runtime: MedicalRuntime) {
         self.runtime = runtime
         _enabled = AppStorage(wrappedValue: false, InstitutionPrivateExports.preferenceKey, store: runtime.exportPreferences)
+        _lastResult = AppStorage(wrappedValue: "", InstitutionPrivateExports.lastResultKey, store: runtime.exportPreferences)
+        _lastAttempt = AppStorage(wrappedValue: 0, InstitutionPrivateExports.lastAttemptKey, store: runtime.exportPreferences)
     }
     var body: some View {
         if InstitutionExport.enabled {
@@ -158,6 +164,11 @@ struct InstitutionExportSettingsSection: View {
                             folderLabel = ""
                         }
                     }
+                }
+                if !lastResult.isEmpty {
+                    Text("最近一次輸出：" + Date(timeIntervalSince1970: lastAttempt).formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption)
+                    Text(lastResult).font(.footnote).accessibilityIdentifier("AdministrativeExportStatus")
                 }
                 if let folderIssue { Text(folderIssue).foregroundStyle(.red) }
                 Text("預設關閉。開啟後於確認上傳時，使用同一份已確認修訂產生影像、遮罩疊圖與結果；只存時間軸不輸出，加密保存在 App 私密空間並排除系統備份，未選自訂資料夾時不會自動同步。關閉不影響時間軸或已同意的研究上傳，也不會刪除既有副本。")

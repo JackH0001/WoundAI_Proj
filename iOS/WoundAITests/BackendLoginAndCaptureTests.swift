@@ -48,6 +48,12 @@ final class BackendLoginAndCaptureTests: XCTestCase {
         XCTAssertEqual(verified.button,"正在讀取雲端狀態…")
         XCTAssertFalse(BackendLoginPresentation(entryReady:false,verified:true,busy:false,saved:true).showLogout)
     }
+    func testUnverifiedGoogleKeepsLoginActionVisibleWithWaitingLabel() {
+        let waiting = BackendLoginPresentation(entryReady:false,verified:false,busy:false,saved:true)
+        XCTAssertEqual(waiting.button, "儲存並登入（待 Google 入口驗證）")
+        XCTAssertFalse(waiting.showLogout)
+        XCTAssertTrue(waiting.status.contains("請先完成 Google"))
+    }
     func testSavedPasswordCannotMoveToAnotherOriginOrUser() {
         XCTAssertTrue(BackendLoginPresentation.mayReusePassword(inputUser:"doctor",savedUser:"doctor",inputURL:"https://test.invalid/",savedURL:"https://test.invalid"))
         XCTAssertFalse(BackendLoginPresentation.mayReusePassword(inputUser:"nurse",savedUser:"doctor",inputURL:"https://test.invalid",savedURL:"https://test.invalid"))
@@ -70,6 +76,16 @@ final class BackendLoginAndCaptureTests: XCTestCase {
         }, factory: { BackendClient(baseUrl:$0, institutionTransport:transport) })
         return MeasureViewModel(credentials: { ("dr01", "fixture") },
                                 sessionProvider: { try await pool.acquire() })
+    }
+    func testEditedResultUsesExactRasterAreaInsteadOfRoundedEditorSummary() async throws {
+        let vm = sharedModel(CaptureTransportFixture())
+        await vm.analyze(image(), phantom:true)
+        let raster = EditRaster(mask:[1,1,1,1],tissue:[1,1,1,4],origMask:[1,1,1,1],
+            rx0:0,ry0:0,mw:2,mh:2,mScale:1,cm2PerPx:0.0034034715225,canvasW:32,canvasH:32)
+        vm.applyEdited(polygon:[[0,0],[2,0],[2,2]],all:[],iou:1,newArea:0.01,
+                       tissue:raster.tissueFrac(),raster:raster)
+        XCTAssertEqual(vm.result?.areaCm2,raster.areaCm2)
+        XCTAssertNotEqual(vm.result?.areaCm2,0.01)
     }
     func testSharedSessionTenCapturesKeepImageBindingsWithoutTenLogins() async throws {
         let transport = CaptureTransportFixture(); let vm = sharedModel(transport)

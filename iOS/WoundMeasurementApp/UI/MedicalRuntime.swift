@@ -108,6 +108,12 @@ final class MedicalRuntime {
     /// Called only after explicit submission has durably enqueued this exact payload.
     func exportSubmission(_ row: Measurement, payload: Data) async -> String {
         guard automaticExportEnabled else { return "" }
+        let result = await performSubmissionExport(row, payload: payload)
+        exportPreferences.set(result.trimmingCharacters(in: .whitespacesAndNewlines), forKey: InstitutionPrivateExports.lastResultKey)
+        exportPreferences.set(Date().timeIntervalSince1970, forKey: InstitutionPrivateExports.lastAttemptKey)
+        return result
+    }
+    private func performSubmissionExport(_ row: Measurement, payload: Data) async -> String {
         guard active, row.doctorVerified, let image = local.images.rawBytes(row.imagePath),
               let path = row.rasterPath, let raster = local.images.rawBytes(path) else {
             return "\n研究已入列，但輸出資料不完整；請保留紀錄。"
@@ -128,7 +134,7 @@ final class MedicalRuntime {
                 if let bookmark {
                     do {
                         try InstitutionPrivateExports.deliver(files: files, name: name, bookmark: bookmark)
-                        return "\n行政影像、遮罩與結果已輸出至自訂資料夾；研究上傳状态請另行確認。"
+                        return "\n行政影像、遮罩與結果已輸出至自訂資料夾；研究上傳狀態請另行確認。"
                     } catch {
                         return "\n研究已入列；自訂資料夾輸出失敗。私密副本保留，可從設定重新選擇資料夾或匯出。"
                     }
