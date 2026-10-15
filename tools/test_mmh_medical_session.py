@@ -2,6 +2,7 @@
 from datetime import timedelta
 from pathlib import Path
 import secrets
+import logging
 import os
 import sys
 import tempfile
@@ -158,6 +159,28 @@ class MedicalSessionFlowTests(unittest.TestCase):
         cls.env.start()
         cls.addClassCleanup(cls.env.stop)
         cls.addClassCleanup(cls.runtime.cleanup)
+        # Windows refuses deleting an open log. Track only handlers created by
+        # this fixture, including ones basicConfig might leave unattached.
+        cls.fixture_handlers = []
+        file_handler = logging.FileHandler
+        def create_handler(*args, **kwargs):
+            handler = file_handler(*args, **kwargs)
+            cls.fixture_handlers.append(handler)
+            return handler
+        cls.handler_patch = patch.object(logging, "FileHandler", create_handler)
+        cls.handler_patch.start()
+        cls.addClassCleanup(cls.handler_patch.stop)
+        cls.addClassCleanup(cls.close_fixture_handlers)
+
+    @classmethod
+    def close_fixture_handlers(cls):
+        loggers = [logging.getLogger()] + [
+            item for item in logging.Logger.manager.loggerDict.values()
+            if isinstance(item, logging.Logger)]
+        for handler in cls.fixture_handlers:
+            for logger in loggers:
+                logger.removeHandler(handler)
+            handler.close()
 
     setUp = MedicalSessionTests.setUp
     # Only own tests run here; inherited route tests already run above.

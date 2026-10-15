@@ -1147,6 +1147,11 @@ class DemoDeployChecksAgainstFakeGcloud(unittest.TestCase):
             state.mkdir()
             cls.states[shell] = state
             env = os.environ.copy()
+            # Let each PowerShell edition construct its own module search path.
+            # Inheriting pwsh's PSModulePath can hide 5.1's Get-FileHash module.
+            for key in list(env):
+                if key.upper() == "PSMODULEPATH":
+                    env.pop(key)
             env.update({"WOUNDAI_DEMO_CHECK_SOURCE": str(DEMO),
                         "WOUNDAI_DEMO_DOC_BLOCK": str(doc_block),
                         "WOUNDAI_DEMO_CHECK_CASES": str(case_file),

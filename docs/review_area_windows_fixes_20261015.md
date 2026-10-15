@@ -61,3 +61,15 @@ if ($LASTEXITCODE -ne 0) { throw '3D portable tests failed' }
 本次 Mac 重跑：工程111/111檔、tools363項（362通過／1個PowerShell缺環境跳過）、logic50/50、parity無未宣告落差。iOS／Android程式碼未於本次追加修改，上節197／139與117項結果屬前一筆面積修正驗證，並非再次實機執行。
 
 追加證據：`woundai-institution-evidence-20261007/mmh-iap-update-20261011/windows-portability-20261015/`。Windows全套仍需Claude以新的固定SHA重跑；不能把舊版本107/111改寫為已通過。PR維持Draft，完成覆核及CI後才提出固定SHA合併；尚未部署或更新商店。
+
+## 原生 Windows 全套追加驗證（2026-10-15）
+
+獨立私有 CI 固定公開庫 `85c8430`、3D `484eb5e`，使用 Windows Server 2022／Python 3.13、repo Windows dependency lock、Node 20／JDK 17；未變更已部署服務。首次實跑為工程109/111檔，tools363項有1個清理錯誤、3個已聲明POSIX跳過，3D58/58、logic50/50與parity通過。這不是先前Claude的107/111紀錄。
+
+本次補修：
+- Lite部署規劃器的artifact_sha256鍵改用POSIX路徑，對齊既有跨平台契約；保留所有雜湊檢查。
+- 模擬部署測試啟動各PowerShell前清除繼承的PSModulePath，使5.1與7各自載入系統模組；沒有略過Get-FileHash或複製完整性驗證。
+- 醫療session fixture僅追蹤、移除與關閉自己建立的FileHandler，再清除暫存目錄；不關閉其他測試的日誌。
+- 獨立CI的Android SDK安裝指定platform-tools、API36、build-tools36，排除action預設已移除的tools套件；App程式碼不變。
+
+Mac專項：Lite部署規劃10/10、醫療session21/21通過。新版Windows全套結果須以後續固定SHA的實跑為準，不把上述首次失敗改寫成通過。證據：repo外release-continuation-20261015/windows-first及GitHub WoundAI3D run38671739368。

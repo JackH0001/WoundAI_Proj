@@ -150,7 +150,7 @@ def generate(context, expected, probe, fixture, version, output):
                             'warning': 'admission limits, maxScale and billing alerts are not a hard cost cap'},
             'execution': 'offline review artifact only; no cloud mutation has occurred',
         }
-        plan['artifact_sha256'] = {str(p.relative_to(folder)):build.sha(p) for p in sorted(folder.rglob('*')) if p.is_file()}
+        plan['artifact_sha256'] = {p.relative_to(folder).as_posix():build.sha(p) for p in sorted(folder.rglob('*')) if p.is_file()}
         (folder/'plan.json').write_text(json.dumps(plan,indent=2)+'\n');folder.rename(output)
     return plan
 
