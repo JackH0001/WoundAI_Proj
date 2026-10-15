@@ -2,6 +2,23 @@ package com.woundmeasurement.app.pipeline
 
 import android.graphics.Bitmap
 import android.graphics.Matrix
+import android.hardware.camera2.CameraCharacteristics
+import android.view.MotionEvent
+import android.view.ViewConfiguration
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.core.Camera
+import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.FocusMeteringResult
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import com.google.common.util.concurrent.ListenableFuture
+import kotlinx.coroutines.delay
+import java.util.concurrent.TimeUnit
 import android.util.Log
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
@@ -63,6 +80,7 @@ private const val TAG = "CameraCapture"
  * @param onCancel   使用者放棄拍攝。
  * @param onError    擷取失敗（含 OOM）。訊息給人看，不是給程式判斷用。
  */
+@androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
 @Composable
 fun CameraCaptureScreen(
     onCaptured: (Bitmap) -> Unit,
@@ -72,6 +90,37 @@ fun CameraCaptureScreen(
     val ctx = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var capturing by remember { mutableStateOf(false) }
+    var ready by remember { mutableStateOf(false) }
+    val feedback = remember { CameraFocusFeedback() }
+    var focusPhase by remember { mutableStateOf(CameraFocusFeedback.Phase.READY) }
+    var focusRequest by remember { mutableStateOf(0L) }
+    var focusPoint by remember { mutableStateOf<Offset?>(null) }
+    var focusFuture by remember { mutableStateOf<ListenableFuture<FocusMeteringResult>?>(null) }
+    var boundCamera by remember { mutableStateOf<Camera?>(null) }
+    var boundPreview by remember { mutableStateOf<Preview?>(null) }
+    var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    var active by remember { mutableStateOf(true) }
+    val currentOnError by rememberUpdatedState(onError)
+    val focusScale by animateFloatAsState(
+        if (focusPhase == CameraFocusFeedback.Phase.FOCUSING) 1.25f else 1f,
+        label = "focus confirmation"
+    )
+    LaunchedEffect(focusPhase, focusRequest) {
+        val request = focusRequest
+        if (focusPhase == CameraFocusFeedback.Phase.FOCUSING) {
+            delay(6000)
+            if (request == feedback.generation) {
+                focusPhase = feedback.complete(request, false)
+                focusFuture?.cancel(true)
+                boundCamera?.cameraControl?.cancelFocusAndMetering()
+            }
+        }
+        if (focusPhase == CameraFocusFeedback.Phase.CONFIRMED ||
+            focusPhase == CameraFocusFeedback.Phase.UNCONFIRMED) {
+            delay(2500)
+            focusPhase = feedback.expire(request)
+        }
+    }
 
     val imageCapture = remember {
         // HIGHEST_AVAILABLE：要感光元件給得出的最大尺寸，不接受 CameraX 的「合理」預設。
@@ -87,30 +136,114 @@ fun CameraCaptureScreen(
             .build()
     }
 
+    DisposableEffect(lifecycleOwner, imageCapture) {
+        active = true
+        onDispose {
+            active = false
+            ready = false
+            feedback.cancel()
+            focusFuture?.cancel(true)
+            boundCamera?.cameraControl?.cancelFocusAndMetering()
+            boundPreview?.let { cameraProvider?.unbind(it, imageCapture) }
+        }
+    }
+
+    fun focusAt(pv: PreviewView, x: Float, y: Float) {
+        val camera = boundCamera ?: return
+        if (!active || capturing || !ready) return
+        val point = pv.meteringPointFactory.createPoint(x, y)
+        val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF)
+            .setAutoCancelDuration(4, TimeUnit.SECONDS).build()
+        // Fixed-focus cameras can report a successful metering operation without doing AF.
+        // Show success only for a lens with known adjustable focus and a positive AF result.
+        val supported = runCatching {
+            val minDistance = Camera2CameraInfo.from(camera.cameraInfo)
+                .getCameraCharacteristic(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)
+            minDistance != null && minDistance > 0f && camera.cameraInfo.isFocusMeteringSupported(action)
+        }.getOrDefault(false)
+        val request = feedback.begin(supported)
+        focusRequest = request
+        focusPhase = feedback.phase
+        focusPoint = Offset(x, y)
+        focusFuture?.cancel(true)
+        if (!supported) return
+        try {
+            val result = camera.cameraControl.startFocusAndMetering(action)
+            focusFuture = result
+            result.addListener({
+                if (active) focusPhase = feedback.complete(request,
+                    runCatching { result.get().isFocusSuccessful }.getOrDefault(false))
+            }, ContextCompat.getMainExecutor(ctx))
+        } catch (_: Exception) {
+            focusPhase = feedback.complete(request, false)
+        }
+    }
+
     Box(Modifier.fillMaxSize()) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { c ->
                 val pv = PreviewView(c)
+                var down = Offset.Zero
+                var tap = false
+                val slop = ViewConfiguration.get(c).scaledTouchSlop
+                pv.setOnTouchListener { _, event ->
+                    when (event.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> { down = Offset(event.x, event.y); tap = true; true }
+                        MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_CANCEL -> { tap = false; true }
+                        MotionEvent.ACTION_MOVE -> {
+                            if ((Offset(event.x, event.y) - down).getDistance() > slop) tap = false
+                            true
+                        }
+                        MotionEvent.ACTION_UP -> {
+                            if (tap && (Offset(event.x, event.y) - down).getDistance() <= slop) {
+                                pv.performClick()
+                                focusAt(pv, event.x, event.y)
+                            }
+                            true
+                        }
+                        else -> true
+                    }
+                }
                 val future = ProcessCameraProvider.getInstance(c)
                 future.addListener({
+                    if (!active) return@addListener
                     try {
                         val provider = future.get()
                         val preview = Preview.Builder().build()
                             .also { it.setSurfaceProvider(pv.surfaceProvider) }
-                        provider.unbindAll()
-                        provider.bindToLifecycle(
+                        cameraProvider = provider
+                        boundPreview = preview
+                        boundCamera = provider.bindToLifecycle(
                             lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture
                         )
+                        ready = true
                     } catch (e: Exception) {
                         // 綁定失敗（權限未授予、相機被佔用）要說出來，
                         // 否則畫面只是一片黑，使用者會回報成「App 當掉」。
                         Log.e(TAG, "bindToLifecycle 失敗", e)
-                        onError("相機無法啟動：${e.message ?: e::class.simpleName}")
+                        currentOnError("相機無法啟動：${e.message ?: e::class.simpleName}")
                     }
                 }, ContextCompat.getMainExecutor(c))
                 pv
             }
+        )
+
+        if (focusPhase != CameraFocusFeedback.Phase.READY) {
+            val color = when (focusPhase) {
+                CameraFocusFeedback.Phase.CONFIRMED -> Color.Green
+                CameraFocusFeedback.Phase.FOCUSING -> Color.Yellow
+                else -> Color.White
+            }
+            Canvas(Modifier.fillMaxSize()) {
+                focusPoint?.let { drawCircle(color, 28.dp.toPx() * focusScale, it, style = Stroke(3.dp.toPx())) }
+            }
+        }
+        Text(
+            focusPhase.label,
+            color = Color.White,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 100.dp)
+                .background(Color.Black.copy(alpha = 0.75f)).padding(12.dp)
         )
 
         Row(
@@ -120,8 +253,9 @@ fun CameraCaptureScreen(
         ) {
             OutlinedButton(onClick = onCancel, enabled = !capturing) { Text("取消") }
             Button(
-                enabled = !capturing,
+                enabled = ready && !capturing && focusPhase != CameraFocusFeedback.Phase.FOCUSING,
                 onClick = {
+                    focusPhase = feedback.cancel()
                     capturing = true
                     imageCapture.takePicture(
                         ContextCompat.getMainExecutor(ctx),

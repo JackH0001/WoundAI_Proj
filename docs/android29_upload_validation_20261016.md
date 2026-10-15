@@ -2,7 +2,7 @@
 
 ## 結論
 
-已重現 Android 28 的範例來源送件失敗，修正後完成 Android 29 r8 建置、保留資料更新 Alldocube 的獨立驗證版及隔離回歸測試。Play 安裝版仍為 28；29 尚未簽署／上架。真實 MMH 登入與保存收據驗收待使用者回報。本輪沒有變更後端、IAP、資料桶或雲端資料。
+已重現 Android 28 的範例來源送件失敗，修正後完成 Android 29 r9 建置、保留資料更新 Alldocube 的獨立驗證版及隔離回歸測試。Play 安裝版仍為 28；29 尚未簽署／上架。使用者回報新拍模擬圖成功，並確認舊兩筆失敗應是在 Play 28；尚未核對該成功筆的客戶端版本與雲端收據。舊紀錄須在 Play 原 App 保留資料更新後再驗收。本輪沒有變更後端、IAP、資料桶或雲端資料。
 
 ## 問題與修正
 
@@ -11,14 +11,22 @@
 3. 拆開「紀錄版本不同」及「登入／同意未通過」錯誤，便於核對。使用者原始 phantom 失敗沒有裝置追蹤，不能宣稱已證明它完全由登入競態造成，仍需新版本真實送件驗收。
 4. 保持同一次明確送出所確認的影像、遮罩、面積快照：成功入列後才啟動行政輸出；對外只有 image.jpg 與含測量數據的 overlay.jpg。未成功入列不宣稱有輸出；本機輸出成功也不代表雲端保存完成。
 
+## 對焦提示與舊紀錄狀態
+
+- CameraX 預覽支援點選對焦：黃色縮放圓表示正在對焦；只有已知可調焦鏡頭且 CameraX 回報成功才顯示綠色圓與確認文字。固定焦距／不支援／失敗均不顯示成功，6 秒無結果會解鎖並提示重試。成功提示 2.5 秒後清除，避免移動後仍沿用舊確認。
+- 重複點選以 request generation 排除過期回覆；離開畫面取消要求、解除本畫面相機綁定。拖曳與雙指不被誤當單點對焦。對焦中暫停快門，未確認不代表能判定影像品質；仍須人工檢視。
+- 六項對焦單元測試涵蓋成功、失敗、固定焦距、舊回覆、新要求及離開取消。模擬器實際 CameraX 預覽點選測試通過，未拍照或上傳；不代表 Alldocube 真實鏡頭對焦與光學品質已驗收。
+- 使用者本輪確認舊兩筆「應該是 WoundAI MMHPS 28」。獨立 validation App 無法讀取 Play App 私有紀錄；本輪未讀、搬移或刪除那兩筆。先更新相同 Play App 再讀回原紀錄驗證，不要求任意重畫遮罩、不補造缺失的來源或原始組織基準。
+- 初次相機測試編譯缺少 GrantPermissionRule 相依，改用既有 InstrumentationRegistry 的模擬器專用權限設定後完整重建通過，未新增正式版相依。
+
 ## 本輪實測
 
 | 項目 | 結果 | 限制 |
 | --- | --- | --- |
 | 修正前 sample 重現 | 1/1 如預期失敗，同使用者錯誤 | 合成 fixture |
-| MMH validation 單元測試 | 123/123，0 skipped | macOS Gradle JVM |
-| MMH internal 單元測試 | 123/123，0 skipped | macOS Gradle JVM |
-| 模擬器待傳／控制器／輸出 | 50/50 | 注入合成 HTTP 回覆，非真實雲端 |
+| MMH validation 單元測試 | 129/129，0 skipped | macOS Gradle JVM |
+| MMH internal 單元測試 | 129/129，0 skipped | macOS Gradle JVM |
+| 模擬器相機／待傳／控制器／輸出 | 51/51 | 相機實際預覽與點選；HTTP 為合成回覆，非真實雲端 |
 | Alldocube 待傳／控制器／輸出 | 50/50 | 獨立測試資料，未讀寫使用者紀錄 |
 | Android 系統資料夾 | 2/2 | 模擬器實際選資料夾、讀回、程序重啟及撤權測試 |
 | 跨平台契約檢查 | 未宣告落差 0 | 已登記 Android 29／iOS 原始碼 27 的版號差異；非 UI 全面驗收 |
@@ -29,9 +37,9 @@
 
 ## 產物與後續
 
-- Android 29 r8：com.woundai.app.mmhps20261007.validation；已以保留資料方式安裝。
-- 待簽署 AAB SHA-256：`908d2d73a6c4d27d639fdd7cdafd2795d7ad38543a48e697a9e33a3734cd0452`。
-- APK SHA-256：`a13dde119ef9676035032eacf1877694482f990d5f25995da1a38caed30c8f3a`。
+- Android 29 r9：com.woundai.app.mmhps20261007.validation；已以保留資料方式安裝。
+- 待簽署 AAB SHA-256：`51d4d2a38914a476b522652665b79995ca8197ddcb987a6e4ab4106c5757d054`。
+- APK SHA-256：`7fb7c6b26ff8b70e076da50327c10d1c337e0ccf97370bec94de7a739775b55d`。
 - 實機驗收：回 MMH，用既有合成紀錄確認送出；回報最終保存訊息與兩張輸出。不必任意改遮罩或刪除紀錄。通過後才完成商店簽署／更新。
 - 簽署使用既有 upload key，由使用者自行輸入本機密碼；未讀取或保存該密碼。
 - Windows 本輪與 iOS 本輪編譯未執行；本輪沒有更動 iOS 程式。
@@ -48,4 +56,6 @@ MMH 與合成示範使用獨立帳號、資料與待傳工作。根據最新示�
 - `Android/app/src/main/java/com/woundmeasurement/app/pipeline/ReviewTrainingConsent.kt`
 - `Android/app/src/androidTest/java/com/woundmeasurement/app/pipeline/ClinicalResearchControllerTest.kt`
 - 完整測試與產物：`woundai-institution-evidence-20261007/mmh-iap-update-20261011/release-continuation-20261015/android29-upload-fix/`
-- 操作簡報：`woundai-user-guides-20261015/output/WoundAI-Android-操作指南-20261016-v7.pptx`，16 頁；沿用未變動介面的模擬器截圖，更新待傳、輸出與示範入口說明，明列 29 候選未上架。
+- 操作簡報：`woundai-user-guides-20261015/output/WoundAI-Android-操作指南-20261016-v8.pptx`，16 頁；沿用未變動介面的模擬器截圖，更新待傳、輸出、對焦與示範入口說明，明列 29 候選未上架。
+
+- r9 測試、固定 AAB、簽署工具：`release-continuation-20261015/android29-focus-r9/`；先前 r8 產物保留，請勿再以舊簽署腳本準備發布。
