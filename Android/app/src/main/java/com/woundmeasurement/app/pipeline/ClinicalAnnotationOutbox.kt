@@ -51,7 +51,8 @@ internal class ClinicalAnnotationOutbox(context: Context, private val scope: Med
         require(binding.origin.startsWith("https://") && binding.configuredUser.isNotBlank() && binding.actor.isNotBlank()) { "登入身分尚未確認，請先完成 Google／WoundAI 登入" }
         require(row.id > 0 && row.doctorVerified && !row.wdCode.isNullOrBlank() && !row.imageId.isNullOrBlank()) { "缺少醫師確認或已保存影像綁定，請開啟紀錄核對" }
         suspend fun currentMatches() = current()?.copy(annotationSubmitted=false) == row.copy(annotationSubmitted=false)
-        require(currentMatches() && permitted() == Permission.ALLOW) { "紀錄或送件權限已變動，請重新開啟紀錄核對" }
+        require(currentMatches()) { "已存紀錄與本次送件版本不同，請重新開啟紀錄核對；未建立待傳工作" }
+        require(permitted() == Permission.ALLOW) { "目前登入或同意狀態未通過送件核對；請確認登入與紀錄來源後重試" }
         suspend fun assetsMatch(): Boolean {
             val actual=savedAssets() ?: return false
             return actual.first.contentEquals(imageBytes) && actual.second.contentEquals(rasterBytes)

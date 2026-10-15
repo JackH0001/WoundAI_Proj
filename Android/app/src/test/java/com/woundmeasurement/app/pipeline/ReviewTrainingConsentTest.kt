@@ -8,6 +8,11 @@ class ReviewTrainingConsentTest {
     @Test fun unlinkedPhantomCanRetryWithoutInventingPatientConsent() = runBlocking {
         assertTrue(ReviewTrainingConsent.allowed("phantom", null) { error("Must not query a nonexistent patient") })
     }
+    @Test fun explicitSampleAllowedButLinkedSampleStillRequiresConsent() = runBlocking {
+        assertTrue(ReviewTrainingConsent.allowed("sample", null) { error("No patient") })
+        assertFalse(ReviewTrainingConsent.allowed("sample", 7) { false })
+        assertTrue(ReviewTrainingConsent.allowed("sample", 7) { true })
+    }
     @Test fun clinicalRequiresRealCase() = runBlocking {
         assertFalse(ReviewTrainingConsent.allowed("clinical", null) { true })
     }
@@ -38,8 +43,8 @@ class ReviewTrainingConsentTest {
         assertFalse(ReviewTrainingConsent.allowed(null, 7) { false })
         assertTrue(ReviewTrainingConsent.allowed(null, 7) { true })
     }
-    @Test fun sampleAndExternalDoNotImplyNoPatient() = runBlocking {
-        for (source in listOf("sample", "external")) {
+    @Test fun externalDoesNotImplyNoPatient() = runBlocking {
+        for (source in listOf("external")) {
             assertFalse(ReviewTrainingConsent.allowed(source, null) { true })
             assertFalse(ReviewTrainingConsent.allowed(source, 7) { false })
             assertTrue(ReviewTrainingConsent.allowed(source, 7) { true })

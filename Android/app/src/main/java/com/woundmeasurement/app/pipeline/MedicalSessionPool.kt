@@ -26,11 +26,15 @@ class MedicalSessionPool<C : MedicalSessionClient>(private val input: () -> Inpu
     class Input(val origin: String, val user: String, val password: String, val epoch: Long) {
         val binding get() = Binding(origin.trimEnd('/'), user, epoch)
     }
-    private class Pending<C>(val binding: Binding, val future: CompletableFuture<C>)
+    data class Verified<C>(val client: C, val identity: LoginIdentity)
+    private class Pending<C>(val binding: Binding, val future: CompletableFuture<Verified<C>>)
     private val monitor = Any()
     private var cached: Pair<Binding,C>? = null
     private var pending: Pending<C>? = null
-    fun acquire(): C {
+    fun acquire(): C = acquireVerified().client
+
+    /** Immutable receipt of this acquisition; another refresh may clear the shared client identity. */
+    fun acquireVerified(): Verified<C> {
         val current = input(); val binding = current.binding
         if (current.origin.isBlank() || current.user.isBlank() || current.password.isBlank())
             throw IOException("尚未設定 WoundAI 帳號密碼")
@@ -53,7 +57,7 @@ class MedicalSessionPool<C : MedicalSessionClient>(private val input: () -> Inpu
                     if (input().binding != binding) throw IOException("登入設定已變更，請重新驗證")
                     if (pending === active) { cached = binding to candidate; pending = null }
                 }
-                active.future.complete(candidate)
+                active.future.complete(Verified(candidate, identity))
             } catch (error: Exception) {
                 synchronized(monitor) { if (pending === active) pending = null }
                 active.future.completeExceptionally(error)

@@ -69,12 +69,13 @@ class MedicalRuntime internal constructor(context: Context, val scope: MedicalDa
         MedicalSessionPool.Input(if (open.get()) origin else "", backendUser(), backendPassword(),
             generation.get() + if (needsGoogle) MedicalSessionEpoch.snapshot() else 0L)
     }, factory = { makeBackend(it) }) }
-    fun acquire(): BackendClient {
+    fun acquire(): BackendClient = acquireVerified().client
+    fun acquireVerified(): MedicalSessionPool.Verified<BackendClient> {
         if (!open.get()) throw IOException("原環境已關閉")
-        if (needsLiveSession) return pool.acquire()
+        if (needsLiveSession) return pool.acquireVerified()
         val current = operation(); val client = makeBackend()
         if (!client.login(backendUser(), backendPassword()) || !current()) throw IOException("登入未完成")
-        return client
+        return MedicalSessionPool.Verified(client, client.identity ?: throw IOException("登入身分尚未確認"))
     }
     suspend fun warmup() = withContext(Dispatchers.IO) {
         val current = operation()

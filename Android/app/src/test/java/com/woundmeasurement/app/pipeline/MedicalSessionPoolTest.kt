@@ -50,6 +50,25 @@ class MedicalSessionPoolTest {
             assertEquals(1,fake.logins);assertEquals(1,fake.checks)
         } finally { release.countDown();threads.shutdownNow() }
     }
+    @Test fun acquiredPermissionReceiptSurvivesConcurrentRefreshButNextAcquisitionStillChecks() {
+        val fake=Fake();val pool=MedicalSessionPool(::input) { fake }
+        val receipt=pool.acquireVerified()
+        val entered=CountDownLatch(1);val release=CountDownLatch(1)
+        fake.validation={ entered.countDown();check(release.await(3,TimeUnit.SECONDS)) }
+        val thread=Executors.newSingleThreadExecutor()
+        try {
+            val refresh=thread.submit<Fake> {pool.acquire()}
+            assertTrue(entered.await(3,TimeUnit.SECONDS))
+            assertNull(fake.identity) // Exactly the transient state that previously rejected queued work.
+            assertEquals("mmhps20261007:dr01",receipt.identity.identity)
+            assertTrue(receipt.identity.can("measure.sample"))
+            release.countDown();refresh.get(3,TimeUnit.SECONDS)
+            fake.failure=403
+            rejects {pool.acquireVerified()}
+            assertNull(fake.identity)
+            assertEquals(3,fake.checks)
+        } finally {release.countDown();thread.shutdownNow()}
+    }
     @Test fun changedCredentialsOrOriginCreatesFreshClient() {
         val pool=MedicalSessionPool(::input) { Fake() }
         val a=pool.acquire();epoch++;val b=pool.acquire();origin="https://second.invalid"
