@@ -22,8 +22,12 @@ internal class ClinicalResearchController(context: Context, private val runtime:
     private val manual=AtomicBoolean(false)
     @Volatile private var foreground=false
     private var pump: Job?=null
-    data class Item(val recordID:Long,val state:ClinicalAnnotationOutbox.State,val text:String)
+    data class Item(val recordID:Long,val state:ClinicalAnnotationOutbox.State,val text:String,val snapshot:MeasurementEntity?=null)
     data class Status(val items:List<Item> = emptyList(),val busy:Boolean=false,val issue:String?=null) {
+        fun tracks(row:MeasurementEntity?):Boolean = row != null && items.any {
+            it.state != ClinicalAnnotationOutbox.State.CANCELLED &&
+                it.snapshot?.copy(annotationSubmitted=false) == row.copy(annotationSubmitted=false)
+        }
         val pending get()=items.count { it.state !in setOf(ClinicalAnnotationOutbox.State.COMPLETE,ClinicalAnnotationOutbox.State.CANCELLED) }
     }
     private val mutable=MutableStateFlow(Status())
@@ -125,7 +129,7 @@ internal class ClinicalResearchController(context: Context, private val runtime:
                 ClinicalAnnotationOutbox.State.COMPLETE -> if(job.localAcknowledged) "研究標註已確認保存（本筆無深度）" else "舊修訂已保存；較新修訂未標記"
                 ClinicalAnnotationOutbox.State.CANCELLED -> "已停止：紀錄或同意不再有效"
             }
-            Item(job.measurement().id,job.state,text)
+            Item(job.measurement().id,job.state,text,job.measurement())
         })
     }
     private fun upload(client:BackendClient,job:ClinicalAnnotationOutbox.Job,consentTrain:Boolean):ClinicalAnnotationOutbox.Response {

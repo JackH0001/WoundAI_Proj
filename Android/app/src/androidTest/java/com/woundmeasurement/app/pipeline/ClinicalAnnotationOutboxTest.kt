@@ -69,6 +69,23 @@ class ClinicalAnnotationOutboxTest {
         assertNotEquals(enqueue(q,binding).id,enqueue(q,binding.copy(actor="another-actor")).id)
         assertEquals(2,q.jobs().size)
     }
+    @Test fun repeatedConfirmationAfterReceiptReturnsSameJobWithoutFailure()=fixture {
+        val q=queue();val job=enqueue(q,binding)
+        q.process(job.id,binding,allow,{receipt(it)},{runtime.database.measurementDao().acknowledgeAnnotationIfUnchanged(it)})
+        val repeated=enqueue(q,binding) // UI snapshot predates asynchronous acknowledgement.
+        assertEquals(job.id,repeated.id);assertEquals(ClinicalAnnotationOutbox.State.COMPLETE,repeated.state)
+        assertEquals(1,q.jobs().size)
+        val submitted=requireNotNull(runtime.database.measurementDao().getById(row.id))
+        assertEquals(job.id,q.enqueue(submitted,binding,image,raster,current={submitted},savedAssets={image to raster},
+            permitted={ClinicalAnnotationOutbox.Permission.ALLOW}).id)
+    }
+    @Test fun queuedRevisionGateDoesNotBlockNewEditsOrConfuseOtherRecords()=fixture {
+        val status=ClinicalResearchController.Status(items=listOf(ClinicalResearchController.Item(row.id,
+            ClinicalAnnotationOutbox.State.PENDING,"待傳",row)))
+        assertTrue(status.tracks(row));assertTrue(status.tracks(row.copy(annotationSubmitted=true)))
+        assertFalse(status.tracks(row.copy(exudate=3)));assertFalse(status.tracks(row.copy(id=row.id+1)))
+        assertFalse(status.copy(items=status.items.map{it.copy(state=ClinicalAnnotationOutbox.State.CANCELLED)}).tracks(row))
+    }
     @Test fun changedOriginUserOrActorNeverSendsOrAcknowledges()=fixture {
         val q=queue();val job=enqueue(q,binding)
         for(other in listOf(binding.copy(origin="https://other.invalid"),binding.copy(configuredUser="other"),binding.copy(actor="other"))) {

@@ -36,14 +36,14 @@ allow:
 <!-- release-version-exception -->
 ```json
 {
-  "android": 26,
+  "android": 28,
   "ios_medical": 27,
-  "reason": "iOS 27 延續隔離示範服務、登入 UX、量測圖片縮放及修邊工具，新增臨床拍攝導引與多指／ROI 修復；Android 26 候選延續 16 KB、RBAC 與機構內測疊圖匯出，增加保存收據核對、送件等待／防重複點擊及登入 UX，但尚未交付全部 iOS UI 功能，不以單純升號宣稱功能一致。",
+  "reason": "iOS 27 延續隔離示範服務、登入 UX、量測圖片縮放及修邊工具，新增臨床拍攝導引與多指／ROI 修復；Android 28 候選補上 Play 27 實測回報的快速量測 UI、待傳重複確認鎖定、保存競態與修邊座標／ROI 復原；延續 16 KB、RBAC 與機構內測疊圖匯出，增加保存收據核對、送件等待／防重複點擊及登入 UX，但尚未交付全部 iOS UI 功能，不以單純升號宣稱功能一致。",
   "alignment_trigger": "下一次 Android 正式 release 交付對應示範連線與登入 UX 並通過 Windows 驗證時，核對當時兩端 build，移除或重新明確登記此差異。任何一端先升號均使本登記失效。"
 }
 ```
 
-此登記只允許 **Android 26 對醫療 iOS 27**。缺理由、缺對齊條件、任一版號改變、重複登記或兩端已同號但未刪除登記，一律拒絕。WoundLite 是不同產品，build 28 不作 Android 醫療版的比較值。這是目前可覆核候選，尚未推送或宣稱 Windows 驗證通過。
+此登記只允許 **Android 28 對醫療 iOS 27（原始碼版號；已安裝 MMH iOS 的獨立建置號為 37）**。缺理由、缺對齊條件、任一版號改變、重複登記或兩端已同號但未刪除登記，一律拒絕。WoundLite 是不同產品，build 28 不作 Android 醫療版的比較值。這是目前可覆核候選，尚未推送或宣稱 Windows 驗證通過。
 
 `/api/v1/lite/annotation/revision` 是 Lite 28 的修訂回執端點，仍屬 iOS Lite 產品邊界；Android Lite 若日後建立，必須撤銷相應宣告並實作同一契約。
 
