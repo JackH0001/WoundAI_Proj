@@ -48,6 +48,16 @@ class InputTests(unittest.TestCase):
         with zipfile.ZipFile(self.aab, 'w') as z: z.writestr('other', b'x')
         with self.assertRaises(m.SigningError): m.check_input(self.aab, m.digest(self.aab))
 
+    def test_missing_packaged_verifier_stops_before_password_prompt(self):
+        argv = ['sign_mmh_aab.py', '--input', str(self.aab), '--sha256', m.digest(self.aab),
+                '--keystore', str(self.root/'unused.jks'), '--output', str(self.root/'signed.aab')]
+        with patch.object(m, '__file__', str(self.root/'sign_mmh_aab.py')), \
+             patch.object(m.sys, 'argv', argv), patch.object(m.getpass, 'getpass') as password:
+            with self.assertRaisesRegex(m.SigningError, 'Missing VerifyMmhBundle.java'):
+                m.main()
+            password.assert_not_called()
+        self.assertFalse((self.root/'signed.aab').exists())
+
     def test_nonzero_diagnostics_not_exposed(self):
         with patch.object(m.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, b'secret', b'secret')):
             with self.assertRaises(m.SigningError) as e:

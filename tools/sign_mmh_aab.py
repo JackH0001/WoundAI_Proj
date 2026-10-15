@@ -75,6 +75,14 @@ def private_aliases(keytool, keystore, env):
         listing, re.M)]
 
 
+def check_signing_tools(java_home):
+    source = Path(__file__).with_name('VerifyMmhBundle.java')
+    if not source.is_file():
+        raise SigningError('Missing VerifyMmhBundle.java; restore the signing tool package before entering a password.')
+    for name in ('java', 'keytool', 'jarsigner'):
+        tool(java_home, name)
+
+
 def verify_signature(bundle, cert_sha256, java_home):
     # Read every payload entry, triggering JDK JarVerifier. Each entry must be
     # covered by exactly the selected upload certificate, not merely a valid
@@ -89,6 +97,7 @@ def verify_signature(bundle, cert_sha256, java_home):
 
 def sign_bundle(bundle, expected, keystore, alias, store_pass, key_pass, output, java_home):
     check_input(bundle, expected)
+    check_signing_tools(java_home)
     if not keystore.is_file() or keystore.is_symlink():
         raise SigningError('Existing regular keystore required; no key is created.')
     if output.exists() or output.with_suffix('.verification.json').exists():
@@ -146,6 +155,7 @@ def main():
         return
     if not args.keystore or not args.output:
         p.error('--keystore and --output required for signing')
+    check_signing_tools(args.java_home)
     if not sys.stdin.isatty():
         raise SigningError('Run in your local interactive Terminal; never paste passwords into chat.')
     store_pass = getpass.getpass('既有 upload keystore 密碼（不顯示）：')
