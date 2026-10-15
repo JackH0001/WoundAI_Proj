@@ -21,7 +21,7 @@ import UIKit
 
 // MARK: - 工具與調色盤
 
-private enum EditTool { case bPaint, bErase, pan, tissue }
+enum EditTool { case bPaint, bErase, pan, tissue }
 
 /**
  組織圖層配色（RGBA，straight alpha）。索引＝修邊畫面碼。
@@ -251,6 +251,7 @@ private func seedAutoSync(_ st: RasterState, src: CGImage, wbGains: [Double]?) {
                                   mScale: st.mScale, mask: st.mask, src: src, wbGains: wbGains),
        auto.count == st.mw * st.mh {
         st.auto = auto
+        st.recount()
     }
 }
 
@@ -260,7 +261,7 @@ private func seedAutoSync(_ st: RasterState, src: CGImage, wbGains: [Double]?) {
 final class EditCanvasModel: ObservableObject {
     /// 只用來觸發重繪。柵格內容都在 `st` 裡，逐像素塗抹不該經過 SwiftUI diff。
     @Published var version = 0
-    @Published fileprivate var tool: EditTool = .bPaint
+    @Published var tool: EditTool = .bPaint
     @Published var curTissue = 2
     /// 筆刷半徑（**點**，不是像素）。Android 的 36 是 px（≈420dpi 下約 12pt）；
     /// iOS 直接抄 36 會是三倍粗——實機回報「預設過粗」的根因。14pt ≈ Android 視覺同寬。
@@ -410,8 +411,10 @@ final class EditCanvasModel: ObservableObject {
                 let a = Int(auto[i])
                 s.tissue[i] = UInt8((a >= 1 && a <= TissueCode.maxCode) ? a : defaultClass)
             }
-            s.recount(); s.syncAll()
         }
+        // Reopening also replaces the baseline. Incremental brush counters must
+        // start from that baseline, not the temporary all-zero grid from init.
+        s.recount(); s.syncAll()
     }
 
     func bump() {
@@ -754,6 +757,9 @@ final class EditCanvasModel: ObservableObject {
 
     func finish() -> (poly: [[Int]], all: [[[Int]]], iou: Double, area: Double?,
                       frac: [String: Double], raster: EditRaster)? {
+        guard !seeding else { return nil }
+        // Persist counts derived from the final pixels, never a stale UI cache.
+        st.recount()
         // 追**所有**連通元件。同一肢體多處傷口是臨床常態，
         // 只取最大的那一個等於把第二個傷口標成背景。
         let boundaries = MaskTrace.traceAllBoundaries(st.mask, mw: st.mw, mh: st.mh)

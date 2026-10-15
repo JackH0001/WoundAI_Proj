@@ -15,6 +15,14 @@ enum InstitutionPrivateExports {
         return "measurement-\(rowID)-\(digest)"
     }
     static func submissionContents(row: Measurement, image: Data, raster: Data, payload: Data, medicalRecordNumber: String? = nil) throws -> [String: Data] {
+        // Compare on the same JSON representation as annotationPayload. Foundation
+        // can move a binary Double by one ULP when decoding its decimal JSON form.
+        // Do not round values, use an epsilon, or change the saved/exported result.
+        var savedNumbers: [String: Any] = [:]
+        if let fractions = row.tissueFrac { savedNumbers["tissue_frac"] = fractions }
+        if let area = row.estimatedArea { savedNumbers["area_cm2"] = area }
+        let wireNumbers = try JSONSerialization.jsonObject(with:
+            JSONSerialization.data(withJSONObject: savedNumbers)) as? [String: Any] ?? [:]
         guard row.doctorVerified, let bitmap = UIImage(data: image), let cg = bitmap.cgImage,
               row.imageW == cg.width, row.imageH == cg.height,
               let edit = EditRasterCodec.decode(png: raster, meta: row.rasterMeta, canvasW: cg.width, canvasH: cg.height),
@@ -23,9 +31,9 @@ enum InstitutionPrivateExports {
               body["code"] as? String == row.wdCode,
               body["image_w"] as? Int == row.imageW, body["image_h"] as? Int == row.imageH,
               (body["gt_polygons"] as? [[[Int]]] ?? (body["gt_polygon"] as? [[Int]]).map { [$0] } ?? []) == row.polygons,
-              (body["tissue_frac"] as? [String: Double]) == row.tissueFrac,
+              (body["tissue_frac"] as? [String: Double]) == (wireNumbers["tissue_frac"] as? [String: Double]),
               body["doctor_verified"] as? Bool == true,
-              (body["area_cm2"] as? NSNumber)?.doubleValue == row.estimatedArea,
+              (body["area_cm2"] as? NSNumber)?.doubleValue == (wireNumbers["area_cm2"] as? NSNumber)?.doubleValue,
               (body["exudate"] as? NSNumber)?.intValue == row.exudate,
               let wound = body["wound_mask_png"] as? String,
               let tissue = body["tissue_mask_png"] as? String,
@@ -76,6 +84,28 @@ enum InstitutionPrivateExports {
         guard folder.startAccessingSecurityScopedResource() else { throw CocoaError(.fileReadNoPermission) }
         defer { folder.stopAccessingSecurityScopedResource() }
         return try folder.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
+    }
+    /// Only fixed descriptions reach the UI; provider errors can contain private paths.
+    static func failureDescription(_ error: Error) -> String {
+        if let failure = error as? InstitutionExport.Failure {
+            switch failure {
+            case .invalidGeometry: return "影像與遮罩座標不一致"
+            case .incompleteRaster: return "遮罩資料不完整"
+            case .imageEncoding: return "無法產生或加密影像副本"
+            case .inconsistentExistingExport: return "送件與本機副本的一致性核對失敗"
+            }
+        }
+        let failure = error as NSError
+        if failure.domain == NSCocoaErrorDomain {
+            switch failure.code {
+            case NSFileReadNoPermissionError, NSFileWriteNoPermissionError:
+                return "資料夾授權無效，請重新選擇可寫入的資料夾"
+            case NSFileWriteOutOfSpaceError: return "裝置可用空間不足"
+            case NSFileNoSuchFileError, NSFileReadNoSuchFileError: return "找不到原始副本或輸出資料夾"
+            default: break
+            }
+        }
+        return "檔案寫入或讀回核對失敗"
     }
     static func deliver(files: [String: Data], name: String, bookmark: Data) throws {
         var stale = false
@@ -172,6 +202,7 @@ struct InstitutionExportSettingsSection: View {
     @State private var selectingFolder = false
     @State private var folderLabel = ""
     @State private var folderIssue: String?
+    @State private var retrying = false
     init(runtime: MedicalRuntime) {
         self.runtime = runtime
         _enabled = AppStorage(wrappedValue: false, InstitutionPrivateExports.preferenceKey, store: runtime.exportPreferences)
@@ -197,6 +228,17 @@ struct InstitutionExportSettingsSection: View {
                     Text("最近一次輸出：" + Date(timeIntervalSince1970: lastAttempt).formatted(date: .abbreviated, time: .shortened))
                         .font(.caption)
                     Text(lastResult).font(.footnote).accessibilityIdentifier("AdministrativeExportStatus")
+                }
+                if enabled {
+                    Button(retrying ? "正在重新輸出…" : "重新輸出最近一次送件（不上傳）") {
+                        retrying = true
+                        Task {
+                            _ = await runtime.retryLatestSubmissionExport()
+                            retrying = false
+                        }
+                    }.disabled(retrying || !runtime.hasSubmissionForExport)
+                    Text("只將最近一次確認送件的影像與結果重新輸出至目前位置；不修改標註、不重送雲端資料。")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 if let folderIssue { Text(folderIssue).foregroundStyle(.red) }
                 Text("預設關閉。開啟後於確認上傳時，只輸出 image 傷口影像與 overlay 疊圖（含測量數據）兩張；資料夾依病歷號（無則「無病歷號」）及台北輸出日期時間命名。使用同一份已確認修訂；只存時間軸不輸出，加密保存在 App 私密空間並排除系統備份，未選自訂資料夾時不會自動同步。關閉不影響時間軸或已同意的研究上傳，也不會刪除既有副本。")

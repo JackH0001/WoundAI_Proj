@@ -65,6 +65,7 @@ targets:
       - path: WoundAITests/ClinicalUploadOutboxTests.swift
       - path: WoundAITests/InstitutionPrivateExportsTests.swift
       - path: WoundAITests/InstitutionExportTests.swift
+      - path: WoundAITests/TissueEditCountTests.swift
       - path: WoundAITests/TissuePreviewTests.swift
       - path: WoundAITests/InstitutionRestoreTests.swift
       - path: WoundAITests/DepthProvenanceTests.swift

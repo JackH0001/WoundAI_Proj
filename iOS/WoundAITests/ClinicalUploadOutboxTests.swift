@@ -105,6 +105,88 @@ final class ClinicalUploadOutboxTests: XCTestCase {
         XCTAssertThrowsError(try box.enqueue(measurement:m,payload:Data(),server:"https://a.invalid",configuredUser:"dr",actor:"a:dr",depth:nil,requiresDepth:true))
         XCTAssertTrue(box.jobs.isEmpty)
     }
+    private func countPayload(_ ratio: Double, image: String = "fixture") throws -> Data {
+        try JSONSerialization.data(withJSONObject: ["image_id": image, "wound_mask_sha256": "same-mask",
+            "tissue_edit_ratio": ratio, "tissue_edit_px": ratio > 1 ? 12 : 0,
+            "tissue_edited": ratio > 0], options: [.sortedKeys])
+    }
+    private func countJob(_ box: ClinicalUploadOutbox, ratio: Double, actor: String = "mmh:dr01",
+                          image: String = "fixture", depth: Data = Data([1,2])) throws -> String {
+        var m = Measurement(); m.id = 5; m.imageId = image; m.source = "phantom"
+        return try box.enqueue(measurement: m, payload: countPayload(ratio, image: image),
+            server: "https://original.invalid", configuredUser: "dr01", actor: actor,
+            depth: (depth, ["capture":"unchanged"]), requiresDepth: true)
+    }
+    private func rejectCount(_ box: ClinicalUploadOutbox, id: String) async throws {
+        try await box.process(id: id, allowed: { true },
+            annotate: { _ in .rejected(message: "tissue_edit_ratio range/type") },
+            sendDepth: { _ in XCTFail("unaccepted revision") }, acknowledgeRecord: { _ in XCTFail() })
+    }
+    func testExplicitCountRepairRetainsRejectedBytesAndUnblocksNewRevisionAfterRestart() async throws {
+        let box = ClinicalUploadOutbox(directory: directory)
+        let oldID = try countJob(box, ratio: 1.2)
+        try await rejectCount(box, id: oldID)
+        XCTAssertTrue(try XCTUnwrap(box.jobs.first).needsTissueCountRepair)
+        XCTAssertFalse(box.blocksSubmission(recordID: 5))
+        let newID = try countJob(box, ratio: 0)
+        let restarted = ClinicalUploadOutbox(directory: directory)
+        let rejected = try XCTUnwrap(restarted.jobs.first)
+        XCTAssertEqual(rejected.supersededBy, newID)
+        XCTAssertEqual(rejected.annotationPayload, try countPayload(1.2))
+        XCTAssertEqual(rejected.depthRaw, Data([1,2]))
+        XCTAssertFalse(rejected.completed)
+        XCTAssertFalse(rejected.blocksNewSubmission)
+        XCTAssertEqual(restarted.pendingCount, 1)
+        XCTAssertTrue(restarted.blocksSubmission(recordID: 5))
+        try await restarted.process(id: oldID, allowed: { true },
+            annotate: { _ in XCTFail("superseded job replayed"); throw Failure.offline },
+            sendDepth: { _ in XCTFail() }, acknowledgeRecord: { _ in XCTFail() })
+        try await restarted.process(id: newID, allowed: { true },
+            annotate: { body in
+                XCTAssertEqual(body, try self.countPayload(0))
+                return .enqueued(note: nil, revisionID: "0123456789abcdef")
+            }, sendDepth: { job in
+                XCTAssertEqual(job.annotationRevisionID, "0123456789abcdef")
+                XCTAssertEqual(job.depthRaw, Data([1,2]))
+            }, acknowledgeRecord: { _ in })
+        XCTAssertEqual(restarted.pendingCount, 0)
+        XCTAssertFalse(restarted.blocksSubmission(recordID: 5))
+        XCTAssertTrue(try XCTUnwrap(restarted.latest(recordID: 5)).completed)
+    }
+    func testRepairCannotRetargetImageActorOrDepthOrHideAnUnconfirmedNetworkOutcome() async throws {
+        for mode in 0..<4 {
+            let folder = directory.appendingPathComponent(String(mode))
+            let box = ClinicalUploadOutbox(directory: folder)
+            let oldID = try countJob(box, ratio: 1.2)
+            if mode != 3 { try await rejectCount(box, id: oldID) }
+            _ = try countJob(box, ratio: 0, actor: mode == 0 ? "other:dr01" : "mmh:dr01",
+                image: mode == 1 ? "different-image" : "fixture", depth: mode == 2 ? Data([9]) : Data([1,2]))
+            XCTAssertNil(box.jobs.first?.supersededBy)
+            XCTAssertEqual(box.pendingCount, 2)
+        }
+    }
+    func testInvalidCountReplacementCannotRetireRejectedJob() async throws {
+        let box = ClinicalUploadOutbox(directory: directory)
+        let id = try countJob(box, ratio: 1.2)
+        try await rejectCount(box, id: id)
+        _ = try countJob(box, ratio: 1.3)
+        XCTAssertNil(box.jobs.first?.supersededBy)
+    }
+    func testSupersededDiagnosticSnapshotStillExpiresAfterNinetyDays() async throws {
+        let box = ClinicalUploadOutbox(directory: directory)
+        let oldID = try countJob(box, ratio: 1.2)
+        try await rejectCount(box, id: oldID)
+        _ = try countJob(box, ratio: 0)
+        var old = try XCTUnwrap(box.jobs.first)
+        old.measurement.timestamp = Date().addingTimeInterval(-91 * 86400)
+        let encrypted = try XCTUnwrap(PhiCrypto.encryptBytes(JSONEncoder().encode(old)))
+        try encrypted.write(to: directory.appendingPathComponent(oldID + ".enc"))
+        let restarted = ClinicalUploadOutbox(directory: directory)
+        XCTAssertNil(restarted.storageIssue)
+        XCTAssertEqual(restarted.jobs.count, 1)
+        XCTAssertEqual(restarted.pendingCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent(oldID + ".enc").path))
+    }
     func testAnnotationReceiptRejectsUnknownMalformedOrMismatchedSuccess() throws {
         for body in ["{}", "not json", "{\"status\":\"enqueued\",\"code\":\"other\"}",
             "{\"status\":\"unknown\",\"code\":\"WD\"}",

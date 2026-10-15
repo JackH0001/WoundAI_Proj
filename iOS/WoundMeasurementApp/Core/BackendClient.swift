@@ -1134,6 +1134,10 @@ actor BackendClient {
             throw BackendError.badResponse("傷口與組織遮罩未齊全，請保留本機紀錄")
         }
         if let png = tissueMaskPngBase64, let r = tissueRaster {
+            guard r.tissueEditRatio.isFinite, (0...1).contains(r.tissueEditRatio),
+                  r.tissueEditedPx >= 0, r.tissueEditedPx <= r.mask.filter({ $0 != 0 }).count else {
+                throw BackendError.badResponse("組織修改比例需重新核對；請開啟原紀錄的修邊畫面確認完成，不必重拍")
+            }
             guard let wound = WoundMaskCodec.encodeBase64(mask: r.mask, mw: r.mw, mh: r.mh),
                   let woundData = Data(base64Encoded: wound), Data(base64Encoded: png) != nil else {
                 throw BackendError.badResponse("無法編碼最終傷口遮罩，尚未送出")

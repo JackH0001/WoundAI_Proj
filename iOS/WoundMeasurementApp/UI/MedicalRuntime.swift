@@ -105,6 +105,21 @@ final class MedicalRuntime {
     var automaticExportEnabled: Bool {
         InstitutionExport.enabled && exportPreferences.bool(forKey: InstitutionPrivateExports.preferenceKey)
     }
+    private var latestExportJob: ClinicalUploadJob? {
+        local.outbox.jobs.last {
+            $0.server == backendURL() && $0.configuredUser == backendUser()
+                && $0.supersededBy == nil && !$0.annotationPayload.isEmpty
+        }
+    }
+    var hasSubmissionForExport: Bool { active && latestExportJob != nil }
+    /// Explicit local retry uses the immutable submitted snapshot, never a new
+    /// raster from an unsubmitted edit. No authentication, enqueue or network call.
+    func retryLatestSubmissionExport() async -> String {
+        guard automaticExportEnabled, active, let job = latestExportJob else {
+            return "目前沒有可重新輸出的送件副本。"
+        }
+        return await exportSubmission(job.measurement, payload: job.annotationPayload)
+    }
     /// Called only after explicit submission has durably enqueued this exact payload.
     func exportSubmission(_ row: Measurement, payload: Data) async -> String {
         guard automaticExportEnabled else { return "" }
@@ -139,12 +154,12 @@ final class MedicalRuntime {
                         try InstitutionPrivateExports.deliver(files: files, name: InstitutionPrivateExports.deliveryName(files: files), bookmark: bookmark)
                         return "\nimage 與 overlay 兩張影像已輸出至自訂資料夾；研究上傳狀態請另行確認。"
                     } catch {
-                        return "\n研究已入列；自訂資料夾輸出失敗。私密副本保留，可從設定重新選擇資料夾或匯出。"
+                        return "\n自訂資料夾輸出失敗：\(InstitutionPrivateExports.failureDescription(error))。私密副本保留；請在設定重新選擇資料夾後按「重新輸出最近一次送件」。研究上傳狀態請另行確認。"
                     }
                 }
                 return "\n行政影像、遮罩與結果已保存於 App 私密空間；研究上傳狀態請另行確認。"
             } catch {
-                return "\n研究已入列，但行政副本未完成；請保留紀錄並重試輸出。"
+                return "\n行政副本未完成：\(InstitutionPrivateExports.failureDescription(error))。請保留紀錄，在設定按「重新輸出最近一次送件」；研究上傳狀態請另行確認。"
             }
         }.value
     }

@@ -115,6 +115,9 @@ class EditRaster(
 ) {
     val tissueEdited: Boolean get() = tissueEditedPx > 0
     val tissueEditRatio: Double get() = if (maskPx > 0) tissueEditedPx.toDouble() / maskPx else 0.0
+    val hasValidTissueEditStatistics: Boolean get() = tissueEditRatio.isFinite() &&
+        tissueEditRatio in 0.0..1.0 && tissueEditedPx >= 0 &&
+        tissueEditedPx <= mask.count { it.toInt() != 0 }
 }
 
 /**

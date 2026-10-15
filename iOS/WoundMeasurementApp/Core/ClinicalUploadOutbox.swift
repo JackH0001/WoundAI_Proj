@@ -22,8 +22,22 @@ struct ClinicalUploadJob: Codable, Identifiable {
     var lastIssue: String?
     var attempts = 0
     var nextAttemptAt: Date?
+    /// A rejected snapshot is retained for diagnosis, never rewritten or called saved.
+    var supersededBy: String?
+
+    var needsTissueCountRepair: Bool {
+        guard !completed, supersededBy == nil, !annotationConfirmed, annotationRevisionID == nil,
+              lastIssue?.contains("tissue_edit_ratio range/type") == true,
+              let obj = try? JSONSerialization.jsonObject(with: annotationPayload) as? [String: Any],
+              let ratio = obj["tissue_edit_ratio"] as? Double else { return false }
+        return !ratio.isFinite || !(0...1).contains(ratio)
+    }
+
+    var blocksNewSubmission: Bool { !completed && supersededBy == nil && !needsTissueCountRepair }
 
     var status: String {
+        if supersededBy != nil { return "舊送件修改比例無效；已保留並由重新確認的送件取代" }
+        if needsTissueCountRepair { return "組織修改比例需修復：請開啟此筆修邊，確認完成後再送出；不用重拍或改動遮罩。" }
         if completed { return requiresDepth ? "研究標註與原始深度已確認保存" : "研究標註已保存；本筆未附原始深度" }
         if let lastIssue { return lastIssue }
         return annotationConfirmed ? "標註已保存；原始深度待傳" : "研究資料已安全排入待傳佇列"
@@ -65,7 +79,10 @@ final class ClinicalUploadOutbox: ObservableObject {
         reload()
     }
 
-    var pendingCount: Int { jobs.filter { !$0.completed }.count }
+    var pendingCount: Int { jobs.filter { !$0.completed && $0.supersededBy == nil }.count }
+    func blocksSubmission(recordID: Int64) -> Bool {
+        jobs.contains { $0.measurement.id == recordID && $0.blocksNewSubmission }
+    }
     func latest(recordID: Int64) -> ClinicalUploadJob? { jobs.last { $0.measurement.id == recordID } }
 
     private func file(_ id: String) -> URL { directory.appendingPathComponent(id + ".enc") }
@@ -90,6 +107,12 @@ final class ClinicalUploadOutbox: ObservableObject {
                 guard path.lastPathComponent == job.id + ".enc", UUID(uuidString: job.id) != nil else {
                     throw BackendError.badResponse("outbox identity")
                 }
+                // Rejected diagnostic snapshots obey the existing 90-day limit
+                // even after they leave the active upload loop.
+                if job.supersededBy != nil && Date().timeIntervalSince(job.measurement.timestamp) > 90 * 86400 {
+                    try FileManager.default.removeItem(at: path)
+                    continue
+                }
                 loaded.append(job)
             }
             jobs = loaded.sorted { $0.createdAt < $1.createdAt }
@@ -107,14 +130,39 @@ final class ClinicalUploadOutbox: ObservableObject {
         }
         let metadata = try depth.map { try JSONSerialization.data(withJSONObject: $0.meta, options: [.sortedKeys]) }
         if let existing = jobs.last(where: {
-            !$0.completed && $0.measurement.id == measurement.id && $0.server == server && $0.actor == actor
+            !$0.completed && $0.supersededBy == nil && $0.measurement.id == measurement.id && $0.server == server && $0.actor == actor
             && $0.annotationPayload == payload && $0.depthRaw == depth?.raw && $0.depthMetadata == metadata
         }) { return existing.id }
         let job = ClinicalUploadJob(server: server, configuredUser: configuredUser, actor: actor,
             measurement: measurement, annotationPayload: payload, depthRaw: depth?.raw,
             depthMetadata: metadata, requiresDepth: requiresDepth, annotationConfirmed: annotationConfirmed)
         try persist(job)
+        try retireRejectedCounts(replacement: job)
         return job.id
+    }
+
+    /// Only an explicit, newly confirmed submission may replace a server-rejected
+    /// count-only error. Image, masks, scores, actor, origin and raw depth stay bound.
+    private func retireRejectedCounts(replacement: ClinicalUploadJob) throws {
+        guard let revised = try? JSONSerialization.jsonObject(with: replacement.annotationPayload) as? [String: Any],
+              let ratio = revised["tissue_edit_ratio"] as? Double,
+              ratio.isFinite, (0...1).contains(ratio), !replacement.annotationConfirmed else { return }
+        func withoutCounts(_ value: [String: Any]) -> NSDictionary {
+            var copy = value
+            for key in ["tissue_edited", "tissue_edit_px", "tissue_edit_ratio"] { copy.removeValue(forKey: key) }
+            return copy as NSDictionary
+        }
+        for var old in jobs where old.id != replacement.id && old.needsTissueCountRepair {
+            guard activeID != old.id, old.measurement.id == replacement.measurement.id,
+                  old.measurement.imageId == replacement.measurement.imageId,
+                  Self.bindingMatches(old, server: replacement.server, user: replacement.configuredUser, actor: replacement.actor),
+                  old.requiresDepth == replacement.requiresDepth, old.depthRaw == replacement.depthRaw,
+                  old.depthMetadata == replacement.depthMetadata,
+                  let original = try? JSONSerialization.jsonObject(with: old.annotationPayload) as? [String: Any],
+                  withoutCounts(original).isEqual(withoutCounts(revised)) else { continue }
+            old.supersededBy = replacement.id
+            try persist(old)
+        }
     }
 
     /// Dependency-free binding check is also exercised by restart/retargeting tests.
@@ -137,7 +185,8 @@ final class ClinicalUploadOutbox: ObservableObject {
                  annotate: (Data) async throws -> AnnotationOutcome,
                  sendDepth: @escaping (ClinicalUploadJob) async throws -> Void,
                  acknowledgeRecord: (Measurement) async -> Void) async throws {
-        guard var job = jobs.first(where: { $0.id == id }), !job.completed else { return }
+        guard var job = jobs.first(where: { $0.id == id }), !job.completed,
+              job.supersededBy == nil, !job.needsTissueCountRepair else { return }
         let message = await ClinicalUploadFlow.run(annotate: {
             guard !Task.isCancelled, await allowed() else { throw CancellationError() }
             if job.annotationConfirmed && job.annotationRevisionID != nil {
@@ -190,7 +239,14 @@ final class ClinicalUploadOutbox: ObservableObject {
                 activeID = nil; phase = ""; worker = nil
             }
             var blockedRecords = Set<Int64>()
-            for original in jobs where !original.completed {
+            // Recover after an interruption between saving a replacement and
+            // linking its rejected predecessor. Neither payload is modified.
+            do {
+                for replacement in jobs where !replacement.completed && replacement.supersededBy == nil {
+                    try retireRejectedCounts(replacement: replacement)
+                }
+            } catch { storageIssue = "研究送件修復狀態無法保存，已停止上傳。"; return }
+            for original in jobs where !original.completed && original.supersededBy == nil {
                 if Task.isCancelled { break }
                 // Never let a newer edit overtake an older unconfirmed revision.
                 if blockedRecords.contains(original.measurement.id) { continue }
