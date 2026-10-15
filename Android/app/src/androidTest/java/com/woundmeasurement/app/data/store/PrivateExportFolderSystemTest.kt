@@ -88,13 +88,12 @@ class PrivateExportFolderSystemTest {
         val tree=requireNotNull(store.outputFolder)
         assertEquals("primary:Documents",DocumentsContract.getTreeDocumentId(tree))
         assertTrue(context.contentResolver.persistedUriPermissions.any{it.uri==tree && it.isReadPermission && it.isWritePermission})
-        val files=mapOf("image.jpg" to "synthetic-folder-fixture".toByteArray(),"result.json" to "{\"area_cm2\":10.08}".toByteArray())
+        val files=mapOf("image.jpg" to "synthetic-folder-fixture".toByteArray(),"overlay.jpg" to "synthetic-overlay-fixture".toByteArray())
         val name=requireNotNull(store.save(files))
         val before=children(tree).toSet();store.deliver(name)
         val written=children(tree).filter{it !in before};assertEquals(1,written.size)
         val restored=readChildren(written.single());files.forEach{(k,v)->assertArrayEquals(v,restored[k])}
-        val hashes=JSONObject(String(restored.getValue("sha256.json")))
-        files.forEach{(k,v)->assertEquals(java.security.MessageDigest.getInstance("SHA-256").digest(v).joinToString(""){"%02x".format(it)},hashes.getString(k))}
+        assertEquals(setOf("image.jpg","overlay.jpg"),restored.keys)
         state.writeText(JSONObject().put("tree",tree.toString()).put("name",name).put("destination",written.single().toString())
             .put("oldFolder",originalFolder?.toString() ?: JSONObject.NULL).put("oldEnabled",originalEnabled).toString())
     }

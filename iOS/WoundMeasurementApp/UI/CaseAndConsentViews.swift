@@ -617,7 +617,7 @@ struct BackendSettingsView: View {
     }
     private var entryReady: Bool {
         #if WOUND_INSTITUTION
-        return !runtime.needsGoogle || institutionEntry.ready
+        return !runtime.needsGoogle || institutionEntry.applicationLoginReady
         #else
         return true
         #endif
@@ -679,6 +679,10 @@ struct BackendSettingsView: View {
                         }
                     }
                     .disabled(busy || !entryReady)
+                    if !entryReady {
+                        Text("此按鈕會在 Google 機構入口驗證通過後啟用。若服務忙碌，請留意上方入口確認進度。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
                     if let progress {
                         Text(progress).font(.footnote).accessibilityAddTraits(.updatesFrequently)
                         Text("首次連線或雲端服務重新啟動時可能需要較久，請稍候。")

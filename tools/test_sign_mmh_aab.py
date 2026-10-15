@@ -12,7 +12,7 @@ import zipfile
 from unittest.mock import patch
 import sign_mmh_aab as m
 
-JDK = Path(os.environ.get('MMH_TEST_JAVA_HOME', '/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home'))
+JDK = Path(os.environ.get('MMH_TEST_JAVA_HOME', os.environ.get('JAVA_HOME', '/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home')))
 
 
 class InputTests(unittest.TestCase):
@@ -55,7 +55,31 @@ class InputTests(unittest.TestCase):
         self.assertNotIn('secret', str(e.exception))
 
 
-@unittest.skipUnless((JDK/'bin/java').is_file(), 'JDK 17 required')
+class ToolResolutionTests(unittest.TestCase):
+    def test_tools_use_platform_suffix_and_explicit_jdk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root/'bin').mkdir()
+            for platform, suffix in [('win32', '.exe'), ('darwin', ''), ('linux', '')]:
+                for name in ('java', 'keytool', 'jarsigner'):
+                    candidate = root/'bin'/(name+suffix); candidate.touch()
+                    with patch.object(m.sys, 'platform', platform):
+                        self.assertEqual(m.tool(root, name), str(candidate))
+                    candidate.unlink()
+    def test_windows_missing_exe_never_falls_back_to_unqualified_tool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root/'bin').mkdir(); (root/'bin/java').touch()
+            with patch.object(m.sys, 'platform', 'win32'), self.assertRaises(m.SigningError):
+                m.tool(root, 'java')
+
+
+def jdk_available():
+    try:
+        return all(Path(m.tool(JDK, name)).is_file() for name in ('java', 'keytool', 'jarsigner'))
+    except m.SigningError:
+        return False
+
+
+@unittest.skipUnless(jdk_available(), 'JDK 17 required; set JAVA_HOME or MMH_TEST_JAVA_HOME')
 class RealSignatureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -92,8 +116,9 @@ class RealSignatureTests(unittest.TestCase):
         self.assertTrue(self.report['verified'])
         self.assertFalse(self.report['uploaded'])
         self.assertFalse(self.report['play_app_signing_certificate'])
-        self.assertEqual(self.signed.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(self.signed.with_suffix('.verification.json').stat().st_mode & 0o777, 0o600)
+        if os.name != 'nt':  # Windows ACLs are not POSIX permission bits.
+            self.assertEqual(self.signed.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(self.signed.with_suffix('.verification.json').stat().st_mode & 0o777, 0o600)
         self.assertNotIn(self.password, self.signed.with_suffix('.verification.json').read_text())
 
     def test_unsigned_archive_rejected(self):

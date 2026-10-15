@@ -20,6 +20,55 @@ final class EditorGestureTests: XCTestCase {
     }
 
     @MainActor
+    func testUnchangedBoundaryPreservesAreaAcrossTissueChangesAndRepeatedEntry() async throws {
+        let m = await model()
+        XCTAssertEqual(m.liveArea, 10)
+        var result = try XCTUnwrap(m.finish())
+        XCTAssertEqual(result.area, 10)
+        XCTAssertNotEqual(result.raster.areaCm2, result.area)
+        var tissueOnly = result.raster
+        tissueOnly.tissue = tissueOnly.tissue.map { $0 == 0 ? 0 : 2 }
+        XCTAssertEqual(EditAreaPolicy.area(original:10,entry:result.raster,current:tissueOnly),10)
+        result.raster = tissueOnly
+        // The stored AI baseline need not equal the already-reviewed boundary.
+        result.raster.origMask = Array(repeating: 0, count: result.raster.mask.count)
+        for _ in 0..<3 {
+            let f = UIGraphicsImageRendererFormat(); f.scale = 1
+            let image = UIGraphicsImageRenderer(size: CGSize(width:512,height:512), format:f).image { _ in }
+            let reopened = EditCanvasModel(image:image,initialPolygons:result.all,originalArea:result.area,
+                tissueFrac:result.frac,mmPerPx:0.5,resume:result.raster,wbGains:nil,boundaryOnly:true)
+            result = try XCTUnwrap(reopened.finish())
+            XCTAssertEqual(result.area,10)
+            XCTAssertEqual(result.iou,0)
+        }
+    }
+    @MainActor
+    func testSinglePixelAndScaleChangeRecomputeButUndoKeepsArea() async throws {
+        let m = await model()
+        let entry = try XCTUnwrap(m.finish()).raster
+        var changed = entry
+        let index = try XCTUnwrap(changed.mask.firstIndex(of: 0))
+        changed.mask[index] = 1
+        XCTAssertEqual(EditAreaPolicy.area(original:10,entry:entry,current:changed), changed.areaCm2)
+        changed.mask[index] = 0
+        XCTAssertEqual(EditAreaPolicy.area(original:10,entry:entry,current:changed),10)
+        changed.cm2PerPx = changed.cm2PerPx! * 4
+        XCTAssertEqual(EditAreaPolicy.area(original:10,entry:entry,current:changed), changed.areaCm2)
+        m.touchesChanged(.began, [CGPoint(x:180,y:180)])
+        m.touchesChanged(.ended, [])
+        XCTAssertNotEqual(m.liveArea,10)
+        m.undo()
+        XCTAssertEqual(m.liveArea,10)
+    }
+    func testEmptyROIPaddingPreservesBoundaryButTranslationDoesNot() {
+        let a = EditRaster(mask:[1,1,1,1],tissue:[],origMask:[],rx0:1,ry0:1,mw:2,mh:2,mScale:1,cm2PerPx:0.1,canvasW:20,canvasH:20)
+        var b = EditRaster(mask:[0,0,0,0,0,1,1,0,0,1,1,0,0,0,0,0],tissue:[],origMask:[],rx0:0,ry0:0,mw:4,mh:4,mScale:1,cm2PerPx:0.1,canvasW:20,canvasH:20)
+        XCTAssertEqual(EditAreaPolicy.area(original:9,entry:a,current:b),9)
+        b.rx0 = 1
+        XCTAssertEqual(EditAreaPolicy.area(original:9,entry:a,current:b),0.4)
+    }
+
+    @MainActor
     private func equal(_ a: EditCanvasModel.Snap, _ b: EditCanvasModel.Snap,
                        file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertEqual(a.m, b.m, file: file, line: line)

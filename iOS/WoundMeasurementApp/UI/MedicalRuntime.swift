@@ -108,6 +108,12 @@ final class MedicalRuntime {
     /// Called only after explicit submission has durably enqueued this exact payload.
     func exportSubmission(_ row: Measurement, payload: Data) async -> String {
         guard automaticExportEnabled else { return "" }
+        let result = await performSubmissionExport(row, payload: payload)
+        exportPreferences.set(result.trimmingCharacters(in: .whitespacesAndNewlines), forKey: InstitutionPrivateExports.lastResultKey)
+        exportPreferences.set(Date().timeIntervalSince1970, forKey: InstitutionPrivateExports.lastAttemptKey)
+        return result
+    }
+    private func performSubmissionExport(_ row: Measurement, payload: Data) async -> String {
         guard active, row.doctorVerified, let image = local.images.rawBytes(row.imagePath),
               let path = row.rasterPath, let raster = local.images.rawBytes(path) else {
             return "\n研究已入列，但輸出資料不完整；請保留紀錄。"
@@ -118,17 +124,20 @@ final class MedicalRuntime {
                   consent.consentCare, consent.trainEffective else { return "\n同意狀態已改變，未輸出行政副本。" }
         }
         guard active else { return "\n原環境已關閉，未輸出行政副本。" }
+        let medicalRecordNumber: String?
+        if let patientID = row.patientId { medicalRecordNumber = await local.repo.getPatient(id: patientID)?.medicalRecordNumber }
+        else { medicalRecordNumber = nil }
         let directory = local.privateExports
         let bookmark = exportPreferences.data(forKey: InstitutionPrivateExports.folderKey)
         return await Task.detached(priority: .utility) {
             do {
-                let files = try InstitutionPrivateExports.submissionContents(row: row, image: image, raster: raster, payload: payload)
+                let files = try InstitutionPrivateExports.submissionContents(row: row, image: image, raster: raster, payload: payload, medicalRecordNumber: medicalRecordNumber)
                 let name = InstitutionPrivateExports.revisionName(rowID: row.id, files: files)
                 _ = try InstitutionPrivateExports.save(files: files, name: name, directory: directory)
                 if let bookmark {
                     do {
-                        try InstitutionPrivateExports.deliver(files: files, name: name, bookmark: bookmark)
-                        return "\n行政影像、遮罩與結果已輸出至自訂資料夾；研究上傳状态請另行確認。"
+                        try InstitutionPrivateExports.deliver(files: files, name: InstitutionPrivateExports.deliveryName(files: files), bookmark: bookmark)
+                        return "\nimage 與 overlay 兩張影像已輸出至自訂資料夾；研究上傳狀態請另行確認。"
                     } catch {
                         return "\n研究已入列；自訂資料夾輸出失敗。私密副本保留，可從設定重新選擇資料夾或匯出。"
                     }

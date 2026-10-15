@@ -28,6 +28,8 @@ enum InstitutionEntryError: Error, LocalizedError {
         case .signInRequired: return "請先登入機構 Google 帳號，再登入 WoundAI 帳號。"
         case .redirected: return "機構入口回傳重新導向，已停止傳送登入資料。"
         case .badResponse: return "機構入口回應無法確認，請稍後再試。"
+        case .entryProbeFailed(let code) where code == 429 || code == 503:
+            return "Google 帳號已驗證，但機構服務目前忙碌或啟動中（HTTP \(code)）。請稍後重試；這不是 WoundAI 帳密錯誤，尚未傳送帳密。"
         case .entryProbeFailed(let code): return "Google 已登入，但機構入口尚未通過（HTTP \(code)）。請聯絡管理者；尚未傳送 WoundAI 帳密。"
         }
     }

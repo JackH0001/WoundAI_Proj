@@ -451,9 +451,9 @@ final class MeasureViewModel: ObservableObject {
             return false
         }
 
-        // (3) 修邊過就以柵格為準。
+        // (3) 組織由柵格統計；面積沿用編輯器已確認值，避免存檔時再重算。
         let frac = raster?.tissueFrac() ?? r.tissueFrac
-        let area = raster?.areaCm2 ?? r.areaCm2
+        let area = r.areaCm2
         var rasterPath: String?
         var rasterMeta: String?
         if let ras = raster, let enc = EditRasterCodec.encode(ras) {
@@ -660,13 +660,13 @@ final class MeasureViewModel: ObservableObject {
                 gtPolygon: PolygonJson.largest(polys),
                 exudate: exudate,
                 allPolygons: polys,
-                // 面積以遮罩像素為真值，不讓後端由多邊形反算（RDP 有損＋多輪廓要合計，
-                // 兩邊各算一次必然對不上——兩個都合理、都沒警告的數字最難查）。
-                areaCm2: r.areaCm2,
+                // 使用本次已確認並保存的面積；未改邊界／尺度保留原值，真正修改才按柵格重算。
+                // 不讓存檔、上傳或後端另由有損多邊形計算而覆寫。
+                areaCm2: saved.estimatedArea,
                 imageId: imageId, imageW: r.imageW, imageH: r.imageH,
                 mmPerPx: r.mmPerPx, route: r.route, segModel: r.segModel,
                 // 修邊完成時 applyEdited 已把醫師確認過的比例寫回 result。
-                tissueFrac: r.tissueFrac,
+                tissueFrac: saved.tissueFrac,
                 // 柵格為 nil（理論上不會，doctorVerified 已保證修過）就整組不送——
                 // 硬用輪廓補一張遮罩只會製造假 GT。
                 tissueMaskPngBase64: tissueMaskB64,

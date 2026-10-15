@@ -37,14 +37,17 @@ final class InstitutionRestoreTests: XCTestCase {
 
 private actor RestoreEntryFixture: InstitutionAuthenticatedTransport {
     var status = 200
+    var statuses: [Int] = []
     var requests: [URLRequest] = []
     var invalidated = false
+    func setStatuses(_ values: [Int]) { statuses = values }
     func setStatus(_ value: Int) { status = value }
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         guard !invalidated else { throw InstitutionEntryError.signInRequired }
         requests.append(request)
+        let code = statuses.isEmpty ? status : statuses.removeFirst()
         let bytes = Data(#"{"build":{"service":"woundai-backend-mmhps20261007","revision":"fixture"}}"#.utf8)
-        return (bytes, HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
+        return (bytes, HTTPURLResponse(url: request.url!, statusCode: code, httpVersion: nil, headerFields: nil)!)
     }
     func invalidate() { invalidated = true }
 }
@@ -83,13 +86,19 @@ private final class RestoreHarness {
     let preferences: UserDefaults
     var seconds: TimeInterval = 10
     var factories = 0
+    var delays: [UInt64] = []
+    var onWait: (() async throws -> Void)?
     init() {
         preferences = UserDefaults(suiteName: suite)!
         preferences.set("original-subject", forKey: "mmh.google.rememberedSubject")
     }
     func session() -> InstitutionGoogleSession {
         InstitutionGoogleSession(driver: driver, preferences: preferences, registry: registry,
-            clock: { [unowned self] in seconds }, makeTransport: { [unowned self] _,_,_,_ in
+            clock: { [unowned self] in seconds },
+            waitBeforeProbeRetry: { [unowned self] delay in
+                delays.append(delay)
+                try await onWait?()
+            }, makeTransport: { [unowned self] _,_,_,_ in
                 factories += 1; return entry
             })
     }
@@ -97,6 +106,63 @@ private final class RestoreHarness {
 }
 
 extension InstitutionRestoreTests {
+    func testBusyEntryRetriesOnlyHealthUsingSameGoogleAuthentication() async {
+        let h = RestoreHarness(); defer { h.clear() }
+        await h.entry.setStatuses([429, 503, 200])
+        let s = h.session()
+        h.onWait = {
+            XCTAssertFalse(s.applicationLoginReady)
+            XCTAssertTrue(s.busy)
+            XCTAssertNil(h.registry.snapshot())
+            XCTAssertTrue(s.message?.contains("不需重填帳密") == true)
+        }
+        await s.signIn(presenting: UIViewController())
+        XCTAssertTrue(s.applicationLoginReady)
+        XCTAssertEqual(h.driver.interactiveCalls, 1)
+        XCTAssertEqual(h.factories, 1)
+        XCTAssertEqual(h.delays, [2_000_000_000, 4_000_000_000])
+        let requests = await h.entry.requests
+        XCTAssertEqual(requests.count, 3)
+        for request in requests {
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.url?.path, "/api/health")
+            XCTAssertNil(request.httpBody)
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+        }
+    }
+    func testBusyEntryExhaustionKeepsCredentialsAndExplainsServiceFailure() async {
+        let h = RestoreHarness(); defer { h.clear() }
+        await h.entry.setStatus(429)
+        XCTAssertTrue(AppSettings.setCredentials(user: "fixture-doctor", password: UUID().uuidString))
+        let s = h.session(); await s.restoreIfNeeded()
+        XCTAssertFalse(s.applicationLoginReady); XCTAssertFalse(s.busy)
+        XCTAssertNil(h.registry.snapshot())
+        XCTAssertEqual(AppSettings.backendUser(), "fixture-doctor")
+        XCTAssertTrue(s.message?.contains("不是 WoundAI 帳密錯誤") == true)
+        let requests = await h.entry.requests; XCTAssertEqual(requests.count, 3)
+        XCTAssertEqual(h.driver.restoreCalls, 1)
+    }
+    func testDeniedOrMalformedEntryNeverRetriesOrPublishesReady() async {
+        // 200 with the wrong service is covered by InstitutionEntryHealth tests.
+        for code in [401, 403, 302, 500] {
+            let h = RestoreHarness(); defer { h.clear() }
+            await h.entry.setStatus(code)
+            let s = h.session(); await s.restoreIfNeeded()
+            XCTAssertFalse(s.applicationLoginReady); XCTAssertNil(h.registry.snapshot())
+            XCTAssertTrue(h.delays.isEmpty)
+            let requests = await h.entry.requests; XCTAssertEqual(requests.count, 1)
+        }
+    }
+    func testCancellationDuringRetryDoesNotSendAnotherProbeOrPublishReady() async {
+        let h = RestoreHarness(); defer { h.clear() }
+        await h.entry.setStatus(503)
+        h.onWait = { throw CancellationError() }
+        let s = h.session(); await s.restoreIfNeeded()
+        XCTAssertFalse(s.applicationLoginReady); XCTAssertFalse(s.busy)
+        XCTAssertNil(h.registry.snapshot())
+        let requests = await h.entry.requests; XCTAssertEqual(requests.count, 1)
+        let invalidated = await h.entry.invalidated; XCTAssertTrue(invalidated)
+    }
     func testSameSubjectRestoresThroughHealthWithoutClearingAppCredentials() async throws {
         let h = RestoreHarness(); defer { h.clear() }
         XCTAssertTrue(AppSettings.setCredentials(user: "fixture-doctor", password: UUID().uuidString))

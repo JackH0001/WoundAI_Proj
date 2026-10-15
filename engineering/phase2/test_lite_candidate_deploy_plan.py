@@ -61,7 +61,7 @@ class CandidatePlanTests(unittest.TestCase):
         self.assertIn('--network=none',cfg['steps'][-1]['args']);self.assertNotIn('push',cfg['steps'][-1]['args'])
         self.assertEqual(cfg['steps'][1]['args'][cfg['steps'][1]['args'].index('--tag')+1],cfg['images'][0])
         for path,sha in p['artifact_sha256'].items():self.assertEqual(plan.build.sha(self.output/path),sha)
-        self.assertEqual(set(p['artifact_sha256']),{str(f.relative_to(self.output)) for f in self.output.rglob('*') if f.is_file() and f.name!='plan.json'})
+        self.assertEqual(set(p['artifact_sha256']),{f.relative_to(self.output).as_posix() for f in self.output.rglob('*') if f.is_file() and f.name!='plan.json'})
     def test_source_extra_private_file_and_changed_source_refused_before_output(self):
         extra=self.context/'credentials.json';extra.write_text('{}')
         with self.assertRaises(ValueError):self.generate()

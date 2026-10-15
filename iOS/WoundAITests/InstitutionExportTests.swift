@@ -45,7 +45,10 @@ final class InstitutionExportTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at:root) }
         try InstitutionPrivateExports.writeDelivery(files:files,name:"test-revision",folder:root)
         let folder = try XCTUnwrap(FileManager.default.contentsOfDirectory(at:root,includingPropertiesForKeys:nil).first)
-        for (name, bytes) in files { XCTAssertEqual(try Data(contentsOf:folder.appendingPathComponent(name)),bytes) }
+        XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath:folder.path)), ["image.jpg", "overlay.png"])
+        for (name, bytes) in try InstitutionPrivateExports.deliveryImages(files) { XCTAssertEqual(try Data(contentsOf:folder.appendingPathComponent(name)),bytes) }
+        let wrapper = try InstitutionExportDocument(files:files)
+        XCTAssertEqual(Set(wrapper.files.keys), ["image.jpg", "overlay.png"])
         var corrupt=files;corrupt["wound.png"]=Data([0])
         XCTAssertThrowsError(try InstitutionPrivateExports.writeDelivery(files:corrupt,name:"bad",folder:root))
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath:root.path).count,1)
@@ -68,8 +71,20 @@ final class InstitutionExportTests: XCTestCase {
             allPolygons:row.polygons,areaCm2:row.estimatedArea,imageId:row.imageId,imageW:64,imageH:64,
             tissueFrac:row.tissueFrac,tissueMaskPngBase64:TissueMaskCodec.encodeBase64(tissue:raster.tissue,mask:raster.mask,mw:raster.mw,mh:raster.mh),
             tissueRaster:raster,consentTrain:true,doctorVerified:true)
-        let files = try InstitutionPrivateExports.submissionContents(row:row,image:raw,raster:encoded.0,payload:payload)
+        let files = try InstitutionPrivateExports.submissionContents(row:row,image:raw,raster:encoded.0,payload:payload,medicalRecordNumber:" MRN123 ")
         XCTAssertEqual(files["submission.json"],payload)
+        XCTAssertEqual(try InstitutionPrivateExports.deliveryName(files:files,at:Date(timeIntervalSince1970:0)),"MRN123_19700101_080000_000")
+        let unsafe = try InstitutionPrivateExports.submissionContents(row:row,image:raw,raster:encoded.0,payload:payload,medicalRecordNumber:"../../A:123")
+        XCTAssertEqual(try InstitutionPrivateExports.deliveryName(files:unsafe,at:Date(timeIntervalSince1970:0)),"______A_123_19700101_080000_000")
+        let legacy = try InstitutionPrivateExports.submissionContents(row:row,image:raw,raster:encoded.0,payload:payload)
+        XCTAssertTrue(try InstitutionPrivateExports.deliveryName(files:legacy).hasPrefix("無病歷號_"))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:root) }
+        let sameName = try InstitutionPrivateExports.deliveryName(files:files,at:Date(timeIntervalSince1970:0))
+        try InstitutionPrivateExports.writeDelivery(files:files,name:sameName,folder:root)
+        try InstitutionPrivateExports.writeDelivery(files:files,name:sameName,folder:root)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath:root.path).count,2)
         for mutation in 0..<4 {
             var changed=row
             switch mutation {

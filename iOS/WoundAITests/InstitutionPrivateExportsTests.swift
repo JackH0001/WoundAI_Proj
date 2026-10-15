@@ -7,6 +7,34 @@ import CryptoKit
 #endif
 
 final class InstitutionPrivateExportsTests: XCTestCase {
+    @MainActor
+    func testExportFailureRemainsVisibleAfterReturningToSettings() async throws {
+        let prefs = UserDefaults.standard
+        let keys = [InstitutionPrivateExports.preferenceKey, InstitutionPrivateExports.lastResultKey, InstitutionPrivateExports.lastAttemptKey]
+        let previous = keys.map { prefs.object(forKey:$0) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            for (key,value) in zip(keys,previous) {
+                if let value { prefs.set(value,forKey:key) } else { prefs.removeObject(forKey:key) }
+            }
+            try? FileManager.default.removeItem(at:root)
+        }
+        prefs.set(true,forKey:InstitutionPrivateExports.preferenceKey)
+        prefs.removeObject(forKey:InstitutionPrivateExports.lastResultKey)
+        prefs.removeObject(forKey:InstitutionPrivateExports.lastAttemptKey)
+        let runtime = try MedicalRuntime(scope:.mmh,support:root)
+        defer { runtime.deactivate() }
+        let note = await runtime.exportSubmission(Measurement(),payload:Data())
+        if !InstitutionExport.enabled {
+            XCTAssertEqual(note, "")
+            XCTAssertNil(prefs.object(forKey:InstitutionPrivateExports.lastResultKey))
+            XCTAssertNil(prefs.object(forKey:InstitutionPrivateExports.lastAttemptKey))
+            return
+        }
+        XCTAssertTrue(note.contains("輸出資料不完整"))
+        XCTAssertEqual(prefs.string(forKey:InstitutionPrivateExports.lastResultKey), note.trimmingCharacters(in:.whitespacesAndNewlines))
+        XCTAssertGreaterThan(prefs.double(forKey:InstitutionPrivateExports.lastAttemptKey),0)
+    }
     func testExportToggleDefaultsOffAndHonoursBuildCapability() {
         let d = UserDefaults.standard, key = InstitutionPrivateExports.preferenceKey
         let old = d.object(forKey:key); defer { if let old { d.set(old,forKey:key) } else { d.removeObject(forKey:key) } }
@@ -42,8 +70,8 @@ final class InstitutionPrivateExportsTests: XCTestCase {
         try XCTSkipIf(prefs.data(forKey: InstitutionPrivateExports.folderKey) == nil, "Requires a system-picker grant from testSelectLocalFolderForRestartValidation")
         let bookmark = try XCTUnwrap(prefs.data(forKey: InstitutionPrivateExports.folderKey))
         let bytes = Data("synthetic-local-folder-validation".utf8)
-        let hashes = ["fixture.json": SHA256.hash(data:bytes).map{String(format:"%02x",$0)}.joined()]
-        let files = ["fixture.json":bytes,"sha256.json":try JSONSerialization.data(withJSONObject:hashes)]
+        let hashes = ["image.png": SHA256.hash(data:bytes).map{String(format:"%02x",$0)}.joined(), "overlay.png": SHA256.hash(data:bytes).map{String(format:"%02x",$0)}.joined()]
+        let files = ["image.png":bytes,"overlay.png":bytes,"sha256.json":try JSONSerialization.data(withJSONObject:hashes)]
         let name = "synthetic-folder-check-" + UUID().uuidString
         try InstitutionPrivateExports.deliver(files:files,name:name,bookmark:bookmark)
         var stale=false
@@ -53,7 +81,7 @@ final class InstitutionPrivateExportsTests: XCTestCase {
         let own = try FileManager.default.contentsOfDirectory(at:folder,includingPropertiesForKeys:nil).filter{$0.lastPathComponent.hasPrefix(name)}
         XCTAssertEqual(own.count,1)
         for item in own {
-            for (file,data) in files {XCTAssertEqual(try Data(contentsOf:item.appendingPathComponent(file)),data)}
+            for (file,data) in try InstitutionPrivateExports.deliveryImages(files) {XCTAssertEqual(try Data(contentsOf:item.appendingPathComponent(file)),data)}
             try FileManager.default.removeItem(at:item)
         }
         prefs.removeObject(forKey:InstitutionPrivateExports.folderKey)

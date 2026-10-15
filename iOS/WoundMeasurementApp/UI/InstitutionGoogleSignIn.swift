@@ -47,6 +47,7 @@ final class InstitutionGoogleSession: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var ready = false
     @Published private(set) var message: String?
+    var applicationLoginReady: Bool { ready && !busy }
     private var provider: InstitutionRefreshingTokenProvider?
     private var generation: UInt64 = 0
     private let rememberedSubjectKey = "mmh.google.rememberedSubject"
@@ -55,17 +56,20 @@ final class InstitutionGoogleSession: ObservableObject {
     private let registry: InstitutionTransportRegistry
     private let clock: () -> TimeInterval
     private let makeTransport: (URL, String, String, any InstitutionIDTokenProvider) throws -> any InstitutionAuthenticatedTransport
+    private let waitBeforeProbeRetry: (UInt64) async throws -> Void
     private var lastRestoreAt: TimeInterval?
 
     init(driver: (any InstitutionGoogleDriver)? = nil, preferences: UserDefaults = .standard,
          registry: InstitutionTransportRegistry = .shared,
          clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         waitBeforeProbeRetry: @escaping (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) },
          makeTransport: @escaping (URL, String, String, any InstitutionIDTokenProvider) throws -> any InstitutionAuthenticatedTransport = {
              try InstitutionIAPTransport(origin: $0, audience: $1, subject: $2, provider: $3)
          }) {
         self.driver = driver ?? InstitutionGoogleSDKDriver()
         self.preferences = preferences; self.registry = registry; self.clock = clock
         self.makeTransport = makeTransport
+        self.waitBeforeProbeRetry = waitBeforeProbeRetry
     }
 
     func restoreIfNeeded() async {
@@ -113,8 +117,20 @@ final class InstitutionGoogleSession: ObservableObject {
             let transport = try makeTransport(origin, audience, account.subject, account.provider)
             candidate = transport
             let probeURL = origin.appendingPathComponent("api/health").appending(queryItems: [URLQueryItem(name: "mmh_native_probe", value: "1")])
-            let (data, response) = try await transport.send(URLRequest(url: probeURL))
-            try InstitutionEntryHealth.validate(data, response: response, service: "woundai-backend-mmhps20261007")
+            message = "Google 帳號已驗證，正在確認機構入口；請稍候，不需再次登入。"
+            // Retry only this read-only probe. Never replay application login or uploads here.
+            for probeAttempt in 1...3 {
+                try Task.checkCancellation()
+                let (data, response) = try await transport.send(URLRequest(url: probeURL))
+                try Task.checkCancellation()
+                if [429, 503].contains(response.statusCode), probeAttempt < 3 {
+                    message = "Google 帳號已驗證；機構服務忙碌或啟動中，正在等候第 \(probeAttempt + 1)/3 次入口確認。請稍候，不需重填帳密。"
+                    try await waitBeforeProbeRetry(UInt64(probeAttempt * 2) * 1_000_000_000)
+                    continue
+                }
+                try InstitutionEntryHealth.validate(data, response: response, service: "woundai-backend-mmhps20261007")
+                break
+            }
             guard attempt == generation else { throw InstitutionEntryError.signInRequired }
             // Change application identity only after IAP accepts the explicitly chosen Google subject.
             if previous != account.subject { AppSettings.clearCredentials() }

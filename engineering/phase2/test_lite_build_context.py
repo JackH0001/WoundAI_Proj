@@ -30,7 +30,7 @@ class ContextTests(unittest.TestCase):
             self.write(self.repo/'Backend/Flask'/name,b'must never copy')
         self.write(self.models/'training.jpg',b'must never copy')
         manifest=self.run_stage()
-        actual={str(p.relative_to(self.output)) for p in self.output.rglob('*') if p.is_file()}
+        actual={p.relative_to(self.output).as_posix() for p in self.output.rglob('*') if p.is_file()}
         self.assertEqual(actual,set(manifest['files'])|{'build-context-manifest.json'})
         self.assertEqual(len(manifest['files']),len(stager.FLASK_FILES)+len(stager.VENDOR_FILES)+3)
         self.assertFalse(manifest['release_approved']);self.assertTrue(manifest['working_tree_dirty'])

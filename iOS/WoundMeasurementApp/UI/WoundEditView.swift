@@ -309,6 +309,7 @@ final class EditCanvasModel: ObservableObject {
     private var multi = false
     private var prevPair: (CGPoint, CGPoint)?
     private var prevSingle: CGPoint?
+    private var entryAreaRaster: EditRaster!
 
     init(image: UIImage, initialPolygons: [[[Int]]], originalArea: Double?,
          tissueFrac: [String: Double], mmPerPx: Double?, resume: EditRaster?,
@@ -381,6 +382,7 @@ final class EditCanvasModel: ObservableObject {
         }
         // 有影像才需要底稿；設了這個旗標，畫布觸控與「完成修邊」會鎖到 runSeed 完成。
         // 民眾版（boundaryOnly）不算底稿：組織分類對它無意義，開畫面即可用。
+        self.entryAreaRaster = (resume?.canvasW == bw && resume?.canvasH == bh) ? resume : currentAreaRaster
         self.seeding = (cgImg != nil) && !boundaryOnly
     }
 
@@ -739,8 +741,13 @@ final class EditCanvasModel: ObservableObject {
             "other":       Double(st.tCounts[5]) / tot
         ]
     }
+    private var currentAreaRaster: EditRaster {
+        EditRaster(mask: st.mask, tissue: [], origMask: [], rx0: st.rx0, ry0: st.ry0,
+                   mw: st.mw, mh: st.mh, mScale: st.mScale, cm2PerPx: st.cm2PerPx,
+                   canvasW: bw, canvasH: bh)
+    }
     var liveArea: Double? {
-        return st.cm2PerPx.map { $0 * Double(st.maskCount) } ?? originalArea
+        EditAreaPolicy.area(original: originalArea, entry: entryAreaRaster, current: currentAreaRaster)
     }
 
     // MARK: 完成
@@ -773,10 +780,8 @@ final class EditCanvasModel: ObservableObject {
                                 // 白平衡增益跟著存：下次從時間軸回頭修邊沒有後端回應，
                                 // 底稿要靠它才能重建成與這次相同的分區。
                                 wbGains: wbGains)
-        // ⚠ 沒動過邊界就**不要動那個數字**。由多邊形重建柵格是有損的（RDP＋重新填充＋
-        // ROI 改變），每進出一次面積漂移約 0.5%。醫師什麼都沒改卻看到面積變了，
-        // 那個數字就失去意義——會自己緩慢變動的臨床數值比明顯的錯誤更難察覺。
-        let areaOut = (iou >= 0.9999 && originalArea != nil) ? originalArea : liveArea
+        // Preserve the entry value only when this session's boundary AND scale are unchanged.
+        let areaOut = liveArea
         return (poly, polys, iou, areaOut, liveFrac(), raster)
     }
 }

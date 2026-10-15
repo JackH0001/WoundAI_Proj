@@ -6,13 +6,15 @@ import CryptoKit
 /// Readable copies leave private storage only via explicit export or an opted-in submission folder.
 enum InstitutionPrivateExports {
     static let preferenceKey = "institution.administrativeExport.enabled"
+    static let lastResultKey = "institution.administrativeExport.lastResult"
+    static let lastAttemptKey = "institution.administrativeExport.lastAttempt"
     static let folderKey = "institution.administrativeExport.folderBookmark"
     static let folderLabelKey = "institution.administrativeExport.folderLabel"
     static func revisionName(rowID: Int64, files: [String: Data]) -> String {
         let digest = SHA256.hash(data: files["sha256.json"]!).map { String(format: "%02x", $0) }.joined()
         return "measurement-\(rowID)-\(digest)"
     }
-    static func submissionContents(row: Measurement, image: Data, raster: Data, payload: Data) throws -> [String: Data] {
+    static func submissionContents(row: Measurement, image: Data, raster: Data, payload: Data, medicalRecordNumber: String? = nil) throws -> [String: Data] {
         guard row.doctorVerified, let bitmap = UIImage(data: image), let cg = bitmap.cgImage,
               row.imageW == cg.width, row.imageH == cg.height,
               let edit = EditRasterCodec.decode(png: raster, meta: row.rasterMeta, canvasW: cg.width, canvasH: cg.height),
@@ -32,6 +34,8 @@ enum InstitutionPrivateExports {
         else { throw InstitutionExport.Failure.inconsistentExistingExport }
         var files = try InstitutionExport.contents(image: bitmap, raster: edit, polygons: row.polygons,
             marker: nil, measurementID: row.id, doctorVerified: true, exudate: row.exudate, submitted: row)
+        // Local encrypted administrative metadata only; never added to the research payload.
+        files["delivery.json"] = try JSONSerialization.data(withJSONObject: ["medical_record_number": medicalRecordNumber ?? ""])
         files["measurement-image.jpg"] = image
         files["submission.json"] = payload
         files["wound.png"] = Data(base64Encoded: wound)
@@ -41,6 +45,32 @@ enum InstitutionPrivateExports {
         files["sha256.json"] = try JSONSerialization.data(withJSONObject: hashes, options: [.sortedKeys])
         try validate(files)
         return files
+    }
+    static func deliveryImages(_ files: [String: Data]) throws -> [String: Data] {
+        try validate(files)
+        guard let overlay = files["overlay.png"], !overlay.isEmpty else { throw InstitutionExport.Failure.incompleteRaster }
+        if let image = files["measurement-image.jpg"], !image.isEmpty {
+            return ["image.jpg": image, "overlay.png": overlay]
+        }
+        guard let image = files["image.png"], !image.isEmpty else { throw InstitutionExport.Failure.imageEncoding }
+        return ["image.png": image, "overlay.png": overlay]
+    }
+    static func deliveryName(files: [String: Data], at date: Date = Date()) throws -> String {
+        try validate(files)
+        var info: [String: String] = [:]
+        if let data = files["delivery.json"] {
+            guard let decoded = try JSONSerialization.jsonObject(with: data) as? [String: String] else { throw InstitutionExport.Failure.inconsistentExistingExport }
+            info = decoded
+        }
+        let raw = info["medical_record_number"] ?? ""
+        let safe = raw.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars.map {
+            CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_").contains($0) ? String($0) : "_"
+        }.joined().prefix(64)
+        let label = safe.contains(where: { $0 != "_" && $0 != "-" }) ? String(safe) : "無病歷號"
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian); formatter.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
+        formatter.dateFormat = "yyyyMMdd_HHmmss_SSS"
+        return label + "_" + formatter.string(from: date)
     }
     static func folderBookmark(_ folder: URL) throws -> Data {
         guard folder.startAccessingSecurityScopedResource() else { throw CocoaError(.fileReadNoPermission) }
@@ -61,14 +91,14 @@ enum InstitutionPrivateExports {
         if let error = writingError { throw error }
     }
     static func writeDelivery(files: [String: Data], name: String, folder: URL) throws {
-        try validate(files)
+        let images = try deliveryImages(files)
         guard !name.contains("/"), !name.contains("\\"), !name.hasPrefix(".") else { throw CocoaError(.fileWriteInvalidFileName) }
         let stage = folder.appendingPathComponent(".WoundAI-partial-" + UUID().uuidString, isDirectory: true)
-        let destination = folder.appendingPathComponent(name + "-" + UUID().uuidString, isDirectory: true)
+        let destination = folder.appendingPathComponent(name + "_" + UUID().uuidString.prefix(8), isDirectory: true)
         try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: stage) }
-        for (key, bytes) in files { try bytes.write(to: stage.appendingPathComponent(key), options: .atomic) }
-        for (key, bytes) in files where try Data(contentsOf: stage.appendingPathComponent(key)) != bytes {
+        for (key, bytes) in images { try bytes.write(to: stage.appendingPathComponent(key), options: .atomic) }
+        for (key, bytes) in images where try Data(contentsOf: stage.appendingPathComponent(key)) != bytes {
             _ = key; throw InstitutionExport.Failure.inconsistentExistingExport
         }
         try FileManager.default.moveItem(at: stage, to: destination)
@@ -127,7 +157,7 @@ enum InstitutionPrivateExports {
 struct InstitutionExportDocument: FileDocument {
     static var readableContentTypes: [UTType] { [.folder] }
     var files: [String: Data]
-    init(files: [String: Data]) { self.files = files }
+    init(files: [String: Data]) throws { self.files = try InstitutionPrivateExports.deliveryImages(files) }
     init(configuration: ReadConfiguration) throws { throw CocoaError(.fileReadUnsupportedScheme) }
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
         FileWrapper(directoryWithFileWrappers: files.mapValues { FileWrapper(regularFileWithContents: $0) })
@@ -137,12 +167,16 @@ struct InstitutionExportDocument: FileDocument {
 struct InstitutionExportSettingsSection: View {
     let runtime: MedicalRuntime
     @AppStorage private var enabled: Bool
+    @AppStorage private var lastResult: String
+    @AppStorage private var lastAttempt: Double
     @State private var selectingFolder = false
     @State private var folderLabel = ""
     @State private var folderIssue: String?
     init(runtime: MedicalRuntime) {
         self.runtime = runtime
         _enabled = AppStorage(wrappedValue: false, InstitutionPrivateExports.preferenceKey, store: runtime.exportPreferences)
+        _lastResult = AppStorage(wrappedValue: "", InstitutionPrivateExports.lastResultKey, store: runtime.exportPreferences)
+        _lastAttempt = AppStorage(wrappedValue: 0, InstitutionPrivateExports.lastAttemptKey, store: runtime.exportPreferences)
     }
     var body: some View {
         if InstitutionExport.enabled {
@@ -159,8 +193,13 @@ struct InstitutionExportSettingsSection: View {
                         }
                     }
                 }
+                if !lastResult.isEmpty {
+                    Text("最近一次輸出：" + Date(timeIntervalSince1970: lastAttempt).formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption)
+                    Text(lastResult).font(.footnote).accessibilityIdentifier("AdministrativeExportStatus")
+                }
                 if let folderIssue { Text(folderIssue).foregroundStyle(.red) }
-                Text("預設關閉。開啟後於確認上傳時，使用同一份已確認修訂產生影像、遮罩疊圖與結果；只存時間軸不輸出，加密保存在 App 私密空間並排除系統備份，未選自訂資料夾時不會自動同步。關閉不影響時間軸或已同意的研究上傳，也不會刪除既有副本。")
+                Text("預設關閉。開啟後於確認上傳時，只輸出 image 傷口影像與 overlay 疊圖（含測量數據）兩張；資料夾依病歷號（無則「無病歷號」）及台北輸出日期時間命名。使用同一份已確認修訂；只存時間軸不輸出，加密保存在 App 私密空間並排除系統備份，未選自訂資料夾時不會自動同步。關閉不影響時間軸或已同意的研究上傳，也不會刪除既有副本。")
                     .font(.caption).foregroundStyle(.secondary)
                 NavigationLink("選擇副本並匯出…") { InstitutionExportsView(directory: runtime.local.privateExports) }
                 Text("需交付時由你選擇匯出位置；匯出後為可讀取的檔案，目的地可能自行同步。舊版已放在「檔案」的副本不會自動搬移或刪除。")
@@ -194,8 +233,9 @@ struct InstitutionExportsView: View {
             ForEach(files, id: \.self) { file in
                 Button(file.deletingPathExtension().lastPathComponent) {
                     do {
-                        document = InstitutionExportDocument(files: try InstitutionPrivateExports.read(file))
-                        name = file.deletingPathExtension().lastPathComponent
+                        let contents = try InstitutionPrivateExports.read(file)
+                        document = try InstitutionExportDocument(files: contents)
+                        name = try InstitutionPrivateExports.deliveryName(files: contents)
                         exporting = true
                     } catch { issue = "副本完整性檢查失敗，未匯出。" }
                 }.font(.caption)

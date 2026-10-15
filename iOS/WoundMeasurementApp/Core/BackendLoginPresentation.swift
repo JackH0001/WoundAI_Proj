@@ -13,6 +13,7 @@ struct BackendLoginPresentation {
         return saved ? "WoundAI：帳密已儲存，尚未驗證登入" : "WoundAI：尚未登入"
     }
     var button: String {
+        if !entryReady { return "儲存並登入（待 Google 入口驗證）" }
         if busy { return verified ? "正在讀取雲端狀態…" : "正在登入…" }
         return verified && entryReady ? "重新驗證連線" : "儲存並登入"
     }

@@ -63,7 +63,7 @@ fun PrivateExportSettings(runtime: MedicalRuntime) {
         Text(if (folder == null) "輸出位置：App 私密空間" else "輸出位置：${android.provider.DocumentsContract.getTreeDocumentId(folder!!)}")
         OutlinedButton(enabled=!busy,onClick={folderPicker.launch(folder)}) { Text("選擇輸出資料夾…") }
         if (folder != null) TextButton(enabled=!busy,onClick={store.usePrivateFolder();folder=null}) { Text("改用 App 私密空間") }
-        Text("按確認上傳時，使用同一份已確認修訂輸出影像、遮罩疊圖與結果。自訂資料夾會按修訂分開寫入可讀影像與結果，可能由該服務同步；輸出完成不代表雲端已保存。",style=MaterialTheme.typography.bodySmall)
+        Text("按確認上傳時，使用同一份已確認修訂輸出影像、遮罩疊圖與結果。自訂資料夾只輸出 image 與 overlay（含測量數據）兩張影像，以病歷號（無則「無病歷號」）及台北輸出日期時間命名；每次另建資料夾，可能由該服務同步；輸出完成不代表雲端已保存。",style=MaterialTheme.typography.bodySmall)
     }
     OutlinedButton(enabled = !busy && selected == null, onClick = {
         coroutine.launch { files = withContext(Dispatchers.IO) { store.list() }; expanded = !expanded }
@@ -72,7 +72,14 @@ fun PrivateExportSettings(runtime: MedicalRuntime) {
         if (files.isEmpty()) Text("尚無行政副本。開啟選項後，按確認上傳才建立；只存時間軸不輸出。")
         files.forEach { name ->
             TextButton(enabled = !busy && selected == null, onClick = {
-                selected = name; launcher.launch("WoundAI-${name.removeSuffix(".enc")}.zip")
+                busy = true
+                coroutine.launch {
+                    try {
+                        val suggested = withContext(Dispatchers.IO) { store.suggestedDeliveryName(name) }
+                        selected = name; launcher.launch("$suggested.zip")
+                    } catch (_: Exception) { message = "無法讀取副本，未開始匯出。" }
+                    finally { busy = false }
+                }
             }) { Text(if (name.startsWith("record-")) "量測紀錄 ${name.split('-')[1]} · 修訂 ${name.split('-')[2].take(8)}"
                 else "拍攝副本 " + java.text.SimpleDateFormat("MM/dd HH:mm:ss", java.util.Locale.TAIWAN)
                 .format(java.util.Date(name.take(13).toLong())) + " · " + name.substring(14,20)) }
