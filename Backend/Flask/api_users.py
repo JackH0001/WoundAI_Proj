@@ -7,6 +7,7 @@
 """
 import csv
 import io
+import os
 import secrets
 import time
 
@@ -46,6 +47,19 @@ def _guard():
     return (get_jwt_identity() or "unknown", role, c.get("org"))
 
 
+def medical_session_configured():
+    """Reuse only for MMH or the fully isolated synthetic review profile."""
+    if institution_context.BOUND_ORG == "mmhps20261007":
+        return True
+    if institution_context.BOUND_ORG != "mmh-review-demo":
+        return False
+    from review_service_profile import review_environment
+    try:
+        return review_environment(os.environ)
+    except PermissionError:
+        return False
+
+
 @users_bp.get("/api/v1/auth/session")
 @jwt_required()
 def current_user_session():
@@ -56,7 +70,7 @@ def current_user_session():
     refresh occurs here, and current account state is read on every request.
     """
     claims = get_jwt()
-    if institution_context.BOUND_ORG != "mmhps20261007":
+    if not medical_session_configured():
         body, status = jsonify(error="session_reuse_not_configured"), 503
     elif (claims.get("org") != institution_context.BOUND_ORG
           or claims.get("typ") == "otc"
