@@ -24,6 +24,8 @@
 	<true/>
 
 	<!-- Must equal WOUNDAI_LITE_ATTEST_AUDIENCE on the independently deployed candidate. -->
+	<key>LiteBackendURL</key>
+	<string>$(WOUNDLITE_BACKEND_URL)</string>
 	<key>LiteAttestAudience</key>
 	<string>woundlite-research-v1</string>
 	<key>CFBundleDisplayName</key>

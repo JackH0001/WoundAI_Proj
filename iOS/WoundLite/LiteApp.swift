@@ -37,17 +37,20 @@ enum LitePrefs {
         get {
             guard !LiteWithdrawalJournal.standard.blocksUploads else { return false }
             // An old acceptance must not silently authorize the revised disclosure.
-            guard d.string(forKey: "lite_consent_version") == consentVersion else { return nil }
-            return d.object(forKey: "lite_research_consent") as? Bool
+            return LiteBackendConfiguration.consentChoice(
+                d.object(forKey: "lite_research_consent") as? Bool,
+                savedVersion: d.string(forKey: "lite_consent_version"), requiredVersion: consentVersion,
+                savedOrigin: d.string(forKey: "lite_consent_origin"), currentOrigin: AppSettings.backendURL())
         }
         set {
             d.set(newValue, forKey: "lite_research_consent")
             d.set(newValue == nil ? nil : consentVersion, forKey: "lite_consent_version")
+            d.set(newValue == nil ? nil : AppSettings.backendURL(), forKey: "lite_consent_origin")
         }
     }
     /// 同意文案版本。**改了同意頁的實質內容就要遞增**——每筆上傳都帶著它，
     /// 日後治理要能回答「這筆是在哪一版文案下同意的」。
-    static let consentVersion = "2026-10-04.1"
+    static let consentVersion = "2026-10-16.1"
 
     /// Legacy anonymous UUID, retained for old records/support only.
     /// New uploads use the server-assigned App Attest installation; never overwrite old bindings.
