@@ -150,7 +150,7 @@ code{font-family:ui-monospace,monospace;font-size:12.5px;word-break:break-all}
 
 <section id="tab-recs">
   <h1 id="recs_h1">我的送件</h1>
-  <p class="sub" id="recs_sub">你送出的每一筆訓練標註與它目前的狀態。</p>
+  <p class="sub" id="recs_sub">你送出的標註與目前版本狀態。「有效標註」不代表已通過訓練篩選；仍須核對來源用途、品質及研究授權。</p>
   <div class="row">
     <select id="r_status"><option value="">全部狀態</option></select>
     <span id="r_scope"></span>
@@ -352,15 +352,15 @@ async function loadDash(){
   $("cards").innerHTML =
     card("臨床收案進度", clinical + " <span style='font-size:14px;color:var(--dim)'>/ 20</span>",
          Math.round(clinical/20*100) + "%") +
-    card("佇列可訓練", s.trainable ?? "—", "共 " + (s.total ?? "—") + " 筆") +
+    card("有效標註（待篩選）", s.trainable ?? "—", "共 " + (s.total ?? "—") + " 筆") +
     card("資料鏈異常", broken, "孤兒 " + (s.orphan_no_image||0) +
          "・影像遺失 " + (s.image_file_missing||0) + "・格式錯 " + (s.malformed||0),
          broken ? "bad" : "ok") +
     card("影像", s.images_on_disk ?? "—", "隔離 " + (s.quarantined||0));
   const rows = [
-    ["臨床 clinical", by.clinical||0, "唯一可作臨床證據者"],
-    ["範例 sample", by.sample||0, "驗收基準，訓練時排除"],
-    ["模擬圖 phantom", by.phantom||0, "印刷色塊，無傷口材質"],
+    ["臨床 clinical", by.clinical||0, "臨床來源；仍須核對品質、同意與研究授權"],
+    ["範例 sample", by.sample||0, "範例驗證用途；網頁匯出預設不納入"],
+    ["模擬圖 phantom", by.phantom||0, "模擬驗證用途；網頁匯出預設不納入"],
     ["外部 external", by.external||0, "公開資料集"],
     ["已撤回", s.withdrawn||0, "同意撤回即排除"],
     ["被取代", s.superseded||0, "同影像取最新的醫師修訂版"],
@@ -368,7 +368,7 @@ async function loadDash(){
   ];
   $("detail").innerHTML = "<table><tr><th>項目</th><th>筆數</th><th>說明</th></tr>" +
     rows.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td style="color:var(--dim)">${r[2]}</td></tr>`).join("") +
-    "</table><p class='note'>儲存後端：<code>" + esc(s.store||"—") + "</code></p>";
+    "</table><p class='note'>儲存後端：<code>" + esc(s.store||"—") + "</code></p><p class='note'>網頁資料集匯出預設只選 clinical；指定其他來源或使用離線工具時，須另外確認用途與篩選條件。此統計不代表已進行模型訓練。</p>";
 }
 
 /* ───────── 我的送件 ───────── */
@@ -415,12 +415,12 @@ async function loadRecs(){
              style="font-size:11px">看疊圖</a>
            <a href="#" onclick="showPreview('${esc(r.image_id)}','${esc(r.annotation_receipt_id || '')}');return false"
              style="font-size:11px">・僅標註</a>` : ""}</td>
-      <td>${esc(r.source)}<br><span style="font-size:11px;color:var(--dim)">${esc(r.route||"")}</span></td>
+      <td>${esc(r.source)}${r.source==="phantom"?"<br><small>模擬驗證</small>":(r.source==="sample"?"<br><small>範例驗證</small>":"")}<br><span style="font-size:11px;color:var(--dim)">${esc(r.route||"")}</span></td>
       <td class="nowrap">${r.area_cm2==null?"—":esc(r.area_cm2)+" cm²"}</td>
       <td class="nowrap">${tissueCell(r)}</td>
       <td class="nowrap">${depthCell(r)}</td>
       <td class="nowrap">${qualityCell(r)}</td>
-      <td class="${r.status==="trainable"?"ok":(r.status==="superseded"?"":"bad")}">
+      <td class="${r.status==="trainable"?"":(r.status==="superseded"?"":"bad")}">
         ${esc(r.status_zh)}${r.retract_reason?`<br><span style="font-size:11px">${esc(r.retract_reason)}${r.retract_note?"："+esc(r.retract_note):""}</span>`:""}</td>
       ${j.scope==="all"?`<td class="nowrap">${esc(r.actor)}</td>`:""}
       <td class="nowrap">${r.can_retract
