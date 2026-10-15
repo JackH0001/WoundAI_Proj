@@ -49,10 +49,19 @@ private fun openUrl(ctx: android.content.Context, url: String) {
     }
 }
 
+internal fun installedAppVersionLabel(ctx: android.content.Context): String {
+    @Suppress("DEPRECATION")
+    val info = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+    @Suppress("DEPRECATION")
+    val code = if (android.os.Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()
+    return "App ${info.versionName ?: "未知"} (build $code)"
+}
+
 @Composable
 fun BackendSettingsScreen(onBack: () -> Unit) {
     val ctx = LocalContext.current
     val runtime = rememberMedicalRuntime()
+    val installedVersion = remember(ctx) { installedAppVersionLabel(ctx) }
     val scope = rememberCoroutineScope()
     val focus = LocalFocusManager.current
 
@@ -151,8 +160,7 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
         if (runtime.fixedOrigin) Text(runtime.title, style = MaterialTheme.typography.titleMedium)
         // App 版本。排錯的第一個問題永遠是「你裝的是哪一版」——
         // 沒有這一行，答案只能靠測試者回去翻手機的應用程式資訊，而多數人不會翻。
-        Text("App ${com.woundmeasurement.app.BuildConfig.VERSION_NAME} " +
-             "(build ${com.woundmeasurement.app.BuildConfig.VERSION_CODE})" +
+        Text(installedVersion +
              if (com.woundmeasurement.app.BuildConfig.DEBUG) " · DEBUG 版（不可用於真實個案）" else "",
             style = MaterialTheme.typography.bodySmall,
             color = if (com.woundmeasurement.app.BuildConfig.DEBUG) MaterialTheme.colorScheme.error
