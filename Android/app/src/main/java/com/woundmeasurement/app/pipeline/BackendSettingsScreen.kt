@@ -129,8 +129,8 @@ fun BackendSettingsScreen(onBack: () -> Unit) {
         } finally { testing = false }
     }
     // Re-entering settings verifies saved credentials; saving is not proof of login.
-    LaunchedEffect(googleReady) {
-        if (hasSaved && (!mmh || googleReady)) connect(false)
+    RestoreBackendAfterEntry(entryReady = !mmh || googleReady, entryBusy = googleBusy, hasSaved = hasSaved) {
+        connect(false)
     }
     LaunchedEffect(mmh) {
         if (mmh) while (true) {

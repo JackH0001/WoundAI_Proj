@@ -48,4 +48,31 @@ class BackendSignInActionsTest {
         compose.onNodeWithText("儲存並登入").assertIsNotEnabled()
         compose.onNodeWithText("登出 WoundAI 帳號").assertDoesNotExist()
     }
+
+    @Test fun googleReadyBeforeBusyCallbackClearsStillRestoresBackendOnce() {
+        val ready=mutableStateOf(false);val busy=mutableStateOf(true);var calls=0
+        compose.setContent {RestoreBackendAfterEntry(ready.value,busy.value,true){calls++}}
+        compose.runOnIdle {ready.value=true}
+        compose.runOnIdle {assertEquals(0,calls);busy.value=false}
+        compose.runOnIdle {assertEquals(1,calls)}
+    }
+    @Test fun googleBusyClearsBeforeReadyStillRestoresBackendOnce() {
+        val ready=mutableStateOf(false);val busy=mutableStateOf(true);var calls=0
+        compose.setContent {RestoreBackendAfterEntry(ready.value,busy.value,true){calls++}}
+        compose.runOnIdle {busy.value=false}
+        compose.runOnIdle {assertEquals(0,calls);ready.value=true}
+        compose.runOnIdle {assertEquals(1,calls)}
+    }
+    @Test fun firstGoogleLoginWithoutSavedPasswordWaitsForExplicitBackendSignIn() {
+        val ready=mutableStateOf(false);val busy=mutableStateOf(true);var calls=0
+        compose.setContent {RestoreBackendAfterEntry(ready.value,busy.value,false){calls++}}
+        compose.runOnIdle {ready.value=true;busy.value=false}
+        compose.runOnIdle {assertEquals(0,calls)}
+    }
+    @Test fun savedPasswordChangeDoesNotLaunchSecondLoginDuringExplicitSave() {
+        val saved=mutableStateOf(false);var calls=0
+        compose.setContent {RestoreBackendAfterEntry(true,false,saved.value){calls++}}
+        compose.runOnIdle {saved.value=true}
+        compose.runOnIdle {assertEquals(0,calls)}
+    }
 }

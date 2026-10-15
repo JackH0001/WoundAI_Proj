@@ -1,6 +1,8 @@
 package com.woundmeasurement.app.institution
 
 import android.content.Context
+import android.content.MutableContextWrapper
+import androidx.credentials.exceptions.*
 import androidx.credentials.*
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
@@ -35,7 +37,7 @@ object InstitutionLogin {
         // Invalidate active clients before asking for a new identity; retain encrypted credentials
         // until the Google subject has been verified. Explicit logout clears both gates.
         InstitutionRegistry.replace(null)
-        status=if(automatic) "正在恢復 Google 登入…" else "正在開啟 Google 登入…"
+        status=if(automatic) "正在恢復 Google 登入…" else "正在開啟 Google 帳號選擇，請完成授權…"
         try {
             val manager=CredentialManager.create(ctx)
             val nonce=ByteArray(32).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
@@ -44,28 +46,33 @@ object InstitutionLogin {
                 .setServerClientId(InstitutionConfig.AUDIENCE).setNonce(nonce)
                 .setFilterByAuthorizedAccounts(true).setAutoSelectEnabled(true).build())
             else builder.addCredentialOption(GetSignInWithGoogleOption.Builder(InstitutionConfig.AUDIENCE).setNonce(nonce).build())
-            val c=manager.getCredential(ctx,builder.build()).credential
+            val c=manager.getCredential(MutableContextWrapper(ctx),builder.build()).credential
             require(c is CustomCredential && c.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL)
             val google=GoogleIdTokenCredential.createFrom(c.data)
             val session=InstitutionSession.parse(google.idToken,nonce); next=session
             val previous=prefs(ctx).getString("subject",null)
             if (automatic && !InstitutionIdentityPolicy.mayRestore(previous, session.subject)) throw java.io.IOException("Google 帳號不同，請由設定明確切換帳號")
             status="Google 已登入，正在確認 MMH 入口…"
-            withContext(Dispatchers.IO) {
+            withTimeout(75_000) { withContext(Dispatchers.IO) {
                 val http=OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)
-                    .retryOnConnectionFailure(false).callTimeout(90,TimeUnit.SECONDS)
+                    .retryOnConnectionFailure(false).callTimeout(20,TimeUnit.SECONDS)
                     .addInterceptor(InstitutionInterceptor(session)).build()
                 InstitutionEntryProbe.verify(probe = {
                     http.newCall(Request.Builder().url(InstitutionConfig.ORIGIN+"/api/health?android_entry_probe=1").build()).execute().use {
                         it.code to (it.body?.string() ?: "")
                     }
-                }, onBusy = { status="Google 已登入，機構入口忙碌，正在重試…" })
-            }
+                }, onBusy = { status="Google 已登入，機構入口連線重試中，請稍候…" })
+            } }
             if(!InstitutionIdentityPolicy.preserveAppCredentials(previous, session.subject)) AppSettings.clearCredentials(ctx)
             session.markVerified(); InstitutionRegistry.replace(session); next=null
             prefs(ctx).edit().putString("subject",session.subject).putBoolean("restore",true).apply()
             status="Google 與機構入口驗證通過"
-        } catch(e: CancellationException) { throw e }
+        } catch(_: TimeoutCancellationException) { status="Google 已登入，但機構入口驗證逾時，請確認網路後重試" }
+        catch(e: CancellationException) { status="登入流程已中斷，請返回設定重新驗證"; throw e }
+        catch(_: GetCredentialCancellationException) { status="Google 授權已取消，尚未登入；可再次按 Google 登入" }
+        catch(_: NoCredentialException) { status=if(automatic) "無法自動恢復 Google 帳號，請按 Google 登入完成授權" else "未找到可用 Google 帳號，請確認裝置已加入機構允許的帳號" }
+        catch(_: GetCredentialInterruptedException) { status="Google 帳號選擇被中斷，請返回設定再試一次" }
+        catch(_: GetCredentialException) { status="Google 授權服務未完成，請確認網路與 Google Play 服務後重試" }
         catch(e: java.io.IOException) { status=e.message ?: "機構入口未通過" }
         catch(_: Exception) { status="Google 登入未完成，請在設定重新登入；已保存的紀錄保留。" }
         finally { next?.invalidate(); busy=false }
@@ -88,6 +95,7 @@ fun InstitutionSignIn(enabled: Boolean, onBusy: (Boolean) -> Unit, onChanged: (B
     val scope=rememberCoroutineScope()
     var ready by remember { mutableStateOf(InstitutionRegistry.snapshot()?.ready()==true) }
     LaunchedEffect(Unit) { InstitutionLogin.restore(ctx) }
+    LaunchedEffect(ready) { onChanged(ready) }
     LaunchedEffect(InstitutionLogin.busy) { onBusy(InstitutionLogin.busy) }
     LaunchedEffect(Unit) {
         while(true) { ready=InstitutionRegistry.snapshot()?.ready()==true; delay(1000) }
@@ -95,12 +103,17 @@ fun InstitutionSignIn(enabled: Boolean, onBusy: (Boolean) -> Unit, onChanged: (B
     Text("1. Google 機構門禁 → 2. WoundAI 帳號與角色")
     Text("Google 確認機構入口資格；WoundAI 決定醫師／護理權限。入口權限由機構管理員管理。")
     Button(enabled=enabled && !InstitutionLogin.busy, onClick={ scope.launch {
-        InstitutionLogin.authenticate(ctx); onChanged(InstitutionRegistry.snapshot()?.ready()==true)
+        InstitutionLogin.authenticate(ctx); ready=InstitutionRegistry.snapshot()?.ready()==true
     } }) { Text(if(InstitutionLogin.busy) "正在驗證…" else if(ready) "切換 Google 帳號" else "Sign in with Google") }
-    if(InstitutionLogin.busy) LinearProgressIndicator()
-    Text(if(ready) "Google 與機構入口驗證通過" else if(!InstitutionLogin.busy && InstitutionLogin.status == "Google 與機構入口驗證通過") "Google 門禁已到期，請重新驗證" else InstitutionLogin.status)
+    if(InstitutionLogin.busy) {
+        var seconds by remember { mutableIntStateOf(0) }
+        LaunchedEffect(Unit) { while(true) { delay(1000); seconds++ } }
+        LinearProgressIndicator()
+        Text("已等待 ${seconds} 秒；請完成 Google 視窗授權，返回後會自動核對機構入口，無需再按登入。")
+    }
+    Text(if(InstitutionLogin.busy) InstitutionLogin.status else if(ready) "Google 與機構入口驗證通過" else if(!InstitutionLogin.busy && InstitutionLogin.status == "Google 與機構入口驗證通過") "Google 門禁已到期，請重新驗證" else InstitutionLogin.status)
     Text("首次授權後，開啟 App 會嘗試恢復原 Google 帳號並驗證入口。同一帳號可沿用已儲存的 WoundAI 登入資料；撤銷授權、到期或切換帳號時可能需要重新登入。")
     if(ready) OutlinedButton(enabled=enabled && !InstitutionLogin.busy, onClick={ scope.launch {
-        InstitutionLogin.signOut(ctx); ready=false; onChanged(false)
+        InstitutionLogin.signOut(ctx); ready=false
     } }) { Text("登出 Google 與 WoundAI") }
 }
