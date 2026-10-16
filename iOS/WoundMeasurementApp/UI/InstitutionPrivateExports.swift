@@ -271,6 +271,8 @@ struct InstitutionExportSettingsSection: View {
 struct InstitutionExportsView: View {
     let directory: URL
     @State private var files: [URL] = []
+    @State private var page = 0
+    private let pageSize = 5
     @State private var document: InstitutionExportDocument?
     @State private var exporting = false
     @State private var name = "MMH-review"
@@ -279,7 +281,8 @@ struct InstitutionExportsView: View {
         List {
             if files.isEmpty { Text("尚無行政匯出副本。開啟選項後，下次確認上傳時建立。") }
             if let issue { Text(issue).foregroundStyle(.red) }
-            ForEach(files, id: \.self) { file in
+            if !files.isEmpty { Text("共 \(files.count) 份副本 · 最新在前 · 每頁最多 5 份").font(.caption) }
+            ForEach(Array(files.dropFirst(page * pageSize).prefix(pageSize)), id: \.self) { file in
                 Button(file.deletingPathExtension().lastPathComponent) {
                     do {
                         let contents = try InstitutionPrivateExports.read(file)
@@ -289,13 +292,32 @@ struct InstitutionExportsView: View {
                     } catch { issue = "副本完整性檢查失敗，未匯出。" }
                 }.font(.caption)
             }
+            if files.count > pageSize {
+                HStack {
+                    Button("上一頁") { page -= 1 }.disabled(page == 0)
+                    Spacer()
+                    Text("第 \(page + 1) / \((files.count + pageSize - 1) / pageSize) 頁").font(.caption)
+                    Spacer()
+                    Button("下一頁") { page += 1 }.disabled((page + 1) * pageSize >= files.count)
+                }.buttonStyle(.borderless)
+            }
         }
         .navigationTitle("行政副本")
         .task {
             do {
                 try HealthDataFiles.prepareDirectory(directory)
-                files = try FileManager.default.contentsOfDirectory(at: directory,
-                    includingPropertiesForKeys:nil).filter { $0.pathExtension == "enc" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+                let entries = try FileManager.default.contentsOfDirectory(at: directory,
+                    includingPropertiesForKeys:[.contentModificationDateKey, .isRegularFileKey])
+                    .filter { $0.pathExtension == "enc" }
+                    .compactMap { url -> (URL, Date)? in
+                        let values = try url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
+                        guard values.isRegularFile == true else { return nil }
+                        return (url, values.contentModificationDate ?? .distantPast)
+                    }
+                files = entries.sorted {
+                    $0.1 == $1.1 ? $0.0.lastPathComponent < $1.0.lastPathComponent : $0.1 > $1.1
+                }.map { $0.0 }
+                page = 0
             } catch { issue = "無法讀取私密副本目錄。" }
         }
         .fileExporter(isPresented: $exporting, document: document, contentType: .folder, defaultFilename: name) { result in

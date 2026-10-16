@@ -22,6 +22,8 @@ fun PrivateExportSettings(runtime: MedicalRuntime) {
     var enabled by remember(runtime) { mutableStateOf(store.enabled) }
     var expanded by remember(runtime) { mutableStateOf(false) }
     var files by remember(runtime) { mutableStateOf(emptyList<String>()) }
+    var page by remember(runtime) { mutableStateOf(0) }
+    val pageSize = 5
     var selected by remember(runtime) { mutableStateOf<String?>(null) }
     var busy by remember(runtime) { mutableStateOf(false) }
     var message by remember(runtime) { mutableStateOf<String?>(null) }
@@ -67,12 +69,21 @@ fun PrivateExportSettings(runtime: MedicalRuntime) {
         Text("按確認上傳時，使用同一份已確認修訂輸出影像、遮罩疊圖與結果。自訂資料夾只輸出 image 與 overlay（含測量數據）兩張影像，以病歷號（無則「無病歷號」）及台北輸出日期時間命名；每次另建資料夾，可能由該服務同步；輸出完成不代表雲端已保存。",style=MaterialTheme.typography.bodySmall)
     }
     OutlinedButton(enabled = !busy && selected == null, onClick = {
-        coroutine.launch { files = withContext(Dispatchers.IO) { store.list() }; expanded = !expanded }
-    }) { Text("選擇副本並匯出…") }
+        if (expanded) { expanded = false; page = 0 }
+        else coroutine.launch {
+            files = withContext(Dispatchers.IO) {
+                store.list().map { it to java.io.File(store.directory, it).lastModified() }
+                    .sortedWith(compareByDescending<Pair<String, Long>> { it.second }.thenBy { it.first })
+                    .map { it.first }
+            }
+            page = 0; expanded = true
+        }
+    }) { Text(if (expanded) "收合副本清單" else "選擇副本並匯出…") }
     if (expanded) {
         if (files.isEmpty()) Text("尚無行政副本。開啟選項後，按確認上傳才建立；只存時間軸不輸出。")
         Text("以下操作只輸出既有副本，不重新上傳，也不變更研究保存狀態。")
-        files.forEach { name ->
+        if (files.isNotEmpty()) Text("共 ${files.size} 份副本 · 最新在前 · 每頁最多 5 份", style = MaterialTheme.typography.bodySmall)
+        files.drop(page * pageSize).take(pageSize).forEach { name ->
             TextButton(enabled = !busy && selected == null, onClick = {
                 busy = true
                 coroutine.launch {
@@ -100,6 +111,11 @@ fun PrivateExportSettings(runtime: MedicalRuntime) {
                     } finally { busy = false }
                 }
             }) { Text("輸出此副本至設定資料夾（不上傳）") }
+        }
+        if (files.size > pageSize) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            TextButton(enabled = !busy && selected == null && page > 0, onClick = { page-- }) { Text("上一頁") }
+            Text("第 ${page + 1} / ${(files.size + pageSize - 1) / pageSize} 頁")
+            TextButton(enabled = !busy && selected == null && (page + 1) * pageSize < files.size, onClick = { page++ }) { Text("下一頁") }
         }
     }
     if (busy) { LinearProgressIndicator(Modifier.fillMaxWidth()); Text("正在匯出所選副本…") }
