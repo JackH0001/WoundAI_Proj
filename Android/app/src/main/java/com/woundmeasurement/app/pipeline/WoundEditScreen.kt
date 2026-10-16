@@ -14,6 +14,7 @@ import androidx.compose.material.icons.outlined.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -114,6 +115,9 @@ class EditRaster(
 ) {
     val tissueEdited: Boolean get() = tissueEditedPx > 0
     val tissueEditRatio: Double get() = if (maskPx > 0) tissueEditedPx.toDouble() / maskPx else 0.0
+    val hasValidTissueEditStatistics: Boolean get() = tissueEditRatio.isFinite() &&
+        tissueEditRatio in 0.0..1.0 && tissueEditedPx >= 0 &&
+        tissueEditedPx <= mask.count { it.toInt() != 0 }
 }
 
 /**
@@ -253,6 +257,10 @@ private class RasterState(
         return floatArrayOf(rx0 + x0 / mScale, ry0 + y0 / mScale, rx0 + x1 / mScale, ry0 + y1 / mScale)
     }
 }
+
+/** Keep the image point under the previous centroid beneath the new centroid. */
+internal fun editorPinchOffset(offset:Offset, oldScale:Float, newScale:Float, centroid:Offset, pan:Offset):Offset =
+    offset + (centroid-pan)/oldScale - centroid/newScale
 
 @Composable
 fun WoundEditScreen(
@@ -409,29 +417,21 @@ fun WoundEditScreen(
         st.syncAll(); version++
     }
 
-    class Snap(val m: ByteArray, val t: ByteArray, val mw: Int, val mh: Int, val rx0: Float, val ry0: Float)
+    class Snap(val m: ByteArray, val t: ByteArray, val orig: ByteArray, val auto: ByteArray, val mw: Int, val mh: Int, val rx0: Float, val ry0: Float)
     val undo = remember(st) { mutableStateListOf<Snap>() }
     val redo = remember(st) { mutableStateListOf<Snap>() }
 
     /**
-     * undo 深度改由**位元組預算**決定，不再固定 8 筆。
-     *
-     * 每筆快照是 `mask + tissue` 兩份 `mw*mh` 陣列。小傷口時遮罩可能只有 400²＝0.32 MB／筆，
-     * 8 筆才 2.6 MB；但遮罩會隨筆刷擴張，到上限 2200² 時單筆就是 **9.7 MB**，8 筆＝77 MB，
-     * 再加上活動中的 mask/tissue/orig（14.5 MB）與 ARGB overlay（19.4 MB）、
-     * 從 DB 載回的全尺寸點陣圖（約 12 MB），峰值超過 120 MB。
-     * minSdk 24 的裝置點陣圖在 Java heap 上，低階機的 heap 上限就在這個量級——
-     * **而大面積傷口正是最需要修邊的情境**，會當在最不該當的時候。
-     *
-     * 這裡用固定的記憶體預算換取「小傷口 undo 很深、大傷口 undo 較淺但絕不 OOM」。
-     * 上限仍保留 8（小遮罩時不會無限成長），下限保 2 —— 只剩 1 步可復原太難用，
-     * 而 2 筆在 2200² 是 19.4 MB，仍在安全範圍。
+     * Snapshots retain four byte arrays and ROI geometry, so undo and pinch rollback also
+     * restore an expanded ROI. At 400² this is 0.64 MB; at 2200² it is 19.36 MB.
+     * Limit each history stack to a 24 MiB target, with 1–8 snapshots. This bounds retained
+     * history; working arrays, the active stroke and image bitmaps need additional memory.
      */
     val undoBudgetBytes = 24 * 1024 * 1024
     fun maxUndoDepth(): Int {
-        val perSnap = st.mw.toLong() * st.mh * 2      // mask + tissue
+        val perSnap = st.mw.toLong() * st.mh * 4      // mask + tissue + original + automatic baseline
         if (perSnap <= 0) return 8
-        return ((undoBudgetBytes / perSnap).toInt()).coerceIn(2, 8)
+        return ((undoBudgetBytes / perSnap).toInt()).coerceIn(1, 8)
     }
     /** 加入一筆快照並依目前預算修剪最舊的。redo 堆疊同樣要受限——它一樣是整份遮罩複本。 */
     fun push(stack: MutableList<Snap>, s: Snap) {
@@ -441,11 +441,13 @@ fun WoundEditScreen(
     }
     /** 新的一筆編輯：進 undo，並讓 redo 失效（分岔後的未來已不成立）。 */
     fun pushUndo(s: Snap) { push(undo, s); redo.clear() }
-    fun snap() = Snap(st.mask.copyOf(), st.tissue.copyOf(), st.mw, st.mh, st.rx0, st.ry0)
+    fun snap() = Snap(st.mask.copyOf(), st.tissue.copyOf(), st.orig.copyOf(), st.auto.copyOf(), st.mw, st.mh, st.rx0, st.ry0)
     fun restore(s: Snap): Boolean {
-        if (s.mw != st.mw || s.mh != st.mh) return false   // 擴張後尺寸不同→無法還原(已於擴張時清空)
-        System.arraycopy(s.m, 0, st.mask, 0, st.mask.size)
-        System.arraycopy(s.t, 0, st.tissue, 0, st.tissue.size)
+        st.mw=s.mw; st.mh=s.mh; st.rx0=s.rx0; st.ry0=s.ry0
+        st.mask=s.m.copyOf(); st.tissue=s.t.copyOf(); st.orig=s.orig.copyOf(); st.auto=s.auto.copyOf()
+        // A pinch can arrive after the first finger expanded the ROI. Restore geometry too.
+        if (st.overlay.width != s.mw || st.overlay.height != s.mh)
+            st.overlay = Bitmap.createBitmap(s.mw,s.mh,Bitmap.Config.ARGB_8888)
         st.recount(); st.syncAll(); return true
     }
 
@@ -454,8 +456,8 @@ fun WoundEditScreen(
         var cx = (imgPt.x - st.rx0) * st.mScale
         var cy = (imgPt.y - st.ry0) * st.mScale
         if (tool == EditTool.B_PAINT || tool == EditTool.B_ERASE || tool == EditTool.TISSUE) {
-            if (st.expandIfNeeded(cx, cy, rM)) {           // 視窗擴張(內容無損);undo 尺寸失效→清空
-                undo.clear(); redo.clear()
+            if (st.expandIfNeeded(cx, cy, rM)) {           // ROI 擴張，快照保留原幾何與分類基準
+                // Snapshots retain geometry; expansion remains undoable.
                 // ⚠ seedAuto **只有 B_PAINT 需要**。
                 //
                 // `auto` 的唯一用途是「新畫進遮罩的像素要帶什麼分類」，而只有 B_PAINT
@@ -538,38 +540,26 @@ fun WoundEditScreen(
     val livePush = WoundPipeline.push(liveArea, lf, exudate).partial
 
     Column(Modifier.fillMaxSize().navigationBarsPadding().padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("修邊標註  面積 ${liveArea?.let { "%.2f".format(it) } ?: "-"} cm² · PUSH ${livePush ?: "-"}" +
-             "  [尺度:${if (mmPerPx != null) "ArUco✓" else "AI後備⚠"}]",
-            style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-        Text("組織  肉芽${(lf["granulation"]!! * 100).toInt()}% · 腐肉${(lf["slough"]!! * 100).toInt()}% · " +
-             "壞死${(lf["necrosis"]!! * 100).toInt()}% · 上皮${(lf["epithelial"]!! * 100).toInt()}% · " +
-             "其他${(lf["other"]!! * 100).toInt()}%  (框會隨筆刷自動擴張)",
-            fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        // 「其他」偏高時要說出來。它代表的是**分類器不知道那是什麼**（肌腱、異物、血水、
-        // 遮蔽物、或只是反光），而那正是最需要醫師看一眼的部分——不是可以忽略的殘差。
-        // 這些像素若被硬歸到四類之一，訓練資料就會學到錯的東西；標成「其他」則是誠實的標籤。
-        if ((lf["other"] ?: 0.0) > 0.10) Text(
-            "ℹ 有 ${((lf["other"]!!) * 100).toInt()}% 判不出類別（肌腱／異物／血水／遮蔽物／反光）。" +
-            "請用「組織🖌 → 其他」確認範圍，或改標成正確的組織——這一塊會照原樣進訓練集。",
-            fontSize = 12.sp, color = MaterialTheme.colorScheme.tertiary)
-        // 這條提示不是催促，是說明後果：不動筆刷不是錯，只是這一筆不會成為組織訓練樣本。
-        // 醫師有權說「AI 分得對，我沒意見」——但那時的遮罩是啟發式輸出，不是人的判斷，
-        // 拿去訓練會變成模型自我確認。所以要讓他知道這個選擇的意義。
-        run {
-            var ed = 0
-            for (i in st.mask.indices) if (st.mask[i].toInt() != 0 && st.tissue[i] != st.auto[i]) ed++
-            if (st.maskCount > 0 && ed == 0) Text(
-                "ℹ 尚未修正任何組織分區。面積與邊界照常送出；但組織遮罩會標記為「未經醫師修正」，" +
-                "**不會進入組織分割訓練集**——未修正的遮罩是 AI 自己的輸出，拿去訓練等於自我確認。",
-                fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("修邊標註  面積 ${liveArea?.let { "%.2f".format(it) } ?: "-"} cm² · PUSH ${livePush ?: "-"}",
+            style=MaterialTheme.typography.titleSmall, minLines=2, maxLines=2,
+            color=MaterialTheme.colorScheme.primary)
+        Text("組織  肉芽${(lf["granulation"]!!*100).toInt()}% · 腐肉${(lf["slough"]!!*100).toInt()}% · " +
+            "壞死${(lf["necrosis"]!!*100).toInt()}% · 上皮${(lf["epithelial"]!!*100).toInt()}% · 其他${(lf["other"]!!*100).toInt()}%",
+            fontSize=12.sp, minLines=3, maxLines=3)
+        var editedTissue = 0
+        for (i in st.mask.indices) if (st.mask[i].toInt()!=0 && st.tissue[i]!=st.auto[i]) editedTissue++
+        val notice = when {
+            st.maskCount == 0 -> "請用「邊界＋」塗滿傷口範圍，再確認圈選邊界。"
+            (lf["other"] ?: 0.0) > .10 -> "有其他組織，請確認範圍或修正分類。訓練標註需另取得權限與同意。"
+            editedTissue == 0 -> "尚未修正組織分區；未修正的組織遮罩不會作為組織訓練標註。完成後回到量測頁。"
+            else -> "完成後回到量測頁；訓練標註需另取得權限與同意。"
         }
-        if (st.maskCount == 0)
-            Text("⚠ AI 未偵測到傷口:請用「邊界＋」從零塗抹;ArUco 尺度仍有效,面積照常精確計算",
-                fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+        // Reserve the same space for every status: never move the canvas under a stroke.
+        Text(notice, fontSize=12.sp, minLines=3, maxLines=3, color=MaterialTheme.colorScheme.onSurfaceVariant)
 
         Box(Modifier.fillMaxWidth().weight(1f).clipToBounds().onSizeChanged { boxSize = it }) {
             Canvas(
-                Modifier.fillMaxSize().pointerInput(Unit) {
+                Modifier.fillMaxSize().testTag("wound-edit-canvas").pointerInput(st) {
                     // ⚠ 不能用 detectDragGestures + detectTransformGestures 兩個 pointerInput 疊起來：
                     // 先註冊的那個會把事件吃掉，於是雙指縮放永遠不會觸發（或反過來，畫不了圖）。
                     // 手勢必須在**同一個迴圈**裡依觸點數分流。
@@ -603,7 +593,7 @@ fun WoundEditScreen(
                                     // 第一指落下時已經畫了一筆。使用者的意圖是縮放，不是畫圖——
                                     // 用既有的快照把那一筆還原，否則每次縮放都會在傷口上留一個點，
                                     // 而那個點會直接進入 GT。
-                                    strokeSnapshot?.let { if (it.mw == st.mw && it.mh == st.mh) restore(it) }
+                                    strokeSnapshot?.let { restore(it) }
                                     strokeSnapshot = null; last = null; cursor = null
                                     version++
                                 }
@@ -614,10 +604,10 @@ fun WoundEditScreen(
                                     // 以雙指中心為錨點縮放：螢幕點 p 對應影像點 p/k + off，
                                     // 要讓錨點下的影像位置不動 → off' = off + c/k - c/k'
                                     val kOld = k()
-                                    val ci = centroid / kOld + viewOffset
+                                    val oldOffset = viewOffset
                                     if (zoom != 1f) viewScale = (viewScale * zoom).coerceIn(0.5f, 24f)
                                     val kNew = k()
-                                    viewOffset = ci - centroid / kNew - pan / kNew
+                                    viewOffset = editorPinchOffset(oldOffset, kOld, kNew, centroid, pan)
                                 }
                                 ev.changes.forEach { it.consume() }
                             } else if (!multi && pressed == 1) {
@@ -634,8 +624,8 @@ fun WoundEditScreen(
                         } while (ev.changes.any { it.pressed })
 
                         strokeSnapshot?.let {
-                            // 擴張過的舊快照尺寸不同，還原會錯位 → 丟棄
-                            if (it.mw == st.mw && it.mh == st.mh) pushUndo(it)
+                            // Geometry and pixels are retained together, including ROI expansion.
+                            pushUndo(it)
                         }
                         cursor = null      // last 是迴圈區域變數，這一輪結束即消失，不必再清
                     }

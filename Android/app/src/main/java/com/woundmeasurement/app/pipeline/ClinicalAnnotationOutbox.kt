@@ -48,23 +48,25 @@ internal class ClinicalAnnotationOutbox(context: Context, private val scope: Med
         savedAssets: suspend () -> Pair<ByteArray,ByteArray>?,
         permitted: suspend () -> Permission): Job = withContext(Dispatchers.IO) { mutex.withLock {
         val jobs = loadAll() // Any unreadable job stops new writes; never silently discard it.
-        require(binding.origin.startsWith("https://") && binding.configuredUser.isNotBlank() && binding.actor.isNotBlank())
-        require(row.id > 0 && row.doctorVerified && !row.wdCode.isNullOrBlank() && !row.imageId.isNullOrBlank())
-        require(!row.annotationSubmitted && current() == row && permitted() == Permission.ALLOW)
+        require(binding.origin.startsWith("https://") && binding.configuredUser.isNotBlank() && binding.actor.isNotBlank()) { "登入身分尚未確認，請先完成 Google／WoundAI 登入" }
+        require(row.id > 0 && row.doctorVerified && !row.wdCode.isNullOrBlank() && !row.imageId.isNullOrBlank()) { "缺少醫師確認或已保存影像綁定，請開啟紀錄核對" }
+        suspend fun currentMatches() = current()?.copy(annotationSubmitted=false) == row.copy(annotationSubmitted=false)
+        require(currentMatches()) { "已存紀錄與本次送件版本不同，請重新開啟紀錄核對；未建立待傳工作" }
+        require(permitted() == Permission.ALLOW) { "目前登入或同意狀態未通過送件核對；請確認登入與紀錄來源後重試" }
         suspend fun assetsMatch(): Boolean {
             val actual=savedAssets() ?: return false
             return actual.first.contentEquals(imageBytes) && actual.second.contentEquals(rasterBytes)
         }
-        require(assetsMatch())
-        require(AnnotationProvenance.decode(row.annotationProvenance) != null)
-        require(parsePolygons(row.gtPolygon).isNotEmpty())
+        require(assetsMatch()) { "已存影像或遮罩與送件版本不一致，未建立待傳工作" }
+        require(AnnotationProvenance.decode(row.annotationProvenance) != null) { "缺少標註來源資訊，請保留紀錄供核對" }
+        require(parsePolygons(row.gtPolygon).isNotEmpty()) { "沒有可送出的傷口輪廓" }
         val image = android.graphics.BitmapFactory.decodeByteArray(imageBytes,0,imageBytes.size)
             ?: error("Saved image unavailable")
         val raster = try {
-            require(image.width == row.imageW && image.height == row.imageH)
+            require(image.width == row.imageW && image.height == row.imageH) { "已存影像尺寸與標註不一致" }
             requireNotNull(EditRasterCodec.decode(rasterBytes,row.rasterMeta,image.width,image.height))
         } finally { image.recycle() }
-        require(raster.tissueEditCountKnown)
+        require(raster.tissueEditCountKnown) { "缺少原始組織分類基準，請保留紀錄供核對" }
         val wound = requireNotNull(WoundMaskCodec.encode(raster.mask,raster.mw,raster.mh))
         val tissue = requireNotNull(TissueMaskCodec.encode(raster.tissue,raster.mask,raster.mw,raster.mh))
         val rowJson = gson.toJson(row.copy(annotationSubmitted = false))
@@ -72,10 +74,11 @@ internal class ClinicalAnnotationOutbox(context: Context, private val scope: Med
         val key = sha(gson.toJson(listOf(scope.name,binding.origin,binding.configuredUser,binding.actor,rowJson,imageSHA,rasterSHA)).toByteArray(Charsets.UTF_8))
         val previous = jobs.firstOrNull { it.key == key && it.state != State.CANCELLED }
         if (previous != null) return@withLock previous
+        require(!row.annotationSubmitted && current()?.annotationSubmitted == false) { "此修訂已保存，無須重送" }
         val job = Job(id=UUID.randomUUID().toString(),scope=scope.name,key=key,binding=binding,rowJson=rowJson,
             rasterBase64=Base64.encodeToString(rasterBytes,Base64.NO_WRAP),imageSHA=imageSHA,rasterSHA=rasterSHA,
             woundSHA=sha(Base64.decode(wound,Base64.NO_WRAP)),tissueSHA=sha(Base64.decode(tissue,Base64.NO_WRAP)),createdAt=now())
-        require(current() == row && assetsMatch() && permitted() == Permission.ALLOW)
+        require(currentMatches() && assetsMatch() && permitted() == Permission.ALLOW) { "影像、標註或權限已變動，未建立新的待傳工作" }
         persist(job)
         job
     } }

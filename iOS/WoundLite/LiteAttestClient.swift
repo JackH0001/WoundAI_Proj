@@ -18,7 +18,7 @@ protocol LiteAttestTransport: Sendable {
 enum LiteAttestFailure: Error, Equatable {
     case unsupported, invalidConfiguration, invalidState, invalidResponse, invalidRequest
     case appleTemporarilyUnavailable, registrationRejected, unavailable, busy, consentRequired
-    case identityMismatch
+    case identityMismatch, serviceChanged
     case http(Int)
 }
 

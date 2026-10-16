@@ -1,5 +1,6 @@
 #if WOUND_INSTITUTION_TESTS
 import XCTest
+import UIKit
 @testable import WoundAIInstitution
 
 private final class ReviewHTTP: URLProtocol {
@@ -74,6 +75,58 @@ final class MedicalRuntimeTests: XCTestCase {
         XCTAssertEqual(a.backendUser(), "mmhps20261007:dr01")
         XCTAssertNotEqual(a.local.privateExports, b.local.privateExports)
         XCTAssertNotEqual(a.exportPreferences, b.exportPreferences)
+    }
+    func testDemoCanRetryOutputWithoutUploadAndRetainsPrivateCopyOnFolderFailure() async throws {
+        let transport = RuntimeReply(org: "mmh-review-demo")
+        let demo = try runtime(.syntheticReview, transport: transport)
+        defer { demo.deactivate() }
+        XCTAssertTrue(demo.setCredentials(user: "review01", password: UUID().uuidString))
+        demo.exportPreferences.set(true, forKey: InstitutionPrivateExports.preferenceKey)
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 64, height: 64), format: format).image { c in
+            UIColor.white.setFill(); c.fill(CGRect(x: 0, y: 0, width: 64, height: 64))
+        }
+        let raw = try XCTUnwrap(image.jpegData(compressionQuality: 0.9))
+        let raster = EditRaster(mask: [1,1,1,1], tissue: [1,2,3,5], origMask: [1,1,1,1],
+            rx0: 10, ry0: 10, mw: 2, mh: 2, mScale: 1, cm2PerPx: nil, canvasW: 64, canvasH: 64)
+        let encoded = try XCTUnwrap(EditRasterCodec.encode(raster))
+        var row = Measurement(); row.id = 1; row.source = "phantom"; row.doctorVerified = true
+        row.imageId = "synthetic-export"; row.wdCode = "SYNTH-EXPORT"; row.imageW = 64; row.imageH = 64
+        row.imagePath = try XCTUnwrap(demo.local.images.save(jpeg: raw))
+        row.rasterPath = try XCTUnwrap(demo.local.images.saveRaw(encoded.0)); row.rasterMeta = encoded.1
+        row.gtPolygon = PolygonJson.toJson([[[10,10],[11,10],[11,11],[10,11]]])
+        let payload = try BackendClient.annotationPayload(code: row.wdCode!, gtPolygon: row.polygons[0], exudate: nil,
+            imageId: row.imageId, imageW: 64, imageH: 64,
+            tissueMaskPngBase64: TissueMaskCodec.encodeBase64(tissue: raster.tissue, mask: raster.mask, mw: 2, mh: 2),
+            tissueRaster: raster, consentTrain: true, doctorVerified: true)
+        let jobID = try demo.local.outbox.enqueue(measurement: row, payload: payload, server: demo.backendURL(),
+            configuredUser: demo.backendUser(), actor: "mmh-review-demo:review01", depth: nil, requiresDepth: false)
+        XCTAssertTrue(demo.hasSubmissionForExport)
+        demo.exportPreferences.set(Data([0]), forKey: InstitutionPrivateExports.folderKey)
+        let failed = await demo.retryLatestSubmissionExport()
+        XCTAssertTrue(failed.contains("自訂資料夾輸出失敗"), failed)
+        XCTAssertEqual(demo.local.outbox.jobs.count, 1)
+        let copies = try FileManager.default.contentsOfDirectory(at: demo.local.privateExports, includingPropertiesForKeys: nil)
+        XCTAssertEqual(copies.count, 1)
+        let copy = try InstitutionPrivateExports.read(try XCTUnwrap(copies.first))
+        XCTAssertEqual(copy["submission.json"], payload)
+        let localFolder = root.appendingPathComponent("Demo-output")
+        try FileManager.default.createDirectory(at: localFolder, withIntermediateDirectories: true)
+        try InstitutionPrivateExports.writeDelivery(files: copy, name: "demo-retry", folder: localFolder)
+        let delivered = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: localFolder, includingPropertiesForKeys: nil).first)
+        XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: delivered.path)), ["image.jpg", "overlay.png"])
+        XCTAssertEqual(try Data(contentsOf: delivered.appendingPathComponent("image.jpg")), raw)
+        XCTAssertNotNil(UIImage(data: try Data(contentsOf: delivered.appendingPathComponent("overlay.png"))))
+        demo.exportPreferences.removeObject(forKey: InstitutionPrivateExports.folderKey)
+        let success = await demo.retryLatestSubmissionExport()
+        XCTAssertTrue(success.contains("已保存於 App 私密空間"), success)
+        XCTAssertEqual(demo.exportPreferences.string(forKey: InstitutionPrivateExports.lastResultKey), success.trimmingCharacters(in: .whitespacesAndNewlines))
+        XCTAssertEqual(demo.local.outbox.jobs.map(\.id), [jobID])
+        XCTAssertEqual(demo.local.outbox.jobs.first?.annotationPayload, payload)
+        let calls = await transport.calls; XCTAssertEqual(calls, 0, "Local retry must not authenticate or upload")
+        XCTAssertFalse(try runtime(.mmh).hasSubmissionForExport)
+        XCTAssertTrue(demo.setCredentials(user: "another-user", password: UUID().uuidString))
+        XCTAssertFalse(demo.hasSubmissionForExport, "Do not select another account's submission")
     }
     func testClosedEnvironmentRejectsLateLoginAndNewClients() async throws {
         let transport = RuntimeReply(org: "mmh-review-demo"); await transport.pause()

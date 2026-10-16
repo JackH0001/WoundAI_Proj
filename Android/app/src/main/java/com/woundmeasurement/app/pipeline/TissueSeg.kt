@@ -58,7 +58,9 @@ internal object TissueSeg {
 
         val roi = Bitmap.createBitmap(src, x0, y0, bw, bh)
         val small = Bitmap.createScaledBitmap(roi, gw, gh, true)
-        if (roi !== small) roi.recycle()
+        // A full-image crop of an immutable bitmap may return src itself.
+        // Only release owned temporaries; the editor still draws the caller's image.
+        if (roi !== small && roi !== src) roi.recycle()
         val px = IntArray(gw * gh)
         small.getPixels(px, 0, gw, 0, 0, gw, gh)
         if (small !== src) small.recycle()

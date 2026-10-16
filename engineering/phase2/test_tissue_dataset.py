@@ -284,6 +284,36 @@ def main():
     check("8k dr02 自己的舊那筆被 superseded，只留最新",
           sorted(dr02) == ["parallel_rater", "superseded"], dr02)
 
+    # Queue validity is separate from training-purpose and quality selection.
+    for source in ("phantom", "sample"):
+        jpg = make_jpeg() + source.encode()
+        iid = hashlib.sha1(jpg).hexdigest()[:16]
+        with open(os.path.join(tmp, "images", iid + ".jpg"), "wb") as f:
+            f.write(jpg)
+        ids[source] = iid
+        ratify_synthetic(tmp, [iid])
+        data = anno(source, "WD-" + source.upper(), make_png())
+        data["source"] = source
+        status, _ = post("/api/v1/annotation", "physician", data)
+        check("9 " + source + " remains accepted for validation", status == 200)
+        _, records = get("/api/v1/flywheel/records", "physician")
+        row = next(r for r in records["records"] if r["image_id"] == iid)
+        check("9a " + source + " active revision does not claim training eligibility",
+              row["status"] == "trainable" and row["status_zh"] == "有效標註（待篩選）")
+        _, default = get("/api/v1/dataset/manifest?kind=tissue", "engineer")
+        check("9b default manifest excludes " + source,
+              iid not in {r["image_id"] for r in default["items"]})
+        _, explicit = get("/api/v1/dataset/manifest?kind=tissue&source=" + source, "engineer")
+        check("9c explicit validation source selection remains available: " + source,
+              iid in {r["image_id"] for r in explicit["items"]})
+    _, records = get("/api/v1/flywheel/records", "physician")
+    poor = next(r for r in records["records"] if r["image_id"] == ids["poor"])
+    check("9d poor-quality annotation stays active but is not a training approval",
+          poor["status"] == "trainable" and poor["status_zh"] == "有效標註（待篩選）")
+    _, default = get("/api/v1/dataset/manifest?kind=tissue", "engineer")
+    check("9e quality filter still excludes poor-quality active annotation",
+          ids["poor"] not in {r["image_id"] for r in default["items"]})
+
     shutil.rmtree(tmp, ignore_errors=True)
     print()
     if FAILED:

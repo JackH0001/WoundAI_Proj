@@ -207,7 +207,7 @@ struct ReviewView: View {
     }
 
     private func canSubmit(_ m: Measurement) -> Bool {
-        return !loading && !uploadBusy && !uploads.jobs.contains(where: { $0.measurement.id == m.id && !$0.completed }) && !m.annotationSubmitted && m.gtPolygon != nil && m.imageId != nil
+        return !loading && !uploadBusy && !uploads.blocksSubmission(recordID: m.id) && !m.annotationSubmitted && m.gtPolygon != nil && m.imageId != nil
             && m.wdCode != nil && m.doctorVerified && trainOk && loggedIn
             && identity?.canSubmitClinicalTraining == true
     }
@@ -216,7 +216,10 @@ struct ReviewView: View {
         if identity?.canSubmitClinicalTraining != true {
             return "目前帳號無醫師確認／訓練標註權限；可調整輪廓與儲存量測。"
         }
-        if uploads.jobs.contains(where: { $0.measurement.id == m.id && !$0.completed }) {
+        if uploads.jobs.contains(where: { $0.measurement.id == m.id && $0.needsTissueCountRepair }) {
+            return "舊送件修改比例無效。請開啟修邊並確認完成，再送出相同遮罩；不必重拍或任意修改。"
+        }
+        if uploads.blocksSubmission(recordID: m.id) {
             return "此筆研究資料已排入待傳佇列，會自動接續；不需重新修邊或重複送出。"
         }
         if m.annotationSubmitted { return "此筆標註已獲雲端確認；僅在需要修正輪廓時重新修邊，深度上傳不需改動遮罩。" }
@@ -411,7 +414,7 @@ struct ReviewView: View {
 
     @MainActor
     private func submit(_ m: Measurement) async {
-        guard !uploadBusy, !uploads.jobs.contains(where: { $0.measurement.id == m.id && !$0.completed }) else { return }
+        guard !uploadBusy, !uploads.blocksSubmission(recordID: m.id) else { return }
         submitting = true
         uploadPhase = "確認登入與最新同意…"
         defer { submitting = false }

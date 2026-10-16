@@ -2,7 +2,7 @@ package com.woundmeasurement.app.pipeline
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 
 /** A saved password is not a verified session. */
@@ -27,4 +27,15 @@ internal fun BackendSignInActions(
     if (authenticated && entryReady && !busy) OutlinedButton(
         onClick = onSignOut, enabled = enabled, modifier = Modifier.fillMaxWidth()
     ) { Text("登出 WoundAI 帳號") }
+}
+
+/** Wait for both the Google result and its busy callback, whichever arrives first. */
+@Composable
+internal fun RestoreBackendAfterEntry(entryReady: Boolean, entryBusy: Boolean, hasSaved: Boolean,
+    connect: suspend () -> Unit) {
+    val latestConnect by rememberUpdatedState(connect)
+    val latestHasSaved by rememberUpdatedState(hasSaved)
+    LaunchedEffect(entryReady, entryBusy) {
+        if (entryReady && !entryBusy && latestHasSaved) latestConnect()
+    }
 }

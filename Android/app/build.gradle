@@ -136,7 +136,7 @@ android {
             initWith debug
             matchingFallbacks = ['debug']
             applicationIdSuffix ".mmhps20261007.validation"
-            versionNameSuffix "-mmh-validation-r5"
+            versionNameSuffix "-mmh-validation-r11"
             buildConfigField "boolean", "MMH_VALIDATION", "true"
             buildConfigField "String", "DEFAULT_BACKEND_URL", '"https://woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app"'
         }
@@ -314,4 +314,12 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
     mmhValidationImplementation("androidx.compose.ui:ui-test-manifest")
+}
+
+// Explicit release/QA mode: avoid reusing Kotlin incremental output across version bumps.
+// Invoke with -PverifiedReleaseBuild=true --no-build-cache for distributable MMH artifacts.
+if (providers.gradleProperty("verifiedReleaseBuild").orNull == "true") {
+    tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+        incremental = false
+    }
 }

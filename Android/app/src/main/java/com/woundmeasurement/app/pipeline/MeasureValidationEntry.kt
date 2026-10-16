@@ -63,7 +63,7 @@ fun MeasureValidationEntry(
     var exudate by remember { mutableStateOf<Int?>(null) }
     // 樣本來源:載入影像前就要選(決定分割走 AI 還是色彩法),送出標註時沿用同一個值。
     // 臨床模式直接鎖 clinical——已經從個案進來了,再問一次只是多一個選錯的機會。
-    var source by rememberSaveable { mutableStateOf<String?>(if (clinicalMode) "clinical" else null) }
+    var source by rememberSaveable { mutableStateOf<String?>(if (clinicalMode) "clinical" else "sample") }
     // Sprint N1:選定的傷口個案與其同意紀錄。臨床收案必須先選個案,
     // 否則量測存不進正確的時間軸、送出的 code 也不穩定(回診串不起來)。
     // rememberSaveable:轉螢幕若丟了「切換後的個案」,會悄悄換回進來時那個,接著存檔就寫進錯的時間軸
@@ -205,7 +205,7 @@ fun MeasureValidationEntry(
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(loginState, style = MaterialTheme.typography.bodySmall)
-            Text(modelState, style = MaterialTheme.typography.bodySmall)
+
 
             // ---- 個案綁定列（臨床模式常駐；快速量測不顯示，因為它本來就不綁個案）----
             if (clinicalMode) {
@@ -521,6 +521,7 @@ private fun DoctorFlywheelSubmit(
     val researchState by runtime.research.status.collectAsState()
     LaunchedEffect(researchState.items) { vm.reconcileSavedAcknowledgement(dao) }
     val st by vm.state.collectAsState()
+    val queued = researchState.tracks(vm.savedSnapshot)
     val scope = rememberCoroutineScope()
     if (st.result == null) return
     // 臨床樣本必須有個案(穩定 wdCode)與有效訓練同意才可送;範例/模擬圖無受試者,不受此限。
@@ -545,7 +546,7 @@ private fun DoctorFlywheelSubmit(
         if (caseOk && !trainOk) Text("⚠ 此病患未勾選②訓練同意(或已撤回),不得送出訓練標註",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
 
-        ResearchOutboxPanel(runtime)
+        ResearchOutboxPanel(runtime, vm.savedSnapshot?.id)
         Text("按確認送出表示由目前登入的醫師確認此已存版本，並允許 App 接續重試。", style=MaterialTheme.typography.bodySmall)
         if (!st.saved) Text("請先存入時間軸，再送出此修訂的標註。")
         // 送出狀態放按鈕「上方」,按下即可見
@@ -554,7 +555,7 @@ private fun DoctorFlywheelSubmit(
         }
         AnnotationSubmitButton(
             busy = st.annotationSending,
-            label = if (st.annotationSaved) "此修訂標註已保存" else "確認送出已存檔的標註",
+            label = when { st.annotationSaved -> "此修訂標註已保存"; queued -> "此修訂已排入待傳，請查看保存狀態"; else -> "確認送出研究資料" },
             onClick = {
                 // 臨床樣本用個案的**穩定** wdCode(回診沿用同一組);範例/模擬圖沒有個案才另發,
                 // 但同樣不可用 timestamp 尾碼(27.8 小時就循環、跨日必碰撞)。
@@ -576,7 +577,7 @@ private fun DoctorFlywheelSubmit(
                         enqueueResearch = { saved -> runtime.research.enqueue(saved) })
                 }
             },
-            enabled = !st.loading && !st.saving && !st.annotationSending && st.saved && !st.annotationSaved && source != null && caseOk && trainOk
+            enabled = !st.loading && !st.saving && !st.annotationSending && st.saved && !st.annotationSaved && !queued && source != null && caseOk && trainOk
         )
     }
 }

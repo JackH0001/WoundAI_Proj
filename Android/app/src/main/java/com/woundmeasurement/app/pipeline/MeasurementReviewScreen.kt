@@ -73,6 +73,7 @@ fun MeasurementReviewScreen(
     var msg by remember { mutableStateOf<String?>(null) }
     var cur by remember { mutableStateOf(record) }
     val researchState by runtime.research.status.collectAsState()
+    val queued = researchState.tracks(cur)
     LaunchedEffect(researchState.items) {
         val latest=withContext(Dispatchers.IO){dao.getById(cur.id)}
         if(latest!=null && latest.annotationSubmitted && latest.copy(annotationSubmitted=cur.annotationSubmitted)==cur) cur=latest
@@ -396,9 +397,9 @@ fun MeasurementReviewScreen(
         )
         AnnotationSubmitButton(
             busy = submitting,
-            label = if (cur.annotationSubmitted) "標註已保存，無需補送" else "補送訓練標註 → 再訓練佇列",
+            label = when { cur.annotationSubmitted -> "標註已保存，無需補送"; queued -> "此修訂已排入待傳，請查看保存狀態"; else -> "確認送出研究資料" },
             onClick = { confirmSubmit = true },
-            enabled = !loading && !submitting && !savingRevision && provenance != null && resumeRaster?.tissueEditCountKnown != false && me?.can("gt.verify") == true && !cur.annotationSubmitted && cur.gtPolygon != null && cur.imageId != null &&
+            enabled = !queued && !loading && !submitting && !savingRevision && provenance != null && resumeRaster?.tissueEditCountKnown != false && me?.can("gt.verify") == true && !cur.annotationSubmitted && cur.gtPolygon != null && cur.imageId != null &&
                       cur.wdCode != null && cur.doctorVerified && trainOk && loggedIn
         )
 

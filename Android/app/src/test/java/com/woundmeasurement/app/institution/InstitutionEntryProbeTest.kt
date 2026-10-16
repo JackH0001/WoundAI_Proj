@@ -46,4 +46,29 @@ class InstitutionEntryProbeTest {
         catch(_: CancellationException) { }
         assertEquals(1,calls)
     }
+
+    @Test fun coldConnectionTimeoutThenSuccessDoesNotRequireAnotherGoogleSignIn() = runBlocking {
+        var calls=0; val waits=mutableListOf<Long>()
+        InstitutionEntryProbe.verify({ calls++; if(calls==1) throw java.io.InterruptedIOException("timeout"); 200 to valid }, {waits.add(it)})
+        assertEquals(2,calls);assertEquals(listOf(2000L),waits)
+    }
+    @Test fun transientNetworkFailuresStopAfterThreeAttempts() = runBlocking {
+        for(error in listOf(java.net.SocketTimeoutException(),java.net.ConnectException(),java.net.UnknownHostException(),java.net.SocketException())) {
+            var calls=0
+            try { InstitutionEntryProbe.verify({calls++;throw error},{ });fail() }
+            catch(e:IOException) {assertTrue(e.message!!.contains("連線未完成"))}
+            assertEquals(3,calls)
+        }
+    }
+    @Test fun tlsFailureNeverRetries() = runBlocking {
+        var calls=0
+        try {InstitutionEntryProbe.verify({calls++;throw javax.net.ssl.SSLHandshakeException("synthetic")},{fail()});fail()}
+        catch(_:IOException) {}
+        assertEquals(1,calls)
+    }
+    @Test fun gatewayTimeoutThenSuccessUsesSameProbe() = runBlocking {
+        val codes=ArrayDeque(listOf(502,504,200));var calls=0
+        InstitutionEntryProbe.verify({calls++;codes.removeFirst() to valid},{})
+        assertEquals(3,calls)
+    }
 }

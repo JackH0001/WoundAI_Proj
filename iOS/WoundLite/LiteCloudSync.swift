@@ -88,6 +88,9 @@ extension LiteStore {
     func syncRevision(recordID: String, consent: () -> Bool = { LitePrefs.researchConsent == true },
                       identity: (() -> String)? = nil,
                       send: (LiteCloudBinding, LitePendingRevision) async throws -> Void = { binding, pending in
+                          guard LiteBackendConfiguration.sameService(binding.server, AppSettings.backendURL()) else {
+                              throw LiteAttestFailure.serviceChanged
+                          }
                           try await BackendClient(baseUrl: binding.server).liteRevision(bindingAnonID: binding.anonID,
                               imageID: binding.imageID, revision: pending.revision,
                               payloadJSON: pending.payloadJSON, digest: pending.digest)
@@ -123,9 +126,13 @@ extension LiteStore {
             } catch {
                 guard var latest = records.first(where: { $0.id == recordID }),
                       var current = latest.cloudSync else { return }
-                current.lastError = (error as? LiteAttestFailure) == .identityMismatch
-                    ? "本機已保存；這筆影像的原上傳身分無法由目前裝置驗證，尚未同步。舊資料不會自動轉移或重傳。"
-                    : "本機已保存；雲端尚未確認此修訂（可能尚未支援同步或連線失敗）。可稍後重試，不重傳照片。"
+                if (error as? LiteAttestFailure) == .serviceChanged {
+                    current.lastError = "本機已保存；此紀錄屬於舊服務，未轉送到目前服務。請保留原紀錄，另行核對舊資料。"
+                } else {
+                    current.lastError = (error as? LiteAttestFailure) == .identityMismatch
+                        ? "本機已保存；這筆影像的原上傳身分無法由目前裝置驗證，尚未同步。舊資料不會自動轉移或重傳。"
+                        : "本機已保存；雲端尚未確認此修訂（可能尚未支援同步或連線失敗）。可稍後重試，不重傳照片。"
+                }
                 latest.cloudSync = current
                 _ = update(latest)
                 return

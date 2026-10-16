@@ -743,15 +743,24 @@ struct MeasureFlowView: View {
             return s
         }()
         let ratio = de.projectedAreaCm2 > 0 ? de.surfaceAreaCm2 / de.projectedAreaCm2 : 1
+        let scaleConflict = de.hasGrossScaleConflict(stickerAreaCm2: sticker)
         VStack(alignment: .leading, spacing: 3) {
+            if scaleConflict {
+                Text("⚠ 深度與貼紙尺度嚴重不一致：本次深度面積與容積不可採用。請核對校正貼紙、拍攝距離及 LiDAR 是否被遮擋。")
+                    .font(.footnote).foregroundStyle(.orange)
+                Text("以下保留原始估算供排查；未以貼紙比例修改深度資料。")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
             Text(line1).font(.footnote)
+            Text(String(format: "深度估計攝距約 %.0f 公分（傷口範圍中位數）", de.medianDistanceM * 100))
+                .font(.caption).foregroundStyle(scaleConflict ? .orange : .secondary)
             if let t = de.tiltDeg {
                 Text(String(format: "拍攝傾角約 %.0f°%@", t,
                             t > 25 ? "——斜拍會低估投影面積，建議近正拍" : ""))
                     .font(.caption2).foregroundStyle(t > 25 ? .orange : .secondary)
                 // 平面／近平面時投影÷cosθ 是傾斜不變量（2026-08-10 實測多角度 ±3%）。
                 // 真實肢體曲面此校正只是近似，故標明平面假設。
-                if t > 10, t < 65 {
+                if !scaleConflict, t > 10, t < 65 {
                     Text(String(format: "斜拍校正投影 ≈ %.2f cm²（÷cos%.0f°，平面假設）",
                                 de.projectedAreaCm2 / cos(t * .pi / 180), t))
                         .font(.caption2).foregroundStyle(.blue)
@@ -762,7 +771,7 @@ struct MeasureFlowView: View {
                 // 表面積與體積此時是雜訊的積分，不是幾何。
                 Text(String(format: "⚠ 深度雜訊偏高（表面/投影比 %.2f），本次表面積與容積不可採用", ratio))
                     .font(.caption2).foregroundStyle(.orange)
-            } else if !line2.isEmpty {
+            } else if !scaleConflict, !line2.isEmpty {
                 Text(line2).font(.caption).foregroundStyle(.secondary)
             }
             if de.coverage < 0.7 {

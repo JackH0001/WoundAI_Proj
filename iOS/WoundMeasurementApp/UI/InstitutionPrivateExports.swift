@@ -15,6 +15,14 @@ enum InstitutionPrivateExports {
         return "measurement-\(rowID)-\(digest)"
     }
     static func submissionContents(row: Measurement, image: Data, raster: Data, payload: Data, medicalRecordNumber: String? = nil) throws -> [String: Data] {
+        // Compare on the same JSON representation as annotationPayload. Foundation
+        // can move a binary Double by one ULP when decoding its decimal JSON form.
+        // Do not round values, use an epsilon, or change the saved/exported result.
+        var savedNumbers: [String: Any] = [:]
+        if let fractions = row.tissueFrac { savedNumbers["tissue_frac"] = fractions }
+        if let area = row.estimatedArea { savedNumbers["area_cm2"] = area }
+        let wireNumbers = try JSONSerialization.jsonObject(with:
+            JSONSerialization.data(withJSONObject: savedNumbers)) as? [String: Any] ?? [:]
         guard row.doctorVerified, let bitmap = UIImage(data: image), let cg = bitmap.cgImage,
               row.imageW == cg.width, row.imageH == cg.height,
               let edit = EditRasterCodec.decode(png: raster, meta: row.rasterMeta, canvasW: cg.width, canvasH: cg.height),
@@ -23,9 +31,9 @@ enum InstitutionPrivateExports {
               body["code"] as? String == row.wdCode,
               body["image_w"] as? Int == row.imageW, body["image_h"] as? Int == row.imageH,
               (body["gt_polygons"] as? [[[Int]]] ?? (body["gt_polygon"] as? [[Int]]).map { [$0] } ?? []) == row.polygons,
-              (body["tissue_frac"] as? [String: Double]) == row.tissueFrac,
+              (body["tissue_frac"] as? [String: Double]) == (wireNumbers["tissue_frac"] as? [String: Double]),
               body["doctor_verified"] as? Bool == true,
-              (body["area_cm2"] as? NSNumber)?.doubleValue == row.estimatedArea,
+              (body["area_cm2"] as? NSNumber)?.doubleValue == (wireNumbers["area_cm2"] as? NSNumber)?.doubleValue,
               (body["exudate"] as? NSNumber)?.intValue == row.exudate,
               let wound = body["wound_mask_png"] as? String,
               let tissue = body["tissue_mask_png"] as? String,
@@ -76,6 +84,28 @@ enum InstitutionPrivateExports {
         guard folder.startAccessingSecurityScopedResource() else { throw CocoaError(.fileReadNoPermission) }
         defer { folder.stopAccessingSecurityScopedResource() }
         return try folder.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
+    }
+    /// Only fixed descriptions reach the UI; provider errors can contain private paths.
+    static func failureDescription(_ error: Error) -> String {
+        if let failure = error as? InstitutionExport.Failure {
+            switch failure {
+            case .invalidGeometry: return "影像與遮罩座標不一致"
+            case .incompleteRaster: return "遮罩資料不完整"
+            case .imageEncoding: return "無法產生或加密影像副本"
+            case .inconsistentExistingExport: return "送件與本機副本的一致性核對失敗"
+            }
+        }
+        let failure = error as NSError
+        if failure.domain == NSCocoaErrorDomain {
+            switch failure.code {
+            case NSFileReadNoPermissionError, NSFileWriteNoPermissionError:
+                return "資料夾授權無效，請重新選擇可寫入的資料夾"
+            case NSFileWriteOutOfSpaceError: return "裝置可用空間不足"
+            case NSFileNoSuchFileError, NSFileReadNoSuchFileError: return "找不到原始副本或輸出資料夾"
+            default: break
+            }
+        }
+        return "檔案寫入或讀回核對失敗"
     }
     static func deliver(files: [String: Data], name: String, bookmark: Data) throws {
         var stale = false
@@ -166,14 +196,18 @@ struct InstitutionExportDocument: FileDocument {
 
 struct InstitutionExportSettingsSection: View {
     let runtime: MedicalRuntime
+    // Upload completion and restored jobs can change while Settings remains open.
+    @ObservedObject private var outbox: ClinicalUploadOutbox
     @AppStorage private var enabled: Bool
     @AppStorage private var lastResult: String
     @AppStorage private var lastAttempt: Double
     @State private var selectingFolder = false
     @State private var folderLabel = ""
     @State private var folderIssue: String?
+    @State private var retrying = false
     init(runtime: MedicalRuntime) {
         self.runtime = runtime
+        _outbox = ObservedObject(wrappedValue: runtime.local.outbox)
         _enabled = AppStorage(wrappedValue: false, InstitutionPrivateExports.preferenceKey, store: runtime.exportPreferences)
         _lastResult = AppStorage(wrappedValue: "", InstitutionPrivateExports.lastResultKey, store: runtime.exportPreferences)
         _lastAttempt = AppStorage(wrappedValue: 0, InstitutionPrivateExports.lastAttemptKey, store: runtime.exportPreferences)
@@ -197,6 +231,21 @@ struct InstitutionExportSettingsSection: View {
                     Text("最近一次輸出：" + Date(timeIntervalSince1970: lastAttempt).formatted(date: .abbreviated, time: .shortened))
                         .font(.caption)
                     Text(lastResult).font(.footnote).accessibilityIdentifier("AdministrativeExportStatus")
+                }
+                if enabled {
+                    Button(retrying ? "正在重新輸出…" : "重新輸出最近一次送件（不上傳）") {
+                        retrying = true
+                        Task {
+                            _ = await runtime.retryLatestSubmissionExport()
+                            retrying = false
+                        }
+                    }.disabled(retrying || !runtime.hasSubmissionForExport)
+                    if !runtime.hasSubmissionForExport {
+                        Text("目前帳號沒有可重新輸出的送件副本。請確認使用原送件帳號；既有本機副本可由下方「選擇副本並匯出」取得，不必為了輸出再次修邊或上傳。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Text("只將最近一次確認送件的影像與結果重新輸出至目前位置；不修改標註、不重送雲端資料。")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 if let folderIssue { Text(folderIssue).foregroundStyle(.red) }
                 Text("預設關閉。開啟後於確認上傳時，只輸出 image 傷口影像與 overlay 疊圖（含測量數據）兩張；資料夾依病歷號（無則「無病歷號」）及台北輸出日期時間命名。使用同一份已確認修訂；只存時間軸不輸出，加密保存在 App 私密空間並排除系統備份，未選自訂資料夾時不會自動同步。關閉不影響時間軸或已同意的研究上傳，也不會刪除既有副本。")
@@ -222,6 +271,8 @@ struct InstitutionExportSettingsSection: View {
 struct InstitutionExportsView: View {
     let directory: URL
     @State private var files: [URL] = []
+    @State private var page = 0
+    private let pageSize = 5
     @State private var document: InstitutionExportDocument?
     @State private var exporting = false
     @State private var name = "MMH-review"
@@ -230,7 +281,8 @@ struct InstitutionExportsView: View {
         List {
             if files.isEmpty { Text("尚無行政匯出副本。開啟選項後，下次確認上傳時建立。") }
             if let issue { Text(issue).foregroundStyle(.red) }
-            ForEach(files, id: \.self) { file in
+            if !files.isEmpty { Text("共 \(files.count) 份副本 · 最新在前 · 每頁最多 5 份").font(.caption) }
+            ForEach(Array(files.dropFirst(page * pageSize).prefix(pageSize)), id: \.self) { file in
                 Button(file.deletingPathExtension().lastPathComponent) {
                     do {
                         let contents = try InstitutionPrivateExports.read(file)
@@ -240,13 +292,32 @@ struct InstitutionExportsView: View {
                     } catch { issue = "副本完整性檢查失敗，未匯出。" }
                 }.font(.caption)
             }
+            if files.count > pageSize {
+                HStack {
+                    Button("上一頁") { page -= 1 }.disabled(page == 0)
+                    Spacer()
+                    Text("第 \(page + 1) / \((files.count + pageSize - 1) / pageSize) 頁").font(.caption)
+                    Spacer()
+                    Button("下一頁") { page += 1 }.disabled((page + 1) * pageSize >= files.count)
+                }.buttonStyle(.borderless)
+            }
         }
         .navigationTitle("行政副本")
         .task {
             do {
                 try HealthDataFiles.prepareDirectory(directory)
-                files = try FileManager.default.contentsOfDirectory(at: directory,
-                    includingPropertiesForKeys:nil).filter { $0.pathExtension == "enc" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+                let entries = try FileManager.default.contentsOfDirectory(at: directory,
+                    includingPropertiesForKeys:[.contentModificationDateKey, .isRegularFileKey])
+                    .filter { $0.pathExtension == "enc" }
+                    .compactMap { url -> (URL, Date)? in
+                        let values = try url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
+                        guard values.isRegularFile == true else { return nil }
+                        return (url, values.contentModificationDate ?? .distantPast)
+                    }
+                files = entries.sorted {
+                    $0.1 == $1.1 ? $0.0.lastPathComponent < $1.0.lastPathComponent : $0.1 > $1.1
+                }.map { $0.0 }
+                page = 0
             } catch { issue = "無法讀取私密副本目錄。" }
         }
         .fileExporter(isPresented: $exporting, document: document, contentType: .folder, defaultFilename: name) { result in

@@ -464,6 +464,8 @@ class BackendClient internal constructor(
         // 沒有 image_id/尺寸就送出 = 產生孤兒 GT(後端會 400)。提早在端上擋下並給明確訊息。
         if (tissueRaster?.tissueEditCountKnown == false)
             return Pair(false, "缺少原始組織分類基準，無法確認修改量；未送出標註")
+        if (tissueRaster?.hasValidTissueEditStatistics == false)
+            return Pair(false, "組織修改比例需重新核對；請開啟原紀錄的修邊畫面確認完成，不必重拍")
         if (imageId.isNullOrEmpty() || imageW <= 0 || imageH <= 0) {
             return Pair(false, "缺影像綁定(image_id/尺寸);請重新以後端模式量測一次再送出")
         }

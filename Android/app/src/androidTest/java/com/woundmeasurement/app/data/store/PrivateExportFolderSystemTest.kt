@@ -6,6 +6,9 @@ import android.net.Uri
 import android.provider.DocumentsContract
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.Modifier
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -13,6 +16,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.platform.app.InstrumentationRegistry
 import com.woundmeasurement.app.pipeline.MedicalRuntime
 import com.woundmeasurement.app.pipeline.PrivateExportSettings
+import com.woundmeasurement.app.pipeline.ClinicalAnnotationOutbox
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.FixMethodOrder
@@ -103,12 +107,34 @@ class PrivateExportFolderSystemTest {
         assertTrue(context.contentResolver.persistedUriPermissions.any{it.uri==tree && it.isReadPermission && it.isWritePermission})
         val destination=Uri.parse(saved.getString("destination"))
         assertArrayEquals(store.read(name).getValue("image.jpg"),readChildren(destination).getValue("image.jpg"))
-        val before=children(tree).toSet();store.deliver(name)
+        val before=children(tree).toSet()
+        val outbox=ClinicalAnnotationOutbox(context,MedicalDataScope.SYNTHETIC_REVIEW)
+        val jobsBefore=kotlinx.coroutines.runBlocking { outbox.jobs() }
+        val privateBefore=store.read(name)
+        var networkCalls=0
+        val runtime=MedicalRuntime(context,MedicalDataScope.SYNTHETIC_REVIEW) { _,_,_ ->
+            networkCalls++;error("Local export must not request a network client")
+        }
+        compose.setContent { MaterialTheme { Column(Modifier.verticalScroll(rememberScrollState())) {
+            PrivateExportSettings(runtime)
+        } } }
+        compose.onNodeWithText("選擇副本並匯出…").performScrollTo().performClick()
+        compose.waitUntil(8000) { compose.onAllNodesWithText("輸出此副本至設定資料夾（不上傳）").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("retry-export-$name").performScrollTo().performClick()
+        compose.waitUntil(8000) { compose.onAllNodesWithText("image 與 overlay 兩張影像已輸出至設定資料夾；未重新上傳，研究保存狀態未變更。").fetchSemanticsNodes().isNotEmpty() }
         val second=children(tree).filter{it !in before};assertEquals(1,second.size)
+        assertEquals(setOf("image.jpg","overlay.jpg"),readChildren(second.single()).keys)
+        assertEquals(0,networkCalls)
+        assertEquals(jobsBefore,kotlinx.coroutines.runBlocking { outbox.jobs() })
+        privateBefore.forEach { (key,bytes) -> assertArrayEquals(bytes,store.read(name)[key]) }
         assertTrue(DocumentsContract.deleteDocument(context.contentResolver,second.single()))
         assertTrue(DocumentsContract.deleteDocument(context.contentResolver,destination))
         context.contentResolver.releasePersistableUriPermission(tree,Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         assertThrows(Exception::class.java){store.deliver(name)}
+        compose.onNodeWithTag("retry-export-$name").performScrollTo().performClick()
+        compose.waitUntil(8000) { compose.onAllNodesWithText("本機輸出未完成；原副本仍保留。請重新選擇資料夾後重試，不必再次上傳。").fetchSemanticsNodes().isNotEmpty() }
+        assertEquals(0,networkCalls)
+        assertEquals(jobsBefore,kotlinx.coroutines.runBlocking { outbox.jobs() })
         assertTrue(store.list().contains(name));store.read(name)
         File(store.directory,name).delete()
         store.usePrivateFolder();store.enabled=saved.getBoolean("oldEnabled")

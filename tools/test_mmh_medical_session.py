@@ -149,6 +149,37 @@ class MedicalSessionTests(unittest.TestCase):
     def test_cross_institution_issuance_refused(self):
         with self.assertRaises(ValueError):context.account_session_claims(self.row,"other","dr01")
 
+class ReviewMedicalSessionTests(MedicalSessionTests):
+    """Apply all live-account/revision checks to the independent review org."""
+    def setUp(self):
+        org_patch=patch(__name__+".ORG", "mmh-review-demo")
+        org_patch.start();self.addCleanup(org_patch.stop)
+        from review_service_profile import EXPECTED
+        env_patch=patch.dict(os.environ, EXPECTED, clear=True)
+        env_patch.start();self.addCleanup(env_patch.stop)
+        super().setUp()
+
+    def test_physician_still_cannot_use_manager_or_list_accounts(self):
+        self.assertEqual(self.get(path="/api/v1/users/session").status_code,503)
+        self.assertEqual(self.get(path="/api/v1/users").status_code,403)
+
+    def test_partial_review_profile_never_enables_reuse(self):
+        from review_service_profile import EXPECTED
+        token=self.token()
+        for key in EXPECTED:
+            with self.subTest(key=key),patch.dict(os.environ,{key:"wrong"}):
+                self.assertEqual(self.get(token).status_code,503)
+
+    def test_unapproved_org_never_enables_reuse(self):
+        token=self.token()
+        with patch.object(context,"BOUND_ORG","another-org"):
+            self.assertEqual(self.get(token).status_code,503)
+
+    def test_seed_override_never_enables_reuse(self):
+        token=self.token()
+        with patch.dict(os.environ,{"WOUNDAI_DEMO_SEED_PASSWORD":"synthetic-only"}):
+            self.assertEqual(self.get(token).status_code,503)
+
 class MedicalSessionFlowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

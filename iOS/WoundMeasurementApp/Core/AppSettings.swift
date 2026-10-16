@@ -38,7 +38,8 @@ enum AppSettings {
         #if DEBUG && targetEnvironment(simulator)
         return "http://localhost:5000"
         #elseif WOUND_LITE
-        return legacyURL
+        return LiteBackendConfiguration.releaseOrigin(
+            Bundle.main.object(forInfoDictionaryKey: "LiteBackendURL") as? String)
         #else
         return demoURL
         #endif
@@ -57,7 +58,10 @@ enum AppSettings {
     // MARK: - 後端連線
 
     static func backendURL() -> String {
-        #if WOUND_INSTITUTION
+        #if WOUND_LITE
+        // A saved medical/legacy URL cannot override the signed Lite release binding.
+        return defaultURL
+        #elseif WOUND_INSTITUTION
         // Dedicated product cannot reuse a saved production/demo endpoint.
         return (Bundle.main.object(forInfoDictionaryKey: "WoundAIInstitutionBackendURL") as? String).flatMap { value in
             guard let url = URL(string: value), url.scheme == "https",

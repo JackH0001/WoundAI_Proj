@@ -97,12 +97,54 @@ final class InstitutionExportTests: XCTestCase {
         }
     }
 
+    func testFractionalSubmissionSurvivesJSONRoundTripWithoutChangingSavedValues() throws {
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 128, height: 128), format: format).image { c in
+            UIColor.white.setFill(); c.fill(CGRect(x: 0, y: 0, width: 128, height: 128))
+        }
+        var mask = [UInt8](repeating: 1, count: 10100)
+        for i in 10001..<10100 { mask[i] = 0 }
+        var tissue = mask; tissue[0] = 2; tissue[1] = 2
+        let raster = EditRaster(mask: mask, tissue: tissue, origMask: mask,
+            rx0: 0, ry0: 0, mw: 101, mh: 100, mScale: 1, cm2PerPx: nil, canvasW: 128, canvasH: 128)
+        let encoded = try XCTUnwrap(EditRasterCodec.encode(raster))
+        var row = Measurement(); row.id = 79; row.doctorVerified = true
+        row.imageId = "synthetic-fraction-image"; row.wdCode = "synthetic-fraction"
+        row.imageW = 128; row.imageH = 128; row.rasterMeta = encoded.1
+        row.exudate = 0; row.estimatedArea = Double(2) / 10001
+        let fractions = raster.tissueFrac()
+        row.tissueGranulation = fractions["granulation"]; row.tissueSlough = fractions["slough"]
+        row.tissueNecrosis = fractions["necrosis"]; row.tissueEpithelial = fractions["epithelial"]; row.tissueOther = fractions["other"]
+        row.gtPolygon = PolygonJson.toJson([[[0,0],[100,0],[100,99],[0,99]]])
+        let raw = try XCTUnwrap(image.jpegData(compressionQuality: 0.9))
+        let payload = try BackendClient.annotationPayload(code: row.wdCode!, gtPolygon: row.polygons[0], exudate: row.exudate,
+            allPolygons: row.polygons, areaCm2: row.estimatedArea, imageId: row.imageId, imageW: 128, imageH: 128,
+            tissueFrac: row.tissueFrac, tissueMaskPngBase64: TissueMaskCodec.encodeBase64(tissue: tissue, mask: mask, mw: 101, mh: 100),
+            tissueRaster: raster, consentTrain: true, doctorVerified: true)
+        let files = try InstitutionPrivateExports.submissionContents(row: row, image: raw, raster: encoded.0, payload: payload)
+        XCTAssertEqual(files["submission.json"], payload)
+        XCTAssertEqual(try InstitutionPrivateExports.deliveryImages(files)["image.jpg"], raw)
+        for changedArea in [row.estimatedArea! + 0.000001, 12.3] {
+            var changed = row; changed.estimatedArea = changedArea
+            XCTAssertThrowsError(try InstitutionPrivateExports.submissionContents(row: changed, image: raw, raster: encoded.0, payload: payload))
+        }
+        var changed = row; changed.tissueSlough = 0.1
+        XCTAssertThrowsError(try InstitutionPrivateExports.submissionContents(row: changed, image: raw, raster: encoded.0, payload: payload))
+    }
+
     func testExportAvailabilityFollowsBuildPolicy() {
         #if WOUND_INSTITUTION_TESTS && !WOUND_ADMIN_EXPORT_DISABLED
         XCTAssertTrue(InstitutionExport.enabled)
         #else
         XCTAssertFalse(InstitutionExport.enabled)
         #endif
+    }
+    func testExportErrorHintsDistinguishFailureStagesWithoutPrivatePaths() {
+        XCTAssertTrue(InstitutionPrivateExports.failureDescription(CocoaError(.fileWriteNoPermission)).contains("授權"))
+        XCTAssertTrue(InstitutionPrivateExports.failureDescription(CocoaError(.fileWriteOutOfSpace)).contains("空間"))
+        XCTAssertTrue(InstitutionPrivateExports.failureDescription(InstitutionExport.Failure.inconsistentExistingExport).contains("一致性"))
+        let error = NSError(domain: "Provider", code: 42, userInfo: [NSLocalizedDescriptionKey: "/private/patient-secret"])
+        XCTAssertFalse(InstitutionPrivateExports.failureDescription(error).contains("patient-secret"))
     }
     func testMismatchedCoordinateSpaceIsRejected() {
         var (image, raster) = fixture(); raster.canvasW = 63

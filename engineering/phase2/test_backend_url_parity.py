@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Pin each shipping profile to its documented backend, including demo isolation.
 
-Medical TestFlight uses the isolated demo service. Lite and Android retain the
-existing service until their separate release gates change. A single universal
+Medical TestFlight uses the isolated demo service. Lite uses its dedicated
+release binding; Android retains its separately documented profiles. A single universal
 URL assertion would reject this intentional split; dropping parity altogether
 would allow an unnoticed wrong-environment release. Parse the explicit profile
 switch fail-closed and compare each profile with a named runbook entry.
@@ -16,6 +16,9 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 IOS = ROOT / "iOS" / "WoundMeasurementApp" / "Core" / "AppSettings.swift"
+LITE_CONFIG = ROOT / "iOS/WoundLite/LiteBackendConfiguration.swift"
+LITE_INFO = ROOT / "iOS/WoundLite/Info.plist"
+PROJECT = ROOT / "iOS/project.yml"
 GRADLE = ROOT / "Android" / "app" / "build.gradle"
 RUNBOOK = ROOT / "docs" / "admin_operations.md"
 WORKFLOW = ROOT / ".github" / "workflows" / "p0-4-audit.yml"
@@ -26,6 +29,9 @@ SELF = "engineering/phase2/test_backend_url_parity.py"
 GUARDED = (
     SELF,
     "iOS/WoundMeasurementApp/Core/AppSettings.swift",
+    "iOS/WoundLite/LiteBackendConfiguration.swift",
+    "iOS/WoundLite/Info.plist",
+    "iOS/project.yml",
     "Android/app/build.gradle",
     "docs/admin_operations.md",
 )
@@ -92,20 +98,42 @@ def ios_profile_urls():
     match = re.fullmatch(
         r'\s*#if DEBUG && targetEnvironment\(simulator\)\s+'
         r'return "(?P<debug>[^"\n]+)"\s+'
-        r'#elseif WOUND_LITE\s+return legacyURL\s+'
+        r'#elseif WOUND_LITE\s+return LiteBackendConfiguration\.releaseOrigin\(\s*'
+        r'Bundle\.main\.object\(forInfoDictionaryKey: "LiteBackendURL"\) as\? String\)\s+'
         r'#else\s+return demoURL\s+#endif\s*', body)
     if not match:
         raise AssertionError("unrecognized defaultURL profile switch; inspect all shipping profiles")
     src = without_line_comments(text(IOS), "//")
     urls = {"debug": match.group("debug")}
-    for constant, profile in (("legacyURL", "ios-lite"), ("demoURL", "ios-medical-testflight")):
+    for constant, profile in (("demoURL", "ios-medical-testflight"),):
         values = re.findall(
             r'^[ \t]*(?:private )?static let ' + constant + r' = "([^"\n]+)"[ \t]*$',
             src, re.M)
         if len(values) != 1:
             raise AssertionError("expected one literal declaration for " + constant)
         urls[profile] = values[0]
+    urls['ios-lite'] = lite_release_url()
     return urls
+
+
+def lite_release_url():
+    config = without_line_comments(text(LITE_CONFIG), '//')
+    origins = re.findall(r'^\s*static let dedicatedOrigin = "([^"\n]+)"\s*$', config, re.M)
+    if len(origins) != 1 or not RUN_APP.fullmatch(origins[0]):
+        raise AssertionError('Lite must have one explicit dedicated HTTPS origin')
+    if plistlib.loads(text(LITE_INFO).encode()).get('LiteBackendURL') != '$(WOUNDLITE_BACKEND_URL)':
+        raise AssertionError('Lite Info.plist must use its release build setting')
+    project = text(PROJECT)
+    block = re.search(r'^  WoundLite:\n(.*?)(?=^  \w+:|\Z)', project, re.M | re.S)
+    if not block:
+        raise AssertionError('Missing dedicated Lite target')
+    settings = re.findall(r'^\s*WOUNDLITE_BACKEND_URL: "([^"\n]+)"\s*$', block.group(1), re.M)
+    if settings != origins:
+        raise AssertionError('Lite bundle setting disagrees with origin allowlist')
+    if not re.search(r'static func backendURL\(\) -> String \{\s*#if WOUND_LITE\s*return defaultURL',
+                     without_line_comments(text(IOS), '//')):
+        raise AssertionError('Saved medical settings must not override Lite origin')
+    return origins[0]
 
 
 # ------------------------------------------------------------ Android
@@ -290,8 +318,21 @@ class BackendUrlParityTests(unittest.TestCase):
             "android-mmh-internal": android_backend_urls()["mmhInternal"],
         }
         self.assertEqual(shipped, runbook_profiles())
-        self.assertEqual(shipped["ios-lite"], shipped["android-release"],
-                         "Lite and Android still share the existing service")
+        self.assertNotEqual(shipped["ios-lite"], shipped["android-release"],
+                            "Lite must not reuse the medical service")
+
+    def test_lite_release_binding_drift_is_rejected(self):
+        original = text
+        mutations = {
+            LITE_INFO: original(LITE_INFO).replace('$(WOUNDLITE_BACKEND_URL)', 'https://wrong.run.app'),
+            PROJECT: original(PROJECT).replace('WOUNDLITE_BACKEND_URL: "https://', 'WOUNDLITE_BACKEND_URL: "https://wrong-'),
+            LITE_CONFIG: original(LITE_CONFIG).replace('static let dedicatedOrigin = "https://', 'static let dedicatedOrigin = "https://wrong-'),
+            IOS: original(IOS).replace('#if WOUND_LITE\n        // A saved', '#if WOUND_OTHER\n        // A saved'),
+        }
+        for path, changed in mutations.items():
+            with self.subTest(path=path), patch(__name__+'.text', side_effect=lambda p: changed if p==path else original(p)):
+                with self.assertRaises(AssertionError):
+                    lite_release_url()
 
     # -- the guard must actually run -----------------------------------
 

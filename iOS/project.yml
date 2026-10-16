@@ -140,7 +140,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.woundai.lite
-        CURRENT_PROJECT_VERSION: "33"
+        CURRENT_PROJECT_VERSION: "35"
+        WOUNDLITE_BACKEND_URL: "https://woundai-lite-candidate-421209514056.asia-east1.run.app"
         CODE_SIGN_ENTITLEMENTS: WoundLite/WoundLite.entitlements
         INFOPLIST_FILE: WoundLite/Info.plist
         GENERATE_INFOPLIST_FILE: NO
@@ -170,6 +171,7 @@ targets:
       - path: WoundAITests
       - path: WoundLiteTests/LiteZoomPreviewTests.swift
       - path: WoundLiteTests/DepthPhotoAlignmentTests.swift
+      - path: WoundLiteTests/DepthScaleReviewTests.swift
     dependencies:
       - target: WoundMeasurementApp
     settings:

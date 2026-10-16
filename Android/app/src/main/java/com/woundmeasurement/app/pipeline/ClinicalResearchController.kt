@@ -22,8 +22,12 @@ internal class ClinicalResearchController(context: Context, private val runtime:
     private val manual=AtomicBoolean(false)
     @Volatile private var foreground=false
     private var pump: Job?=null
-    data class Item(val recordID:Long,val state:ClinicalAnnotationOutbox.State,val text:String)
+    data class Item(val recordID:Long,val state:ClinicalAnnotationOutbox.State,val text:String,val snapshot:MeasurementEntity?=null)
     data class Status(val items:List<Item> = emptyList(),val busy:Boolean=false,val issue:String?=null) {
+        fun tracks(row:MeasurementEntity?):Boolean = row != null && items.any {
+            it.state != ClinicalAnnotationOutbox.State.CANCELLED &&
+                it.snapshot?.copy(annotationSubmitted=false) == row.copy(annotationSubmitted=false)
+        }
         val pending get()=items.count { it.state !in setOf(ClinicalAnnotationOutbox.State.COMPLETE,ClinicalAnnotationOutbox.State.CANCELLED) }
     }
     private val mutable=MutableStateFlow(Status())
@@ -41,17 +45,17 @@ internal class ClinicalResearchController(context: Context, private val runtime:
     fun wake(retryPaused:Boolean=false) { if(retryPaused) manual.set(true);wakeups.trySend(Unit) }
     fun close() {foreground=false;tasks.cancel()}
 
-    private fun binding(client:BackendClient)=ClinicalAnnotationOutbox.Binding(runtime.backendUrl(),runtime.backendUser(),
-        requireNotNull(client.identity).identity)
+    private fun binding(identity:LoginIdentity)=ClinicalAnnotationOutbox.Binding(runtime.backendUrl(),runtime.backendUser(),
+        identity.identity)
     private suspend fun permission(row:MeasurementEntity,expected:ClinicalAnnotationOutbox.Binding,
-        client:BackendClient,current:()->Boolean):ClinicalAnnotationOutbox.Permission {
-        if(!runtime.isOpen() || !current() || binding(client)!=expected) return ClinicalAnnotationOutbox.Permission.WAIT
-        if(client.identity?.can("gt.verify")!=true || client.identity?.can("annotation.submit")!=true) return ClinicalAnnotationOutbox.Permission.WAIT
+        identity:LoginIdentity,current:()->Boolean):ClinicalAnnotationOutbox.Permission {
+        if(!runtime.isOpen() || !current() || binding(identity)!=expected) return ClinicalAnnotationOutbox.Permission.WAIT
+        if(!identity.can("gt.verify") || !identity.can("annotation.submit")) return ClinicalAnnotationOutbox.Permission.WAIT
         val latest=runtime.database.measurementDao().getById(row.id) ?: return ClinicalAnnotationOutbox.Permission.REVOKED
         if(latest.patientId!=row.patientId || latest.caseId!=row.caseId || latest.imageId!=row.imageId || latest.wdCode!=row.wdCode) return ClinicalAnnotationOutbox.Permission.REVOKED
         if(row.wdCode in runtime.accounts.pending(MedicalAccountPreferences.ConsentQueue.WITHDRAWAL)) return ClinicalAnnotationOutbox.Permission.REVOKED
         if(row.wdCode in runtime.accounts.pending(MedicalAccountPreferences.ConsentQueue.RESTORE)) return ClinicalAnnotationOutbox.Permission.WAIT
-        if(row.caseId==null) return if(row.patientId==null && ReviewTrainingConsent.isUnlinkedPhantom(row.source,row.caseId)) ClinicalAnnotationOutbox.Permission.ALLOW else ClinicalAnnotationOutbox.Permission.WAIT
+        if(row.caseId==null) return if(row.patientId==null && ReviewTrainingConsent.isUnlinkedQuickMeasurement(row.source,row.caseId)) ClinicalAnnotationOutbox.Permission.ALLOW else ClinicalAnnotationOutbox.Permission.WAIT
         val case=runtime.repo.getCase(row.caseId) ?: return ClinicalAnnotationOutbox.Permission.REVOKED
         if(case.patientId!=row.patientId || case.wdCode!=row.wdCode) return ClinicalAnnotationOutbox.Permission.REVOKED
         val consent=runtime.repo.activeConsent(case.patientId) ?: return ClinicalAnnotationOutbox.Permission.REVOKED
@@ -60,7 +64,9 @@ internal class ClinicalResearchController(context: Context, private val runtime:
 
     /** Explicit send confirms this displayed revision under the current authorized actor. */
     suspend fun enqueue(row:MeasurementEntity):String=withContext(Dispatchers.IO) {
-        val client=runtime.acquire();val expected=binding(client);val current=runtime.operation()
+        val current=runtime.operation();val session=runtime.acquireVerified()
+        check(current()) { "登入設定已變更，請重新登入後送出；紀錄保留" }
+        val identity=session.identity;val expected=binding(identity)
         suspend fun assets():Pair<ByteArray,ByteArray>? {
             val image=runtime.images.rawBytes(row.imagePath) ?: return null
             val raster=runtime.images.rawBytes(row.rasterPath) ?: return null
@@ -69,7 +75,7 @@ internal class ClinicalResearchController(context: Context, private val runtime:
         val assets=requireNotNull(assets()) {"已存影像或遮罩不完整"}
         outbox.enqueue(row,expected,assets.first,assets.second,
             current={runtime.database.measurementDao().getById(row.id)},savedAssets={assets()},
-            permitted={permission(row,expected,client,current)})
+            permitted={permission(row,expected,identity,current)})
         refresh();wake()
         val exportNote = try {
             SavedMeasurementExport(runtime, com.woundmeasurement.app.data.store.PrivateExports(contextForExports, runtime.scope))
@@ -92,17 +98,19 @@ internal class ClinicalResearchController(context: Context, private val runtime:
                 (it.state!=ClinicalAnnotationOutbox.State.PAUSED || it.issue=="authorization_required" || retryPaused) }
             if(due.isEmpty()) return
             mutable.value=mutable.value.copy(busy=true,issue=null)
-            val client=runtime.acquire();val expected=binding(client);val current=runtime.operation()
-            if(client.identity?.can("gt.verify")!=true || client.identity?.can("annotation.submit")!=true) {
+            val current=runtime.operation();val session=runtime.acquireVerified()
+            check(current()) { "登入設定已變更，請重新登入後送出；紀錄保留" }
+            val client=session.client;val identity=session.identity;val expected=binding(identity)
+            if(!identity.can("gt.verify") || !identity.can("annotation.submit")) {
                 mutable.value=mutable.value.copy(issue="目前帳號沒有研究送件權限，請由原送件醫師登入。");return
             }
             for(job in due) {
                 if(!current() || !runtime.isOpen()) break
                 if(job.binding!=expected) {mutable.value=mutable.value.copy(issue="有待傳工作需要原送件醫師登入。");continue}
                 outbox.process(job.id,expected,
-                    permitted={permission(it.measurement(),expected,client,current)},
+                    permitted={permission(it.measurement(),expected,identity,current)},
                     upload={
-                        val consentNow=permission(it.measurement(),expected,client,current)==ClinicalAnnotationOutbox.Permission.ALLOW
+                        val consentNow=permission(it.measurement(),expected,identity,current)==ClinicalAnnotationOutbox.Permission.ALLOW
                         check(consentNow)
                         upload(client,it,consentNow)
                     },
@@ -125,7 +133,7 @@ internal class ClinicalResearchController(context: Context, private val runtime:
                 ClinicalAnnotationOutbox.State.COMPLETE -> if(job.localAcknowledged) "研究標註已確認保存（本筆無深度）" else "舊修訂已保存；較新修訂未標記"
                 ClinicalAnnotationOutbox.State.CANCELLED -> "已停止：紀錄或同意不再有效"
             }
-            Item(job.measurement().id,job.state,text)
+            Item(job.measurement().id,job.state,text,job.measurement())
         })
     }
     private fun upload(client:BackendClient,job:ClinicalAnnotationOutbox.Job,consentTrain:Boolean):ClinicalAnnotationOutbox.Response {

@@ -30,12 +30,13 @@ class ClinicalResearchControllerTest {
         override fun getSharedPreferences(name:String,mode:Int):SharedPreferences=super.getSharedPreferences(root.name+name,mode)
         fun clear(){MedicalDataScope.entries.forEach{super.deleteSharedPreferences(root.name+it.settingsName)};root.deleteRecursively()}
     }
-    private class Fixture(val ctx:TestContext) {
+    private class Fixture(val ctx:TestContext,val dataScope:MedicalDataScope=MedicalDataScope.SYNTHETIC_REVIEW) {
         var rejectReceipt=false;var serverStatus=200;var allowed=true
         val sent=mutableListOf<JSONObject>()
         val runtimes=mutableListOf<MedicalRuntime>()
         fun runtime():MedicalRuntime {
-            val r=MedicalRuntime(ctx,MedicalDataScope.SYNTHETIC_REVIEW,{origin,current,_->
+            val org=if(dataScope==MedicalDataScope.MMH) "mmhps20261007" else "mmh-review-demo"
+            val r=MedicalRuntime(ctx,dataScope,{origin,current,_->
                 val http=OkHttpClient.Builder().addInterceptor{chain->
                     val request=chain.request();val path=request.url.encodedPath
                     var code=200
@@ -49,11 +50,11 @@ class ClinicalResearchControllerTest {
                             .put("tissue_mask_sha256",if(rejectReceipt) "0".repeat(64) else sha(android.util.Base64.decode(payload.getString("tissue_mask_png"),android.util.Base64.NO_WRAP))).toString()
                     } else {
                         val perms=if(allowed) "[\"measure.sample\",\"gt.verify\",\"annotation.submit\"]" else "[\"measure.sample\"]"
-                        """{"access_token":"synthetic-token","session_contract":"account-revision-v1","identity":"mmh-review-demo:dr01","org":"mmh-review-demo","user":"dr01","role":"physician","role_zh":"醫師","perms":$perms,"expires_at":9999999999}"""
+                        """{"access_token":"synthetic-token","session_contract":"account-revision-v1","identity":"$org:dr01","org":"$org","user":"dr01","role":"physician","role_zh":"醫師","perms":$perms,"expires_at":9999999999}"""
                     }
                     Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(code).message("Synthetic").body(body.toResponseBody()).build()
                 }.build()
-                BackendClient(origin,"",http,current,false,"mmh-review-demo")
+                BackendClient(origin,"",http,current,false,org)
             })
             runtimes.add(r);return r
         }
@@ -73,8 +74,8 @@ class ClinicalResearchControllerTest {
             return row.copy(id=r.database.measurementDao().insertMeasurement(row))
         }
     }
-    private fun fixture(block:suspend Fixture.(MedicalRuntime,MeasurementEntity)->Unit)=runBlocking {
-        val ctx=TestContext(ApplicationProvider.getApplicationContext());val f=Fixture(ctx);val r=f.runtime()
+    private fun fixture(scope:MedicalDataScope=MedicalDataScope.SYNTHETIC_REVIEW,block:suspend Fixture.(MedicalRuntime,MeasurementEntity)->Unit)=runBlocking {
+        val ctx=TestContext(ApplicationProvider.getApplicationContext());val f=Fixture(ctx,scope);val r=f.runtime()
         try {assertTrue(r.setCredentials("dr01",UUID.randomUUID().toString()));f.block(r,f.saved(r))}
         finally {f.runtimes.forEach{it.deactivate()};r.database.close();ctx.clear()}
     }
@@ -97,6 +98,52 @@ class ClinicalResearchControllerTest {
         assertEquals(2,exports.list().size)
         assertEquals(2,sent.last().getInt("exudate"))
         assertArrayEquals(files.getValue("result.json"),exports.read(first).getValue("result.json"))
+    }
+    @Test fun unlinkedSampleUploadsAndExportsSameConfirmedRevision()=fixture{r,original->
+        val row=original.copy(source="sample")
+        assertTrue(r.database.measurementDao().updateIfUnchanged(original,row))
+        val exports=PrivateExports(ctx,r.scope);exports.enabled=true
+        r.research.enqueue(row);r.research.drainOnce()
+        assertTrue(r.database.measurementDao().getById(row.id)!!.annotationSubmitted)
+        val files=exports.read(exports.list().single())
+        assertEquals(setOf("image.jpg","overlay.jpg"),PrivateExports.deliveryImages(files).keys)
+        assertArrayEquals(r.images.rawBytes(row.imagePath),PrivateExports.deliveryImages(files)["image.jpg"])
+        assertEquals("sample",sent.single().getString("source"))
+        assertEquals(sent.single().getDouble("area_cm2"),JSONObject(String(files.getValue("result.json"))).getDouble("area_cm2"),0.0)
+    }
+    @Test fun mmhPhantomRoundTripKeepsMasksAreaAndTwoImages()=fixture(MedicalDataScope.MMH){r,row->
+        val exports=PrivateExports(ctx,r.scope);exports.enabled=true
+        r.research.enqueue(row);r.research.enqueue(row) // Same snapshot cannot create another upload job.
+        r.research.drainOnce()
+        assertEquals(1,sent.size);assertEquals("phantom",sent.single().getString("source"))
+        assertTrue(r.database.measurementDao().getById(row.id)!!.annotationSubmitted)
+        val files=exports.read(exports.list().single())
+        assertEquals(setOf("image.jpg","overlay.jpg"),PrivateExports.deliveryImages(files).keys)
+        assertArrayEquals(android.util.Base64.decode(sent.single().getString("wound_mask_png"),android.util.Base64.NO_WRAP),files["wound.png"])
+        assertArrayEquals(android.util.Base64.decode(sent.single().getString("tissue_mask_png"),android.util.Base64.NO_WRAP),files["tissue.png"])
+        assertEquals(row.estimatedArea!!,sent.single().getDouble("area_cm2"),0.0)
+    }
+    @Test fun mmhSampleRoundTripDoesNotNeedInventedPatient()=fixture(MedicalDataScope.MMH){r,original->
+        val row=original.copy(source="sample")
+        assertTrue(r.database.measurementDao().updateIfUnchanged(original,row))
+        r.research.enqueue(row);r.research.drainOnce()
+        assertEquals("sample",sent.single().getString("source"))
+        assertTrue(r.database.measurementDao().getById(row.id)!!.annotationSubmitted)
+    }
+    @Test fun changedSavedRevisionCannotQueueOrExport()=fixture{r,row->
+        val exports=PrivateExports(ctx,r.scope);exports.enabled=true
+        assertTrue(r.database.measurementDao().updateIfUnchanged(row,row.copy(estimatedArea=7.0)))
+        try {r.research.enqueue(row);fail("stale revision queued")}
+        catch(e:IllegalArgumentException){assertTrue(e.message!!.contains("版本不同"))}
+        assertTrue(exports.list().isEmpty());assertTrue(ClinicalAnnotationOutbox(ctx,r.scope).jobs().isEmpty())
+    }
+    @Test fun externalWithoutPatientCannotQueueOrExport()=fixture{r,original->
+        val row=original.copy(source="external")
+        assertTrue(r.database.measurementDao().updateIfUnchanged(original,row))
+        val exports=PrivateExports(ctx,r.scope);exports.enabled=true
+        try {r.research.enqueue(row);fail("unknown consent queued")}
+        catch(e:IllegalArgumentException){assertTrue(e.message!!.contains("同意狀態"))}
+        assertTrue(exports.list().isEmpty());assertTrue(ClinicalAnnotationOutbox(ctx,r.scope).jobs().isEmpty())
     }
     @Test fun inaccessibleCustomFolderDoesNotLoseQueuedUploadOrPrivateCopy()=fixture{r,row->
         val exports=PrivateExports(ctx,r.scope);exports.enabled=true

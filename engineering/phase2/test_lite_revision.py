@@ -53,7 +53,7 @@ class LiteRevisionTests(unittest.TestCase):
         for rev,kind in enumerate(["ai","manual"],1):
             result=self.post(self.body(rev,dict(self.payload,source=kind,consent_version=values[0])))
             self.assertEqual(result.status_code,200,result.json)
-        for invalid in ["",None,"future",[],"2026-10-04.1 "]:
+        for invalid in ["",None,"future",[],"2026-10-04.1 ",values[0]+" ","2026-10-16.2"]:
             self.assertEqual(self.post(self.body(3,dict(self.payload,consent_version=invalid))).status_code,400)
 
     def test_ai_measurement_is_persisted_but_never_counted_as_lay_label(self):

@@ -37,6 +37,15 @@ struct DepthAreaResult {
     var medianDistanceM: Double
     /// 表面相對光軸的傾角（度，來自環帶平面擬合）。>25° 建議改近正拍。
     var tiltDeg: Double?
+
+    /// Gross disagreement screen, not an accuracy certification. Either scale
+    /// may be wrong; never rescale the raw depth to force agreement with a marker.
+    func hasGrossScaleConflict(stickerAreaCm2: Double?) -> Bool {
+        guard let stickerAreaCm2, stickerAreaCm2.isFinite, stickerAreaCm2 > 0 else { return false }
+        guard projectedAreaCm2.isFinite, projectedAreaCm2 > 0 else { return true }
+        let ratio = projectedAreaCm2 / stickerAreaCm2
+        return ratio > 2 || ratio < 0.5
+    }
 }
 
 enum DepthAreaEstimator {
@@ -54,8 +63,11 @@ enum DepthAreaEstimator {
         guard dw >= 8, dh >= 8, imageW > 0, imageH > 0,
               dw <= 4096, dh <= 4096, depth.map.count == dw * dh,
               depth.matchesImageAspect(width: imageW, height: imageH),
+              depth.accuracy == "absolute",
+              [depth.fx, depth.fy, depth.cx, depth.cy, depth.refWidth, depth.refHeight].allSatisfy({ $0.isFinite }),
               depth.fx > 0, depth.fy > 0, depth.refWidth > 0, depth.refHeight > 0,
               !polygons.isEmpty else { return nil }
+        guard abs((depth.refWidth / depth.refHeight) / (Double(dw) / Double(dh)) - 1) <= 0.01 else { return nil }
 
         // 內參換算到**深度圖像素空間**（原值相對 refW×refH）。
         let sx = Double(dw) / depth.refWidth

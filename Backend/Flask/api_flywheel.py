@@ -1045,7 +1045,8 @@ def classify_queue(recs, images_dir=None, wd_codes=None, wd_imgs=None,
 
 RECORD_STATUS = {
     "legacy_unratified": "缺有效 promotion receipt 或舊資料核准（禁止所有訓練匯出）",
-    "trainable":       "可訓練",
+    # Compatibility key denotes an active queue revision, not dataset eligibility.
+    "trainable":       "有效標註（待篩選）",
     "superseded":      "被同一人較新的修訂版取代",
     # 不是被取代，是另一位標註者對同一張影像的獨立判斷。
     # 不計入訓練（避免同一張圖佔兩倍權重），但**是一致性分析的資料**。

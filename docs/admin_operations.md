@@ -16,7 +16,7 @@
 | 發布設定 | 後端 origin |
 |---|---|
 | `ios-medical-testflight` | `https://woundai-backend-demo-z4kgfkob4a-de.a.run.app` |
-| `ios-lite` | `https://woundai-backend-421209514056.asia-east1.run.app` |
+| `ios-lite` | `https://woundai-lite-candidate-421209514056.asia-east1.run.app` |
 | `android-release` | `https://woundai-backend-421209514056.asia-east1.run.app` |
 | `android-mmh-validation` | `https://woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app` |
 | `android-mmh-internal` | `https://woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app` |
@@ -25,7 +25,9 @@
 
 此表由 `test_backend_url_parity.py` 逐設定核對。醫療版的 demo 分流不代表 Lite／Android 已完成雲端發布驗收。Debug 模擬器仍使用本機服務。
 
-已安裝 App 的使用者設定優先於預設值。切換示範環境時，先在 App 設定登出，再填 demo 網址並使用 demo01 登入；不沿用舊平台的 dr01 帳密。示範服務僅供合成／模擬資料測試，LocalStore 不保證跨實例保存，demo01 的 nurse 權限亦不包含醫師训练標註。正式收案仍走獨立審核與部署閘門。
+Lite 35 候選綁定獨立服務的預設網址（不是 candidate tag）；此來源設定不代表雲端已部署或商店已發布。Lite 不採用舊醫療版網址設定；研究同意綁定服務來源，舊服務的待傳修訂不會自動改送新服務。
+
+一般醫療 App 的使用者設定優先於預設值。切換示範環境時，先在 App 設定登出，再填 demo 網址並使用 demo01 登入；不沿用舊平台的 dr01 帳密。示範服務僅供合成／模擬資料測試，LocalStore 不保證跨實例保存，demo01 的 nurse 權限亦不包含醫師训练標註。正式收案仍走獨立審核與部署閘門。
 
 App 內的入口：主畫面 →「設定」→ 連線測試成功後，
 「目前身分」下方會出現**開啟管理主控台**按鈕（只有管理者看得到）。

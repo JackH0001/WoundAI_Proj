@@ -264,4 +264,18 @@ final class LiteRevisionSyncTests: XCTestCase {
         let calls = await http.snapshot(); XCTAssertTrue(calls.1.isEmpty)
     }
 
+    @MainActor
+    func testProductionSenderKeepsOldServiceRevisionPendingWithoutRetargeting() async throws {
+        let (store, dir) = try setup(); defer { try? FileManager.default.removeItem(at: dir) }
+        let original = try XCTUnwrap(store.records[0].cloudSync?.binding)
+        // Use the real default sender. It must reject before constructing a network request.
+        await store.syncRevision(recordID: "record", consent: { true })
+        let restarted = LiteStore(fileURL: dir.appendingPathComponent("records.json"))
+        let saved = try XCTUnwrap(restarted.records[0].cloudSync)
+        XCTAssertEqual(saved.binding, original)
+        XCTAssertEqual(saved.acknowledgedRevision, 0)
+        XCTAssertNotNil(saved.pending)
+        XCTAssertTrue(saved.lastError?.contains("屬於舊服務") == true)
+    }
+
 }

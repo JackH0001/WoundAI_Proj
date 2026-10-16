@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -53,7 +54,8 @@ fun SamplePickerScreen(
     val runtime = rememberMedicalRuntime()
     val captureScope = rememberCoroutineScope()
     // 模式:false=端上、true=後端。有後端時預設走後端(端上 ONNX 原生庫在模擬器可能不相容)
-    var useBackend by remember { mutableStateOf(backend != null) }
+    val useBackend = backend != null
+    val measurementState by vm.state.collectAsState()
 
     fun dispatch(bmp: Bitmap) {
         // 模擬圖走**決定性色彩分割**(seg=color),完全不碰模型:
@@ -116,56 +118,29 @@ fun SamplePickerScreen(
     }
 
     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("模擬驗證 / 檢錯", style = MaterialTheme.typography.titleLarge)
-        // 端上 / 後端 切換(後端為 null 時禁用)
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(if (useBackend) "模式：後端 classify" else "模式：端上管線")
-            Spacer(Modifier.weight(1f))
-            Switch(checked = useBackend, enabled = backend != null, onCheckedChange = { useBackend = it })
-        }
-        if (backend == null) Text("(未設定後端,僅端上)", style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
-
-        // 樣本來源必須在**分析前**決定:它同時決定分割走 AI 還是色彩法,以及日後計不計入臨床樣本數。
-        // 放到送出前才問會太晚(那時已經用錯的分割跑完了),也會讓人重複選兩次。
         if (onSource != null) {
-            Text("樣本來源(必選)", style = MaterialTheme.typography.bodySmall)
-            val opts = buildList {
-                if (allowClinicalSource) add("clinical" to "臨床")
-                add("sample" to "範例"); add("phantom" to "模擬圖")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("印刷模擬圖（色彩分割）", Modifier.weight(1f))
+                Switch(checked = source == "phantom",
+                    enabled = measureEnabled && !measurementState.loading && vm.lastBitmap == null,
+                    onCheckedChange = { onSource(if (it) "phantom" else "sample") })
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                opts.forEach { (v, label) ->
-                    if (source == v) Button({ onSource(v) }, Modifier.weight(1f)) { Text(label) }
-                    else OutlinedButton({ onSource(v) }, Modifier.weight(1f)) { Text(label) }
-                }
-            }
-            if (!allowClinicalSource) Text(
-                "（快速量測不提供「臨床」：沒有個案綁定的臨床紀錄無法歸戶，請由主畫面「個案」進入）",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(when (source) {
-                "clinical" -> "真實病人傷口 · AI 分割 · 計入臨床收案進度"
-                "sample" -> "範例/示範圖 · AI 分割 · 不計入臨床樣本數"
-                "phantom" -> "印刷模擬圖 · **色彩分割(非AI)** · 面積可驗尺度鏈,組織/PUSH 為顏料推算"
-                else -> "⚠ 先選來源再載入影像:模擬圖會改走色彩分割,選錯會拿 AI 去量印刷色塊(必失敗)"
-            }, style = MaterialTheme.typography.bodySmall,
-                color = if (source == null) MaterialTheme.colorScheme.error
-                        else MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("模擬圖用於量測驗證，不使用 AI 模型；一般影像請關閉。",
+                style = MaterialTheme.typography.bodySmall)
         }
 
         if (!measureEnabled && disabledReason != null) Text(
             disabledReason, style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.error)
 
-        val canLoad = measureEnabled && (onSource == null || source != null)
+        val canLoad = measureEnabled && !measurementState.loading && (onSource == null || source != null)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             // 臨床現場以「拍照」為主(現場拍攝是常態,事後從相簿補件有壓縮/裁切破壞尺度的風險)
-            Button({ showCamera = true }, Modifier.weight(1f), enabled = canLoad) { Text("拍照") }
+            Button({ showCamera = true }, Modifier.weight(1f), enabled = canLoad) { Text(if (vm.lastBitmap == null) "拍照" else "重新拍照") }
             OutlinedButton({ pickGallery.launch("image/*") }, Modifier.weight(1f), enabled = canLoad) { Text("相簿") }
             OutlinedButton({ pickFile.launch(arrayOf("image/*")) }, Modifier.weight(1f), enabled = canLoad) { Text("檔案") }
         }
-        Text("「檔案」可瀏覽 Download 等資料夾(拖入模擬器的新圖選這個;相簿只列已入媒體庫的照片)",
+        Text("可從相簿或檔案選擇影像。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
         captureInfo?.let {

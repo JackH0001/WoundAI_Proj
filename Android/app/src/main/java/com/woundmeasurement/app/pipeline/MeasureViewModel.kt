@@ -81,6 +81,7 @@ class MeasureViewModel(
     @Volatile private var lastImageHash: Int? = null
     @Volatile private var lastSavedId: Long? = null
     private var lastSavedSnapshot: MeasurementEntity? = null
+    internal val savedSnapshot get() = lastSavedSnapshot
     // editRaster 所依附的畫布尺寸(端上=原圖、後端=≤2048 縮圖);尺寸變了柵格座標就對不上
     @Volatile private var lastCanvasW: Int = 0
     @Volatile private var lastCanvasH: Int = 0
@@ -378,6 +379,7 @@ class MeasureViewModel(
         enqueueResearch: (suspend (MeasurementEntity) -> String)? = null
     ) {
         if (_state.value.loading || _state.value.saving || _state.value.annotationSending) return
+        if (_state.value.annotationSaved) return
         val poly = lastPolygon
         if (poly.isEmpty()) {
             _state.value = _state.value.copy(submitStatus = "⚠️ 無傷口輪廓可送(請先量測)"); return
@@ -427,7 +429,9 @@ class MeasureViewModel(
         viewModelScope.launch {
             try {
                 if(enqueueResearch != null) {
-                    _state.value=_state.value.copy(submitStatus=enqueueResearch(saved),annotationSaved=false)
+                    val queuedMessage = enqueueResearch(saved)
+                    if (!_state.value.annotationSaved) _state.value=_state.value.copy(submitStatus=queuedMessage)
+                    reconcileSavedAcknowledgement(dao)
                     return@launch
                 }
                 val outcome = withContext(Dispatchers.IO) {
@@ -467,8 +471,12 @@ class MeasureViewModel(
                 }
                 if (outcome.acknowledged) lastSavedSnapshot = saved.copy(annotationSubmitted = true)
                 _state.value = _state.value.copy(submitStatus = outcome.message, annotationSaved = outcome.acknowledged)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
-                _state.value = _state.value.copy(submitStatus = "⚠️ 送出失敗:${e.message}")
+                reconcileSavedAcknowledgement(dao)
+                if (!_state.value.annotationSaved)
+                    _state.value = _state.value.copy(submitStatus = "⚠️ 未能建立待傳工作：${e.message ?: "請核對保存狀態後重試"}")
             } finally {
                 annotationGate.release()
                 _state.value = _state.value.copy(annotationSending = false)

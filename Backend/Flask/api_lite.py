@@ -756,7 +756,7 @@ def lite_annotation_revision():
             raise ValueError()
         # Retain the exact previously supported version for durable pending
         # retries; accept the current disclosure without accepting arbitrary text.
-        if p["source"] not in ("manual", "ai") or p["consent_version"] not in ("2026-10-03.1", "2026-10-04.1"):
+        if p["source"] not in ("manual", "ai") or p["consent_version"] not in ("2026-10-03.1", "2026-10-04.1", "2026-10-16.1"):
             raise ValueError()
         w, h = p["image_w"], p["image_h"]
         if any(type(v) is not int or not 1 <= v <= 4096 for v in (w, h)):
