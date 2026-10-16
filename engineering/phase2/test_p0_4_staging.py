@@ -151,9 +151,16 @@ class StagingTests(unittest.TestCase):
 
     def test_role_org_signature_expiry_rejected(self):
         token = self.token()
+        payload, encoded_signature = token.split(".")
+        signature = base64.urlsafe_b64decode(encoded_signature + "=" * (-len(encoded_signature) % 4))
+        # Alter signed bytes, not padding bits: replacing the last characters
+        # with a constant can still decode to the original signature.
+        altered = bytes([signature[0] ^ 1]) + signature[1:]
+        tampered = payload + "." + base64.urlsafe_b64encode(altered).decode().rstrip("=")
+        self.assertNotEqual(signature, altered)
         for candidate, role, org, now in ((token, "lite", self.org, self.clock),
                                          (token, "physician", "other", self.clock),
-                                         (token[:-2] + "zz", "physician", self.org, self.clock),
+                                         (tampered, "physician", self.org, self.clock),
                                          (token, "physician", self.org, self.clock + 43200)):
             with self.subTest(role=role, org=org, now=now), self.assertRaises(ConsentError):
                 verify_care(candidate, self.keys, role, org, now)
