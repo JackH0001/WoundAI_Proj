@@ -87,7 +87,9 @@ def generate(context,expected,probe,fixture,output):
         f"assert hashlib.sha256(pathlib.Path('fixture.json').read_bytes()).hexdigest()=='{fixture_hash}'")
     config={'serviceAccount':f'projects/{PROJECT}/serviceAccounts/{EMAIL}',
         'logsBucket':'gs://'+BUCKET,'timeout':'1200s',
-        'options':{'logging':'GCS_ONLY','machineType':'E2_STANDARD_2'},
+        # Omitted machineType uses Google's default e2-standard-2 (2 CPUs).
+        # E2_STANDARD_2 is not a valid Cloud Build API enum.
+        'options':{'logging':'GCS_ONLY'},
         'tags':['lite-validation-no-deploy'],
         'steps':[
             {'name':PYTHON_IMAGE,'entrypoint':'python','args':['-c',verify_code]},
@@ -118,7 +120,7 @@ def generate(context,expected,probe,fixture,output):
               'read back newly created identity, role and bucket IAM; exact scoped binding','effective denied access to production/demo secrets and data; UNKNOWN is failure',
               'verify all source and verification digests again immediately before upload'],
           'not_authorized':['cloud run deploy','image push','public invocation','runtime buckets','clinical secrets','project-level role binding'],
-          'limits':{'build_timeout_seconds':1200,'machine':'E2_STANDARD_2','estimated_build_compute_usd_without_free_tier':0.12,
+          'limits':{'build_timeout_seconds':1200,'machine':'e2-standard-2 (default)','estimated_build_compute_usd_without_free_tier':0.12,
                     'cost_note':'20 minutes × listed $0.006/min; storage/network/log costs additional, not an enforced billing cap'},
           'rollback':['cancel only the returned build ID','remove only the exact new bucket role binding after evidence download',
                       'disable the dedicated build account; keep artifacts for review; no automatic bucket/role deletion']}

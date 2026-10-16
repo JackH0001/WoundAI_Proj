@@ -78,6 +78,45 @@ class HTTPTests(unittest.TestCase):
         headers=self.headers(path,raw,content_type)
         return self.client.post(path,data=raw,content_type=content_type,headers=headers)
 
+    def test_zero_length_delete_with_gunicorn_stream_reaches_auth_guard(self):
+        response=self.client.delete('/api/v1/lite/data/'+'0'*32,
+            headers={'Content-Length':'0'},environ_overrides={'wsgi.input_terminated':True})
+        self.assertEqual(response.status_code,401,response.json)
+        self.assertEqual(response.json['error'],'lite_attestation_required')
+
+    def test_signed_empty_delete_with_gunicorn_stream_succeeds(self):
+        self.register()
+        path='/api/v1/lite/data/'+self.owner
+        headers=self.headers(path,b'','',method='DELETE',purpose='withdraw')
+        headers['Content-Length']='0'
+        response=self.client.delete(path,headers=headers,
+            environ_overrides={'wsgi.input_terminated':True})
+        self.assertEqual(response.status_code,200,response.json)
+
+    def test_capacity_wait_preserves_server_retry_delay(self):
+        with patch.object(self.budget,'reserve',side_effect=BudgetExceeded(73)):
+            response=self.client.post('/api/v1/lite/segment',data=b'')
+        self.assertEqual(response.status_code,429)
+        self.assertEqual(response.headers['Retry-After'],'73')
+        self.assertEqual(response.json['retry_after'],73)
+        self.assertTrue(response.json['retryable'])
+        self.assertNotIn('stored',response.json)
+
+    def test_nonempty_delete_remains_rejected(self):
+        response=self.client.delete('/api/v1/lite/data/'+'0'*32,data=b'x',
+            environ_overrides={'wsgi.input_terminated':True})
+        self.assertEqual(response.status_code,413)
+
+    def test_security_unavailable_returns_wait_contract_without_saved_claim(self):
+        from lite_attest_state import StateUnavailable
+        with patch.object(self.budget,'reserve',side_effect=StateUnavailable('unavailable')):
+            response=self.client.post('/api/v1/lite/segment',data=b'')
+        self.assertEqual(response.status_code,503,response.json)
+        self.assertEqual(response.headers['Retry-After'],'5')
+        self.assertEqual(response.json['retry_after'],5)
+        self.assertTrue(response.json['retryable'])
+        self.assertNotIn('stored',response.json)
+
     def test_full_registration_segment_revision_and_delete(self):
         self.register();path='/api/v1/lite/segment';raw,ctype=self.segment_bytes()
         response=self.post_signed(path,raw,ctype);self.assertEqual(response.status_code,200,response.json)

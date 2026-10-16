@@ -18,7 +18,7 @@ from unittest.mock import patch
 import cbor2
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from google.api_core.exceptions import NotFound, PreconditionFailed, Forbidden
+from google.api_core.exceptions import NotFound, PreconditionFailed, Forbidden, TooManyRequests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'Backend/Flask'))
 from lite_attest_assertion import AssertionPolicy, CATEGORY, VERSION
@@ -297,6 +297,47 @@ class AdmissionTests(unittest.TestCase):
 class GCSCASTests(unittest.TestCase):
     def setUp(self):
         self.bucket = FakeBucket(); self.store = GCSStateStore(self.bucket); self.key = b'k' * 32
+
+    def test_explicit_throttle_retries_same_generation_with_bounded_backoff(self):
+        self.bucket.fail_upload = TooManyRequests('object mutation rate')
+        def release(delay): self.bucket.fail_upload = None
+        with patch('lite_attest_state.time.sleep', side_effect=release) as sleep:
+            self.assertTrue(self.store.compare_exchange(self.key, 0, {'value': 1}))
+        sleep.assert_called_once_with(1.1)
+        uploads = [x for x in self.bucket.calls if x[0] == 'upload']
+        self.assertEqual(len(uploads), 2)
+        self.assertTrue(all(x[2]['if_generation_match'] == 0 and x[2]['retry'] is None for x in uploads))
+        self.assertEqual(self.store.load(self.key)[1], {'value': 1})
+
+    def test_throttle_exhaustion_never_claims_success(self):
+        self.bucket.fail_upload = TooManyRequests('persistent throttle')
+        with patch('lite_attest_state.time.sleep') as sleep:
+            with self.assertRaises(StateUnavailable):
+                self.store.compare_exchange(self.key, 0, {'value': 1})
+        self.assertEqual([x.args[0] for x in sleep.call_args_list], [1.1, 2.2, 4.4])
+        self.assertEqual(len([x for x in self.bucket.calls if x[0] == 'upload']), 4)
+        self.assertEqual(self.bucket.live, {})
+
+    def test_throttle_retry_cannot_overwrite_concurrent_new_state(self):
+        self.bucket.fail_upload = TooManyRequests('throttle')
+        def competitor(delay):
+            self.bucket.fail_upload = None
+            self.assertTrue(self.store.compare_exchange(self.key, 0, {'withdrawn': True}))
+        with patch('lite_attest_state.time.sleep', side_effect=competitor):
+            self.assertFalse(self.store.compare_exchange(self.key, 0, {'withdrawn': False}))
+        self.assertEqual(self.store.load(self.key)[1], {'withdrawn': True})
+
+    def test_unknown_outcome_after_throttle_is_not_retried(self):
+        self.bucket.fail_upload = TooManyRequests('throttle')
+        def lose_response(delay):
+            self.bucket.fail_upload = None
+            self.bucket.lose_response = True
+        with patch('lite_attest_state.time.sleep', side_effect=lose_response) as sleep:
+            with self.assertRaises(StateUnavailable):
+                self.store.compare_exchange(self.key, 0, {'value': 1})
+        self.assertEqual(sleep.call_count, 1)
+        self.assertEqual(len([x for x in self.bucket.calls if x[0] == 'upload']), 2)
+        self.assertEqual(self.store.load(self.key)[1], {'value': 1})
 
     def test_creation_and_stale_replacement_are_conditional(self):
         self.assertTrue(self.store.compare_exchange(self.key, 0, {'value': 1}))

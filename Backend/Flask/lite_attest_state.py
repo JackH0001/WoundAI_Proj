@@ -15,7 +15,7 @@ import secrets
 import sqlite3
 import time
 
-from google.api_core.exceptions import NotFound, PreconditionFailed
+from google.api_core.exceptions import NotFound, PreconditionFailed, TooManyRequests
 
 from audit_chain_contract import loads_json_object_strict
 from lite_attest_assertion import AssertionPolicy, AssertionRejected, verify_assertion
@@ -147,9 +147,19 @@ class GCSStateStore:
         name = self._name(key_id); _revision(expected_revision, creating=True); data = _encode(state)
         try:
             blob = self.bucket.blob(name)
-            blob.upload_from_string(data, content_type='application/json',
-                                    if_generation_match=expected_revision, checksum='crc32c',
-                                    timeout=10, retry=None)
+            # GCS can throttle repeated mutations of the same journal object.
+            # Retry only an explicit 429, with bounded backoff and the ORIGINAL
+            # generation/data. Never rebase here or retry an unknown outcome.
+            for attempt in range(4):
+                try:
+                    blob.upload_from_string(data, content_type='application/json',
+                                            if_generation_match=expected_revision, checksum='crc32c',
+                                            timeout=10, retry=None)
+                    break
+                except TooManyRequests:
+                    if attempt == 3:
+                        raise
+                    time.sleep(1.1 * (2 ** attempt))
             generation = _revision(blob.generation)
             if generation <= expected_revision:
                 raise StateUnavailable('storage revision did not advance')
