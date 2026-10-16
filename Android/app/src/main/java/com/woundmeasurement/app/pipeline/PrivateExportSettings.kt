@@ -7,6 +7,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import com.woundmeasurement.app.data.store.PrivateExports
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -28,7 +29,7 @@ fun PrivateExportSettings(runtime: MedicalRuntime) {
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
             runCatching { store.selectFolder(uri); folder=store.outputFolder }
-                .onSuccess { message="已設定輸出資料夾；之後確認上傳時同步輸出。" }
+                .onSuccess { message="已設定輸出資料夾；可選擇既有副本重新輸出，不必再次上傳。" }
                 .onFailure { message="無法保留資料夾存取權，請重新選擇。" }
         }
     }
@@ -70,6 +71,7 @@ fun PrivateExportSettings(runtime: MedicalRuntime) {
     }) { Text("選擇副本並匯出…") }
     if (expanded) {
         if (files.isEmpty()) Text("尚無行政副本。開啟選項後，按確認上傳才建立；只存時間軸不輸出。")
+        Text("以下操作只輸出既有副本，不重新上傳，也不變更研究保存狀態。")
         files.forEach { name ->
             TextButton(enabled = !busy && selected == null, onClick = {
                 busy = true
@@ -83,6 +85,21 @@ fun PrivateExportSettings(runtime: MedicalRuntime) {
             }) { Text(if (name.startsWith("record-")) "量測紀錄 ${name.split('-')[1]} · 修訂 ${name.split('-')[2].take(8)}"
                 else "拍攝副本 " + java.text.SimpleDateFormat("MM/dd HH:mm:ss", java.util.Locale.TAIWAN)
                 .format(java.util.Date(name.take(13).toLong())) + " · " + name.substring(14,20)) }
+            if (folder != null) OutlinedButton(modifier = Modifier.testTag("retry-export-$name"), enabled = !busy && selected == null, onClick = {
+                busy = true
+                coroutine.launch {
+                    try {
+                        withContext(Dispatchers.IO) {
+                            check(runtime.isOpen())
+                            store.deliver(name)
+                        }
+                        message = "image 與 overlay 兩張影像已輸出至設定資料夾；未重新上傳，研究保存狀態未變更。"
+                    } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+                    catch (_: Exception) {
+                        message = "本機輸出未完成；原副本仍保留。請重新選擇資料夾後重試，不必再次上傳。"
+                    } finally { busy = false }
+                }
+            }) { Text("輸出此副本至設定資料夾（不上傳）") }
         }
     }
     if (busy) { LinearProgressIndicator(Modifier.fillMaxWidth()); Text("正在匯出所選副本…") }

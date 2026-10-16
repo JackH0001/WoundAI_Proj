@@ -196,6 +196,8 @@ struct InstitutionExportDocument: FileDocument {
 
 struct InstitutionExportSettingsSection: View {
     let runtime: MedicalRuntime
+    // Upload completion and restored jobs can change while Settings remains open.
+    @ObservedObject private var outbox: ClinicalUploadOutbox
     @AppStorage private var enabled: Bool
     @AppStorage private var lastResult: String
     @AppStorage private var lastAttempt: Double
@@ -205,6 +207,7 @@ struct InstitutionExportSettingsSection: View {
     @State private var retrying = false
     init(runtime: MedicalRuntime) {
         self.runtime = runtime
+        _outbox = ObservedObject(wrappedValue: runtime.local.outbox)
         _enabled = AppStorage(wrappedValue: false, InstitutionPrivateExports.preferenceKey, store: runtime.exportPreferences)
         _lastResult = AppStorage(wrappedValue: "", InstitutionPrivateExports.lastResultKey, store: runtime.exportPreferences)
         _lastAttempt = AppStorage(wrappedValue: 0, InstitutionPrivateExports.lastAttemptKey, store: runtime.exportPreferences)
@@ -237,6 +240,10 @@ struct InstitutionExportSettingsSection: View {
                             retrying = false
                         }
                     }.disabled(retrying || !runtime.hasSubmissionForExport)
+                    if !runtime.hasSubmissionForExport {
+                        Text("目前帳號沒有可重新輸出的送件副本。請確認使用原送件帳號；既有本機副本可由下方「選擇副本並匯出」取得，不必為了輸出再次修邊或上傳。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     Text("只將最近一次確認送件的影像與結果重新輸出至目前位置；不修改標註、不重送雲端資料。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
