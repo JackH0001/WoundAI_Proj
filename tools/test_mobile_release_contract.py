@@ -70,7 +70,10 @@ class MobileReleaseContractTests(unittest.TestCase):
                  'Backend/AccessManager/accounts.py',
                  'Backend/AccessManager/sessions.py',
                  'Backend/AccessManager/web.py',
-                 'Backend/AccessManager/static/members.js']
+                 'Backend/AccessManager/static/members.js',
+                 'iOS/WoundLite/LiteBackendConfiguration.swift',
+                 'iOS/WoundLite/Info.plist',
+                 'iOS/project.yml']
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for path in paths:
@@ -87,6 +90,9 @@ class MobileReleaseContractTests(unittest.TestCase):
                 (paths[2], 'http://10.0.2.2:5000', 'http://localhost:5000'),
                 (paths[3], '| `ios-medical-testflight` |', '| `unknown-profile` |'),
                 (paths[4], 'python -B engineering/phase2/test_backend_url_parity.py', 'echo not-tested'),
+                (paths[12], 'static let dedicatedOrigin = "https://', 'static let dedicatedOrigin = "https://wrong-'),
+                (paths[13], '$(WOUNDLITE_BACKEND_URL)', 'https://wrong.run.app'),
+                (paths[14], 'WOUNDLITE_BACKEND_URL: "https://', 'WOUNDLITE_BACKEND_URL: "https://wrong-'),
             ]
             for path, old, new in changes:
                 with self.subTest(path=path, replacement=new):
