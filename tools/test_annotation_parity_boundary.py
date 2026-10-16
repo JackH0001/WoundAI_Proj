@@ -12,6 +12,7 @@ FILES = [
     'tools/parity_check.py', 'tools/mobile_release_contract.py', 'docs/PARITY.md',
     'engineering/phase2/test_backend_url_parity.py',
     'iOS/WoundMeasurementApp/Core/AppSettings.swift', 'Android/app/build.gradle',
+    'iOS/WoundLite/LiteBackendConfiguration.swift', 'iOS/WoundLite/Info.plist',
     'docs/admin_operations.md', '.github/workflows/p0-4-audit.yml',
     'Android/version.properties', 'iOS/project.yml', SWIFT,
     'Android/app/src/main/java/com/woundmeasurement/app/pipeline/BackendClient.kt',
