@@ -5,7 +5,7 @@ import com.google.gson.JsonParser
 /** A transport success is not evidence of saved research data. */
 internal object AnnotationReceipt {
     fun validate(httpCode: Int, body: String, code: String, imageId: String,
-                 woundSHA: String? = null, tissueSHA: String? = null): Pair<Boolean, String> {
+                 woundSHA: String? = null, tissueSHA: String? = null, woundProfileJson: String? = null): Pair<Boolean, String> {
         fun reject(reason: String) = false to "$reason；尚未確認保存，請保留本機紀錄後重試。"
         if (httpCode != 200) return reject("上傳回覆 HTTP $httpCode")
         return try {
@@ -20,6 +20,12 @@ internal object AnnotationReceipt {
                 return reject("保存回覆的個案或影像不符")
             if (text("annotation_receipt_id")?.matches(Regex("[0-9a-f]{16}")) != true)
                 return reject("缺少有效修訂收據；請核對後端版本")
+            if (woundProfileJson != null) {
+                val expected = com.woundmeasurement.app.data.MedicalWoundProfile.decode(woundProfileJson)
+                val received = com.woundmeasurement.app.data.MedicalWoundProfile.decode(obj.get("wound_profile")?.toString())
+                if (expected == null || received == null || expected.encoded() != received.encoded())
+                    return reject("傷口部位／成因保存回覆不符；請核對後端版本")
+            }
             if (woundSHA != null || tissueSHA != null) {
                 if (woundSHA?.matches(Regex("[0-9a-f]{64}")) != true ||
                     tissueSHA?.matches(Regex("[0-9a-f]{64}")) != true ||

@@ -1077,7 +1077,8 @@ actor BackendClient {
         /// **深度圖像素空間**的 {fx, fy, cx, cy}。契約明言：少了它整批深度資料報廢。
         cameraIntrinsics: [String: Double]? = nil,
         consentTrain: Bool,
-        doctorVerified: Bool
+        doctorVerified: Bool,
+        woundProfileJson: String? = nil
     ) throws -> Data {
 
         // 沒有 image_id／尺寸就送出 ＝ 產生孤兒 GT（後端會 400）。提早在端上擋下並給明確訊息。
@@ -1096,6 +1097,12 @@ actor BackendClient {
             "image_w":         imageW,
             "image_h":         imageH
         ]
+        if let woundProfileJson {
+            guard let profile = MedicalWoundProfile.decode(woundProfileJson) else {
+                throw BackendError.badResponse("傷口部位／成因資料格式不符，尚未送出")
+            }
+            obj["wound_profile"] = try JSONSerialization.jsonObject(with: Data(profile.encoded().utf8))
+        }
         // 多輪廓。與 Android 同規則：>1 個才送 gt_polygons，gt_polygon 保留最大的那一個，
         // 新舊後端都收得下。
         let polysOut = allPolygons.filter { $0.count >= 3 }
@@ -1173,15 +1180,27 @@ actor BackendClient {
         let tissueData = (expected["tissue_mask_png"] as? String).flatMap { Data(base64Encoded: $0) }
         let tissueHash = woundHash == nil ? nil : tissueData.map { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined() }
         return try Self.annotationReceipt(data, code: code, imageID: imageID,
-                                          woundSHA: woundHash, tissueSHA: tissueHash)
+                                          woundSHA: woundHash, tissueSHA: tissueHash,
+                                          woundProfileJson: try expected["wound_profile"].map {
+                                              String(decoding: try JSONSerialization.data(withJSONObject: $0), as: UTF8.self)
+                                          })
     }
 
     nonisolated static func annotationReceipt(_ data: Data, code: String, imageID: String,
-                                               woundSHA: String? = nil, tissueSHA: String? = nil) throws -> AnnotationOutcome {
+                                               woundSHA: String? = nil, tissueSHA: String? = nil, woundProfileJson: String? = nil) throws -> AnnotationOutcome {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               object["error"] == nil, object["issues"] == nil,
               let j = JSONAny(data: data), j["code"].string == code else {
             throw BackendError.badResponse("標註回執缺漏或個案不符")
+        }
+        if let woundProfileJson {
+            guard let expectedProfile = MedicalWoundProfile.decode(woundProfileJson),
+                  let received = object["wound_profile"],
+                  let raw = try? JSONSerialization.data(withJSONObject: received),
+                  let savedProfile = MedicalWoundProfile.decode(String(decoding: raw, as: UTF8.self)),
+                  try expectedProfile.encoded() == savedProfile.encoded() else {
+                throw BackendError.badResponse("傷口部位／成因保存回執不符；請保留紀錄並核對後端版本")
+            }
         }
         if woundSHA != nil || tissueSHA != nil {
             guard let woundSHA, let tissueSHA,

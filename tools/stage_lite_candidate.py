@@ -18,7 +18,7 @@ FLASK_FILES = (
     'app.py', 'model_preprocessing.py', 'runtime_golden.py', 'image_canonical.py', 'runtime_secrets.py',
     'api_lite.py', 'api_flywheel.py', 'api_users.py', 'api_console.py', 'auth_users.py', 'institution_context.py', 'account_versions.py',
     'store.py', 'audit_chain_contract.py', 'consent_staging.py',
-    'annotation_masks.py', 'tissue_mask_contract.py', 'medical_depth_geometry.py', 'review_service_profile.py',
+    'annotation_masks.py', 'medical_wound_profile.py', 'medical_wound_catalog.py', 'tissue_mask_contract.py', 'medical_depth_geometry.py', 'review_service_profile.py',
     'lite_attest_assertion.py', 'lite_attest_budget.py', 'lite_attest_config.py',
     'lite_attest_enrollment.py', 'lite_attest_http.py', 'lite_attest_receipt.py',
     'lite_attest_registration.py', 'lite_attest_request.py', 'lite_attest_state.py',

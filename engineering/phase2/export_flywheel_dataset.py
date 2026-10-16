@@ -171,6 +171,10 @@ def main():
 
     manifest, skipped = [], []
     for r in recs:
+        if 'wound_profile' in r:
+            from medical_wound_profile import validate_profile
+            if not validate_profile(r['wound_profile']):
+                skipped.append({'code': r.get('code'), 'reason': 'invalid_wound_profile'}); continue
         code, iid = str(r["code"]), str(r["image_id"])
         stem = f"{code}__{iid}"          # code 對得回同意書、image_id 保證唯一(見檔頭說明)
         try:
@@ -202,6 +206,7 @@ def main():
 
         mm = r.get("mm_per_px")
         manifest.append({
+            **({'wound_profile': r['wound_profile']} if 'wound_profile' in r else {}),
             "code": code, "image_id": iid, "image": f"images/{stem}.jpg", "mask": f"masks/{stem}.png",
             "width": w_rec, "height": h_rec, "mask_px": px,
             "area_cm2": (round(px * (float(mm) / 10.0) ** 2, 3) if mm else None),

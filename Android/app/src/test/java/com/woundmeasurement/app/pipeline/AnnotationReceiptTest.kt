@@ -52,4 +52,14 @@ class AnnotationReceiptTest {
             assertFalse(AnnotationReceipt.validate(200,obj.toString(),"WD-test","image-test",wound,null).first)
         }
     }
+
+    @Test fun profileReceiptMustMatchAndOldServerCannotClaimSuccess() {
+        val profile=com.woundmeasurement.app.data.MedicalWoundProfile(site="heel",side="right",surface="plantar",etiology="pressure").encoded()
+        val obj=com.google.gson.JsonParser.parseString(valid).asJsonObject
+        fun accepts()=AnnotationReceipt.validate(200,obj.toString(),"WD-test","image-test",woundProfileJson=profile).first
+        assertFalse(accepts())
+        obj.add("wound_profile",com.google.gson.JsonParser.parseString(profile));assertTrue(accepts())
+        obj["wound_profile"].asJsonObject.addProperty("side","left");assertFalse(accepts())
+        obj.addProperty("wound_profile","wrong");assertFalse(accepts())
+    }
 }

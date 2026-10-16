@@ -459,7 +459,8 @@ class BackendClient internal constructor(
          * 飛輪的整個前提是 GT 來自人的判斷，這個欄位說謊會讓後續所有模型評估失去意義。
          */
         doctorVerified: Boolean,
-        onResponse: ((Int, String) -> Unit)? = null
+        onResponse: ((Int, String) -> Unit)? = null,
+        woundProfileJson: String? = null
     ): Pair<Boolean, String> {
         // 沒有 image_id/尺寸就送出 = 產生孤兒 GT(後端會 400)。提早在端上擋下並給明確訊息。
         if (tissueRaster?.tissueEditCountKnown == false)
@@ -546,6 +547,11 @@ class BackendClient internal constructor(
             obj.put("tissue_edit_px", tissueRaster.tissueEditedPx)
             obj.put("tissue_edit_ratio", tissueRaster.tissueEditRatio)
         }
+        if (woundProfileJson != null) {
+            val profile = com.woundmeasurement.app.data.MedicalWoundProfile.decode(woundProfileJson)
+                ?: return false to "傷口部位／成因資料格式不符，尚未送出"
+            obj.put("wound_profile", JSONObject(profile.encoded()))
+        }
         val req = Request.Builder().url("$baseUrl/api/v1/annotation")
             .header("Authorization", "Bearer $jwt")
             .post(obj.toString().toRequestBody("application/json".toMediaType())).build()
@@ -554,7 +560,7 @@ class BackendClient internal constructor(
             // 直接把 raw JSON 丟給醫師看會變成一整串 \uXXXX 逃脫碼(實機截圖確認過,完全不可讀)
             // → 解析出 issues 逐條顯示中文
             onResponse?.invoke(resp.code, body)
-            return AnnotationReceipt.validate(resp.code, body, code, imageId, woundHash, tissueHash)
+            return AnnotationReceipt.validate(resp.code, body, code, imageId, woundHash, tissueHash, woundProfileJson)
         }
     }
 
