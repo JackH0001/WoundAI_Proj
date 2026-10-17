@@ -101,9 +101,12 @@ internal class ClinicalResearchController(context: Context, private val runtime:
             val eligible=pending.filter {it.binding.origin==runtime.backendUrl() && it.binding.configuredUser==runtime.backendUser()}
             if(eligible.isEmpty()) {mutable.value=mutable.value.copy(issue="有待傳工作需要原送件帳號登入。");return}
             if(eligible.any { it.capacityNotBefore>System.currentTimeMillis() }) return
-            // Serialize revisions of each record; a later edit never overtakes an unconfirmed one.
-            val due=eligible.sortedBy { it.createdAt }.distinctBy { it.measurement().id }.filter { (retryPaused || it.nextAttemptAt<=System.currentTimeMillis()) &&
-                (it.state!=ClinicalAnnotationOutbox.State.PAUSED || it.issue=="authorization_required" || retryPaused) }
+            // Keep active retries ordered. A permanently paused snapshot remains for review,
+            // but cannot starve a newer, separately confirmed revision forever.
+            val sendable=eligible.filter { it.state!=ClinicalAnnotationOutbox.State.PAUSED ||
+                it.issue=="authorization_required" || retryPaused }
+            val due=sendable.sortedBy { it.createdAt }.distinctBy { it.measurement().id }
+                .filter { retryPaused || it.nextAttemptAt<=System.currentTimeMillis() }
             if(due.isEmpty()) return
             mutable.value=mutable.value.copy(busy=true,issue=null)
             val current=runtime.operation();val session=runtime.acquireVerified()

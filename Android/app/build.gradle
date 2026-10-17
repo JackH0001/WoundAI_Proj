@@ -136,7 +136,7 @@ android {
             initWith debug
             matchingFallbacks = ['debug']
             applicationIdSuffix ".mmhps20261007.validation"
-            versionNameSuffix "-mmh-validation-r12"
+            versionNameSuffix "-mmh-validation-r13"
             buildConfigField "boolean", "MMH_VALIDATION", "true"
             buildConfigField "String", "DEFAULT_BACKEND_URL", '"https://woundai-backend-mmhps20261007-z4kgfkob4a-de.a.run.app"'
         }
