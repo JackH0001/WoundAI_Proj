@@ -640,6 +640,11 @@ struct BackendSettingsView: View {
                 Section("App 資訊") {
                     LabeledContent("版本（建置號）", value: versionLabel)
                         .textSelection(.enabled)
+                    if CameraModel.isUnfilteredDiagnosticBuild {
+                        Text("本機深度診斷 D1：停用拍攝濾波（只供合成模型）")
+                            .foregroundStyle(.orange)
+                            .accessibilityIdentifier("DepthDiagnosticBuildLabel")
+                    }
                 }
                 #if WOUND_INSTITUTION
                 if runtime.needsGoogle {

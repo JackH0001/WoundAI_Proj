@@ -12,7 +12,13 @@ final class DepthProvenanceTests: XCTestCase {
     func testUnfilteredDiagnosticIsExplicitAndRequiresDepthCapability() {
         let normal = CameraModel.photoSettings(depthEnabled:true,arguments:[])
         XCTAssertTrue(normal.isDepthDataDeliveryEnabled)
+        #if DEBUG && WOUND_DEPTH_DIAGNOSTICS
+        XCTAssertTrue(CameraModel.isUnfilteredDiagnosticBuild)
+        XCTAssertFalse(normal.isDepthDataFiltered, "Dedicated local build must survive launch without arguments")
+        #else
+        XCTAssertFalse(CameraModel.isUnfilteredDiagnosticBuild)
         XCTAssertTrue(normal.isDepthDataFiltered)
+        #endif
         let diagnostic = CameraModel.photoSettings(depthEnabled:true,arguments:["-WoundDepthUnfilteredDiagnostics"])
         #if DEBUG
         XCTAssertFalse(diagnostic.isDepthDataFiltered)

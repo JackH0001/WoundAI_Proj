@@ -202,11 +202,21 @@ final class CameraModel: NSObject, ObservableObject {
         Task.detached { if s.isRunning { s.stopRunning() } }
     }
 
-    /// Local diagnostic launch only. Release captures retain their existing policy.
+    /// Explicit local diagnostic builds survive a manual relaunch. Neither this
+    /// build flag nor launch arguments may change Release capture policy.
+    static var isUnfilteredDiagnosticBuild: Bool {
+        #if DEBUG && WOUND_DEPTH_DIAGNOSTICS
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    /// Local diagnostic only. Release captures retain their existing policy.
     /// Actual filtering is recorded from AVDepthData, never inferred from this request.
     static func requestsFilteredDepth(arguments: [String] = ProcessInfo.processInfo.arguments) -> Bool {
         #if DEBUG
-        return !arguments.contains("-WoundDepthUnfilteredDiagnostics")
+        return !isUnfilteredDiagnosticBuild && !arguments.contains("-WoundDepthUnfilteredDiagnostics")
         #else
         return true
         #endif
