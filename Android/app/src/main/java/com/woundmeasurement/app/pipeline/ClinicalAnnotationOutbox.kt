@@ -28,13 +28,14 @@ internal class ClinicalAnnotationOutbox(context: Context, private val scope: Med
     enum class State { PENDING, RETRY, PAUSED, RECEIPT_SAVED, COMPLETE, CANCELLED }
     enum class Permission { ALLOW, WAIT, REVOKED }
     data class Binding(val origin: String, val configuredUser: String, val actor: String)
-    data class Response(val httpCode: Int, val body: String)
+    data class Response(val httpCode: Int, val body: String, val retryAfter: String? = null, val serverDate: String? = null)
     data class Job(
         val schema: Int = 1, val id: String, val scope: String, val key: String,
         val binding: Binding, val rowJson: String, val rasterBase64: String,
         val imageSHA: String, val rasterSHA: String, val woundSHA: String, val tissueSHA: String,
         val createdAt: Long, val state: State = State.PENDING, val attempts: Int = 0,
         val nextAttemptAt: Long = 0, val issue: String? = null,
+        val capacityNotBefore: Long = 0,
         val receiptID: String? = null, val receiptBody: String? = null,
         val localAcknowledged: Boolean = false
     ) {
@@ -85,6 +86,17 @@ internal class ClinicalAnnotationOutbox(context: Context, private val scope: Med
 
     suspend fun jobs(): List<Job> = withContext(Dispatchers.IO) { mutex.withLock { loadAll() } }
 
+    /** Authentication/service waits are durable too, without changing the frozen payload. */
+    suspend fun deferAttempts(origin:String,user:String,until:Long,capacity:Boolean) = withContext(Dispatchers.IO) { mutex.withLock {
+        loadAll().filter { it.binding.origin==origin && it.binding.configuredUser==user &&
+            it.state !in setOf(State.COMPLETE,State.CANCELLED) }.forEach { job ->
+            persist(job.copy(nextAttemptAt=maxOf(job.nextAttemptAt,until),
+                capacityNotBefore=if(capacity) maxOf(job.capacityNotBefore,until) else job.capacityNotBefore,
+                state=if(capacity) State.RETRY else job.state,
+                issue=if(capacity) "capacity_wait" else job.issue))
+        }
+    } }
+
     /** Serialized across instances. Receipt is durable before local acknowledgement.
      * WAIT/REVOKED never sends; a different account/server cannot inherit a queued doctor's work.
      * PAUSED needs an explicit retry after the caller has refreshed authentication or fixed the issue.
@@ -95,6 +107,9 @@ internal class ClinicalAnnotationOutbox(context: Context, private val scope: Med
         var job = mutex.withLock { loadAll().first { it.id == id } }
         if (job.state in setOf(State.COMPLETE,State.CANCELLED)) return@process job
         if (job.binding != binding) return@process job // Do not overwrite another account's status.
+        val capacityBlocked = mutex.withLock { loadAll().any { it.binding == binding &&
+            it.state !in setOf(State.COMPLETE,State.CANCELLED) && it.capacityNotBefore > now() } }
+        if (capacityBlocked) return@process job
         if (job.nextAttemptAt > now() && !retryPaused) return@process job
         if (job.state == State.PAUSED && !retryPaused) return@process job
         suspend fun update(next: Job): Job { mutex.withLock { persist(next) };job=next;return next }
@@ -113,8 +128,11 @@ internal class ClinicalAnnotationOutbox(context: Context, private val scope: Med
             val valid=AnnotationReceipt.validate(response.httpCode,response.body,requireNotNull(row.wdCode),requireNotNull(row.imageId),job.woundSHA,job.tissueSHA).first
             if (!valid) {
                 val retry=response.httpCode in setOf(408,429) || response.httpCode in 500..599
+                val capacity=if(response.httpCode in setOf(429,503)) ResearchCapacityWait.deadline(
+                    response.retryAfter,response.serverDate,response.body,now()) else 0L
                 return@process update(job.copy(state=if(retry) State.RETRY else State.PAUSED,
-                    issue=if(retry) "server_retry" else "receipt_unconfirmed"))
+                    capacityNotBefore=capacity,nextAttemptAt=maxOf(job.nextAttemptAt,capacity),
+                    issue=if(capacity>0) "capacity_wait" else if(retry) "server_retry" else "receipt_unconfirmed"))
             }
             // Store only the verified fields, never server error text or arbitrary returned data.
             val obj=JsonParser.parseString(response.body).asJsonObject
@@ -123,7 +141,7 @@ internal class ClinicalAnnotationOutbox(context: Context, private val scope: Med
                     .forEach { add(it,obj.get(it)) }
             }
             update(job.copy(state=State.RECEIPT_SAVED,receiptID=obj.get("annotation_receipt_id").asString,
-                receiptBody=receipt.toString(),nextAttemptAt=0,issue=null))
+                receiptBody=receipt.toString(),nextAttemptAt=0,capacityNotBefore=0,issue=null))
         }
         when(permitted(job)) {
             Permission.WAIT -> return@process update(job.copy(state=State.PAUSED,issue="authorization_required"))

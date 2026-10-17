@@ -39,6 +39,8 @@ class MedicalAccountPreferences private constructor(
     enum class ConsentQueue(val key: String) {
         WITHDRAWAL("pending_withdrawals"), RESTORE("pending_restores")
     }
+    fun retryAfter(queue:ConsentQueue):Long = synchronized(lock) { prefs.getLong(queue.key+"_retry_at",0) }
+    fun deferRetry(queue:ConsentQueue,until:Long) = synchronized(lock) { check(prefs.edit().putLong(queue.key+"_retry_at",until).commit()) }
     fun pending(queue: ConsentQueue): Set<String> = synchronized(lock) {
         prefs.getStringSet(queue.key, emptySet())?.toSet() ?: emptySet()
     }

@@ -48,6 +48,7 @@ enum ConsentSync {
     }
 
     /// 同步方向。**兩個方向必須用兩個佇列**，理由見 `AppSettings`。
+    private static var running = false
     private enum Dir {
         case withdraw
         case restore
@@ -81,23 +82,28 @@ enum ConsentSync {
         // Persist before awaiting: switching environments or terminating during
         // a request must not lose the requested consent change.
         remember(list)
+        guard !running, !(context.accounts.retryAfter(queue).map { $0 > Date() } ?? false) else { return Result(done: [], pending: list) }
+        running = true; defer { running = false }
+        context.accounts.deferRetry(queue, until: Date().addingTimeInterval(60))
         guard context.active() else { return Result(done: [], pending: list) }
         let backend: BackendClient
         do { backend = try await context.acquire() }
+        catch let wait as ResearchCapacityWait { context.accounts.deferRetry(queue, until: wait.notBefore); return Result(done: [], pending: list) }
         catch { return Result(done: [], pending: list) }
 
         var done: [String] = []
         var fail: [String] = []
+        var capacityWaiting = false
         for c in list {
             // 逐筆處理而非整批：一個代碼失敗不該讓其他的也留在佇列裡，
             // 而重試時只重試真正沒完成的那些。
-            guard context.active(), !Task.isCancelled else { fail.append(c); continue }
+            guard context.active(), !Task.isCancelled, !capacityWaiting else { fail.append(c); continue }
             let ok = dir == .withdraw
-                ? await backend.withdrawConsent(code: c)
-                : await backend.restoreConsent(code: c)
+                ? await backend.withdrawConsent(code: c, onCapacity: { capacityWaiting = true; context.accounts.deferRetry(queue, until: $0.notBefore) })
+                : await backend.restoreConsent(code: c, onCapacity: { capacityWaiting = true; context.accounts.deferRetry(queue, until: $0.notBefore) })
             if ok && context.active() && !Task.isCancelled { done.append(c); forget(c) } else { fail.append(c) }
         }
-        if !fail.isEmpty { remember(fail) }
+        if !fail.isEmpty { remember(fail) } else { context.accounts.deferRetry(queue, until: .distantPast) }
         return Result(done: done, pending: fail)
     }
 

@@ -22,7 +22,7 @@ internal class ClinicalResearchController(context: Context, private val runtime:
     private val manual=AtomicBoolean(false)
     @Volatile private var foreground=false
     private var pump: Job?=null
-    data class Item(val recordID:Long,val state:ClinicalAnnotationOutbox.State,val text:String,val snapshot:MeasurementEntity?=null)
+    data class Item(val recordID:Long,val state:ClinicalAnnotationOutbox.State,val text:String,val snapshot:MeasurementEntity?=null,val capacityNotBefore:Long=0)
     data class Status(val items:List<Item> = emptyList(),val busy:Boolean=false,val issue:String?=null) {
         fun tracks(row:MeasurementEntity?):Boolean = row != null && items.any {
             it.state != ClinicalAnnotationOutbox.State.CANCELLED &&
@@ -36,8 +36,13 @@ internal class ClinicalResearchController(context: Context, private val runtime:
         foreground=value
         if(pump==null) pump=tasks.launch {
             while(isActive) {
-                if(foreground) drainOnce(manual.getAndSet(false))
-                withTimeoutOrNull(30_000){wakeups.receive()}
+                if(foreground) {
+                    try { ConsentWithdrawal.retryPending(contextForExports,runtime) }
+                    catch(cancelled:CancellationException) {throw cancelled}
+                    catch(_:Exception) { /* Durable withdrawal queue remains authoritative. */ }
+                    drainOnce(manual.getAndSet(false))
+                }
+                withTimeoutOrNull(5_000){wakeups.receive()}
             }
         }
         wake()
@@ -87,6 +92,7 @@ internal class ClinicalResearchController(context: Context, private val runtime:
 
     internal suspend fun drainOnce(retryPaused:Boolean=false) {
         if(!drainLock.tryLock()) return
+        val attemptOrigin=runtime.backendUrl();val attemptUser=runtime.backendUser()
         try {
             val jobs=outbox.jobs();refresh(jobs)
             val pending=jobs.filter {it.state !in setOf(ClinicalAnnotationOutbox.State.COMPLETE,ClinicalAnnotationOutbox.State.CANCELLED)}
@@ -94,7 +100,9 @@ internal class ClinicalResearchController(context: Context, private val runtime:
             // Do not repeatedly authenticate an unrelated account or upload an old environment's work.
             val eligible=pending.filter {it.binding.origin==runtime.backendUrl() && it.binding.configuredUser==runtime.backendUser()}
             if(eligible.isEmpty()) {mutable.value=mutable.value.copy(issue="有待傳工作需要原送件帳號登入。");return}
-            val due=eligible.filter { (retryPaused || it.nextAttemptAt<=System.currentTimeMillis()) &&
+            if(eligible.any { it.capacityNotBefore>System.currentTimeMillis() }) return
+            // Serialize revisions of each record; a later edit never overtakes an unconfirmed one.
+            val due=eligible.sortedBy { it.createdAt }.distinctBy { it.measurement().id }.filter { (retryPaused || it.nextAttemptAt<=System.currentTimeMillis()) &&
                 (it.state!=ClinicalAnnotationOutbox.State.PAUSED || it.issue=="authorization_required" || retryPaused) }
             if(due.isEmpty()) return
             mutable.value=mutable.value.copy(busy=true,issue=null)
@@ -119,7 +127,14 @@ internal class ClinicalResearchController(context: Context, private val runtime:
                 refresh()
             }
         } catch(cancelled:CancellationException) {throw cancelled}
-        catch(_:Exception) {mutable.value=mutable.value.copy(issue="待傳尚未完成：請確認網路、Google／WoundAI 登入及本機資料；紀錄保留。")}
+        catch(wait:ResearchCapacityException) {
+            outbox.deferAttempts(attemptOrigin,attemptUser,wait.notBefore,true);refresh()
+            mutable.value=mutable.value.copy(issue="後端容量等待中；待傳資料已保留，App 開啟時會接續處理。")
+        }
+        catch(_:Exception) {
+            outbox.deferAttempts(attemptOrigin,attemptUser,System.currentTimeMillis()+60_000,false)
+            mutable.value=mutable.value.copy(issue="待傳尚未完成：請確認網路、Google／WoundAI 登入及本機資料；紀錄保留。")
+        }
         finally {mutable.value=mutable.value.copy(busy=false);drainLock.unlock()}
     }
     private suspend fun refresh(jobs:List<ClinicalAnnotationOutbox.Job>? = null) {
@@ -127,13 +142,14 @@ internal class ClinicalResearchController(context: Context, private val runtime:
         mutable.value=mutable.value.copy(items=saved.map { job ->
             val text=when(job.state) {
                 ClinicalAnnotationOutbox.State.PENDING -> "待傳"
-                ClinicalAnnotationOutbox.State.RETRY -> "等待重試，尚未確認保存"
+                ClinicalAnnotationOutbox.State.RETRY -> if(job.capacityNotBefore>System.currentTimeMillis())
+                    "後端容量等待中；資料已保留，${java.text.DateFormat.getTimeInstance().format(java.util.Date(job.capacityNotBefore))} 後自動續傳，無須重複送出" else "等待重試，尚未確認保存"
                 ClinicalAnnotationOutbox.State.PAUSED -> if(job.issue=="authorization_required") "需確認登入／同意" else "保存回覆未通過，請核對後重試"
                 ClinicalAnnotationOutbox.State.RECEIPT_SAVED -> "雲端標註已保存，本機狀態待同步"
                 ClinicalAnnotationOutbox.State.COMPLETE -> if(job.localAcknowledged) "研究標註已確認保存（本筆無深度）" else "舊修訂已保存；較新修訂未標記"
                 ClinicalAnnotationOutbox.State.CANCELLED -> "已停止：紀錄或同意不再有效"
             }
-            Item(job.measurement().id,job.state,text,job.measurement())
+            Item(job.measurement().id,job.state,text,job.measurement(),job.capacityNotBefore)
         })
     }
     private fun upload(client:BackendClient,job:ClinicalAnnotationOutbox.Job,consentTrain:Boolean):ClinicalAnnotationOutbox.Response {
@@ -141,6 +157,7 @@ internal class ClinicalResearchController(context: Context, private val runtime:
         val provenance=requireNotNull(AnnotationProvenance.decode(row.annotationProvenance))
         val polys=parsePolygons(row.gtPolygon)
         var response:ClinicalAnnotationOutbox.Response?=null
+        var retryAfter:String?=null;var serverDate:String?=null
         client.submitAnnotation(requireNotNull(row.wdCode),PolygonJson.largest(polys),row.exudate,
             allPolygons=polys,areaCm2=row.estimatedArea,imageId=row.imageId,imageW=requireNotNull(row.imageW),imageH=requireNotNull(row.imageH),
             mmPerPx=row.mmPerPx,route=row.route,segModel=provenance.segModel,quality=provenance.quality,
@@ -149,7 +166,8 @@ internal class ClinicalResearchController(context: Context, private val runtime:
                 "necrosis" to row.tissueNecrosis,"epithelial" to row.tissueEpithelial,"other" to row.tissueOther)
                 .mapNotNull{(k,v)->v?.let{k to it}}.toMap(),
             tissueMaskPng=requireNotNull(TissueMaskCodec.encode(raster.tissue,raster.mask,raster.mw,raster.mh)),tissueRaster=raster,
-            consentTrain=consentTrain,doctorVerified=row.doctorVerified,onResponse={code,body->response=ClinicalAnnotationOutbox.Response(code,body)})
+            consentTrain=consentTrain,doctorVerified=row.doctorVerified,onRetryHeaders={retry,date->retryAfter=retry;serverDate=date},
+            onResponse={code,body->response=ClinicalAnnotationOutbox.Response(code,body,retryAfter,serverDate)})
         return response ?: ClinicalAnnotationOutbox.Response(400,"{}")
     }
 }

@@ -38,7 +38,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.woundai.app.mmhps20261007
-        CURRENT_PROJECT_VERSION: 33
+        CURRENT_PROJECT_VERSION: 39
         INFOPLIST_FILE: WoundMeasurementApp/InstitutionInfo.plist
         # ⚠ 不可同時開 GENERATE_INFOPLIST_FILE 與 INFOPLIST_FILE：舊專案兩者都設，
         #   而 build setting 裡的 NSCameraUsageDescription 與 Info.plist 裡的字串不一致，

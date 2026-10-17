@@ -2,7 +2,7 @@ import Foundation
 import SwiftUI
 
 /// This receipt covers only current live media, never backups or model unlearning.
-enum LiteWithdrawalOutcome: Equatable { case pending, liveMediaRemoved }
+enum LiteWithdrawalOutcome: Equatable { case pending, pendingUntil(Date), liveMediaRemoved }
 
 enum LiteWithdrawalFailure: LocalizedError {
     case noIdentity, invalidReceipt, unavailable, invalidState
@@ -21,6 +21,7 @@ struct LiteWithdrawalRecord: Codable, Equatable {
     var server: String
     var owner: String?
     var phase: Phase = .pending
+    var retryAt: Date? = nil
 }
 
 /// Atomic, backup-excluded journal. Corruption/read failures block uploads instead of resetting consent.
@@ -91,6 +92,7 @@ extension LiteSignedCloudTransport {
         var request = URLRequest(url: origin.appendingPathComponent("api/v1/lite/data/" + owner))
         request.httpMethod = "DELETE"
         let (data, response) = try await client.send(request, installation: owner, requestID: UUID(), allowSending: { true })
+        try ResearchCapacityWait.check(response, data: data)
         struct Receipt: Decodable {
             let status: String
             let anon_id: String
@@ -107,7 +109,8 @@ extension LiteSignedCloudTransport {
             throw LiteWithdrawalFailure.invalidReceipt
         }
         if response.statusCode == 202, receipt.status == "withdrawal_pending", receipt.reason == "writers_in_flight" {
-            return .pending
+            return .pendingUntil(ResearchCapacityWait.deadline(retryAfter: response.value(forHTTPHeaderField: "Retry-After"),
+                serverDate: response.value(forHTTPHeaderField: "Date"), data: data, now: Date()))
         }
         guard response.statusCode == 200, receipt.status == "deleted", receipt.deletion_scope == "live_media" else {
             throw LiteWithdrawalFailure.invalidReceipt
@@ -147,25 +150,36 @@ final class LiteWithdrawalModel: ObservableObject {
     var blocksUploads: Bool { journal.blocksUploads }
     var finished: Bool { record?.phase == .liveMediaRemoved }
     func request(server: String) async {
-        guard !busy, !finished else { return }
+        guard !busy, !finished, !(record?.retryAt.map { $0 > Date() } ?? false) else { return }
         busy = true; defer { busy = false }
         stopUploads()
         do {
             // A retry always retains its ORIGINAL origin/owner, even after settings change.
             var value = try journal.load() ?? LiteWithdrawalRecord(server: try LiteWithdrawalJournal.origin(server))
+            value.retryAt = Date().addingTimeInterval(60)
             try journal.save(value); record = value
             if value.owner == nil {
                 guard let existing = try await owner(value.server) else { throw LiteWithdrawalFailure.noIdentity }
                 value.owner = existing
                 try journal.save(value); record = value
             }
-            let result = try await send(value.server, value.owner!)
-            if result == .liveMediaRemoved { value.phase = .liveMediaRemoved }
+            value.retryAt = Date().addingTimeInterval(60)
             try journal.save(value); record = value
-            message = result == .pending
-                ? "雲端已受理撤回，正在等待先前的上傳結束。請稍後按「重試／查核撤回」。"
-                : "雲端確認目前可見的影像與深度媒體已清除，該安裝的研究索引已停用。"
+            let result = try await send(value.server, value.owner!)
+            if result == .liveMediaRemoved { value.phase = .liveMediaRemoved; value.retryAt = nil }
+            if case .pendingUntil(let deadline) = result { value.retryAt = deadline }
+            try journal.save(value); record = value
+            message = result == .liveMediaRemoved
+                ? "雲端確認目前可見的影像與深度媒體已清除，該安裝的研究索引已停用。"
+                : "雲端已受理撤回，正在等待先前的上傳結束。本機已保留撤回要求，App 開啟時會自動接續查核。"
+        } catch let wait as ResearchCapacityWait {
+            if var value = record {
+                value.retryAt = wait.notBefore
+                do { try journal.save(value); record = value } catch { message = LiteWithdrawalFailure.invalidState.localizedDescription; return }
+            }
+            message = "後端忙碌；撤回要求已保留，等待後自動查核。研究上傳保持停用。"
         } catch let error as LiteWithdrawalFailure {
+            if var value = record { value.retryAt = nil; do { try journal.save(value); record = value } catch { message = LiteWithdrawalFailure.invalidState.localizedDescription; return } }
             message = error.localizedDescription
         } catch {
             message = LiteWithdrawalFailure.unavailable.localizedDescription

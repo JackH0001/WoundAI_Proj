@@ -24,6 +24,35 @@ final class ClinicalUploadOutboxTests: XCTestCase {
             server: "https://original.invalid", configuredUser: "dr01", actor: "mmh:dr01",
             depth: (Data([1,2,3,4]), ["source_exif_orientation":6]), requiresDepth: true)
     }
+    func testCapacityWaitSurvivesRestartAndOnlyRetriesUnconfirmedDepth() async throws {
+        var clock = Date()
+        let due = clock.addingTimeInterval(300)
+        let box = ClinicalUploadOutbox(directory: directory, now: { clock })
+        let id = try enqueue(box)
+        try await box.process(id: id, allowed: { true }, annotate: { _ in .enqueued(note: nil, revisionID: "0123456789abcdef") },
+            sendDepth: { _ in throw ResearchCapacityWait(notBefore: due) }, acknowledgeRecord: { _ in })
+        let reopened = ClinicalUploadOutbox(directory: directory, now: { clock })
+        XCTAssertEqual(reopened.jobs.first?.capacityNotBefore, due)
+        XCTAssertEqual(reopened.jobs.first?.annotationRevisionID, "0123456789abcdef")
+        XCTAssertEqual(reopened.jobs.first?.depthRaw, Data([1,2,3,4]))
+        try await reopened.process(id: id, allowed: { true }, annotate: { _ in XCTFail(); throw Failure.offline },
+            sendDepth: { _ in XCTFail("cannot bypass capacity wait") }, acknowledgeRecord: { _ in XCTFail() })
+        clock = due
+        try await reopened.process(id: id, allowed: { true }, annotate: { _ in XCTFail(); throw Failure.offline },
+            sendDepth: { job in XCTAssertEqual(job.depthRaw, Data([1,2,3,4])); XCTAssertEqual(job.annotationRevisionID,"0123456789abcdef") }, acknowledgeRecord: { _ in })
+        XCTAssertEqual(reopened.jobs.first?.completed, true)
+    }
+    func testRetryAfterContractUsesLargestHintAndServerClock() throws {
+        let now = Date(timeIntervalSince1970: 1000)
+        func delay(_ header: String?, _ body: String, _ date: String? = nil) -> Double {
+            ResearchCapacityWait.deadline(retryAfter: header, serverDate: date, data: Data(body.utf8), now: now, jitter: 0).timeIntervalSince(now)
+        }
+        XCTAssertEqual(delay("120", "{\"retry_after\":180}"), 180)
+        XCTAssertEqual(delay("Sat, 17 Oct 2026 03:05:00 GMT", "{}", "Sat, 17 Oct 2026 03:00:00 GMT"), 300)
+        XCTAssertEqual(delay("-10", "{\"retry_after\":true}"), 60)
+        XCTAssertEqual(delay("NaN", "{\"retry_after\":-1}"), 60)
+        XCTAssertEqual(delay("90000", "{}"), 90000)
+    }
     func testEncryptedSnapshotSurvivesReopenWithoutCredentials() throws {
         let box = ClinicalUploadOutbox(directory: directory)
         let id = try enqueue(box)

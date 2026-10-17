@@ -280,6 +280,7 @@ actor BackendClient {
         if let institutionTransport {
             let (data, response) = try await institutionTransport.send(req)
             try requireCurrentSessionContext()
+            try ResearchCapacityWait.check(response, data: data)
             return (response.statusCode, data)
         }
         #if WOUND_INSTITUTION
@@ -287,6 +288,7 @@ actor BackendClient {
         #else
         let (data, resp) = try await session.data(for: req)
         try requireCurrentSessionContext()
+        if let response = resp as? HTTPURLResponse { try ResearchCapacityWait.check(response, data: data) }
         let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
         return (code, data)
         #endif
@@ -301,6 +303,7 @@ actor BackendClient {
     private func sendLite(_ request: URLRequest, installation: String) async throws -> (Int, Data) {
         guard let liteTransport else { throw BackendError.badResponse("缺少裝置驗證設定") }
         let (data, response) = try await liteTransport.send(request, installation: installation)
+        try ResearchCapacityWait.check(response, data: data)
         return (response.statusCode, data)
     }
 
@@ -1233,8 +1236,8 @@ actor BackendClient {
     // MARK: - ⑦ 同意：撤回／重新取得
 
     /// `POST /api/v1/consent/withdraw`。
-    func withdrawConsent(code: String, imageId: String? = nil) async -> Bool {
-        return await consentCall(path: "/api/v1/consent/withdraw", code: code, imageId: imageId)
+    func withdrawConsent(code: String, imageId: String? = nil, onCapacity: (ResearchCapacityWait) -> Void = { _ in }) async -> Bool {
+        return await consentCall(path: "/api/v1/consent/withdraw", code: code, imageId: imageId, onCapacity: onCapacity)
     }
 
     /**
@@ -1244,19 +1247,22 @@ actor BackendClient {
      而雲端仍以「已撤回訓練同意」擋下每一次送出——錯誤訊息還會把內部端點路徑直接印給
      醫師看，而他沒有辦法自己呼叫它。
      */
-    func restoreConsent(code: String, imageId: String? = nil) async -> Bool {
-        return await consentCall(path: "/api/v1/consent/restore", code: code, imageId: imageId)
+    func restoreConsent(code: String, imageId: String? = nil, onCapacity: (ResearchCapacityWait) -> Void = { _ in }) async -> Bool {
+        return await consentCall(path: "/api/v1/consent/restore", code: code, imageId: imageId, onCapacity: onCapacity)
     }
 
-    private func consentCall(path: String, code: String, imageId: String?) async -> Bool {
+    private func consentCall(path: String, code: String, imageId: String?, onCapacity: (ResearchCapacityWait) -> Void) async -> Bool {
         do {
             var body: [String: Any] = ["code": code]
             if let i = imageId { body["image_id"] = i }
             var r = try request("POST", path)
             r.setValue("application/json", forHTTPHeaderField: "Content-Type")
             r.httpBody = try JSONSerialization.data(withJSONObject: body)
-            let (code, _) = try await send(r)
-            return code == 200
+            let (httpCode, data) = try await send(r)
+            guard httpCode == 200, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+            return obj["code"] as? String == code && obj["status"] as? String == (path.hasSuffix("/withdraw") ? "withdrawn" : "restored")
+        } catch let wait as ResearchCapacityWait {
+            onCapacity(wait); return false
         } catch {
             return false
         }

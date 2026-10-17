@@ -211,6 +211,8 @@ class BackendClient internal constructor(
             .toRequestBody("application/json".toMediaType())
         val req = Request.Builder().url("$baseUrl/api/auth/login").post(body).build()
         http.newCall(req).execute().use { resp ->
+            if (resp.code in setOf(429,503)) throw ResearchCapacityException(ResearchCapacityWait.deadline(
+                resp.header("Retry-After"),resp.header("Date"),resp.body?.string().orEmpty(),System.currentTimeMillis()))
             if (!resp.isSuccessful) { identity = null; return false }
             val j = JSONObject(resp.body!!.string())
             val tok = j.optString("access_token", "")
@@ -242,6 +244,8 @@ class BackendClient internal constructor(
         val req=Request.Builder().url("$baseUrl/api/v1/auth/session")
             .header("Authorization", "Bearer $jwt").get().build()
         http.newCall(req).execute().use { response ->
+            if (response.code in setOf(429,503)) throw ResearchCapacityException(ResearchCapacityWait.deadline(
+                response.header("Retry-After"),response.header("Date"),response.body?.string().orEmpty(),System.currentTimeMillis()))
             if (response.code != 200) {
                 if (response.code in listOf(401,403)) jwt=""
                 throw java.io.IOException(if (response.code==404) "此後端尚未支援登入狀態驗證，請聯絡管理員更新"
@@ -460,6 +464,7 @@ class BackendClient internal constructor(
          */
         doctorVerified: Boolean,
         onResponse: ((Int, String) -> Unit)? = null,
+        onRetryHeaders: ((String?, String?) -> Unit)? = null,
         woundProfileJson: String? = null
     ): Pair<Boolean, String> {
         // 沒有 image_id/尺寸就送出 = 產生孤兒 GT(後端會 400)。提早在端上擋下並給明確訊息。
@@ -559,6 +564,7 @@ class BackendClient internal constructor(
             val body = resp.body?.string() ?: ""
             // 直接把 raw JSON 丟給醫師看會變成一整串 \uXXXX 逃脫碼(實機截圖確認過,完全不可讀)
             // → 解析出 issues 逐條顯示中文
+            onRetryHeaders?.invoke(resp.header("Retry-After"), resp.header("Date"))
             onResponse?.invoke(resp.code, body)
             return AnnotationReceipt.validate(resp.code, body, code, imageId, woundHash, tissueHash, woundProfileJson)
         }
@@ -597,7 +603,13 @@ class BackendClient internal constructor(
             .toRequestBody("application/json".toMediaType())
         val req = Request.Builder().url("$baseUrl/api/v1/consent/restore")
             .header("Authorization", "Bearer $jwt").post(body).build()
-        http.newCall(req).execute().use { return it.isSuccessful }
+        http.newCall(req).execute().use {
+            val response=it.body?.string().orEmpty()
+            if(it.code in setOf(429,503)) throw ResearchCapacityException(ResearchCapacityWait.deadline(
+                it.header("Retry-After"),it.header("Date"),response,System.currentTimeMillis()))
+            val receipt=runCatching{JSONObject(response)}.getOrNull()
+            return it.code==200 && receipt?.optString("status")=="restored" && receipt.optString("code")==code
+        }
     }
 
     fun withdrawConsent(code: String): Boolean {
@@ -605,6 +617,12 @@ class BackendClient internal constructor(
             .toRequestBody("application/json".toMediaType())
         val req = Request.Builder().url("$baseUrl/api/v1/consent/withdraw")
             .header("Authorization", "Bearer $jwt").post(body).build()
-        http.newCall(req).execute().use { return it.isSuccessful }
+        http.newCall(req).execute().use {
+            val response=it.body?.string().orEmpty()
+            if(it.code in setOf(429,503)) throw ResearchCapacityException(ResearchCapacityWait.deadline(
+                it.header("Retry-After"),it.header("Date"),response,System.currentTimeMillis()))
+            val receipt=runCatching{JSONObject(response)}.getOrNull()
+            return it.code==200 && receipt?.optString("status")=="withdrawn" && receipt.optString("code")==code
+        }
     }
 }

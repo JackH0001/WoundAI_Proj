@@ -22,6 +22,8 @@ struct ClinicalUploadJob: Codable, Identifiable {
     var lastIssue: String?
     var attempts = 0
     var nextAttemptAt: Date?
+    /// Server-directed wait survives restarts and cannot be bypassed by the retry button.
+    var capacityNotBefore: Date?
     /// A rejected snapshot is retained for diagnosis, never rewritten or called saved.
     var supersededBy: String?
 
@@ -39,6 +41,9 @@ struct ClinicalUploadJob: Codable, Identifiable {
         if supersededBy != nil { return "舊送件修改比例無效；已保留並由重新確認的送件取代" }
         if needsTissueCountRepair { return "組織修改比例需修復：請開啟此筆修邊，確認完成後再送出；不用重拍或改動遮罩。" }
         if completed { return requiresDepth ? "研究標註與原始深度已確認保存" : "研究標註已保存；本筆未附原始深度" }
+        if let until = capacityNotBefore, until > Date() {
+            return "後端容量等待中；資料已保留，\(until.formatted(date: .omitted, time: .standard)) 後自動續傳。"
+        }
         if let lastIssue { return lastIssue }
         return annotationConfirmed ? "標註已保存；原始深度待傳" : "研究資料已安全排入待傳佇列"
     }
@@ -70,10 +75,12 @@ final class ClinicalUploadOutbox: ObservableObject {
     @Published private(set) var phase = ""
     @Published private(set) var storageIssue: String?
     private let directory: URL
+    private let now: () -> Date
     private var worker: Task<Void, Never>?
     private var backgroundID: UIBackgroundTaskIdentifier = .invalid
 
-    init(directory: URL? = nil) {
+    init(directory: URL? = nil, now: @escaping () -> Date = Date.init) {
+        self.now = now
         self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("clinical_research_outbox", isDirectory: true)
         reload()
@@ -84,6 +91,11 @@ final class ClinicalUploadOutbox: ObservableObject {
         jobs.contains { $0.measurement.id == recordID && $0.blocksNewSubmission }
     }
     func latest(recordID: Int64) -> ClinicalUploadJob? { jobs.last { $0.measurement.id == recordID } }
+
+    func capacityDeadline(server: String, user: String) -> Date? {
+        jobs.filter { !$0.completed && $0.supersededBy == nil && $0.server == server && $0.configuredUser == user }
+            .compactMap(\.capacityNotBefore).filter { $0 > now() }.max()
+    }
 
     private func file(_ id: String) -> URL { directory.appendingPathComponent(id + ".enc") }
     private func persist(_ job: ClinicalUploadJob) throws {
@@ -109,7 +121,7 @@ final class ClinicalUploadOutbox: ObservableObject {
                 }
                 // Rejected diagnostic snapshots obey the existing 90-day limit
                 // even after they leave the active upload loop.
-                if job.supersededBy != nil && Date().timeIntervalSince(job.measurement.timestamp) > 90 * 86400 {
+                if job.supersededBy != nil && now().timeIntervalSince(job.measurement.timestamp) > 90 * 86400 {
                     try FileManager.default.removeItem(at: path)
                     continue
                 }
@@ -187,6 +199,8 @@ final class ClinicalUploadOutbox: ObservableObject {
                  acknowledgeRecord: (Measurement) async -> Void) async throws {
         guard var job = jobs.first(where: { $0.id == id }), !job.completed,
               job.supersededBy == nil, !job.needsTissueCountRepair else { return }
+        guard capacityDeadline(server: job.server, user: job.configuredUser) == nil else { return }
+        var capacity: ResearchCapacityWait?
         let message = await ClinicalUploadFlow.run(annotate: {
             guard !Task.isCancelled, await allowed() else { throw CancellationError() }
             if job.annotationConfirmed && job.annotationRevisionID != nil {
@@ -208,14 +222,15 @@ final class ClinicalUploadOutbox: ObservableObject {
                 job.depthConfirmed = true
                 try self.persist(job)
             }
-        } : nil, progress: { self.phase = $0 })
+        } : nil, failure: { capacity = $0 as? ResearchCapacityWait }, progress: { self.phase = $0 })
         if job.annotationConfirmed && (!job.requiresDepth || job.depthConfirmed) {
-            job.completed = true; job.lastIssue = nil
+            job.completed = true; job.lastIssue = nil; job.nextAttemptAt = nil; job.capacityNotBefore = nil
             job.annotationPayload = Data(); job.depthRaw = nil; job.depthMetadata = nil
         } else {
             job.lastIssue = message
             job.attempts += 1
-            job.nextAttemptAt = Date().addingTimeInterval(min(3600, 60 * pow(2, Double(min(job.attempts - 1, 6)))))
+            job.capacityNotBefore = capacity?.notBefore
+            job.nextAttemptAt = max(capacity?.notBefore ?? .distantPast, now().addingTimeInterval(min(3600, 60 * pow(2, Double(min(job.attempts - 1, 6))))))
         }
         try persist(job)
     }
@@ -251,12 +266,13 @@ final class ClinicalUploadOutbox: ObservableObject {
                 // Never let a newer edit overtake an older unconfirmed revision.
                 if blockedRecords.contains(original.measurement.id) { continue }
                 var job = original
-                if !force, let next = job.nextAttemptAt, next > Date() {
+                if capacityDeadline(server: job.server, user: job.configuredUser) != nil { break }
+                if !force, let next = job.nextAttemptAt, next > now() {
                     blockedRecords.insert(job.measurement.id); continue
                 }
                 do {
                     // Same 90-day maximum as source images; no hidden perpetual raw-data copy.
-                    if Date().timeIntervalSince(job.measurement.timestamp) > 90 * 86400 {
+                    if now().timeIntervalSince(job.measurement.timestamp) > 90 * 86400 {
                         try FileManager.default.removeItem(at: file(job.id))
                         jobs.removeAll { $0.id == job.id }
                         continue
@@ -293,10 +309,12 @@ final class ClinicalUploadOutbox: ObservableObject {
                         blockedRecords.insert(job.measurement.id)
                     }
                 } catch {
+                    let capacity = error as? ResearchCapacityWait
                     job = jobs.first(where: { $0.id == original.id }) ?? original
                     job.lastIssue = "研究資料待重試；臨床紀錄已保存。請核對網路及原登入帳號。"
                     job.attempts += 1
-                    job.nextAttemptAt = Date().addingTimeInterval(min(3600, 60 * pow(2, Double(min(job.attempts - 1, 6)))))
+                    job.capacityNotBefore = capacity?.notBefore
+                    job.nextAttemptAt = max(capacity?.notBefore ?? .distantPast, now().addingTimeInterval(min(3600, 60 * pow(2, Double(min(job.attempts - 1, 6))))))
                     do { try persist(job) } catch { storageIssue = "研究上傳狀態無法保存，已停止自動上傳。"; break }
                     blockedRecords.insert(job.measurement.id)
                 }

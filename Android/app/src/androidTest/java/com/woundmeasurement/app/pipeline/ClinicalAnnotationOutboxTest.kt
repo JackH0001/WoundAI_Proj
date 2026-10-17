@@ -56,6 +56,26 @@ class ClinicalAnnotationOutboxTest {
         .put("wound_mask_sha256",job.woundSHA).put("tissue_mask_sha256",job.tissueSHA).toString())
     private val allow:suspend(ClinicalAnnotationOutbox.Job)->ClinicalAnnotationOutbox.Permission={ClinicalAnnotationOutbox.Permission.ALLOW}
 
+    @Test fun capacityDeadlineSurvivesRestartAndManualRetryCannotBypass()=fixture {
+        val q=queue();val job=enqueue(q,binding)
+        val waiting=q.process(job.id,binding,allow,{ClinicalAnnotationOutbox.Response(429,"{\"retry_after\":300}","120")},{error("no receipt")})
+        assertTrue(waiting.capacityNotBefore>=clock+300_000)
+        val restored=queue().jobs().single();assertEquals(waiting,restored)
+        queue().process(job.id,binding,allow,{error("manual retry must respect server")},{error("no receipt")},retryPaused=true)
+        clock=restored.nextAttemptAt
+        val done=queue().process(job.id,binding,allow,{
+            assertEquals(job.rowJson,it.rowJson);assertArrayEquals(job.rasterBytes(),it.rasterBytes());receipt(it,"duplicate_skipped")
+        },{true})
+        assertEquals(ClinicalAnnotationOutbox.State.COMPLETE,done.state)
+    }
+    @Test fun authenticationCapacityWaitPersistsWithoutChangingPayload()=fixture {
+        val q=queue();val job=enqueue(q,binding)
+        q.deferAttempts(binding.origin,binding.configuredUser,clock+600_000,true)
+        val restored=queue().jobs().single()
+        assertEquals(job.rowJson,restored.rowJson);assertArrayEquals(job.rasterBytes(),restored.rasterBytes())
+        assertEquals(clock+600_000,restored.capacityNotBefore)
+        queue().process(job.id,binding,allow,{error("no early network")},{error("no ack")},retryPaused=true)
+    }
     @Test fun encryptedRestartRetainsExactFrozenSnapshotAndTimestamp()=fixture {
         val q=queue();val job=enqueue(q,binding);val loaded=queue().jobs().single()
         assertEquals(job,loaded);assertEquals(row,loaded.measurement());assertArrayEquals(raster,loaded.rasterBytes())
@@ -146,7 +166,7 @@ class ClinicalAnnotationOutboxTest {
     @Test fun serverTransientFailureSchedulesRetryButValidationFailurePauses()=fixture {
         val q=queue();val job=enqueue(q,binding)
         val first=q.process(job.id,binding,allow,{ClinicalAnnotationOutbox.Response(503,"unavailable")},{error("no")})
-        assertEquals(ClinicalAnnotationOutbox.State.RETRY,first.state);clock+=60_000
+        assertEquals(ClinicalAnnotationOutbox.State.RETRY,first.state);clock=first.nextAttemptAt
         val second=q.process(job.id,binding,allow,{ClinicalAnnotationOutbox.Response(400,"invalid")},{error("no")})
         assertEquals(ClinicalAnnotationOutbox.State.PAUSED,second.state)
     }

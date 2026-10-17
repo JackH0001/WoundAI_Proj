@@ -42,6 +42,21 @@ final class LiteRevisionSyncTests: XCTestCase {
     private enum Offline: Error { case timeout }
 
     @MainActor
+    func testCapacityWaitKeepsExactRevisionAcrossRestartAndManualRetry() async throws {
+        let (store, dir) = try setup(); defer { try? FileManager.default.removeItem(at: dir) }
+        let due = Date().addingTimeInterval(300)
+        var original: LitePendingRevision?
+        await store.syncRevision(recordID: "record", consent: { true }) { _, pending in
+            original = pending; throw ResearchCapacityWait(notBefore: due)
+        }
+        let reopened = LiteStore(fileURL: dir.appendingPathComponent("records.json"))
+        XCTAssertEqual(reopened.records.first?.cloudSync?.pending, original)
+        XCTAssertEqual(reopened.records.first?.cloudSync?.capacityNotBefore, due)
+        await reopened.syncRevision(recordID: "record", consent: { true }) { _, _ in XCTFail("not due") }
+        XCTAssertEqual(reopened.records.first?.cloudSync?.acknowledgedRevision, 0)
+    }
+
+    @MainActor
     func testUnchangedRecordDoesNotResendAcrossRestart() async throws {
         let (store, dir) = try setup(); defer { try? FileManager.default.removeItem(at: dir) }
         var calls = 0

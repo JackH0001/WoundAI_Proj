@@ -16,6 +16,22 @@ final class LiteRawDepthPacketTests: XCTestCase {
             UIColor.blue.setFill(); c.fill(CGRect(x:0,y:0,width:64,height:64))
         }.jpegData(compressionQuality: 0.92)!
     }
+    @MainActor
+    func testIngestRetainsOneCanonicalJPEGForCloudAndLocalDepthBinding() async throws {
+        let vm = LiteMeasureVM()
+        let raw = try XCTUnwrap(UIImage(data: jpeg()))
+        _ = await vm.ingest(raw, depth: nil) // No cloud request or consent mutation.
+        let captured = try XCTUnwrap(vm.captureJPEG)
+        XCTAssertEqual(captured, raw.jpegData(compressionQuality: 0.92))
+        let packet = try LiteRawDepthPacket.make(depth: depth(), jpeg: captured)
+        XCTAssertEqual(packet.jpeg, captured)
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1
+        let other = UIGraphicsImageRenderer(size: CGSize(width:64,height:64),format:format).image { c in
+            UIColor.red.setFill(); c.fill(CGRect(x:0,y:0,width:64,height:64))
+        }
+        _ = await vm.ingest(other, depth: nil)
+        XCTAssertNotEqual(vm.captureJPEG, captured)
+    }
     func testExactFloatBitsAndHonestProvenance() throws {
         var d = depth();d.map[0] = Float(bitPattern: 0x7fc01234)
         let j = jpeg();let p = try LiteRawDepthPacket.make(depth:d,jpeg:j)

@@ -64,7 +64,10 @@ final class LiteWithdrawalSigningTests: XCTestCase {
         let (transport, client, http, _, _) = try setup(); let owner = try await client.registeredInstallation()
         await http.options(status: 202)
         await http.businessReply(["status":"withdrawal_pending", "anon_id":owner, "reason":"writers_in_flight"])
-        let result = try await transport.withdraw(server: server, owner: owner); XCTAssertEqual(result, .pending)
+        let before = Date()
+        let result = try await transport.withdraw(server: server, owner: owner)
+        guard case .pendingUntil(let deadline) = result else { return XCTFail("Missing durable wait") }
+        XCTAssertGreaterThanOrEqual(deadline.timeIntervalSince(before), 60)
     }
     func testMissingDrainedWrongScopeWrongOwnerAndOldReplyCannotReportDeletion() async throws {
         let (transport, client, http, _, _) = try setup(); let owner = try await client.registeredInstallation()
@@ -101,6 +104,7 @@ final class LiteWithdrawalSigningTests: XCTestCase {
             await http.businessReply(["status":"deleted", "anon_id":owner, "deletion_scope":"live_media", "writers_drained":true])
             do { _ = try await transport.withdraw(server: server, owner: owner); XCTFail() }
             catch is LiteWithdrawalFailure { }
+            catch is ResearchCapacityWait { XCTAssertTrue([429,503].contains(status)) }
         }
     }
     func testCanonicalOriginAcceptsExplicitHTTPSPortWithoutChangingOwner() async throws {
@@ -137,12 +141,33 @@ final class LiteWithdrawalJournalTests: XCTestCase {
         })
         await first.request(server:server)
         XCTAssertEqual(calls, 1); XCTAssertFalse(first.finished)
+        var pending = try XCTUnwrap(journal.load()); pending.retryAt = .distantPast; try journal.save(pending)
         let second = LiteWithdrawalModel(journal:journal, stopUploads:{}, owner:{ _ in XCTFail("Must not replace owner"); return nil }, send:{ origin, owner in
             XCTAssertEqual(origin, self.server); XCTAssertEqual(owner, self.owner); return .liveMediaRemoved
         })
         await second.request(server:"https://changed.invalid")
         XCTAssertTrue(second.finished); XCTAssertTrue(journal.blocksUploads)
         XCTAssertEqual(try journal.load()?.phase, .liveMediaRemoved)
+    }
+    func testCapacityWaitKeepsWithdrawalFenceAndPreventsEarlyRetry() async throws {
+        let due = Date().addingTimeInterval(300)
+        let first = LiteWithdrawalModel(journal: journal, stopUploads: {}, owner: { _ in self.owner }, send: { _, _ in
+            throw ResearchCapacityWait(notBefore: due)
+        })
+        await first.request(server: server)
+        XCTAssertEqual(try journal.load()?.retryAt, due); XCTAssertTrue(journal.blocksUploads)
+        let reopened = LiteWithdrawalModel(journal: journal, stopUploads: {}, send: { _, _ in XCTFail("too early"); return .liveMediaRemoved })
+        await reopened.request(server: "https://changed.invalid")
+        XCTAssertFalse(reopened.finished); XCTAssertEqual(reopened.record?.server,server)
+    }
+    func test202DeadlineSurvivesRestartAndBlocksEarlyRetry() async throws {
+        let until = Date().addingTimeInterval(600)
+        let model = LiteWithdrawalModel(journal:journal, stopUploads:{}, owner:{ _ in self.owner }, send:{ _,_ in .pendingUntil(until) })
+        await model.request(server:server)
+        XCTAssertEqual(try journal.load()?.retryAt, until)
+        let restarted = LiteWithdrawalModel(journal:journal, stopUploads:{}, owner:{ _ in XCTFail(); return nil }, send:{ _,_ in XCTFail(); return .liveMediaRemoved })
+        await restarted.request(server:server)
+        XCTAssertFalse(restarted.finished); XCTAssertTrue(restarted.blocksUploads)
     }
     func test202RemainsPendingAcrossRestart() async throws {
         let model = LiteWithdrawalModel(journal:journal, stopUploads:{}, owner:{ _ in self.owner }, send:{ _,_ in .pending })

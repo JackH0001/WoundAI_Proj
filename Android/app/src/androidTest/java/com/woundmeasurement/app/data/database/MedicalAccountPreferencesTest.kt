@@ -26,6 +26,16 @@ class MedicalAccountPreferencesTest {
         fun clear() { MedicalDataScope.entries.forEach { super.deleteSharedPreferences(prefix + it.settingsName) } }
     }
     private fun context() = TestContext(ApplicationProvider.getApplicationContext())
+    @Test fun withdrawalWaitSurvivesRestartAndIsSeparateFromRestoreAndDemo() {
+        val ctx=context()
+        try {
+            val a=MedicalAccountPreferences(ctx)
+            a.deferRetry(ConsentQueue.WITHDRAWAL,1234567)
+            assertEquals(1234567,MedicalAccountPreferences(ctx).retryAfter(ConsentQueue.WITHDRAWAL))
+            assertEquals(0,a.retryAfter(ConsentQueue.RESTORE))
+            assertEquals(0,MedicalAccountPreferences(ctx,MedicalDataScope.SYNTHETIC_REVIEW).retryAfter(ConsentQueue.WITHDRAWAL))
+        } finally {ctx.clear()}
+    }
     @Test fun encryptedCredentialsSurviveReopenAndClearOnlyTheirScope() {
         val ctx = context()
         try {
