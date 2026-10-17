@@ -118,6 +118,58 @@ final class BackendLoginAndCaptureTests: XCTestCase {
         XCTAssertEqual(row?.estimatedArea, 0.01)
 
     }
+    func testTimelineUnchangedSaveReusesAssetsAndTracksExudateAndTissueEdits() async throws {
+        let vm = sharedModel(CaptureTransportFixture())
+        vm.source = "phantom"
+        await vm.analyze(image(), phantom: true)
+        vm.exudate = 0
+        var raster = EditRaster(mask:[1,1,1,1], tissue:[1,1,1,1], origMask:[1,1,1,1],
+            rx0:0, ry0:0, mw:2, mh:2, mScale:1, cm2PerPx:0.25, canvasW:32, canvasH:32)
+        func confirm() {
+            vm.applyEdited(polygon:[[0,0],[2,0],[2,2]], all:[], iou:1, newArea:1,
+                tissue:raster.tissueFrac(), raster:raster)
+        }
+        confirm()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalImageStore(directory:root)
+        let repo = CaseRepository(store:WoundStore(path:":memory:"))
+        XCTAssertTrue(vm.hasUnsavedTimelineChanges)
+        let first = await vm.saveToTimeline(repo:repo, imageStore:store, woundCase:nil)
+        XCTAssertTrue(first)
+        XCTAssertFalse(vm.hasUnsavedTimelineChanges)
+        let id = try XCTUnwrap(vm.lastSavedId)
+        let beforeRow = await repo.measurement(id:id)
+        let before = try XCTUnwrap(beforeRow)
+        let files = try FileManager.default.contentsOfDirectory(atPath:root.path).sorted()
+        confirm() // No boundary, tissue, scale or confirmation change.
+        XCTAssertFalse(vm.hasUnsavedTimelineChanges)
+        let repeated = await vm.saveToTimeline(repo:repo, imageStore:store, woundCase:nil)
+        XCTAssertTrue(repeated)
+        XCTAssertTrue(vm.saveNote?.contains("內容未變更") == true)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath:root.path).sorted(), files)
+        let unchangedRow = await repo.measurement(id:id)
+        let unchanged = try XCTUnwrap(unchangedRow)
+        XCTAssertEqual(unchanged.imagePath,before.imagePath)
+        XCTAssertEqual(unchanged.rasterPath,before.rasterPath)
+        XCTAssertEqual(unchanged.timestamp,before.timestamp)
+        vm.exudate = 1
+        XCTAssertTrue(vm.hasUnsavedTimelineChanges)
+        vm.exudate = 0
+        XCTAssertFalse(vm.hasUnsavedTimelineChanges) // Reverting the edit removes the action.
+        raster.tissue[0] = 2; raster.tissueEditedPx = 1; raster.maskPx = 4
+        confirm()
+        XCTAssertTrue(vm.hasUnsavedTimelineChanges) // Tissue-only change must not be lost.
+        let changed = await vm.saveToTimeline(repo:repo,imageStore:store,woundCase:nil)
+        XCTAssertTrue(changed)
+        XCTAssertEqual(vm.lastSavedId,id)
+        XCTAssertFalse(vm.hasUnsavedTimelineChanges)
+        let afterRow = await repo.measurement(id:id)
+        let after = try XCTUnwrap(afterRow)
+        XCTAssertNotEqual(after.rasterPath,before.rasterPath)
+        XCTAssertEqual(after.timestamp,before.timestamp)
+    }
+
     func testSharedSessionTenCapturesKeepImageBindingsWithoutTenLogins() async throws {
         let transport = CaptureTransportFixture(); let vm = sharedModel(transport)
         for index in 1...10 {

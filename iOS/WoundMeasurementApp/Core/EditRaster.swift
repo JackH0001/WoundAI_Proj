@@ -16,7 +16,7 @@ import ImageIO
  | `tissue`   | 組織分區（**修邊畫面碼**，見 `TissueCode`） | 0…5 |
  | `origMask` | AI 原始遮罩（算 `correction_iou` 用） | 0 / 1 |
  */
-struct EditRaster {
+struct EditRaster: Equatable {
     var mask: [UInt8]
     var tissue: [UInt8]
     var origMask: [UInt8]

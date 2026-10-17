@@ -55,7 +55,7 @@ struct LoginIdentity: Equatable {
 
 // MARK: - classify 結果
 
-struct ClassifyResult {
+struct ClassifyResult: Equatable {
     var areaCm2: Double?
     var tissueFrac: [String: Double]
     var pushPartial: Int?
