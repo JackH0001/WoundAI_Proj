@@ -168,6 +168,13 @@ final class BackendLoginAndCaptureTests: XCTestCase {
         let after = try XCTUnwrap(afterRow)
         XCTAssertNotEqual(after.rasterPath,before.rasterPath)
         XCTAssertEqual(after.timestamp,before.timestamp)
+        var external = after; external.exudate = 3
+        await repo.updateMeasurement(external)
+        let stale = await vm.saveToTimeline(repo:repo,imageStore:store,woundCase:nil)
+        XCTAssertFalse(stale)
+        XCTAssertTrue(vm.saveNote?.contains("未覆寫") == true)
+        let retained = await repo.measurement(id:id)
+        XCTAssertEqual(retained,external)
     }
 
     func testSharedSessionTenCapturesKeepImageBindingsWithoutTenLogins() async throws {

@@ -82,6 +82,45 @@ class MeasureViewModel(
     @Volatile private var lastSavedId: Long? = null
     private var lastSavedSnapshot: MeasurementEntity? = null
     internal val savedSnapshot get() = lastSavedSnapshot
+
+    // A content snapshot excludes receipt/transport state. Raster bytes are copied so an
+    // editor cannot mutate the saved baseline in place. No image encoding occurs in UI checks.
+    private class RasterBytes(bytes: ByteArray, freeze: Boolean) {
+        private val value = if (freeze) bytes.copyOf() else bytes
+        override fun equals(other: Any?) = other is RasterBytes && value.contentEquals(other.value)
+        override fun hashCode() = value.contentHashCode()
+    }
+    private data class TimelineDraft(
+        val result: MeasureResult?, val bitmap: Bitmap?, val exudate: Int?, val source: String?,
+        val polygons: List<List<List<Int>>>, val verified: Boolean, val iou: Double?,
+        val imageId: String?, val careCode: String?, val width: Int, val height: Int,
+        val scale: Double?, val provenance: String, val rasterMeta: List<Any?>,
+        val mask: RasterBytes?, val tissue: RasterBytes?, val original: RasterBytes?, val baseline: RasterBytes?
+    )
+    private var savedTimelineDraft: TimelineDraft? = null
+    private var savedTimelineCaseId: Long? = null
+    val hasTimelineRecord: Boolean get() = lastSavedId != null
+    private fun timelineDraft(exudate: Int?, source: String?, freeze: Boolean = false): TimelineDraft {
+        val e = editRaster
+        return TimelineDraft(_state.value.result, lastBitmap, exudate, source,
+            lastPolygons.ifEmpty { if (lastPolygon.size >= 3) listOf(lastPolygon) else emptyList() }
+                .map { p -> p.map { it.toList() } }, lastDoctorVerified, lastCorrectionIou,
+            lastImageId, lastCareCode, lastImageW, lastImageH, lastMmPerPx,
+            AnnotationProvenance(lastSegModel, lastQuality, AnnotationProvenance.CARE_NOTE).encode(),
+            listOf(e?.rx0, e?.ry0, e?.mw, e?.mh, e?.mScale, e?.cm2PerPx,
+                e?.tissueEditedPx, e?.maskPx, e?.canvasW, e?.canvasH,
+                e?.wbGains?.toList(), e?.tissueEditCountKnown),
+            e?.mask?.let { RasterBytes(it, freeze) }, e?.tissue?.let { RasterBytes(it, freeze) }, e?.origMask?.let { RasterBytes(it, freeze) }, e?.autoBaseline?.let { RasterBytes(it, freeze) })
+    }
+    fun hasUnsavedTimelineChanges(exudate: Int?, source: String?): Boolean =
+        _state.value.result != null && (lastSavedId == null || timelineDraft(exudate, source) != savedTimelineDraft)
+
+    fun refreshTimelineState(exudate: Int?, source: String?) {
+        if (_state.value.saving || _state.value.annotationSending) return
+        val saved = hasTimelineRecord && !hasUnsavedTimelineChanges(exudate, source)
+        _state.value = _state.value.copy(saved = saved,
+            annotationSaved = saved && lastSavedSnapshot?.annotationSubmitted == true)
+    }
     // editRaster 所依附的畫布尺寸(端上=原圖、後端=≤2048 縮圖);尺寸變了柵格座標就對不上
     @Volatile private var lastCanvasW: Int = 0
     @Volatile private var lastCanvasH: Int = 0
@@ -555,9 +594,22 @@ class MeasureViewModel(
             reportSubmitBlocked("⚠️ 量測後個案已切換，不得把舊影像存入另一個案；請重新量測")
             return
         }
+        val content = timelineDraft(exudate, source, freeze = true)
         _state.value = _state.value.copy(saving = true, submitStatus = "存入時間軸中…")
         viewModelScope.launch {
             try {
+                if (lastSavedId != null && content == savedTimelineDraft && case?.id == savedTimelineCaseId) {
+                    val expected = lastSavedSnapshot
+                    val existing = withContext(Dispatchers.IO) { dao.getMeasurementById(lastSavedId!!) }
+                    check(expected != null && existing != null &&
+                        existing.copy(annotationSubmitted = expected.annotationSubmitted) == expected) {
+                        "紀錄已在時間軸更新或移除，請返回核對；未覆寫。"
+                    }
+                    lastSavedSnapshot = existing
+                    _state.value = _state.value.copy(saved = true, annotationSaved = existing.annotationSubmitted,
+                        submitStatus = "內容未變更，已沿用原時間軸紀錄。")
+                    return@launch
+                }
                 fun pct(k: String) = ((r.tissueFrac[k] ?: 0.0) * 100).toInt()
                 val notes = "PUSH ${r.push.partial ?: "-"}; 肉芽${pct("granulation")}% 腐肉${pct("slough")}% 壞死${pct("necrosis")}%; 滲液${exudate ?: "-"}; route ${r.route}" +
                         (lastCorrectionIou?.let { "; 修邊IoU %.2f".format(it) } ?: "")
@@ -693,6 +745,8 @@ class MeasureViewModel(
                 }
                 lastSavedId = id
                 lastSavedSnapshot = savedSnapshot
+                savedTimelineDraft = content
+                savedTimelineCaseId = case?.id
                 _state.value = _state.value.copy(
                     saved = true,
                     annotationSaved = savedSnapshot.annotationSubmitted,
@@ -709,7 +763,8 @@ class MeasureViewModel(
                 }
             } catch (e: kotlinx.coroutines.CancellationException) { throw e }
             catch (e: Exception) {
-                _state.value = _state.value.copy(submitStatus = "⚠️ 存入失敗:${e.message}")
+                savedTimelineDraft = null
+                _state.value = _state.value.copy(saved = false, annotationSaved = false, submitStatus = "⚠️ 存入失敗:${e.message}")
             } finally {
                 _state.value = _state.value.copy(saving = false)
             }

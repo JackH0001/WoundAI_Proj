@@ -52,6 +52,7 @@ final class MeasureViewModel: ObservableObject {
         let raster: EditRaster?
     }
     private var savedTimelineSnapshot: TimelineSnapshot?
+    private var savedTimelineRecord: Measurement?
     private var savedTimelineCaseID: Int64?
     private var timelineSnapshot: TimelineSnapshot? {
         guard let result, let image else { return nil }
@@ -455,8 +456,17 @@ final class MeasureViewModel: ObservableObject {
         // Internal guard as well as UI protection: unchanged retries reuse the saved row
         // and assets, but still pass the current permission/consent checks above.
         if let snapshot, snapshot == savedTimelineSnapshot,
-           savedTimelineCaseID == woundCase?.id, let id = lastSavedId,
-           let old = await repo.measurement(id: id), old.imageId == r.imageId {
+           savedTimelineCaseID == woundCase?.id, let id = lastSavedId {
+            guard let old = await repo.measurement(id: id), let expected = savedTimelineRecord else {
+                saveNote = "原紀錄已移除或無法核對，請返回時間軸確認；未另建紀錄。"
+                return false
+            }
+            var comparable = old
+            comparable.annotationSubmitted = expected.annotationSubmitted
+            guard comparable == expected else {
+                saveNote = "紀錄已在時間軸更新，請返回核對；未覆寫。"
+                return false
+            }
             if requireDepth && pendingDepth != nil && DepthStore.load(imagePath: old.imagePath, store: imageStore) == nil {
                 saveNote = "原始深度副本尚未確認，請保留紀錄供核對。"
                 return false
@@ -586,6 +596,7 @@ final class MeasureViewModel: ObservableObject {
                 DepthStore.purge(imagePath: old.imagePath, store: imageStore)
             }
             if let op = old.rasterPath, op != m.rasterPath { imageStore.delete(op) }
+            savedTimelineRecord = await repo.measurement(id: id)
             savedTimelineSnapshot = snapshot; savedTimelineCaseID = woundCase?.id
             saveNote = "已更新這一筆時間軸紀錄。"
             return true
@@ -599,6 +610,7 @@ final class MeasureViewModel: ObservableObject {
             return false
         }
         lastSavedId = newId
+        savedTimelineRecord = await repo.measurement(id: newId)
         savedTimelineSnapshot = snapshot; savedTimelineCaseID = woundCase?.id
         saveNote = "已存入時間軸。" + depthNote
         return true
@@ -813,6 +825,9 @@ struct MeasureFlowView: View {
                     .font(.caption2).foregroundStyle(.orange)
             } else if !scaleConflict, !line2.isEmpty {
                 Text(line2).font(.caption).foregroundStyle(.secondary)
+            } else if line2.isEmpty {
+                Text("深度資料缺值或參考面不足，本次不提供容積與最深值。原始資料仍保留。")
+                    .font(.caption2).foregroundStyle(.orange)
             }
             if de.coverage < 0.7 {
                 Text(String(format: "⚠ 深度覆蓋率僅 %.0f%%（濕亮面會讓 LiDAR 出洞），此估算僅供參考",
@@ -905,18 +920,20 @@ struct MeasureFlowView: View {
         Text("存入時間軸：\(reason)")
             .font(.footnote).foregroundStyle(.secondary)
     }
-    if vm.hasUnsavedTimelineChanges {
-    Button(vm.lastSavedId == nil ? "存入時間軸" : "更新這一筆紀錄") {
-        Task {
-            await vm.saveToTimeline(
-                repo: app.repo,
-                imageStore: app.imageStore,
-                // ⚠ 快速量測一律傳 nil。範例圖／模擬圖不得綁上真實病患。
-                woundCase: clinicalMode ? app.chosenCase : nil)
+    if vm.saving {
+        HStack { ProgressView(); Text("正在保存…") }
+    } else if vm.lastSavedId != nil && !vm.hasUnsavedTimelineChanges {
+        Label("已存入時間軸（本機）", systemImage: "checkmark.circle.fill")
+            .foregroundStyle(.blue)
+    } else if vm.hasUnsavedTimelineChanges && !needExudate && saveBlockedReason == nil {
+        Button(vm.lastSavedId == nil ? "存入時間軸" : "更新這一筆") {
+            Task {
+                await vm.saveToTimeline(repo: app.repo, imageStore: app.imageStore,
+                    woundCase: clinicalMode ? app.chosenCase : nil)
+            }
         }
-    }
-    .buttonStyle(.bordered)
-    .disabled(vm.saving || needExudate || saveBlockedReason != nil)
+        .buttonStyle(.borderedProminent)
+        .disabled(vm.loading)
     }
 
     if let s = vm.saveNote {
