@@ -107,7 +107,7 @@ private struct MedicalRootView: View {
         uploads = app.runtime.local.outbox
     }
     @Environment(\.scenePhase) private var scenePhase
-    private let retryTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
+    private let retryTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
 
     var body: some View {
         Group {
@@ -133,11 +133,15 @@ private struct MedicalRootView: View {
                     VStack(alignment: .leading) {
                         Text(uploads.activeID == nil ? "研究資料待傳：\(uploads.pendingCount) 筆" : uploads.phase)
                             .font(.footnote).bold()
+                        if let until = uploads.capacityDeadline(server: app.runtime.backendURL(), user: app.runtime.backendUser()) {
+                            Text("後端容量等待中；\(until.formatted(date: .omitted, time: .standard)) 後自動續傳，無須重複按送出。")
+                                .font(.caption)
+                        }
                         Text("臨床紀錄已保存在手機，可繼續操作；中斷後回到 App 會續傳。")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Button("重試") { app.runtime.resumeUploads(force: true) }
-                        .disabled(uploads.activeID != nil)
+                        .disabled(uploads.activeID != nil || uploads.capacityDeadline(server: app.runtime.backendURL(), user: app.runtime.backendUser()) != nil)
                 }.padding(10).background(.regularMaterial)
             }
         }
@@ -145,7 +149,10 @@ private struct MedicalRootView: View {
             if phase == .active { app.runtime.resumeUploads() }
         }
         .onReceive(retryTimer) { _ in
-            if scenePhase == .active { app.runtime.resumeUploads() }
+            if scenePhase == .active {
+                app.runtime.resumeUploads()
+                Task { _ = await ConsentSync.retryPending(context: app.runtime.consent) }
+            }
         }
         .environmentObject(app)
         .task {

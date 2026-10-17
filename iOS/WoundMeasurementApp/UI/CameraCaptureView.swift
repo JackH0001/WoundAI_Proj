@@ -66,6 +66,13 @@ struct CameraCaptureView: View {
                     .padding(6)
                     .background(Color.black.opacity(0.45))
                     .cornerRadius(6)
+                #if DEBUG
+                if !CameraModel.requestsFilteredDepth() {
+                    Text("深度診斷：停用拍攝濾波（只供合成模型）")
+                        .font(.caption).foregroundStyle(.yellow)
+                        .padding(6).background(Color.black.opacity(0.7))
+                }
+                #endif
                 Spacer()
                 HStack {
                     Button("取消") { cam.stop(); onCancel() }
@@ -195,11 +202,39 @@ final class CameraModel: NSObject, ObservableObject {
         Task.detached { if s.isRunning { s.stopRunning() } }
     }
 
+    /// Explicit local diagnostic builds survive a manual relaunch. Neither this
+    /// build flag nor launch arguments may change Release capture policy.
+    static var isUnfilteredDiagnosticBuild: Bool {
+        #if DEBUG && WOUND_DEPTH_DIAGNOSTICS
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    /// Local diagnostic only. Release captures retain their existing policy.
+    /// Actual filtering is recorded from AVDepthData, never inferred from this request.
+    static func requestsFilteredDepth(arguments: [String] = ProcessInfo.processInfo.arguments) -> Bool {
+        #if DEBUG
+        return !isUnfilteredDiagnosticBuild && !arguments.contains("-WoundDepthUnfilteredDiagnostics")
+        #else
+        return true
+        #endif
+    }
+
+    static func photoSettings(depthEnabled: Bool, arguments: [String] = ProcessInfo.processInfo.arguments) -> AVCapturePhotoSettings {
+        let settings = AVCapturePhotoSettings()
+        // Only request delivery after the photo output has enabled its supported capability.
+        if depthEnabled {
+            settings.isDepthDataDeliveryEnabled = true
+            settings.isDepthDataFiltered = requestsFilteredDepth(arguments: arguments)
+        }
+        return settings
+    }
+
     func capture(_ done: @escaping (UIImage, DepthCapture?) -> Void) {
         completion = done
-        let settings = AVCapturePhotoSettings()
-        // 只有 output 已啟用時才能開，否則直接 crash（Apple 的執行期斷言）。
-        if depthSupported { settings.isDepthDataDeliveryEnabled = true }
+        let settings = Self.photoSettings(depthEnabled: depthSupported)
         output.capturePhoto(with: settings, delegate: self)
     }
 }

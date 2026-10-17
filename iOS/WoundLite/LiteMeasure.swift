@@ -11,6 +11,8 @@ import UIKit
 @MainActor
 final class LiteMeasureVM: ObservableObject {
     @Published var image: UIImage?
+    /// The exact normalized JPEG used by the cloud and the local RGB-D sidecar.
+    private(set) var captureJPEG: Data?
     @Published var polys: [[[Int]]] = []
     @Published var imageW = 0
     @Published var imageH = 0
@@ -66,9 +68,12 @@ final class LiteMeasureVM: ObservableObject {
         cloudBinding = nil
         cloudHadPolys = false
         userEdited = false
-        let work = await Task.detached(priority: .userInitiated) {
-            Self.normalize(raw)
+        let capture = await Task.detached(priority: .userInitiated) {
+            let image = Self.normalize(raw)
+            return (image, image.jpegData(compressionQuality: 0.92))
         }.value
+        let work = capture.0
+        captureJPEG = capture.1
         image = work
         imageW = work.cgImage?.width ?? Int(work.size.width)
         imageH = work.cgImage?.height ?? Int(work.size.height)
@@ -222,9 +227,9 @@ final class LiteMeasureVM: ObservableObject {
      編碼是 MB 級工作，照例移出主執行緒。
      */
     private func liteCloudSegment(_ work: UIImage, depth d: DepthCapture?) async -> LiteCloudOutcome {
+        guard let jpeg = captureJPEG else { return .hardFail }
         let payload: (jpeg: Data, dep: String?, conf: String?, k: [String: Double]?, raw: LiteRawDepthPacket?)? =
             await Task.detached(priority: .userInitiated) {
-                guard let jpeg = work.jpegData(compressionQuality: 0.92) else { return nil }
                 if let d, let packet = try? LiteRawDepthPacket.make(depth: d, jpeg: jpeg) {
                     return (jpeg, nil, nil, nil, packet)
                 }
@@ -521,7 +526,7 @@ struct LiteMeasureView: View {
             saveNotice = "傷口或位置已變更，請重新確認後存入。"
             return
         }
-        guard let img = vm.image, let jpeg = img.jpegData(compressionQuality: 0.85),
+        guard let jpeg = vm.captureJPEG,
               let name = store.images.save(jpeg: jpeg) else { return }
         let v = liteVerdict(e)
         // 輪廓與深度側檔一併落地：詳情頁「修正圈選・重新量測」靠它們

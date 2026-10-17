@@ -192,13 +192,34 @@ class ClinicalResearchControllerTest {
         rejectReceipt=false;r.research.drainOnce();assertEquals(1,sent.size)
         r.research.drainOnce(true);assertEquals(2,sent.size);assertTrue(r.database.measurementDao().getById(row.id)!!.annotationSubmitted)
     }
+    @Test fun pausedOldRevisionDoesNotBlockNewExplicitlyConfirmedRevision()=fixture{r,row->
+        r.research.enqueue(row);rejectReceipt=true;r.research.drainOnce()
+        val newer=row.copy(exudate=2)
+        assertTrue(r.database.measurementDao().updateIfUnchanged(row,newer))
+        rejectReceipt=false;r.research.enqueue(newer);r.research.drainOnce()
+        assertEquals(2,sent.size);assertEquals(2,sent.last().getInt("exudate"))
+        assertTrue(r.database.measurementDao().getById(row.id)!!.annotationSubmitted)
+        val jobs=ClinicalAnnotationOutbox(ctx,r.scope).jobs()
+        assertEquals(2,jobs.size)
+        assertTrue(jobs.any{it.measurement().exudate==1 && it.state==ClinicalAnnotationOutbox.State.PAUSED})
+        assertTrue(jobs.any{it.measurement().exudate==2 && it.state==ClinicalAnnotationOutbox.State.COMPLETE})
+    }
     @Test fun serverFailureKeepsJobAndExplicitRetryReusesSameMask()=fixture{r,row->
-        r.research.enqueue(row);serverStatus=503;r.research.drainOnce()
+        r.research.enqueue(row);serverStatus=500;r.research.drainOnce()
         assertFalse(r.database.measurementDao().getById(row.id)!!.annotationSubmitted)
         val first=sent.single();serverStatus=200;r.research.drainOnce(true)
         assertEquals(first.getString("wound_mask_png"),sent.last().getString("wound_mask_png"))
         assertEquals(first.getString("tissue_mask_png"),sent.last().getString("tissue_mask_png"))
         assertTrue(r.database.measurementDao().getById(row.id)!!.annotationSubmitted)
+    }
+    @Test fun capacityWaitRejectsRepeatedSendWithoutLosingConfirmedSnapshot()=fixture{r,row->
+        r.research.enqueue(row);serverStatus=503;r.research.drainOnce()
+        val waiting=r.research.status.value.items.single()
+        assertTrue(waiting.capacityNotBefore>System.currentTimeMillis())
+        serverStatus=200;r.research.drainOnce(true)
+        assertEquals(1,sent.size)
+        assertFalse(r.database.measurementDao().getById(row.id)!!.annotationSubmitted)
+        assertTrue(r.research.status.value.items.single().text.contains("容量等待"))
     }
     @Test fun savedNewRevisionIsNotAcknowledgedByOldQueuedJob()=fixture{r,row->
         r.research.enqueue(row);val newer=row.copy(exudate=3)

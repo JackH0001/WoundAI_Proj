@@ -42,6 +42,8 @@ struct LiteCloudSyncState: Codable {
     var acknowledgedDigest: String? = nil
     var pending: LitePendingRevision? = nil
     var lastError: String? = nil
+    var capacityNotBefore: Date? = nil
+    var automaticRetryAt: Date? = nil
 }
 
 extension LiteRecord {
@@ -67,6 +69,9 @@ extension LiteRecord {
         guard let sync = cloudSync else {
             return "未保存可核對的雲端影像識別碼；此筆不會自動補傳或猜測配對。"
         }
+        if let until = sync.capacityNotBefore, until > Date() {
+            return "後端容量等待中；原修訂已保留，\(until.formatted(date: .omitted, time: .standard)) 後自動續傳。"
+        }
         if let error = sync.lastError { return error }
         if sync.pending != nil { return "修訂等待雲端確認；可安全重試同一修訂，不重傳照片。" }
         if let json = try? revisionJSON(), LitePendingRevision.digest(json) == sync.acknowledgedDigest {
@@ -82,6 +87,14 @@ extension LiteRecord {
 }
 
 extension LiteStore {
+    func resumePendingRevisions() async {
+        guard LitePrefs.researchConsent == true else { return }
+        for record in records where record.cloudSync?.pending != nil {
+            guard let due = record.cloudSync?.automaticRetryAt, due <= Date(),
+                  LitePrefs.researchConsent == true else { continue }
+            await syncRevision(recordID: record.id)
+        }
+    }
     /// At most one sender per record in this store. The durable pending slot also protects restart/retry.
     /// The production sender checks the stored App Attest owner; the optional identity is a test seam.
     /// v2 has no fallback to the old append-only endpoint; an old server leaves this pending.
@@ -102,13 +115,14 @@ extension LiteStore {
         while true {
             guard consent(), var record = records.first(where: { $0.id == recordID }),
                   var sync = record.cloudSync, (identity == nil || identity?() == sync.binding.anonID) else { return }
+            guard !(sync.capacityNotBefore.map { $0 > Date() } ?? false) else { return }
             do {
                 if sync.pending == nil {
                     guard let json = try record.revisionJSON(),
                           LitePendingRevision.digest(json) != sync.acknowledgedDigest else { return }
                     sync.pending = LitePendingRevision(revision: sync.acknowledgedRevision + 1, payloadJSON: json)
                 }
-                sync.lastError = nil
+                sync.lastError = nil; sync.automaticRetryAt = Date().addingTimeInterval(60)
                 record.cloudSync = sync
                 guard update(record), let pending = sync.pending else { return }
                 // No await between the last consent check and initiating the request.
@@ -120,19 +134,24 @@ extension LiteStore {
                 current.acknowledgedRevision = pending.revision
                 current.acknowledgedDigest = pending.digest
                 current.pending = nil
-                current.lastError = nil
+                current.lastError = nil; current.capacityNotBefore = nil; current.automaticRetryAt = nil
                 latest.cloudSync = current // Preserve edits/group changes made while the request was in flight.
                 guard update(latest) else { return }
             } catch {
                 guard var latest = records.first(where: { $0.id == recordID }),
                       var current = latest.cloudSync else { return }
-                if (error as? LiteAttestFailure) == .serviceChanged {
+                current.automaticRetryAt = nil
+                if let wait = error as? ResearchCapacityWait {
+                    current.capacityNotBefore = wait.notBefore; current.automaticRetryAt = wait.notBefore
+                    current.lastError = wait.localizedDescription
+                } else if (error as? LiteAttestFailure) == .serviceChanged {
                     current.lastError = "本機已保存；此紀錄屬於舊服務，未轉送到目前服務。請保留原紀錄，另行核對舊資料。"
                 } else {
                     current.lastError = (error as? LiteAttestFailure) == .identityMismatch
                         ? "本機已保存；這筆影像的原上傳身分無法由目前裝置驗證，尚未同步。舊資料不會自動轉移或重傳。"
                         : "本機已保存；雲端尚未確認此修訂（可能尚未支援同步或連線失敗）。可稍後重試，不重傳照片。"
                 }
+                if error is URLError { current.automaticRetryAt = Date().addingTimeInterval(60) }
                 latest.cloudSync = current
                 _ = update(latest)
                 return

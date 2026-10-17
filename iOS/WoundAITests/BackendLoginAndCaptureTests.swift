@@ -7,6 +7,10 @@ import UIKit
 #endif
 
 private actor CaptureTransportFixture: InstitutionAuthenticatedTransport {
+    var consentStatus = 200
+    var consentBody = "{}"
+    var retryAfter: String?
+    func setConsent(_ status: Int, _ body: String, _ retry: String? = nil) { consentStatus=status; consentBody=body; retryAfter=retry }
     var loginStatus = 200
     var classifyCount = 0
     var loginCount = 0
@@ -19,7 +23,8 @@ private actor CaptureTransportFixture: InstitutionAuthenticatedTransport {
         let path = request.url!.path
         var status = 200
         var body = "{}"
-        if path == "/api/auth/login" {
+        if path.hasPrefix("/api/v1/consent/") { status=consentStatus; body=consentBody }
+        else if path == "/api/auth/login" {
             loginCount += 1; status = loginStatus
             body = #"{"access_token":"synthetic-app-token","identity":"mmhps20261007:dr01","org":"mmhps20261007","user":"dr01","role":"physician","perms":["gt.verify","annotation.submit"]}"#
         } else if path == "/api/v1/auth/session" {
@@ -34,12 +39,28 @@ private actor CaptureTransportFixture: InstitutionAuthenticatedTransport {
             try await Task.sleep(nanoseconds: 40_000_000)
             body = "{\"image_w\":32,\"image_h\":32,\"persisted\":true,\"image_id\":\"fixture-\(classifyCount)\",\"stage3_calibrate\":{\"area_cm2\":10}}"
         }
-        return (Data(body.utf8), HTTPURLResponse(url:request.url!,statusCode:status,httpVersion:nil,headerFields:nil)!)
+        return (Data(body.utf8), HTTPURLResponse(url:request.url!,statusCode:status,httpVersion:nil,headerFields:retryAfter.map { ["Retry-After":$0] })!)
     }
 }
 
 @MainActor
 final class BackendLoginAndCaptureTests: XCTestCase {
+    func testConsentRequiresBoundReceiptAndCarriesCapacityDeadline() async throws {
+        let transport = CaptureTransportFixture()
+        let client = BackendClient(baseUrl:"https://test.invalid",institutionTransport:transport)
+        let loggedIn = try await client.login(username:"synthetic",password:UUID().uuidString)
+        XCTAssertTrue(loggedIn)
+        for body in ["{}", #"{"status":"withdrawn","code":"wrong"}"#, #"{"status":"restored","code":"fixture"}"#] {
+            await transport.setConsent(200,body)
+            let accepted = await client.withdrawConsent(code:"fixture"); XCTAssertFalse(accepted)
+        }
+        await transport.setConsent(200,#"{"status":"withdrawn","code":"fixture"}"#)
+        let accepted = await client.withdrawConsent(code:"fixture"); XCTAssertTrue(accepted)
+        await transport.setConsent(503,"{}","300")
+        var wait: ResearchCapacityWait?
+        let pending = await client.withdrawConsent(code:"fixture",onCapacity:{ wait=$0 })
+        XCTAssertFalse(pending); XCTAssertGreaterThan(try XCTUnwrap(wait).notBefore.timeIntervalSinceNow,295)
+    }
     func testSavedPasswordIsNotAuthenticatedAndVerifiedBusyIsNotLoggingIn() {
         let saved = BackendLoginPresentation(entryReady:true,verified:false,busy:false,saved:true)
         XCTAssertFalse(saved.showLogout); XCTAssertEqual(saved.button,"儲存並登入")
@@ -97,6 +118,65 @@ final class BackendLoginAndCaptureTests: XCTestCase {
         XCTAssertEqual(row?.estimatedArea, 0.01)
 
     }
+    func testTimelineUnchangedSaveReusesAssetsAndTracksExudateAndTissueEdits() async throws {
+        let vm = sharedModel(CaptureTransportFixture())
+        vm.source = "phantom"
+        await vm.analyze(image(), phantom: true)
+        vm.exudate = 0
+        var raster = EditRaster(mask:[1,1,1,1], tissue:[1,1,1,1], origMask:[1,1,1,1],
+            rx0:0, ry0:0, mw:2, mh:2, mScale:1, cm2PerPx:0.25, canvasW:32, canvasH:32)
+        func confirm() {
+            vm.applyEdited(polygon:[[0,0],[2,0],[2,2]], all:[], iou:1, newArea:1,
+                tissue:raster.tissueFrac(), raster:raster)
+        }
+        confirm()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalImageStore(directory:root)
+        let repo = CaseRepository(store:WoundStore(path:":memory:"))
+        XCTAssertTrue(vm.hasUnsavedTimelineChanges)
+        let first = await vm.saveToTimeline(repo:repo, imageStore:store, woundCase:nil)
+        XCTAssertTrue(first)
+        XCTAssertFalse(vm.hasUnsavedTimelineChanges)
+        let id = try XCTUnwrap(vm.lastSavedId)
+        let beforeRow = await repo.measurement(id:id)
+        let before = try XCTUnwrap(beforeRow)
+        let files = try FileManager.default.contentsOfDirectory(atPath:root.path).sorted()
+        confirm() // No boundary, tissue, scale or confirmation change.
+        XCTAssertFalse(vm.hasUnsavedTimelineChanges)
+        let repeated = await vm.saveToTimeline(repo:repo, imageStore:store, woundCase:nil)
+        XCTAssertTrue(repeated)
+        XCTAssertTrue(vm.saveNote?.contains("內容未變更") == true)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath:root.path).sorted(), files)
+        let unchangedRow = await repo.measurement(id:id)
+        let unchanged = try XCTUnwrap(unchangedRow)
+        XCTAssertEqual(unchanged.imagePath,before.imagePath)
+        XCTAssertEqual(unchanged.rasterPath,before.rasterPath)
+        XCTAssertEqual(unchanged.timestamp,before.timestamp)
+        vm.exudate = 1
+        XCTAssertTrue(vm.hasUnsavedTimelineChanges)
+        vm.exudate = 0
+        XCTAssertFalse(vm.hasUnsavedTimelineChanges) // Reverting the edit removes the action.
+        raster.tissue[0] = 2; raster.tissueEditedPx = 1; raster.maskPx = 4
+        confirm()
+        XCTAssertTrue(vm.hasUnsavedTimelineChanges) // Tissue-only change must not be lost.
+        let changed = await vm.saveToTimeline(repo:repo,imageStore:store,woundCase:nil)
+        XCTAssertTrue(changed)
+        XCTAssertEqual(vm.lastSavedId,id)
+        XCTAssertFalse(vm.hasUnsavedTimelineChanges)
+        let afterRow = await repo.measurement(id:id)
+        let after = try XCTUnwrap(afterRow)
+        XCTAssertNotEqual(after.rasterPath,before.rasterPath)
+        XCTAssertEqual(after.timestamp,before.timestamp)
+        var external = after; external.exudate = 3
+        await repo.updateMeasurement(external)
+        let stale = await vm.saveToTimeline(repo:repo,imageStore:store,woundCase:nil)
+        XCTAssertFalse(stale)
+        XCTAssertTrue(vm.saveNote?.contains("未覆寫") == true)
+        let retained = await repo.measurement(id:id)
+        XCTAssertEqual(retained,external)
+    }
+
     func testSharedSessionTenCapturesKeepImageBindingsWithoutTenLogins() async throws {
         let transport = CaptureTransportFixture(); let vm = sharedModel(transport)
         for index in 1...10 {
@@ -115,7 +195,7 @@ final class BackendLoginAndCaptureTests: XCTestCase {
         await vm.analyze(image(), phantom:true)
         XCTAssertNil(vm.result); XCTAssertNil(vm.image); XCTAssertNil(vm.identity)
         XCTAssertNil(vm.lastSavedId); XCTAssertFalse(vm.loading)
-        XCTAssertTrue(vm.error?.contains("HTTP 503") == true)
+        XCTAssertTrue(vm.error?.contains("後端容量暫滿") == true)
         let logins = await transport.loginCount, images = await transport.classifyCount
         XCTAssertEqual(logins,1); XCTAssertEqual(images,1)
     }
@@ -127,7 +207,7 @@ final class BackendLoginAndCaptureTests: XCTestCase {
         await vm.analyze(image(),phantom:true)
         XCTAssertNil(vm.result); XCTAssertNil(vm.image); XCTAssertNil(vm.pendingDepth)
         XCTAssertNil(vm.lastSavedId); XCTAssertFalse(vm.loading)
-        XCTAssertTrue(vm.error?.contains("HTTP 429") == true)
+        XCTAssertTrue(vm.error?.contains("後端容量暫滿") == true)
         let count = await transport.classifyCount
         XCTAssertEqual(count,1,"Failed login must not upload the next image")
     }

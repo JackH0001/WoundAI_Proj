@@ -16,6 +16,14 @@ final class MedicalAccountPreferencesTests: XCTestCase {
         for name in names { UserDefaults.standard.removePersistentDomain(forName: name) }
         names = []; super.tearDown()
     }
+    func testWithdrawalWaitSurvivesRestartAndIsSeparateFromRestoreAndDemo() {
+        let d=defaults(.mmh), due=Date(timeIntervalSince1970:1234567)
+        let a=MedicalAccountPreferences(scope:.mmh,defaults:d)
+        a.deferRetry(.withdrawal,until:due)
+        XCTAssertEqual(MedicalAccountPreferences(scope:.mmh,defaults:d).retryAfter(.withdrawal),due)
+        XCTAssertNil(a.retryAfter(.restore))
+        XCTAssertNil(MedicalAccountPreferences(scope:.syntheticReview,defaults:defaults(.syntheticReview)).retryAfter(.withdrawal))
+    }
     func testCredentialsSurviveReopenAndClearOnlyTheirScope() throws {
         let da = defaults(.mmh), db = defaults(.syntheticReview)
         let a = MedicalAccountPreferences(scope: .mmh, defaults: da)

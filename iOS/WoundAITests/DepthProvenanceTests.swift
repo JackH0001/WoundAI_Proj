@@ -1,5 +1,6 @@
 import XCTest
 import CryptoKit
+import AVFoundation
 #if WOUND_INSTITUTION_TESTS
 @testable import WoundAIInstitution
 #else
@@ -7,6 +8,28 @@ import CryptoKit
 #endif
 
 final class DepthProvenanceTests: XCTestCase {
+    @MainActor
+    func testUnfilteredDiagnosticIsExplicitAndRequiresDepthCapability() {
+        let normal = CameraModel.photoSettings(depthEnabled:true,arguments:[])
+        XCTAssertTrue(normal.isDepthDataDeliveryEnabled)
+        #if DEBUG && WOUND_DEPTH_DIAGNOSTICS
+        XCTAssertTrue(CameraModel.isUnfilteredDiagnosticBuild)
+        XCTAssertFalse(normal.isDepthDataFiltered, "Dedicated local build must survive launch without arguments")
+        #else
+        XCTAssertFalse(CameraModel.isUnfilteredDiagnosticBuild)
+        XCTAssertTrue(normal.isDepthDataFiltered)
+        #endif
+        let diagnostic = CameraModel.photoSettings(depthEnabled:true,arguments:["-WoundDepthUnfilteredDiagnostics"])
+        #if DEBUG
+        XCTAssertFalse(diagnostic.isDepthDataFiltered)
+        #else
+        XCTAssertTrue(diagnostic.isDepthDataFiltered)
+        #endif
+        let unsupported = CameraModel.photoSettings(depthEnabled:false,arguments:["-WoundDepthUnfilteredDiagnostics"])
+        XCTAssertFalse(unsupported.isDepthDataDeliveryEnabled)
+        XCTAssertTrue(unsupported.isDepthDataFiltered)
+    }
+
     private func capture(_ exif: Int?) -> DepthCapture {
         DepthCapture(map:Array(repeating:0.3,count:192),width:16,height:12,
                      fx:13,fy:17,cx:4,cy:3,refWidth:16,refHeight:12,

@@ -39,7 +39,10 @@ def _b64(value, maximum, exact=None):
 def _body(maximum):
     if request.content_length is None and request.method != 'DELETE':
         raise AdmissionRejected('Content-Length required')
-    request.max_content_length = 1 if request.content_length is None else maximum
+    # Gunicorn marks the stream terminated even for Content-Length: 0.
+    # Werkzeug's zero limit then raises 413 before reading an empty DELETE.
+    # Allow reading one byte, while keeping the exact zero-body checks below.
+    request.max_content_length = max(1, maximum)
     request.max_form_memory_size = maximum
     request.max_form_parts = 64
     if request.content_length is not None and request.content_length > maximum:
@@ -213,5 +216,15 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
             response = jsonify(error='lite_writer_completion_unconfirmed')
             response.status_code = 503
         if request.path.startswith(PREFIX):
+            # Persisted clients can distinguish backpressure from bad data.
+            # Keep the exact response/error (503 can mean unknown write outcome).
+            if response.status_code in (429, 503):
+                response.headers.setdefault('Retry-After', '5')
+                payload = response.get_json(silent=True)
+                if isinstance(payload, dict):
+                    payload.setdefault('retry_after', int(response.headers['Retry-After']))
+                    payload.setdefault('retryable', True)
+                    payload.setdefault('message', '服務忙碌或暫時無法確認保存，請保留待傳資料，等待後核對同一筆送件；請勿重新拍攝或重複建立送件。')
+                    response.set_data(current_app.json.dumps(payload))
             response.headers['Cache-Control'] = 'no-store'
         return response

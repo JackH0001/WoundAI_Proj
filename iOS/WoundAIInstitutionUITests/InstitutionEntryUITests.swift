@@ -2,6 +2,27 @@ import XCTest
 
 final class InstitutionEntryUITests: XCTestCase {
     @MainActor
+    func testDiagnosticBuildIdentitySurvivesPlainRelaunch() throws {
+        let app = XCUIApplication()
+        // Deliberately do not pass the diagnostic launch argument.
+        app.launchArguments = []
+        for _ in 0..<2 {
+            app.launch()
+            let settings = app.buttons["設定（後端連線・帳號・佇列健康度）"]
+            XCTAssertTrue(settings.waitForExistence(timeout: 10)); settings.tap()
+            XCTAssertTrue(app.staticTexts["版本（建置號）"].waitForExistence(timeout: 5))
+            let diagnostic = app.staticTexts["DepthDiagnosticBuildLabel"]
+            #if DEBUG && WOUND_DEPTH_DIAGNOSTICS
+            XCTAssertTrue(diagnostic.waitForExistence(timeout: 5))
+            XCTAssertTrue(diagnostic.label.contains("本機深度診斷 D1"))
+            #else
+            XCTAssertFalse(diagnostic.exists)
+            #endif
+            app.terminate()
+        }
+    }
+
+    @MainActor
     func testDemoSwitchShowsNoGoogleAndReturnsToProtectedMMH() throws {
         let app = XCUIApplication(); app.launch()
         let open = app.buttons["OpenSyntheticReview"]
@@ -19,8 +40,10 @@ final class InstitutionEntryUITests: XCTestCase {
         XCTAssertEqual(app.staticTexts["MedicalEnvironment"].label, "MMH 機構服務")
         app.buttons["設定（後端連線・帳號・佇列健康度）"].tap()
         XCTAssertTrue(app.buttons["MMHGoogleSignIn"].waitForExistence(timeout: 5))
-        for _ in 0..<6 { if app.buttons["儲存並登入"].exists { break }; scrollSettings(app) }
-        XCTAssertFalse(app.buttons["儲存並登入"].isEnabled)
+        let waiting = app.buttons["儲存並登入（待 Google 入口驗證）"]
+        for _ in 0..<6 { if waiting.exists { break }; scrollSettings(app) }
+        XCTAssertTrue(waiting.exists)
+        XCTAssertFalse(waiting.isEnabled)
     }
 
     @MainActor private func scrollSettings(_ app: XCUIApplication) {
@@ -110,7 +133,7 @@ final class InstitutionEntryUITests: XCTestCase {
         let signIn = app.buttons["MMHGoogleSignIn"]
         XCTAssertTrue(signIn.waitForExistence(timeout: 5))
         XCTAssertTrue(signIn.isEnabled, "Google sign-in must have an attached presenter")
-        let save = app.buttons["儲存並登入"]
+        let save = app.buttons["儲存並登入（待 Google 入口驗證）"]
         for _ in 0..<8 {
             if save.exists { break }
             scrollSettings(app)

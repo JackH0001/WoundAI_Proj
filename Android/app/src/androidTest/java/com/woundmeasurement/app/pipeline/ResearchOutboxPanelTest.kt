@@ -10,6 +10,15 @@ import org.junit.Test
 
 class ResearchOutboxPanelTest {
     @get:Rule val compose=createComposeRule()
+    @Test fun capacityWaitDisablesRepeatedRetryAndExplainsPreservation() {
+        var calls=0
+        val status=ClinicalResearchController.Status(items=listOf(ClinicalResearchController.Item(
+            1,ClinicalAnnotationOutbox.State.RETRY,"等待",capacityNotBefore=System.currentTimeMillis()+300_000)))
+        compose.setContent { MaterialTheme {ResearchOutboxStatus(status,onRetry={calls++})} }
+        compose.onNodeWithText("後端容量等待中；資料已保留，到期後自動續傳，無須重複送出。").assertIsDisplayed()
+        compose.onNodeWithText("重新核對並重試").assertIsNotEnabled().performClick()
+        compose.runOnIdle { assertEquals(0,calls) }
+    }
     @Test fun pendingBusyAndSavedHaveDistinctFeedbackAndRetryGate() {
         val status=mutableStateOf(ClinicalResearchController.Status(items=listOf(
             ClinicalResearchController.Item(1,ClinicalAnnotationOutbox.State.PENDING,"待傳"))))

@@ -38,6 +38,32 @@ final class MeasureViewModel: ObservableObject {
     /// 換影像時必須清掉（見 `analyze`），否則下一張照片會覆蓋上一張的病歷列。
     @Published private(set) var lastSavedId: Int64?
     @Published private(set) var saving = false
+
+    /// Compare the actual saved content, including tissue-only edits and exudate.
+    /// Entering/cancelling the editor or changing the preview does not create a change.
+    private struct TimelineSnapshot: Equatable {
+        let result: ClassifyResult
+        let image: ObjectIdentifier
+        let source: String
+        let exudate: Int?
+        let verified: Bool
+        let polygons: [[[Int]]]
+        let iou: Double?
+        let raster: EditRaster?
+    }
+    private var savedTimelineSnapshot: TimelineSnapshot?
+    private var savedTimelineRecord: Measurement?
+    private var savedTimelineCaseID: Int64?
+    private var timelineSnapshot: TimelineSnapshot? {
+        guard let result, let image else { return nil }
+        return TimelineSnapshot(result: result, image: ObjectIdentifier(image), source: source,
+            exudate: exudate, verified: doctorVerified, polygons: effectivePolygons,
+            iou: correctionIou, raster: raster)
+    }
+    var hasUnsavedTimelineChanges: Bool {
+        guard let snapshot = timelineSnapshot else { return false }
+        return lastSavedId == nil || savedTimelineSnapshot != snapshot
+    }
     @Published var saveNote: String?
 
     /// 修邊畫面開關（fullScreenCover）。
@@ -426,6 +452,28 @@ final class MeasureViewModel: ObservableObject {
                 return false
             }
         }
+        let snapshot = timelineSnapshot
+        // Internal guard as well as UI protection: unchanged retries reuse the saved row
+        // and assets, but still pass the current permission/consent checks above.
+        if let snapshot, snapshot == savedTimelineSnapshot,
+           savedTimelineCaseID == woundCase?.id, let id = lastSavedId {
+            guard let old = await repo.measurement(id: id), let expected = savedTimelineRecord else {
+                saveNote = "原紀錄已移除或無法核對，請返回時間軸確認；未另建紀錄。"
+                return false
+            }
+            var comparable = old
+            comparable.annotationSubmitted = expected.annotationSubmitted
+            guard comparable == expected else {
+                saveNote = "紀錄已在時間軸更新，請返回核對；未覆寫。"
+                return false
+            }
+            if requireDepth && pendingDepth != nil && DepthStore.load(imagePath: old.imagePath, store: imageStore) == nil {
+                saveNote = "原始深度副本尚未確認，請保留紀錄供核對。"
+                return false
+            }
+            saveNote = "內容未變更，已沿用原時間軸紀錄。"
+            return true
+        }
         // (1) 影像重存。失敗時 imagePath 留空字串而非中止——量測數字本身仍有病歷價值，
         //     沒有照片的紀錄比沒有紀錄好。
         let newImagePath = imageStore.save(image: img, quality: 0.9) ?? ""
@@ -548,6 +596,8 @@ final class MeasureViewModel: ObservableObject {
                 DepthStore.purge(imagePath: old.imagePath, store: imageStore)
             }
             if let op = old.rasterPath, op != m.rasterPath { imageStore.delete(op) }
+            savedTimelineRecord = await repo.measurement(id: id)
+            savedTimelineSnapshot = snapshot; savedTimelineCaseID = woundCase?.id
             saveNote = "已更新這一筆時間軸紀錄。"
             return true
         }
@@ -560,6 +610,8 @@ final class MeasureViewModel: ObservableObject {
             return false
         }
         lastSavedId = newId
+        savedTimelineRecord = await repo.measurement(id: newId)
+        savedTimelineSnapshot = snapshot; savedTimelineCaseID = woundCase?.id
         saveNote = "已存入時間軸。" + depthNote
         return true
     }
@@ -773,6 +825,9 @@ struct MeasureFlowView: View {
                     .font(.caption2).foregroundStyle(.orange)
             } else if !scaleConflict, !line2.isEmpty {
                 Text(line2).font(.caption).foregroundStyle(.secondary)
+            } else if line2.isEmpty {
+                Text("深度資料缺值或參考面不足，本次不提供容積與最深值。原始資料仍保留。")
+                    .font(.caption2).foregroundStyle(.orange)
             }
             if de.coverage < 0.7 {
                 Text(String(format: "⚠ 深度覆蓋率僅 %.0f%%（濕亮面會讓 LiDAR 出洞），此估算僅供參考",
@@ -865,17 +920,21 @@ struct MeasureFlowView: View {
         Text("存入時間軸：\(reason)")
             .font(.footnote).foregroundStyle(.secondary)
     }
-    Button(vm.lastSavedId == nil ? "存入時間軸" : "更新這一筆紀錄") {
-        Task {
-            await vm.saveToTimeline(
-                repo: app.repo,
-                imageStore: app.imageStore,
-                // ⚠ 快速量測一律傳 nil。範例圖／模擬圖不得綁上真實病患。
-                woundCase: clinicalMode ? app.chosenCase : nil)
+    if vm.saving {
+        HStack { ProgressView(); Text("正在保存…") }
+    } else if vm.lastSavedId != nil && !vm.hasUnsavedTimelineChanges {
+        Label("已存入時間軸（本機）", systemImage: "checkmark.circle.fill")
+            .foregroundStyle(.blue)
+    } else if vm.hasUnsavedTimelineChanges && !needExudate && saveBlockedReason == nil {
+        Button(vm.lastSavedId == nil ? "存入時間軸" : "更新這一筆") {
+            Task {
+                await vm.saveToTimeline(repo: app.repo, imageStore: app.imageStore,
+                    woundCase: clinicalMode ? app.chosenCase : nil)
+            }
         }
+        .buttonStyle(.borderedProminent)
+        .disabled(vm.loading)
     }
-    .buttonStyle(.bordered)
-    .disabled(vm.saving || needExudate || saveBlockedReason != nil)
 
     if let s = vm.saveNote {
         Text(s).font(.footnote).foregroundStyle(.secondary)

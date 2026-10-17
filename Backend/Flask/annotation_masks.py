@@ -51,6 +51,12 @@ def validate_wound_bytes(raw,data):
 
 
 def receipt_fields(rec):
-    if rec.get('mask_contract')==CONTRACT:
-        return {k:rec[k] for k in ('mask_contract','wound_mask_sha256','tissue_mask_sha256')}
-    return {}
+    result = {}
+    if 'wound_profile' in rec:
+        from medical_wound_profile import validate_profile
+        if not validate_profile(rec['wound_profile']):
+            raise ValueError('stored wound_profile invalid')
+        result['wound_profile'] = rec['wound_profile']
+    if rec.get('mask_contract') == CONTRACT:
+        result.update({k: rec[k] for k in ('mask_contract','wound_mask_sha256','tissue_mask_sha256')})
+    return result

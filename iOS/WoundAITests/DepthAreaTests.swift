@@ -104,4 +104,47 @@ final class DepthAreaTests: XCTestCase {
         XCTAssertEqual(enc.depthPng[24], 16)
         XCTAssertEqual(enc.depthPng[25], 0)
     }
+    /// Analytic sloped-wall cavities, independent of the physical silicone phantom.
+    /// The surface follows a cone in world coordinates; its volume is A*h/3.
+    func testSlopedCavitiesKeepVolumeIndependentOfSurfaceSmoothing() throws {
+        for (areaCm2, volumeMl) in [(10.04, 3.9), (3.0, 0.5)] {
+            let w = 128, fx = 400.0, z0 = 0.30
+            let radius = sqrt(areaCm2 / 1e4 / .pi)
+            let height = volumeMl / 1e6 * 3 / (areaCm2 / 1e4)
+            let radiusPx = radius * fx / z0
+            let d = synth(dw: w, dh: w, fx: fx) { x, y in
+                let pixelRadius = hypot(Double(x - w/2), Double(y - w/2))
+                let z = pixelRadius < radiusPx ? (z0 + height) / (1 + height * pixelRadius / (fx * radius)) : z0
+                return Float(z)
+            }
+            let polygon = (0..<120).map { i -> [Int] in
+                let angle = Double(i) * 2 * .pi / 120
+                return [Int(((Double(w/2) + radiusPx * cos(angle)) * 8).rounded()),
+                        Int(((Double(w/2) + radiusPx * sin(angle)) * 8).rounded())]
+            }
+            let original = d.map
+            let reference = try XCTUnwrap(DepthAreaEstimator.estimate(polygons: [polygon], depth: d,
+                imageW: w*8, imageH: w*8, smoothMm: 0))
+            let normal = try XCTUnwrap(DepthAreaEstimator.estimate(polygons: [polygon], depth: d,
+                imageW: w*8, imageH: w*8))
+            XCTAssertEqual(try XCTUnwrap(reference.volumeMl), volumeMl, accuracy: volumeMl * 0.08)
+            XCTAssertEqual(try XCTUnwrap(normal.volumeMl), try XCTUnwrap(reference.volumeMl), accuracy: 1e-10,
+                "Surface smoothing must not flatten the volume or contaminate the reference ring")
+            XCTAssertEqual(try XCTUnwrap(normal.maxDepthMm), height * 1000, accuracy: 0.05)
+            XCTAssertEqual(d.map, original, "Research source depth must remain unchanged")
+        }
+    }
+
+    func testMissingCavityDepthDoesNotBecomeInventedVolume() throws {
+        let d = synth(dw:64,dh:64,fx:100) { x,y in
+            if x == 32 && y == 32 { return 0 }
+            return (20..<44).contains(x) && (20..<44).contains(y) ? 0.305 : 0.3
+        }
+        let polygon = [[160,160],[352,160],[352,352],[160,352]]
+        let r = try XCTUnwrap(DepthAreaEstimator.estimate(polygons:[polygon],depth:d,imageW:512,imageH:512))
+        XCTAssertLessThan(r.coverage,1)
+        XCTAssertNil(r.volumeMl, "Filled pixels are not measured cavity depth")
+        XCTAssertNil(r.maxDepthMm)
+    }
+
 }

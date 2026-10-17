@@ -150,6 +150,6 @@ fun SamplePickerScreen(
         }
         Divider()
         MeasureScreen(vm = vm, onReview = onReview, onSaveToTimeline = onSaveToTimeline,
-            exudate = exudate, onExudate = onExudate, preview = preview)
+            exudate = exudate, source = source, onExudate = onExudate, preview = preview)
     }
 }

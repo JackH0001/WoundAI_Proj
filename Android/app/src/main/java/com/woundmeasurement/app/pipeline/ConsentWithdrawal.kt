@@ -29,6 +29,7 @@ import kotlinx.coroutines.withContext
  *     沒有完成的撤回必須一直看得見，直到它真的完成。
  */
 object ConsentWithdrawal {
+    private val processing = kotlinx.coroutines.sync.Mutex()
 
     /** 單筆結果。`ok=false` 時代碼已經進入待重試佇列。 */
     data class Result(val done: List<String>, val pending: List<String>) {
@@ -68,19 +69,31 @@ object ConsentWithdrawal {
         // Persist before the first suspension; a closed environment must keep its own pending work.
         if (dir == Dir.WITHDRAW) runtime.addPendingWithdrawals(list) else runtime.addPendingRestores(list)
         return withContext(Dispatchers.IO) {
+            if(runtime.accounts.retryAfter(queue)>System.currentTimeMillis() || !processing.tryLock()) return@withContext Result(emptyList(),list)
+            try {
+            runtime.accounts.deferRetry(queue,System.currentTimeMillis()+60_000)
             if (list.isEmpty()) return@withContext Result(emptyList(), emptyList())
             if (!current()) return@withContext Result(emptyList(), list)
-            val backend = runCatching { runtime.acquire() }.getOrNull()
+            val backend = runCatching { runtime.acquire() }.onFailure { failure ->
+                if(failure is ResearchCapacityException) runtime.accounts.deferRetry(queue,failure.notBefore)
+            }.getOrNull()
                 ?: return@withContext Result(emptyList(), list)
             val done = ArrayList<String>(); val fail = ArrayList<String>()
+            var capacityWaiting=false
             for (code in list) {
-                val ok = current() && runCatching {
+                val ok = current() && !capacityWaiting && runCatching {
                     if (dir == Dir.WITHDRAW) backend.withdrawConsent(code) else backend.restoreConsent(code)
+                }.onFailure { failure ->
+                    if(failure is ResearchCapacityException) {
+                        capacityWaiting=true;runtime.accounts.deferRetry(queue,failure.notBefore)
+                    }
                 }.getOrDefault(false)
                 if (ok && current()) { done.add(code); runtime.accounts.remove(code, queue) }
                 else fail.add(code)
             }
+            if(fail.isEmpty()) runtime.accounts.deferRetry(queue,0)
             Result(done, fail)
+            } finally { processing.unlock() }
         }
     }
 

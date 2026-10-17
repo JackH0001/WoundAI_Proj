@@ -1,6 +1,13 @@
 package com.woundmeasurement.app.pipeline
 
 import android.content.Context
+import androidx.compose.ui.test.*
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.Column
+import androidx.compose.ui.Modifier
+import org.junit.Rule
 import android.content.ContextWrapper
 import android.content.SharedPreferences
 import android.graphics.Bitmap
@@ -17,6 +24,7 @@ import java.util.Date
 import java.util.UUID
 
 class SavedMeasurementExportTest {
+    @get:Rule val compose = createComposeRule()
     private class TestContext(base:Context):ContextWrapper(base) {
         val root=File(base.cacheDir,"saved-export-${UUID.randomUUID()}").apply{mkdirs()}
         override fun getApplicationContext():Context=this
@@ -155,4 +163,70 @@ class SavedMeasurementExportTest {
         assertTrue(runtime.database.measurementDao().updateIfUnchanged(saved,acknowledged))
         assertEquals(name,writer.save(acknowledged));assertEquals(1,exports.list().size)
     }
+    @Test fun unchangedSaveAndRevertedExudateReuseRowAndDoNotRunExportAgain()=fixture{runtime,_ ->
+        val vm=viewModel();val dao=runtime.database.measurementDao();var exports=0
+        suspend fun save(exudate:Int) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main){
+                vm.saveToTimeline(dao,exudate,source="phantom",onSaved={exports++;null})
+            }
+            kotlinx.coroutines.withTimeout(5000){vm.state.first{!it.saving}}
+        }
+        assertTrue(vm.hasUnsavedTimelineChanges(0,"phantom"))
+        save(0);val first=dao.getAllMeasurementsOnce().single()
+        assertFalse(vm.hasUnsavedTimelineChanges(0,"phantom"))
+        assertTrue(vm.hasUnsavedTimelineChanges(1,"phantom"))
+        vm.refreshTimelineState(1,"phantom");assertFalse(vm.state.value.saved)
+        vm.refreshTimelineState(0,"phantom");assertTrue(vm.state.value.saved)
+        save(0);assertEquals(first,dao.getAllMeasurementsOnce().single());assertEquals(1,exports)
+        save(1);val changed=dao.getAllMeasurementsOnce().single()
+        assertEquals(first.id,changed.id);assertEquals(first.timestamp,changed.timestamp)
+        assertEquals(1,changed.exudate);assertEquals(2,exports)
+    }
+    @Test fun noChangeGuardRejectsConcurrentTimelineEdit()=fixture{runtime,_ ->
+        val vm=viewModel();val dao=runtime.database.measurementDao()
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main){vm.saveToTimeline(dao,0,source="phantom")}
+        kotlinx.coroutines.withTimeout(5000){vm.state.first{!it.saving}}
+        val saved=dao.getAllMeasurementsOnce().single();val newer=saved.copy(exudate=3)
+        assertTrue(dao.updateIfUnchanged(saved,newer))
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main){vm.saveToTimeline(dao,0,source="phantom")}
+        kotlinx.coroutines.withTimeout(5000){vm.state.first{!it.saving}}
+        assertTrue(vm.state.value.submitStatus.orEmpty().contains("未覆寫"))
+        assertEquals(newer,dao.getById(saved.id))
+    }
+    @Test fun tissueOnlyInPlaceEditCannotMutateSavedComparisonBaseline()=fixture{runtime,_ ->
+        val vm=viewModel();val dao=runtime.database.measurementDao()
+        vm.editRaster=EditRaster(ByteArray(64){1},ByteArray(64){1},ByteArray(64){1},
+            0f,0f,8,8,1f,.1,maskPx=64,canvasW=8,canvasH=8)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main){vm.saveToTimeline(dao,0,source="phantom",imageStore=runtime.images)}
+        kotlinx.coroutines.withTimeout(5000){vm.state.first{!it.saving}}
+        assertFalse(vm.hasUnsavedTimelineChanges(0,"phantom"))
+        vm.editRaster!!.tissue[5]=2
+        assertTrue(vm.hasUnsavedTimelineChanges(0,"phantom"))
+        vm.editRaster!!.tissue[5]=1
+        assertFalse(vm.hasUnsavedTimelineChanges(0,"phantom"))
+        assertTrue(vm.hasUnsavedTimelineChanges(0,"sample"))
+    }
+
+    @Test fun screenShowsSaveOnlyWhenReadyAndUpdateOnlyForChangedContent()=fixture{runtime,_ ->
+        val vm=viewModel();val dao=runtime.database.measurementDao()
+        val exudate=androidx.compose.runtime.mutableStateOf<Int?>(null)
+        compose.setContent { androidx.compose.material3.MaterialTheme {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                MeasureScreen(vm=vm,onReview={},onSaveToTimeline={vm.saveToTimeline(dao,exudate.value,source="phantom")},
+                    exudate=exudate.value,source="phantom",onExudate={exudate.value=it})
+            }
+        } }
+        compose.onNodeWithText("存入時間軸").assertDoesNotExist()
+        compose.runOnIdle { exudate.value=0 }
+        compose.onNodeWithText("存入時間軸").performScrollTo().performClick()
+        compose.waitUntil(5000){vm.state.value.saved && !vm.state.value.saving}
+        compose.onNodeWithText("✓ 已存入時間軸（本機）").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("更新這一筆").assertDoesNotExist()
+        compose.runOnIdle { exudate.value=2 }
+        compose.onNodeWithText("更新這一筆").performScrollTo().assertIsEnabled()
+        compose.runOnIdle { exudate.value=0 }
+        compose.onNodeWithText("更新這一筆").assertDoesNotExist()
+        compose.runOnIdle { assertTrue(vm.state.value.saved) }
+    }
+
 }

@@ -66,6 +66,20 @@ enum LiteRootTab: Hashable { case measure, history, settings }
 
 struct LiteRootView: View {
     @StateObject private var store = LiteStore()
+    @Environment(\.scenePhase) private var scenePhase
+    private let retryTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
+    @State private var resumingResearch = false
+
+    @MainActor private func resumeResearch() async {
+        guard !resumingResearch else { return }
+        resumingResearch = true; defer { resumingResearch = false }
+        let withdrawal = LiteWithdrawalModel.shared
+        if let record = withdrawal.record, record.phase == .pending,
+           let due = record.retryAt, due <= Date() {
+            await withdrawal.request(server: record.server)
+        }
+        await store.resumePendingRevisions()
+    }
     @State private var askConsent = false
     @State private var selectedTab: LiteRootTab = .measure
     /// Hardware gates new capture only; records and privacy controls stay accessible.
@@ -91,6 +105,9 @@ struct LiteRootView: View {
                 .tag(LiteRootTab.settings)
                 .tabItem { Label("設定", systemImage: "gearshape") }
         }
+        .task { await resumeResearch() }
+        .onChange(of: scenePhase) { _, value in if value == .active { Task { await resumeResearch() } } }
+        .onReceive(retryTimer) { _ in if scenePhase == .active { Task { await resumeResearch() } } }
         .onAppear { if lidarOK, LitePrefs.researchConsent == nil { askConsent = true } }
         .fullScreenCover(isPresented: $askConsent) {
             LiteConsentView { agreed in

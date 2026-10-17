@@ -38,6 +38,12 @@ final class MedicalAccountPreferences {
         defaults.removeObject(forKey: "backend_user"); defaults.removeObject(forKey: "backend_pass_enc")
     } }
     enum ConsentQueue: String { case withdrawal = "pending_withdrawals", restore = "pending_restores" }
+    func retryAfter(_ queue: ConsentQueue) -> Date? { locked {
+        (defaults.object(forKey: queue.rawValue + "_retry_at") as? Double).map(Date.init(timeIntervalSince1970:))
+    } }
+    func deferRetry(_ queue: ConsentQueue, until: Date) { locked {
+        defaults.set(until.timeIntervalSince1970, forKey: queue.rawValue + "_retry_at")
+    } }
     func pending(_ queue: ConsentQueue) -> Set<String> { locked {
         Set(defaults.stringArray(forKey: queue.rawValue) ?? [])
     } }

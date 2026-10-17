@@ -19,6 +19,7 @@ fun MeasureScreen(
     onReview: () -> Unit,
     onSaveToTimeline: () -> Unit,
     exudate: Int? = null,
+    source: String? = null,
     onExudate: ((Int) -> Unit)? = null,  // 提供時:滲液顯示於結果卡下方,且未輸入前鎖定修邊/存檔(防呆)
     /**
      * 辨識參照圖插槽，顯示在**量測數值之下、滲液輸入之上**。
@@ -34,6 +35,10 @@ fun MeasureScreen(
 ) {
     val st by vm.state.collectAsState()
     val busy = st.loading || st.saving || st.annotationSending
+    val needsSave = vm.hasUnsavedTimelineChanges(exudate, source)
+    LaunchedEffect(needsSave, exudate, source, st.saved, st.annotationSaved, st.saving) {
+        vm.refreshTimelineState(exudate, source)
+    }
     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (st.saving) { LinearProgressIndicator(Modifier.fillMaxWidth()); Text("正在保存影像與修訂，請稍候…") }
         Text("量測結果", fontSize = 20.sp, fontWeight = FontWeight.Bold)
@@ -81,7 +86,13 @@ fun MeasureScreen(
                 if (r.confidence < 0.70)
                     AssistChip(onClick = onReview, enabled = !busy, label = { Text("信心度偏低，建議醫師確認") })
                 Button(onReview, Modifier.fillMaxWidth(), enabled = !busy && !needExudate) { Text("醫師確認・修邊") }
-                OutlinedButton(onSaveToTimeline, Modifier.fillMaxWidth(), enabled = !busy && !needExudate) { Text("存入個案時間軸") }
+                when {
+                    st.saving -> Text("正在保存…", color = MaterialTheme.colorScheme.primary)
+                    !needsSave && vm.hasTimelineRecord -> Text("✓ 已存入時間軸（本機）", color = MaterialTheme.colorScheme.primary)
+                    needsSave && !needExudate -> Button(onSaveToTimeline, Modifier.fillMaxWidth(), enabled = !busy) {
+                        Text(if (vm.hasTimelineRecord) "更新這一筆" else "存入時間軸")
+                    }
+                }
                 Text(r.disclaimer, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             else -> Text("尚無結果，請先拍攝。", color = MaterialTheme.colorScheme.onSurfaceVariant)

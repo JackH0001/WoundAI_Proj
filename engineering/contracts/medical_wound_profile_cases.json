@@ -1,0 +1,1130 @@
+[
+  {
+    "name": "pressure with diabetes is not diabetic foot",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "pressure",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": true
+  },
+  {
+    "name": "site scalp",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "scalp",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site forehead",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "forehead",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site temple",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "temple",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site occiput",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "occiput",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site cheek",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "cheek",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site nose",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "nose",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site ear",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "ear",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site chin",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "chin",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site neck",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "neck",
+      "side": "left",
+      "surface": "anterior",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site chest",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "chest",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site breast",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "breast",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site inframammary",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "inframammary",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site abdomen",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "abdomen",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site upper_back",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "upper_back",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site lower_back",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "lower_back",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site scapula",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "scapula",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site spine",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "spine",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site sacrum",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "sacrum",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site coccyx",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "coccyx",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site buttock",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "buttock",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site ischium",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "ischium",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site hip",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "hip",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site greater_trochanter",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "greater_trochanter",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site groin",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "groin",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site perineum",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "perineum",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site genital",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "genital",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site shoulder",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "shoulder",
+      "side": "left",
+      "surface": "anterior",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site upper_arm",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "upper_arm",
+      "side": "left",
+      "surface": "anterior",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site elbow",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "elbow",
+      "side": "left",
+      "surface": "anterior",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site forearm",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "forearm",
+      "side": "left",
+      "surface": "anterior",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site wrist",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "wrist",
+      "side": "left",
+      "surface": "anterior",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site hand",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "hand",
+      "side": "left",
+      "surface": "dorsal",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site finger",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "finger",
+      "side": "left",
+      "surface": "dorsal",
+      "digit": "1",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site interdigital_hand",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "interdigital_hand",
+      "side": "left",
+      "surface": "dorsal",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site fingertip",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "fingertip",
+      "side": "left",
+      "surface": "dorsal",
+      "digit": "1",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site thigh",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "thigh",
+      "side": "left",
+      "surface": "anterior",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site knee",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "knee",
+      "side": "left",
+      "surface": "anterior",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site lower_leg",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "lower_leg",
+      "side": "left",
+      "surface": "anterior",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site ankle_medial",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "ankle_medial",
+      "side": "left",
+      "surface": "anterior",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site ankle_lateral",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "ankle_lateral",
+      "side": "left",
+      "surface": "anterior",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site heel",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "left",
+      "surface": "dorsal",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site forefoot",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "forefoot",
+      "side": "left",
+      "surface": "dorsal",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site midfoot",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "midfoot",
+      "side": "left",
+      "surface": "dorsal",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site hindfoot",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "hindfoot",
+      "side": "left",
+      "surface": "dorsal",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site toe",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "toe",
+      "side": "left",
+      "surface": "dorsal",
+      "digit": "1",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site interdigital_foot",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "interdigital_foot",
+      "side": "left",
+      "surface": "dorsal",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site toe_tip",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "toe_tip",
+      "side": "left",
+      "surface": "dorsal",
+      "digit": "1",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "site other",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "other",
+      "side": "left",
+      "surface": "not_applicable",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": []
+    },
+    "valid": true
+  },
+  {
+    "name": "etiology pressure",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "pressure",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": true
+  },
+  {
+    "name": "etiology diabetic_foot",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "diabetic_foot",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": true
+  },
+  {
+    "name": "etiology venous",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "venous",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": true
+  },
+  {
+    "name": "etiology arterial",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "arterial",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": true
+  },
+  {
+    "name": "etiology mixed_vascular",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "mixed_vascular",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": true
+  },
+  {
+    "name": "etiology traumatic",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "traumatic",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": true
+  },
+  {
+    "name": "etiology surgical",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "surgical",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": true
+  },
+  {
+    "name": "etiology skin_tear",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "skin_tear",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": true
+  },
+  {
+    "name": "etiology burn",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "burn",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": true
+  },
+  {
+    "name": "etiology moisture",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "moisture",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": true
+  },
+  {
+    "name": "etiology inflammatory",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "inflammatory",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": true
+  },
+  {
+    "name": "etiology autoimmune",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "autoimmune",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": true
+  },
+  {
+    "name": "etiology malignant",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "malignant",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": true
+  },
+  {
+    "name": "etiology radiation",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "radiation",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": true
+  },
+  {
+    "name": "etiology other",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "other",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": true
+  },
+  {
+    "name": "etiology unknown",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "unknown",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": true
+  },
+  {
+    "name": "invalid site ",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "pressure",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": false
+  },
+  {
+    "name": "invalid side bilateral",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "bilateral",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "pressure",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": false
+  },
+  {
+    "name": "invalid surface palmar",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "palmar",
+      "digit": "not_applicable",
+      "etiology": "pressure",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": false
+  },
+  {
+    "name": "invalid digit 1",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "1",
+      "etiology": "pressure",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": false
+  },
+  {
+    "name": "invalid etiology ai_prediction",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "ai_prediction",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": false
+  },
+  {
+    "name": "invalid schema_version medical-wound-profile/99",
+    "profile": {
+      "schema_version": "medical-wound-profile/99",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "pressure",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": false
+  },
+  {
+    "name": "invalid factors ['diabetes', 'diabetes']",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "pressure",
+      "factors": [
+        "diabetes",
+        "diabetes"
+      ]
+    },
+    "valid": false
+  },
+  {
+    "name": "invalid factors ['invented']",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "pressure",
+      "factors": [
+        "invented"
+      ]
+    },
+    "valid": false
+  },
+  {
+    "name": "invalid factors [1]",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "pressure",
+      "factors": [
+        1
+      ]
+    },
+    "valid": false
+  },
+  {
+    "name": "invalid side True",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": true,
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "pressure",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": false
+  },
+  {
+    "name": "invalid site 42",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": 42,
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "pressure",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": false
+  },
+  {
+    "name": "invalid factors None",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "pressure",
+      "factors": null
+    },
+    "valid": false
+  },
+  {
+    "name": "invalid digit 1",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": 1,
+      "etiology": "pressure",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": false
+  },
+  {
+    "name": "DFU on scalp",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "scalp",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "diabetic_foot",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": false
+  },
+  {
+    "name": "missing side",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "pressure",
+      "factors": [
+        "diabetes"
+      ]
+    },
+    "valid": false
+  },
+  {
+    "name": "free text rejected",
+    "profile": {
+      "schema_version": "medical-wound-profile/1",
+      "site": "heel",
+      "side": "right",
+      "surface": "plantar",
+      "digit": "not_applicable",
+      "etiology": "pressure",
+      "factors": [
+        "diabetes"
+      ],
+      "notes": "synthetic extra text"
+    },
+    "valid": false
+  },
+  {
+    "name": "null profile",
+    "profile": null,
+    "valid": false
+  },
+  {
+    "name": "array profile",
+    "profile": [],
+    "valid": false
+  }
+]

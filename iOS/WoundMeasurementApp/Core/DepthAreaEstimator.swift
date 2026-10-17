@@ -27,7 +27,7 @@ struct DepthAreaResult {
     var surfaceAreaCm2: Double
     /// 投影面積（cm²），與 ArUco 同語意，供對照。
     var projectedAreaCm2: Double
-    /// 相對基準面的傷口容積（mL）。基準面擬合失敗為 nil。
+    /// 相對基準面的研究容積（mL）。基準面失敗或遮罩內深度缺值為 nil。
     var volumeMl: Double?
     /// 相對基準面的最大深度（mm）。
     var maxDepthMm: Double?
@@ -105,6 +105,11 @@ enum DepthAreaEstimator {
         // 有效深度與補洞（濕亮面 LiDAR 會給洞；用鄰域均值迭代補，並誠實記 coverage）。
         var z = depth.map.map { Double($0) }
         var valid = z.map { $0.isFinite && $0 > 0.05 && $0 < 5.0 }
+        // Volume uses only captured observations. Surface denoising and hole filling
+        // must not flatten the cavity or move its reference rim. Copy-on-write keeps
+        // this input separate; DepthCapture.map and upload bytes remain untouched.
+        let volumeZ = z
+        let volumeValid = valid
         var inMaskValid = 0, inMaskTotal = 0
         var distances: [Double] = []
         for i in 0..<(dw * dh) where frac[i] > 0 {
@@ -196,7 +201,7 @@ enum DepthAreaEstimator {
         var rn = 0
         for y in 0..<dh { for x in 0..<dw {
             let i = y * dw + x
-            guard frac[i] == 0, valid[i] else { continue }
+            guard frac[i] == 0, volumeValid[i] else { continue }
             // 距遮罩 2–6 格的環帶
             var near = false, far = true
             for dy in -6...6 { for dx in -6...6 {
@@ -209,7 +214,7 @@ enum DepthAreaEstimator {
                 }
             } }
             guard near, far else { continue }
-            let u = Double(x), v = Double(y), Z = z[i]
+            let u = Double(x), v = Double(y), Z = volumeZ[i]
             su += u; sv += v; sz += Z
             suu += u*u; svv += v*v; suv += u*v; suz += u*Z; svz += v*Z
             rn += 1
@@ -225,17 +230,22 @@ enum DepthAreaEstimator {
                 var vol = 0.0, dmax = 0.0
                 for y in 0..<dh { for x in 0..<dw {
                     let i = y * dw + x
-                    guard frac[i] > 0, valid[i] else { continue }
+                    guard frac[i] > 0, volumeValid[i] else { continue }
                     let planeZ = a * Double(x) + b * Double(y) + c
-                    let dep = z[i] - planeZ               // 傷口面比皮膚遠＝凹陷
+                    let dep = volumeZ[i] - planeZ               // 傷口面比皮膚遠＝凹陷
                     if dep > 0 {
-                        let Z = z[i]
+                        let Z = volumeZ[i]
                         vol += frac[i] * dep * (Z / fx) * (Z / fy)
                         if dep > dmax { dmax = dep }
                     }
                 } }
-                volume = vol * 1e6      // m³ → mL
-                maxDepthMm = dmax * 1e3
+                // Missing cavity observations cannot establish the complete volume
+                // or deepest point. Keep the area/coverage result, but do not invent
+                // these measurements from interpolated pixels.
+                if inMaskValid == inMaskTotal {
+                    volume = vol * 1e6      // m³ → mL
+                    maxDepthMm = dmax * 1e3
+                }
                 let tu = a * fx / max(1e-9, medianZ)   // dZ/du ÷ (dX/du=Z/fx)
                 let tv = b * fy / max(1e-9, medianZ)
                 tiltOut = atan((tu * tu + tv * tv).squareRoot()) * 180 / .pi

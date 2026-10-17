@@ -97,6 +97,7 @@ actor LiteAttestClient {
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
         let (data, response) = try await transport.send(request)
         guard response.url == request.url, data.count <= 100_000 else { throw LiteAttestFailure.invalidResponse }
+        try ResearchCapacityWait.check(response, data: data)
         guard response.statusCode == 200 else {
             if response.statusCode == 401 { throw LiteAttestFailure.registrationRejected }
             throw LiteAttestFailure.http(response.statusCode)

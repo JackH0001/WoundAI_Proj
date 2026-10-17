@@ -20,12 +20,16 @@ on:
     branches: [main, develop]
     paths:
       - 'iOS/**'
+      - 'engineering/contracts/**'
+      - 'tools/generate_medical_wound_catalog.py'
       - '.github/workflows/ios.yml'
       - 'tools/verify_xctest_results.py'
       - 'tools/test_verify_xctest_results.py'
   pull_request:
     paths:
       - 'iOS/**'
+      - 'engineering/contracts/**'
+      - 'tools/generate_medical_wound_catalog.py'
       - '.github/workflows/ios.yml'
       - 'tools/verify_xctest_results.py'
       - 'tools/test_verify_xctest_results.py'

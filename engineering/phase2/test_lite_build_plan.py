@@ -28,7 +28,9 @@ class BuildPlanTests(unittest.TestCase):
         result=self.generate();build=result['cloudbuild']
         self.assertEqual(build['serviceAccount'],f'projects/{plan.PROJECT}/serviceAccounts/{plan.EMAIL}')
         self.assertEqual(build['logsBucket'],'gs://'+plan.BUCKET)
-        self.assertEqual(build['options'],{'logging':'GCS_ONLY','machineType':'E2_STANDARD_2'})
+        self.assertEqual(build['options'],{'logging':'GCS_ONLY'})
+        self.assertNotIn('machineType',build['options'])
+        self.assertEqual(result['limits']['machine'],'e2-standard-2 (default)')
         self.assertEqual(build['timeout'],'1200s');self.assertNotIn('images',build)
         self.assertEqual(build['steps'][1]['args'][:3],['build','--platform','linux/amd64'])
         argv=build['steps'][2]['args']

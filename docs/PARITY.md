@@ -36,9 +36,9 @@ allow:
 <!-- release-version-exception -->
 ```json
 {
-  "android": 30,
+  "android": 31,
   "ios_medical": 27,
-  "reason": "iOS 27 延續隔離示範服務、登入 UX、量測圖片縮放及修邊工具，新增臨床拍攝導引與多指／ROI 修復；Android 30 新增既有行政副本直接重試兩張影像輸出（不上傳）並補上組織修訂統計送件防呆；Android 29 修正範例待傳與登入核對競態；延續 Android 28 補上的 Play 27 實測回報的快速量測 UI、待傳重複確認鎖定、保存競態與修邊座標／ROI 復原；延續 16 KB、RBAC 與機構內測疊圖匯出，增加保存收據核對、送件等待／防重複點擊及登入 UX，但尚未交付全部 iOS UI 功能，不以單純升號宣稱功能一致。",
+  "reason": "MMH iOS 39 與 Android 31 對齊容量等待、不可繞過的伺服器重試期限、待傳續傳及撤回收據核對；Android 尚無 LiDAR 採集。iOS 27 延續隔離示範服務、登入 UX、量測圖片縮放及修邊工具，新增臨床拍攝導引與多指／ROI 修復；Android 30 新增既有行政副本直接重試兩張影像輸出（不上傳）並補上組織修訂統計送件防呆；Android 29 修正範例待傳與登入核對競態；延續 Android 28 補上的 Play 27 實測回報的快速量測 UI、待傳重複確認鎖定、保存競態與修邊座標／ROI 復原；延續 16 KB、RBAC 與機構內測疊圖匯出，增加保存收據核對、送件等待／防重複點擊及登入 UX，但尚未交付全部 iOS UI 功能，不以單純升號宣稱功能一致。",
   "alignment_trigger": "下一次 Android 正式 release 交付對應示範連線與登入 UX 並通過 Windows 驗證時，核對當時兩端 build，移除或重新明確登記此差異。任何一端先升號均使本登記失效。"
 }
 ```
@@ -182,3 +182,9 @@ Android 已在 `BackendClient.health()`、`BackendWarmup.degradedBanner()` 補�
 ## MMHPS20261007 機構特殊內測（2026-10-11 更新）
 
 只比較醫療端 WoundAI Android/iOS；WoundLite 不納入機構版。一般 Android internalTest 仍指向舊服務，不可當成 MMH 版。新增 mmhValidation 與 mmhInternal 固定 MMH 私有 candidate，Google 門禁與 WoundAI 角色分別驗證。iOS MMH 1.0(33) 已啟用 TestFlight 內測；外測未提交，Android Play 內測未啟用。Android 此路徑未實作完整深度採集，不能宣稱與 iOS RGB-D 等價。iOS 私密副本預設關閉、需手動匯出；Android 對應功能仍待實作。各項實測範圍見 `android_revision_ack_validation_20261011.md`、`ios_mmh_login_upload_validation_20261011.md` 與 `mmh_store_release_checkpoint_20261011.md`。
+
+## 2026-10-17 醫療結構化資料基礎（尚未啟用表單）
+
+`engineering/contracts/medical_wound_catalog.json` 為唯一代碼表，產生 Swift／Kotlin／Python 三份離線字典。三端以同一份 83 組有效／無效案例測試合法組合。新增選單元件尚未取代正式個案建立頁；SQLite／Room 遷移、量測與 outbox 快照、能力協商及完整實機工作流列為後續接線閘門。
+
+`wound_profile` 是可選的新 annotation 契約，只允許代碼，不含病例號或特殊備註。兩端傳輸介面在使用新欄位時要求後台回傳相同 profile；缺少或不符均不得宣稱保存成功。後台將 profile 放入修訂身分與匯出清單，舊請求無 profile 時不更動其修訂算法。未啟用新量表總分。

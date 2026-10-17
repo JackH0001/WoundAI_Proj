@@ -129,6 +129,10 @@ def validate_annotation(d: dict, require_image: bool = True):
     image_id 為合法雜湊、polygon 至少 3 點且落在影像範圍內、exudate 0-3。
     require_image=False 僅供舊契約回歸測試,產線一律 True。"""
     issues = []
+    if 'wound_profile' in d:
+        from medical_wound_profile import validate_profile
+        if not validate_profile(d['wound_profile']):
+            issues.append('wound_profile invalid or unsupported')
     need = REQUIRED if require_image else REQUIRED_CORE
     for k in need:
         if k not in d or d.get(k) is None:
@@ -789,6 +793,11 @@ def annotation_revision_signature(data, actor, org):
     # Exclude bearer/care receipts and delivery times: retries keep one identity.
     body = {k: data.get(k) for k in REQUIRED + PROVENANCE
             if k not in ("tissue_mask_key", "depth_map_key", "depth_conf_key")}
+    # Additive contract: absent profiles must preserve every legacy dedup signature.
+    if 'wound_profile' in data:
+        from medical_wound_profile import validate_profile
+        if not validate_profile(data['wound_profile']): raise ValueError('wound_profile invalid')
+        body['wound_profile'] = dict(data['wound_profile'], factors=sorted(data['wound_profile']['factors']))
     body["source"] = str(data.get("source") or DEFAULT_SOURCE)
     body["actor"] = actor
     body["org"] = org
@@ -1508,6 +1517,8 @@ try:
 
         rec = {k: d.get(k) for k in REQUIRED}
         rec.update(promotion_fields)
+        if 'wound_profile' in d:
+            rec['wound_profile'] = dict(d['wound_profile'], factors=sorted(d['wound_profile']['factors']))
         for k in PROVENANCE:
             if d.get(k) is not None and k not in ("tissue_mask_key", "depth_map_key", "depth_conf_key"):
                 rec[k] = d.get(k)
@@ -2300,7 +2311,11 @@ try:
                     verified_wound(r)
                 except ValueError:
                     continue
+                if 'wound_profile' in r:
+                    from medical_wound_profile import validate_profile
+                    if not validate_profile(r['wound_profile']): continue
                 by_img.setdefault(r["image_id"], []).append({
+                    **({'wound_profile': r['wound_profile']} if 'wound_profile' in r else {}),
                     "annotation_receipt_id": revision_id(r),
                     "tissue_mask_sha256": r.get("tissue_mask_sha256"),
                     "gt_polygons": r.get("gt_polygons"),
@@ -2361,7 +2376,12 @@ try:
                 drop("marker_too_small"); continue
             if q.get("roi_short_px") is not None and q["roi_short_px"] < min_roi:
                 drop("roi_too_small"); continue
+            if 'wound_profile' in r:
+                from medical_wound_profile import validate_profile
+                if not validate_profile(r['wound_profile']):
+                    drop('invalid_wound_profile'); continue
             items.append({
+                **({'wound_profile': r['wound_profile']} if 'wound_profile' in r else {}),
                 "annotation_receipt_id": revision_id(r),
                 "mask_contract": r.get("mask_contract"),
                 "wound_mask_key": r.get("wound_mask_key"),

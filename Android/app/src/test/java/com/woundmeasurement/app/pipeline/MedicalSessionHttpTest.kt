@@ -19,7 +19,7 @@ class MedicalSessionHttpTest {
             .addInterceptor { chain ->
                 // The production epoch guard runs before this deterministic synthetic response.
                 before();Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(code()).message("fixture")
-                    .body(text().toResponseBody("application/json".toMediaType())).build()
+                    .header("Retry-After","300").body(text().toResponseBody("application/json".toMediaType())).build()
             }.build())
     @Test fun oldClientDoesNotDispatchAfterAccountChange() {
         org.junit.Assume.assumeTrue(com.woundmeasurement.app.BuildConfig.MMH_VALIDATION)
@@ -33,6 +33,13 @@ class MedicalSessionHttpTest {
         val c=client(before={MedicalSessionEpoch.invalidate()})
         try {c.validateMedicalSession();fail()}catch (_:IOException){}
         assertFalse(c.hasSessionToken);assertNull(c.identity)
+    }
+    @Test fun capacityResponseKeepsServerDeadline() {
+        val before=System.currentTimeMillis(); val c=client(code={503})
+        try {c.validateMedicalSession();fail()} catch(wait:ResearchCapacityException) {
+            assertTrue(wait.notBefore>=before+300_000)
+        }
+        assertTrue(c.hasSessionToken);assertNull(c.identity)
     }
     @Test fun successfulReceiptUpdatesIdentity() {val c=client();assertEquals("dr01",c.validateMedicalSession().user);assertNotNull(c.identity)}
     @Test fun unauthorizedClearsTokenAndIdentity() {val c=client(code={401});try {c.validateMedicalSession();fail()}catch (_:IOException){};assertFalse(c.hasSessionToken);assertNull(c.identity)}
