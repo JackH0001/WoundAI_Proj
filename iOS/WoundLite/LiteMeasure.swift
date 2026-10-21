@@ -269,12 +269,14 @@ final class LiteMeasureVM: ObservableObject {
         let c = BackendClient(baseUrl: server)
         do {
             let anonId = try await c.liteInstallation()
+            let researchEpoch = try LiteWithdrawalJournal.standard.epoch(server: server, owner: anonId)
             let r = try await c.liteSegment(jpeg: payload.jpeg,
                                             anonId: anonId,
                                             consentVersion: LitePrefs.consentVersion,
                                             depthMapPngBase64: payload.dep,
                                             depthConfPngBase64: payload.conf,
-                                            cameraIntrinsics: payload.k, rawCapture: payload.raw)
+                                            cameraIntrinsics: payload.k, rawCapture: payload.raw,
+                                            researchEpoch: researchEpoch)
             LiteUsageState.shared.record(r.quota, server: server, anonId: anonId)
             if let m = r.userMessage { return .softFail(m) }
             guard acceptsCloudGeometry(r) else {
@@ -284,7 +286,8 @@ final class LiteMeasureVM: ObservableObject {
             if r.stored, let imageID = r.imageId, !imageID.isEmpty,
                r.imageW == work.cgImage?.width, r.imageH == work.cgImage?.height {
                 cloudBinding = LiteCloudBinding(server: server, anonID: anonId, imageID: imageID,
-                    imageW: r.imageW > 0 ? r.imageW : imageW, imageH: r.imageH > 0 ? r.imageH : imageH, storageReceipt: r.storageReceipt)
+                    imageW: r.imageW > 0 ? r.imageW : imageW, imageH: r.imageH > 0 ? r.imageH : imageH,
+                    storageReceipt: r.storageReceipt, researchEpoch: researchEpoch)
             }
             // Keep the original JPEG/depth coordinate binding unchanged.
             return .ok(r.polygons, stored: r.stored, route: r.route, raw: r.rawPolyCount, receipt: r.storageReceipt)

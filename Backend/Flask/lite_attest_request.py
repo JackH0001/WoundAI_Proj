@@ -23,9 +23,11 @@ def client_data(*, audience, installation, key_id, challenge, request_id,
     owner = token(installation, r'[A-Za-z0-9_-]{1,128}')
     rid = token(request_id, r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
     allowed = {'POST': {'/api/v1/lite/segment', '/api/v1/lite/annotation',
-                        '/api/v1/lite/annotation/revision'},
+                        '/api/v1/lite/annotation/revision', '/api/v1/lite/research/rejoin'},
                'DELETE': {'/api/v1/lite/data/' + installation}}
-    if not isinstance(method, str) or not isinstance(path, str) or path not in allowed.get(method, set()):
+    epoch_delete = (method == 'DELETE' and isinstance(path, str) and
+                    re.fullmatch(re.escape('/api/v1/lite/data/' + installation) + r'/[0-9a-f]{32}', path) is not None)
+    if not isinstance(method, str) or not isinstance(path, str) or (path not in allowed.get(method, set()) and not epoch_delete):
         raise ValueError('unsupported method or noncanonical path')
     ct = token(content_type, r'[\x20-\x7e]{0,200}')
     if type(key_id) is not bytes or len(key_id) != 32 or type(challenge) is not bytes or len(challenge) != 32:

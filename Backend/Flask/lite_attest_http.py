@@ -15,11 +15,13 @@ from lite_attest_budget import RequestBudget, BudgetExceeded
 from lite_attest_state import AdmissionRejected, ChallengeLimit, StateUnavailable
 from lite_privacy_state import PrivacyState, OwnerWithdrawn, WriterLimit
 from lite_fenced_store import FencedPrivacy
+from lite_reconsent import Reconsent, ReconsentRejected, epoch
 
 PREFIX = '/api/v1/lite/'
 CHALLENGE_PATH = PREFIX + 'attest/challenge'
 REGISTER_PATH = PREFIX + 'attest/register'
-POST_PATHS = {PREFIX+'segment', PREFIX+'annotation', PREFIX+'annotation/revision'}
+REJOIN_PATH = PREFIX+'research/rejoin'
+POST_PATHS = {PREFIX+'segment', PREFIX+'annotation', PREFIX+'annotation/revision', REJOIN_PATH}
 MAX_BODY = 32 * 1024 * 1024
 
 
@@ -98,7 +100,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
                 raise AdmissionRejected('noncanonical request target or encoding')
             control = request.path in (CHALLENGE_PATH, REGISTER_PATH)
             if not ((request.method == 'POST' and (control or request.path in POST_PATHS)) or
-                    (request.method == 'DELETE' and re.fullmatch(PREFIX+r'data/[A-Za-z0-9_-]{1,128}', request.path))):
+                    (request.method == 'DELETE' and re.fullmatch(PREFIX+r'data/[A-Za-z0-9_-]{1,128}(?:/[0-9a-f]{32})?', request.path))):
                 return jsonify(error='lite_route_not_supported'), 404
             # A bounded 4 KiB challenge body selects the privacy lane. Media
             # bodies remain unread until their general capacity is reserved.
@@ -113,7 +115,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
                 g.lite_attest_control = data
                 return None
             budget.reserve(scope='withdraw' if request.method == 'DELETE' else 'general')
-            limit = 0 if request.method == 'DELETE' else 96*1024 if request.path == REGISTER_PATH else MAX_BODY
+            limit = 0 if request.method == 'DELETE' else 4096 if request.path == REJOIN_PATH else 96*1024 if request.path == REGISTER_PATH else MAX_BODY
             raw = _body(limit)
             if control:
                 g.lite_attest_control = _json(raw)
@@ -125,7 +127,8 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
                 content_type=request.headers.get('Content-Type', ''), body=raw)
             if request.method == 'DELETE':
                 # client_data also binds the DELETE path to this installation.
-                owner = request.path.removeprefix(PREFIX+'data/')
+                parts = request.path.removeprefix(PREFIX+'data/').split('/')
+                owner, requested_epoch = parts[0], parts[1] if len(parts) == 2 else 'legacy'
             elif request.path == PREFIX+'segment':
                 if request.mimetype != 'multipart/form-data':
                     raise AdmissionRejected('multipart required')
@@ -133,11 +136,29 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
                 if len(owners) != 1:
                     raise AdmissionRejected('exactly one owner required')
                 owner = owners[0]
+                epochs = request.form.getlist('consent_epoch')
+                if len(epochs) > 1: raise ReconsentRejected('ambiguous epoch')
+                requested_epoch = epochs[0] if epochs else 'legacy'
             else:
-                owner = _json(raw).get('anon_id')
+                data = _json(raw)
+                owner = data.get('anon_id')
+                requested_epoch = data.get('consent_epoch', 'legacy')
             if owner != admitted.installation:
                 return jsonify(error='lite_owner_mismatch'), 403
             g.lite_admission = admitted
+            if request.path == REJOIN_PATH:
+                if not isinstance(privacy, FencedPrivacy): raise ReconsentRejected('renewal unavailable')
+                return jsonify(Reconsent(privacy).resume(owner, data))
+            if isinstance(privacy, FencedPrivacy):
+                if request.method == 'DELETE':
+                    # A delayed deletion targets only the signed epoch, never
+                    # the latest participation. This protects renewed data.
+                    privacy = privacy.scoped(epoch(requested_epoch))
+                else:
+                    privacy = Reconsent(privacy).resolve(owner, requested_epoch)
+            elif requested_epoch != 'legacy':
+                raise ReconsentRejected('renewal unavailable')
+            g.lite_privacy = privacy
             if request.method == 'DELETE':
                 if privacy.withdraw(owner):
                     response = jsonify(status='withdrawal_pending', anon_id=owner, reason='writers_in_flight')
@@ -157,6 +178,8 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
             return response, 429
         except OwnerWithdrawn:
             return jsonify(error='withdrawn'), 410
+        except ReconsentRejected:
+            return jsonify(error='lite_consent_epoch_conflict'), 409
         except WriterLimit:
             return jsonify(error='lite_writers_busy'), 429
         except ChallengeLimit:
@@ -171,6 +194,13 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
             data = g.lite_attest_control
             service = current_app.extensions['lite_attest_http']['service']
             if operation == 'challenge':
+                if data.get('purpose') == 'recover_register':
+                    if set(data) != {'key_id', 'purpose', 'previous_challenge_id'}:
+                        raise AdmissionRejected('invalid recovery request')
+                    challenge = service.recover_challenge(_b64(data['key_id'], 32, 32), data['previous_challenge_id'])
+                    return jsonify(challenge_id=challenge.identifier, challenge=base64.b64encode(challenge.nonce).decode('ascii'),
+                                   expires_at=challenge.expires_at, audience=service.admission.audience,
+                                   replaces_challenge_id=data['previous_challenge_id'])
                 if set(data) != {'key_id', 'purpose'} or data['purpose'] not in ('register', 'assert', 'withdraw'):
                     raise AdmissionRejected('invalid challenge request')
                 key = _b64(data['key_id'], 32, 32)
@@ -196,7 +226,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
     def release_writer():
         ticket = request.environ.get('woundlite.writer_ticket')
         if ticket is not None:
-            current_app.extensions['lite_attest_http']['privacy'].finish_write(ticket)
+            getattr(g, 'lite_privacy', current_app.extensions['lite_attest_http']['privacy']).finish_write(ticket)
             del request.environ['woundlite.writer_ticket']
 
     @app.teardown_request
@@ -216,6 +246,12 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
             response = jsonify(error='lite_writer_completion_unconfirmed')
             response.status_code = 503
         if request.path.startswith(PREFIX):
+            scoped = getattr(g, 'lite_privacy', None)
+            if isinstance(scoped, FencedPrivacy) and response.is_json:
+                payload = response.get_json(silent=True)
+                if isinstance(payload, dict):
+                    payload['consent_epoch'] = scoped.manifest.epoch
+                    response.set_data(current_app.json.dumps(payload))
             # Persisted clients can distinguish backpressure from bad data.
             # Keep the exact response/error (503 can mean unknown write outcome).
             if response.status_code in (429, 503):

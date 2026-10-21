@@ -38,7 +38,7 @@ class RegistrationService:
             required = {'v', 'status', 'key_id', 'app_id', 'environment', 'audience',
                         'installation', 'challenge_id', 'nonce', 'issued_at', 'expires_at'}
             service = self.admission
-            if (type(state) is not dict or set(state) != required or type(state['v']) is not int or
+            if (type(state) is not dict or set(state) not in (required, required | {'recovery_parent'}) or type(state['v']) is not int or
                     state['v'] != 1 or state['status'] != 'pending' or state['key_id'] != _key_name(key_id) or
                     state['app_id'] != service.policy.app_id or state['environment'] != service.environment or
                     state['audience'] != service.audience):
@@ -46,6 +46,10 @@ class RegistrationService:
             for field in ('installation', 'challenge_id'):
                 if type(state[field]) is not str or re.fullmatch(r'[0-9a-f]{32}', state[field]) is None:
                     raise ValueError('pending identifier')
+            if 'recovery_parent' in state and (type(state['recovery_parent']) is not str or
+                    re.fullmatch(r'[0-9a-f]{32}', state['recovery_parent']) is None or
+                    state['recovery_parent'] == state['challenge_id']):
+                raise ValueError('pending recovery lineage')
             if type(state['nonce']) is not str:
                 raise ValueError('pending nonce')
             nonce = base64.b64decode(state['nonce'], validate=True)
@@ -83,6 +87,47 @@ class RegistrationService:
             if self.store.compare_exchange(key_id, revision, state):
                 return Challenge(state['challenge_id'], nonce, state['expires_at'])
         raise StateUnavailable('registration challenge contention')
+
+    def recover_challenge(self, key_id, previous_challenge_id):
+        """Invalidate only an existing expired pending proof; never create a row.
+
+        The normal challenge API also admits entirely new keys, so its success
+        cannot establish that an old enrollment is still pending. Recovery must
+        match the original challenge (or a durable previous recovery lineage).
+        Lost responses may retrieve the same replacement without changing owner.
+        """
+        _key_name(key_id)
+        if (type(previous_challenge_id) is not str or
+                re.fullmatch(r'[0-9a-f]{32}', previous_challenge_id) is None):
+            raise AdmissionRejected('invalid previous challenge')
+        service = self.admission
+        for _ in range(CAS_ATTEMPTS):
+            row = self.store.load(key_id)
+            if row is None:
+                raise AdmissionRejected('previous registration missing')
+            if row[1].get('status') != 'pending':
+                service._load(key_id)  # Includes revoked/corrupt rejection.
+                raise AdmissionRejected('key already registered')
+            revision, state, nonce = self._pending(key_id, row)
+            now = service._now()
+            if now < state['issued_at']:
+                raise StateUnavailable('clock precedes pending challenge')
+            matches_original = state['challenge_id'] == previous_challenge_id
+            matches_recovery = state.get('recovery_parent') == previous_challenge_id
+            if not (matches_original or matches_recovery):
+                raise AdmissionRejected('previous registration differs')
+            if now < state['expires_at']:
+                if matches_recovery:
+                    return Challenge(state['challenge_id'], nonce, state['expires_at'])
+                raise AdmissionRejected('previous challenge still valid')
+            replacement = dict(state, challenge_id=secrets.token_hex(16),
+                               nonce=base64.b64encode(secrets.token_bytes(32)).decode('ascii'),
+                               issued_at=now, expires_at=now + CHALLENGE_TTL,
+                               recovery_parent=previous_challenge_id)
+            if self.store.compare_exchange(key_id, revision, replacement):
+                return Challenge(replacement['challenge_id'], base64.b64decode(replacement['nonce']),
+                                 replacement['expires_at'])
+        raise StateUnavailable('registration recovery contention')
 
     def register(self, key_id, challenge_id, encoded):
         _key_name(key_id)

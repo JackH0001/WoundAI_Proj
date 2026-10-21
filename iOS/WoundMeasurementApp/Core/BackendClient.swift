@@ -612,7 +612,8 @@ actor BackendClient {
                      depthConfPngBase64: String? = nil,
                      cameraIntrinsics: [String: Double]? = nil,
                      measured: [String: Double]? = nil,
-                     rawCapture: LiteRawDepthPacket? = nil) async throws -> LiteSegmentResult {
+                     rawCapture: LiteRawDepthPacket? = nil,
+                     researchEpoch: String? = nil) async throws -> LiteSegmentResult {
         var fields: [String: String] = [
             "anon_id": anonId,
             "client": "woundlite-ios",
@@ -620,6 +621,7 @@ actor BackendClient {
         ]
         // 文案版本綁每筆資料：日後同意書改版，「哪一版收的」要能分桶（治理需求）。
         if let v = consentVersion { fields["consent_version"] = v }
+        if let researchEpoch { fields["consent_epoch"] = researchEpoch }
         if let d = depthMapPngBase64 {
             fields["depth_map_png"] = d
             fields["depth_format"] = "png16_mm"
@@ -657,6 +659,9 @@ actor BackendClient {
         }
         guard code == 200, let j = jOpt else {
             throw BackendError.http(status: code, message: summarize(data))
+        }
+        if let researchEpoch, j["consent_epoch"].string != researchEpoch {
+            throw BackendError.http(status: code, message: "研究批次回執不符，尚未確認保存")
         }
         // ⚠ 逐層防禦式解析，不用 `as? [[[Any]]]` 三層硬轉型——bridging 對巢狀
         //   異質陣列的行為不保證，硬轉失敗是**靜默回 nil**，症狀與「後端空手」
@@ -703,23 +708,27 @@ actor BackendClient {
      */
     /// v2 replies must echo the exact revision and payload digest before we acknowledge locally.
     func liteRevision(bindingAnonID: String, imageID: String, revision: Int,
-                      payloadJSON: String, digest: String) async throws {
+                      payloadJSON: String, digest: String, researchEpoch: String? = nil) async throws {
         var r = try request("POST", "/api/v1/lite/annotation/revision", auth: false)
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        r.httpBody = try JSONSerialization.data(withJSONObject: [
+        var fields: [String: Any] = [
             "anon_id": bindingAnonID, "image_id": imageID, "revision": revision,
             "payload_json": payloadJSON, "research_consent": true
-        ])
+        ]
+        if let researchEpoch { fields["consent_epoch"] = researchEpoch }
+        r.httpBody = try JSONSerialization.data(withJSONObject: fields)
         let (code, data) = try await sendLite(r, installation: bindingAnonID)
         struct Receipt: Decodable {
             let status: String
             let image_id: String
             let revision: Int
             let payload_sha256: String
+            var consent_epoch: String?
         }
         guard code == 200, let response = try? JSONDecoder().decode(Receipt.self, from: data),
               response.status == "stored", response.image_id == imageID,
-              response.revision == revision, response.payload_sha256 == digest else {
+              response.revision == revision, response.payload_sha256 == digest,
+              researchEpoch == nil || response.consent_epoch == researchEpoch else {
             throw BackendError.http(status: code, message: "修訂尚未取得相符回執")
         }
     }

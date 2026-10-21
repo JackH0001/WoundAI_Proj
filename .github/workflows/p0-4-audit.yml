@@ -387,6 +387,7 @@ jobs:
           python -B engineering/phase2/test_lite_fenced_objects.py
           python -B engineering/phase2/test_lite_fenced_manifest.py
           python -B engineering/phase2/test_lite_fenced_http.py
+          python -B engineering/phase2/test_lite_reconsent.py
           python -B tools/test_lite_rgbd_preflight.py
           python -B tools/test_provision_mmh_foundation.py
           python -B tools/test_restrict_mmh_bucket_iam.py

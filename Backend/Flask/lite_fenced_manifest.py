@@ -24,21 +24,25 @@ class PendingWritePlans(StateUnavailable): pass
 class FenceTicket:
     owner: str
     identifier: str
+    epoch: str = 'legacy'
 
 
 class FencedManifest:
     MAX_WRITERS = 8
     MAX_PLANS = 10
 
-    def __init__(self, store, *, bucket):
+    def __init__(self, store, *, bucket, epoch='legacy'):
         if type(bucket) is not str or re.fullmatch(r'[a-z0-9][a-z0-9-]{1,61}[a-z0-9]', bucket) is None:
             raise ValueError('explicit bucket binding required')
-        self.store, self.bucket = store, bucket
+        if epoch != 'legacy' and (type(epoch) is not str or re.fullmatch(r'[0-9a-f]{32}', epoch) is None):
+            raise ValueError('invalid research epoch')
+        self.store, self.bucket, self.epoch = store, bucket, epoch
 
     def _key(self, owner):
         if type(owner) is not str or re.fullmatch(r'[0-9a-f]{32}', owner) is None:
             raise StateUnavailable('invalid owner')
-        return hashlib.sha256(b'woundlite/write-plans/1\0' + self.bucket.encode() + b'\0' + owner.encode()).digest()
+        original = b'woundlite/write-plans/1\0' + self.bucket.encode() + b'\0' + owner.encode()
+        return hashlib.sha256(original if self.epoch == 'legacy' else original + b'\0epoch\0' + self.epoch.encode()).digest()
 
     def _load(self, owner):
         row = self.store.load(self._key(owner))
@@ -70,7 +74,7 @@ class FencedManifest:
             raise StateUnavailable('invalid durable write plans') from None
 
     def _ticket(self, ticket):
-        if not isinstance(ticket, FenceTicket) or re.fullmatch(r'[0-9a-f]{32}', ticket.identifier) is None:
+        if not isinstance(ticket, FenceTicket) or ticket.epoch != self.epoch or re.fullmatch(r'[0-9a-f]{32}', ticket.identifier) is None:
             raise StateUnavailable('invalid fence ticket')
         self._key(ticket.owner)
 
@@ -82,12 +86,12 @@ class FencedManifest:
             if len(state['writers']) >= self.MAX_WRITERS: raise WriterLimit('writers busy')
             if token in state['writers']: raise StateUnavailable('ticket collision')
             state['writers'][token] = {}
-            if self.store.compare_exchange(self._key(owner), revision, state): return FenceTicket(owner, token)
+            if self.store.compare_exchange(self._key(owner), revision, state): return FenceTicket(owner, token, self.epoch)
         raise StateUnavailable('write-plan admission contention')
 
     def plan(self, ticket, pin):
         self._ticket(ticket)
-        if (not isinstance(pin, PinnedWrite) or pin.bucket != self.bucket or pin.ref.owner != ticket.owner or
+        if (not isinstance(pin, PinnedWrite) or pin.bucket != self.bucket or pin.epoch != self.epoch or pin.ref.owner != ticket.owner or
                 type(pin.generation) is not int or pin.generation < 0):
             raise StateUnavailable('write plan scope mismatch')
         pin.ref.name
@@ -107,7 +111,7 @@ class FencedManifest:
 
     def acknowledge(self, ticket, pin):
         self._ticket(ticket)
-        if (not isinstance(pin, PinnedWrite) or pin.bucket != self.bucket or pin.ref.owner != ticket.owner or
+        if (not isinstance(pin, PinnedWrite) or pin.bucket != self.bucket or pin.epoch != self.epoch or pin.ref.owner != ticket.owner or
                 type(pin.generation) is not int or pin.generation < 0):
             raise StateUnavailable('acknowledgement scope mismatch')
         name = pin.ref.kind + ':' + pin.ref.identifier
@@ -146,7 +150,7 @@ class FencedManifest:
     def write_registered(self, ticket, objects, ref, data):
         """Single integration entry point: no payload write before durable intent."""
         self._ticket(ticket)
-        if (not isinstance(objects, FencedObjects) or objects.bucket.name != self.bucket or
+        if (not isinstance(objects, FencedObjects) or objects.bucket.name != self.bucket or objects.epoch != self.epoch or
                 not isinstance(ref, ObjectRef) or ref.owner != ticket.owner):
             raise StateUnavailable('registered write scope mismatch')
         pin = objects.pin(ref)
@@ -162,7 +166,7 @@ class FencedManifest:
         return generation
 
     def seal_pending(self, owner, objects):
-        if not isinstance(objects, FencedObjects) or objects.bucket.name != self.bucket:
+        if not isinstance(objects, FencedObjects) or objects.bucket.name != self.bucket or objects.epoch != self.epoch:
             raise StateUnavailable('recovery bucket mismatch')
         for _ in range(CAS_ATTEMPTS):
             revision, state = self._load(owner)

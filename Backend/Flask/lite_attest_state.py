@@ -287,7 +287,8 @@ class AssertionAdmission:
             now = self._now()
             if challenge is None or not challenge['issued_at'] <= now < challenge['expires_at']:
                 raise AdmissionRejected('challenge missing, consumed or expired')
-            if challenge.get('purpose', 'assert') == 'withdraw' and (method != 'DELETE' or path != '/api/v1/lite/data/' + state['installation']):
+            deletion_path = re.fullmatch(re.escape('/api/v1/lite/data/' + state['installation']) + r'(?:/[0-9a-f]{32})?', path) is not None
+            if challenge.get('purpose', 'assert') == 'withdraw' and (method != 'DELETE' or not deletion_path):
                 raise AdmissionRejected('withdrawal challenge is deletion-only')
             try:
                 data = client_data(audience=state['audience'], installation=state['installation'],

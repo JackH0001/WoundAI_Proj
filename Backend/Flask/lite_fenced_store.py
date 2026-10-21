@@ -16,9 +16,13 @@ EXTENSIONS = {'jpg': 'image', 'json': 'metadata', 'depth.png': 'depth', 'conf.pn
 
 
 class FencedPrivacy:
-    def __init__(self, state_store, media_bucket):
-        self.objects = FencedObjects(media_bucket)
-        self.manifest = FencedManifest(state_store, bucket=media_bucket.name)
+    def __init__(self, state_store, media_bucket, *, epoch='legacy'):
+        self.objects = FencedObjects(media_bucket, epoch=epoch)
+        self.manifest = FencedManifest(state_store, bucket=media_bucket.name, epoch=epoch)
+
+    def scoped(self, epoch):
+        if epoch == self.manifest.epoch: return self
+        return FencedPrivacy(self.manifest.store, self.objects.bucket, epoch=epoch)
 
     def begin_write(self, owner): return self.manifest.begin(owner)
     def finish_write(self, ticket): return self.manifest.finish(ticket)

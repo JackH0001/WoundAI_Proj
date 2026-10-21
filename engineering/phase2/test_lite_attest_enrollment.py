@@ -251,6 +251,76 @@ class EnrollmentTests(unittest.TestCase):
         with self.assertRaises(StateUnavailable):self.service.issue_challenge(self.key_id)
         with self.assertRaises(ValueError):enrollment.RegistrationService(self.store,policy=self.r.policy,audience='lite-test',environment='development')
 
+    def test_recovery_missing_key_never_creates_security_state(self):
+        missing = b'z' * 32
+        with self.assertRaises(AdmissionRejected):
+            self.service.recover_challenge(missing, self.challenge.identifier)
+        self.assertIsNone(self.store.load(missing))
+
+    def test_recovery_requires_expired_exact_original_challenge(self):
+        before = self.store.load(self.key_id)
+        for previous in (self.challenge.identifier, 'a' * 32, '', None):
+            with self.subTest(previous=previous), self.assertRaises(AdmissionRejected):
+                self.service.recover_challenge(self.key_id, previous)
+            self.assertEqual(before, self.store.load(self.key_id))
+        self.now += CHALLENGE_TTL
+        with self.assertRaises(AdmissionRejected):
+            self.service.recover_challenge(self.key_id, 'a' * 32)
+        self.assertEqual(before, self.store.load(self.key_id))
+
+    def test_recovery_keeps_owner_and_lineage_and_repeats_without_writes(self):
+        before = self.store.load(self.key_id)
+        self.now += CHALLENGE_TTL
+        new = self.service.recover_challenge(self.key_id, self.challenge.identifier)
+        after = self.store.load(self.key_id)
+        self.assertNotEqual(new.identifier, self.challenge.identifier)
+        self.assertEqual(after[1]['installation'], before[1]['installation'])
+        self.assertEqual(after[1]['recovery_parent'], self.challenge.identifier)
+        self.assertEqual(self.service.recover_challenge(self.key_id, self.challenge.identifier), new)
+        self.assertEqual(after, self.store.load(self.key_id))
+        with self.assertRaises(AdmissionRejected): self.register()
+        self.assertEqual(self.service.issue_challenge(self.key_id), new)
+
+    def test_recovery_cannot_reset_active_or_revoked_identity(self):
+        self.register()
+        self.now += CHALLENGE_TTL
+        for revoked in (False, True):
+            if revoked: self.service.admission.revoke(self.key_id)
+            before = self.store.load(self.key_id)
+            with self.assertRaises(AdmissionRejected):
+                self.service.recover_challenge(self.key_id, self.challenge.identifier)
+            self.assertEqual(before, self.store.load(self.key_id))
+
+    def test_recovery_unknown_gcs_outcome_preserves_lineage_for_retry(self):
+        bucket = FakeBucket(); store = GCSStateStore(bucket); service = self.engine(store)
+        old = service.issue_challenge(self.key_id)
+        self.now += CHALLENGE_TTL
+        bucket.lose_response = True
+        with self.assertRaises(StateUnavailable): service.recover_challenge(self.key_id, old.identifier)
+        after = store.load(self.key_id)
+        bucket.lose_response = False
+        new = service.recover_challenge(self.key_id, old.identifier)
+        self.assertEqual(new.identifier, after[1]['challenge_id'])
+        self.assertEqual(after, store.load(self.key_id))
+
+    def test_recovery_expired_replacement_retains_original_lineage(self):
+        self.now += CHALLENGE_TTL
+        first = self.service.recover_challenge(self.key_id, self.challenge.identifier)
+        self.now += CHALLENGE_TTL
+        second = self.service.recover_challenge(self.key_id, self.challenge.identifier)
+        self.assertNotEqual(first.identifier, second.identifier)
+        self.assertEqual(self.store.load(self.key_id)[1]['recovery_parent'], self.challenge.identifier)
+
+    def test_recovery_cas_conflict_and_corrupt_lineage_fail_closed(self):
+        self.now += CHALLENGE_TTL
+        before = self.store.load(self.key_id)
+        with patch.object(self.store, 'compare_exchange', return_value=False):
+            with self.assertRaises(StateUnavailable): self.service.recover_challenge(self.key_id, self.challenge.identifier)
+        self.assertEqual(before, self.store.load(self.key_id))
+        rev, state = before; state['recovery_parent'] = state['challenge_id']
+        self.store.compare_exchange(self.key_id, rev, state)
+        with self.assertRaises(StateUnavailable): self.service.recover_challenge(self.key_id, self.challenge.identifier)
+
     def test_pending_is_not_an_assertion_identity(self):
         with self.assertRaises(StateUnavailable):self.service.admission.issue_challenge(self.key_id)
 

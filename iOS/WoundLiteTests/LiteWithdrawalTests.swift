@@ -4,6 +4,51 @@ import CryptoKit
 
 final class LiteWithdrawalSigningTests: XCTestCase {
     let server = "https://lite.invalid"
+    func testRenewalUsesSameKeyAndSignsExactConsentAndEpochWhileMediaOff() async throws {
+        let (transport, client, http, device, permission) = try setup()
+        let owner = try await client.registeredInstallation(); await permission.deny()
+        let epoch = String(repeating: "e", count: 32)
+        let payload = LiteReconsentRequest(anon_id: owner, research_consent: true, previous_epoch: "legacy",
+            new_epoch: epoch, consent_version: LitePrefs.consentVersion, disclosure_version: LiteReconsentRequest.disclosure)
+        let intent = LiteReconsentIntent(server: server, previousWithdrawal: Data(), requestedAt: Date(), request: payload)
+        await http.businessReply(["status":"reconsented", "anon_id":owner, "consent_epoch":epoch,
+            "previous_epoch":"legacy", "consent_version":LitePrefs.consentVersion,
+            "disclosure_version":LiteReconsentRequest.disclosure, "audit_sha256":String(repeating:"b",count:64),
+            "scope":"future_captures_only", "historical_media_restored":false])
+        let receipt = try await transport.rejoin(intent)
+        XCTAssertTrue(receipt.validates(payload))
+        let snapshot = await http.snapshot(), request = try XCTUnwrap(snapshot.1.last)
+        XCTAssertEqual(request.url?.path, "/api/v1/lite/research/rejoin")
+        XCTAssertEqual(try JSONDecoder().decode(LiteReconsentRequest.self, from: XCTUnwrap(request.httpBody)), payload)
+        let bytes = try LiteAttestRequest.clientData(audience: "lite-test", installation: owner,
+            keyID: Data(base64Encoded: device.key)!, challenge: snapshot.4,
+            requestID: XCTUnwrap(request.value(forHTTPHeaderField: "X-Lite-Request-ID")), method: "POST",
+            path: request.url!.path, contentType: "application/json", body: XCTUnwrap(request.httpBody))
+        let hashes = await device.hashes(); XCTAssertEqual(hashes.last, Data(SHA256.hash(data: bytes)))
+        XCTAssertEqual(snapshot.0.count, 1)
+        let counts = await device.counts(); XCTAssertEqual(counts.0, 1); XCTAssertEqual(counts.1, 1)
+        let allowed = await permission.read(); XCTAssertFalse(allowed)
+    }
+    func testRenewedWithdrawalSignsEpochAndRejectsLegacyReceipt() async throws {
+        let (transport, client, http, device, permission) = try setup()
+        let owner = try await client.registeredInstallation(); await permission.deny()
+        let epoch = String(repeating: "e", count: 32)
+        var reply: [String:Any] = ["status":"deleted", "anon_id":owner, "deletion_scope":"live_media", "writers_drained":true]
+        await http.businessReply(reply)
+        do { _ = try await transport.withdraw(server: server, owner: owner, epoch: epoch); XCTFail() }
+        catch LiteWithdrawalFailure.invalidReceipt { }
+        reply["consent_epoch"] = epoch; await http.businessReply(reply)
+        let result = try await transport.withdraw(server: server, owner: owner, epoch: epoch)
+        XCTAssertEqual(result, .liveMediaRemoved)
+        let snapshot = await http.snapshot(), request = try XCTUnwrap(snapshot.1.last)
+        XCTAssertEqual(request.url?.path, "/api/v1/lite/data/"+owner+"/"+epoch)
+        let bytes = try LiteAttestRequest.clientData(audience: "lite-test", installation: owner,
+            keyID: Data(base64Encoded: device.key)!, challenge: snapshot.4,
+            requestID: XCTUnwrap(request.value(forHTTPHeaderField: "X-Lite-Request-ID")), method: "DELETE",
+            path: request.url!.path, contentType: "", body: Data())
+        let hashes = await device.hashes(); XCTAssertEqual(hashes.last, Data(SHA256.hash(data: bytes)))
+        XCTAssertEqual(snapshot.0.count, 1)
+    }
     func setup() throws -> (LiteSignedCloudTransport, LiteAttestClient, AttestHTTPDouble, AttestDeviceDouble, AttestPermission) {
         let http = AttestHTTPDouble(), device = AttestDeviceDouble(), permission = AttestPermission()
         let client = try LiteAttestClient(origin: URL(string: server)!, audience: "lite-test", device: device,
