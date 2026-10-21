@@ -43,9 +43,11 @@ final class DepthReferenceVolumeTests: XCTestCase {
         let flat = try estimate([Float](repeating:0.3,count:4096))
         XCTAssertEqual(flat.deficitMl!,0,accuracy:1e-8)
         // A camera plane has LINEAR INVERSE depth, not linear axial Z.
-        let tilted: [Float] = (0..<4096).map {
-            let u = Double($0 % 64 - 32)/200, v = Double($0 / 64 - 32)/200
-            return Float(1 / (0.7*u-0.4*v+1/0.3))
+        let tilted: [Float] = (0..<4096).map { index -> Float in
+            let u: Double = Double(index % 64 - 32) / 200.0
+            let v: Double = Double(index / 64 - 32) / 200.0
+            let inverseDepth: Double = 0.7 * u - 0.4 * v + (1.0 / 0.3)
+            return Float(1.0 / inverseDepth)
         }
         let r = try estimate(tilted)
         XCTAssertEqual(r.deficitMl!,0,accuracy:0.0001)
