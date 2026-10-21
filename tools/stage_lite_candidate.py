@@ -24,6 +24,7 @@ FLASK_FILES = (
     'lite_attest_registration.py', 'lite_attest_request.py', 'lite_attest_state.py',
     'lite_bucket_policy.py', 'lite_ledger_purge.py', 'lite_privacy_state.py',
     'lite_fenced_objects.py', 'lite_fenced_manifest.py', 'lite_fenced_store.py',
+    'lite_reconsent.py',
     'lite_raw_depth_contract.py', 'lite_raw_depth_store.py', 'lite_service_profile.py',
     'privacy/haarcascade_frontalface_default.xml', 'privacy/README.md',
     'certificates/Apple_App_Attestation_Root_CA.pem', 'certificates/AppleRootCA-G3.pem',
