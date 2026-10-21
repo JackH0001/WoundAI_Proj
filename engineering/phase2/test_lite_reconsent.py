@@ -1,7 +1,10 @@
 """Same authenticated identity; no resurrection, replacement key or cloud calls."""
 import json
+from pathlib import Path
+import sys
 import unittest
 from unittest.mock import patch
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'Backend/Flask'))
 from lite_reconsent import Reconsent, ReconsentRejected, CONSENT, DISCLOSURE
 from lite_fenced_objects import ObjectRef
 from lite_attest_state import StateUnavailable
