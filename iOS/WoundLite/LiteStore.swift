@@ -36,6 +36,8 @@ struct LiteRecord: Codable, Identifiable {
     var woundLocation: LiteWoundLocation? = nil
     var cloudSync: LiteCloudSyncState? = nil
     var manuallyConfirmed: Bool? = nil
+    /// Old values remain unchanged; missing provenance is not retroactively certified.
+    var measurementContext: LiteMeasurementContext? = nil
 }
 
 @MainActor

@@ -65,7 +65,12 @@ struct EditRaster: Equatable {
      */
     var wbGains: [Double]?
 
-    var tissueEdited: Bool { return tissueEditedPx > 0 }
+    // Persisted automatic suggestion, including automatic fallback fills. Never reconstruct
+    // historical human edits from a newly run classifier.
+    var planarCalibration: PlanarAreaCalibration? = nil
+    var autoBaseline: [UInt8]? = nil
+    var tissueEditCountKnown: Bool = true
+    var tissueEdited: Bool { return tissueEditCountKnown && tissueEditedPx > 0 }
     var tissueEditRatio: Double { return maskPx > 0 ? Double(tissueEditedPx) / Double(maskPx) : 0.0 }
 
     /// 遮罩在影像座標中的矩形。與後端 `_raster_rect()` 同一條公式。
@@ -77,6 +82,7 @@ struct EditRaster: Equatable {
     /// 遮罩面積（cm²）。**用像素數 × cm²/px 直接算，不要拿 AI 初始面積乘修正比例**——
     /// 後者會累積換算鏈偏差。
     var areaCm2: Double? {
+        if let planarCalibration { return planarCalibration.area(mask: mask, width: mw, height: mh, x: rx0, y: ry0, scale: mScale) }
         guard let c = cm2PerPx, c > 0 else { return nil }
         var n = 0
         for v in mask where v != 0 { n += 1 }
@@ -156,7 +162,13 @@ enum EditRasterCodec {
         let n = r.mw * r.mh
         guard n > 0, r.mask.count >= n, r.tissue.count >= n, r.origMask.count >= n else { return nil }
 
-        var px = [UInt8](repeating: 0, count: n * 4)   // RGBA8
+        guard r.mw > 0, r.mh > 0, n <= 4_840_000 else { return nil }
+        let hasBaseline = r.autoBaseline != nil
+        if let baseline = r.autoBaseline {
+            guard baseline.count == n, baseline.allSatisfy({ $0 <= UInt8(TissueCode.maxCode) }) else { return nil }
+        }
+        let pngHeight = r.mh * (hasBaseline ? 2 : 1)
+        var px = [UInt8](repeating: 0, count: n * 4 * (hasBaseline ? 2 : 1))
         for i in 0..<n {
             let t = r.tissue[i] <= UInt8(TissueCode.maxCode) ? r.tissue[i] : 0
             px[i * 4 + 0] = t
@@ -164,19 +176,24 @@ enum EditRasterCodec {
             px[i * 4 + 2] = r.origMask[i] != 0 ? 1 : 0
             px[i * 4 + 3] = 255
         }
-        guard let png = Self.pngFromRGBA(px, width: r.mw, height: r.mh) else { return nil }
+        if let baseline = r.autoBaseline {
+            for i in 0..<n { px[(n+i)*4] = baseline[i]; px[(n+i)*4+3] = 255 }
+        }
+        guard let png = Self.pngFromRGBA(px, width: r.mw, height: pngHeight) else { return nil }
 
         var meta: [String: Any] = [
             "rx0": r.rx0, "ry0": r.ry0, "mw": r.mw, "mh": r.mh, "m_scale": r.mScale,
             "tissue_edited_px": r.tissueEditedPx, "mask_px": r.maskPx,
             // 畫布尺寸一起存：續編時若影像尺寸不同（例如換了後端縮圖策略），柵格座標就對不上
             // ——寧可放棄續編也不要用錯的座標畫在病人的傷口上。
-            "canvas_w": r.canvasW, "canvas_h": r.canvasH
+            "canvas_w": r.canvasW, "canvas_h": r.canvasH,
+            "baseline_plane": hasBaseline, "tissue_edit_count_known": r.tissueEditCountKnown
         ]
         // `as Any?` 不可省：`??` 要把兩邊併成同一個型別，而 `Double` 與 `NSNull` 併不起來。
         // 同檔案風格見 BackendClient.swift:551。
         meta["cm2_per_px"] = r.cm2PerPx as Any? ?? NSNull()
         if let g = r.wbGains { meta["wb_gains"] = g }
+        if let c = r.planarCalibration { meta["projective_calibration"] = c.json }
 
         guard let mjson = try? JSONSerialization.data(withJSONObject: meta),
               let mstr = String(data: mjson, encoding: .utf8) else { return nil }
@@ -193,14 +210,15 @@ enum EditRasterCodec {
         guard let png = png, let meta = meta, !meta.isEmpty,
               let mdata = meta.data(using: .utf8), let j = JSONAny(data: mdata) else { return nil }
         let mw = j["mw"].int(0), mh = j["mh"].int(0)
-        guard mw > 0, mh > 0 else { return nil }
+        guard (1...2200).contains(mw), (1...2200).contains(mh) else { return nil }
 
         // ⚠ 尺寸不符時**不要**縮放遷就。柵格座標是相對於當時那張畫布算的，
         //   縮放後每一個像素都對應到不同的位置，醫師的判斷會被搬到錯的地方。
         let cw = j["canvas_w"].int(0), ch = j["canvas_h"].int(0)
         if cw > 0, ch > 0, cw != canvasW || ch != canvasH { return nil }
 
-        guard let px = Self.rgbaFromPNG(png, expectW: mw, expectH: mh) else { return nil }
+        let hasBaseline = j["baseline_plane"].bool(false)
+        guard let px = Self.rgbaFromPNG(png, expectW: mw, expectH: mh * (hasBaseline ? 2 : 1)) else { return nil }
         let n = mw * mh
         var tissue = [UInt8](repeating: 0, count: n)
         var mask = [UInt8](repeating: 0, count: n)
@@ -210,6 +228,7 @@ enum EditRasterCodec {
             mask[i]   = px[i * 4 + 1]
             orig[i]   = px[i * 4 + 2]
         }
+        if hasBaseline && !(0..<n).allSatisfy({ px[(n+$0)*4] <= UInt8(TissueCode.maxCode) }) { return nil }
         var wb: [Double]?
         let g = j["wb_gains"].array.compactMap { $0.double }
         if g.count == 3 { wb = g }
@@ -221,7 +240,10 @@ enum EditRasterCodec {
             cm2PerPx: j["cm2_per_px"].double,
             tissueEditedPx: j["tissue_edited_px"].int(0),
             maskPx: j["mask_px"].int(0),
-            canvasW: cw, canvasH: ch, wbGains: wb
+            canvasW: cw, canvasH: ch, wbGains: wb,
+            planarCalibration: PlanarAreaCalibration.parse(j["projective_calibration"].raw),
+            autoBaseline: hasBaseline ? (0..<n).map { px[(n+$0)*4] } : nil,
+            tissueEditCountKnown: j["tissue_edit_count_known"].bool(true)
         )
         #else
         return nil
@@ -233,7 +255,7 @@ enum EditRasterCodec {
     #if canImport(UIKit)
     /// Label bytes are data, not display colors. Never draw them through a color-converting context.
     static func pngFromRGBA(_ rgba: [UInt8], width: Int, height: Int) -> Data? {
-        guard (1...4096).contains(width), (1...4096).contains(height),
+        guard (1...4096).contains(width), (1...8192).contains(height), width * height <= 16_777_216,
               rgba.count == width * height * 4 else { return nil }
         guard let provider = CGDataProvider(data: Data(rgba) as CFData),
               let space = CGColorSpace(name: CGColorSpace.sRGB),
@@ -251,7 +273,7 @@ enum EditRasterCodec {
     }
 
     static func rgbaFromPNG(_ data: Data, expectW: Int, expectH: Int) -> [UInt8]? {
-        guard (1...4096).contains(expectW), (1...4096).contains(expectH),
+        guard (1...4096).contains(expectW), (1...8192).contains(expectH), expectW * expectH <= 16_777_216,
               let source = CGImageSourceCreateWithData(data as CFData, nil),
               CGImageSourceGetType(source) as String? == "public.png",
               CGImageSourceGetCount(source) == 1,
@@ -351,7 +373,7 @@ enum EditAreaPolicy {
         guard a.mw > 0, a.mh > 0, b.mw > 0, b.mh > 0,
               a.mask.count == a.mw * a.mh, b.mask.count == b.mw * b.mh,
               a.canvasW == b.canvasW, a.canvasH == b.canvasH,
-              a.mScale > 0, a.mScale == b.mScale, a.cm2PerPx == b.cm2PerPx else { return false }
+              a.mScale > 0, a.mScale == b.mScale, a.planarCalibration == b.planarCalibration, a.cm2PerPx == b.cm2PerPx else { return false }
         if a.rx0 == b.rx0 && a.ry0 == b.ry0 && a.mw == b.mw && a.mh == b.mh {
             return a.mask == b.mask
         }
@@ -367,6 +389,7 @@ enum EditAreaPolicy {
         return true
     }
     static func area(original: Double?, entry: EditRaster, current: EditRaster) -> Double? {
+        if current.planarCalibration != nil && current.areaCm2 == nil { return nil }
         if let original, sameBoundaryAndScale(entry, current) { return original }
         return current.areaCm2
     }

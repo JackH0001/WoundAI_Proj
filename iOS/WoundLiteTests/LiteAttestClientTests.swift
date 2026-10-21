@@ -2,6 +2,95 @@ import XCTest
 import CryptoKit
 @testable import WoundLite
 
+// Explicit opt-in, device-only diagnostics. Reads this app's existing pending
+// attestation without exporting a key ID, receipt, proof or nonce, and never
+// generates keys, sends network requests, or changes the persisted identity.
+#if WOUNDAI_ATTEST_READONLY_DIAGNOSTIC && !targetEnvironment(simulator)
+final class LiteAttestReadOnlyDeviceDiagnostic: XCTestCase {
+    private struct CBOR {
+        let bytes: [UInt8]
+        var offset = 0
+        mutating func read(_ depth: Int = 0) throws -> Any {
+            guard depth < 12, offset < bytes.count else { throw LiteAttestFailure.invalidState }
+            let first = bytes[offset]; offset += 1
+            let major = first >> 5, info = first & 31
+            var n = Int(info)
+            if info >= 24 {
+                guard info <= 26 else { throw LiteAttestFailure.invalidState }
+                let width = 1 << Int(info - 24)
+                guard width <= bytes.count - offset else { throw LiteAttestFailure.invalidState }
+                n = 0
+                for _ in 0..<width { n = (n << 8) | Int(bytes[offset]); offset += 1 }
+            }
+            guard n <= 100_000 else { throw LiteAttestFailure.invalidState }
+            switch major {
+            case 0: return n
+            case 1: return -1 - n
+            case 2, 3:
+                guard n <= bytes.count - offset else { throw LiteAttestFailure.invalidState }
+                let data = Data(bytes[offset..<offset+n]); offset += n
+                if major == 2 { return data }
+                guard let string = String(data: data, encoding: .utf8) else { throw LiteAttestFailure.invalidState }
+                return string
+            case 4:
+                guard n <= 32 else { throw LiteAttestFailure.invalidState }
+                return try (0..<n).map { _ in try read(depth+1) }
+            case 5:
+                guard n <= 32 else { throw LiteAttestFailure.invalidState }
+                var map: [AnyHashable: Any] = [:]
+                for _ in 0..<n {
+                    guard let key = try read(depth+1) as? AnyHashable, map[key] == nil else { throw LiteAttestFailure.invalidState }
+                    map[key] = try read(depth+1)
+                }
+                return map
+            default: throw LiteAttestFailure.invalidState
+            }
+        }
+    }
+
+    func testReadExistingPendingProofMetadataWithoutMutation() async throws {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let marker = try String(contentsOf: base.appendingPathComponent("app-attest/app-attest-install-v1"), encoding: .utf8)
+        XCTAssertTrue(LiteAttestClient.matches(marker, "[0-9a-f]{32}"))
+        let origin = "https://woundai-lite-candidate-421209514056.asia-east1.run.app"
+        let binding = origin + "\0woundlite-research-v1\0" + marker
+        let scope = SHA256.hash(data: Data(binding.utf8)).map { String(format: "%02x", $0) }.joined()
+        let vault = LiteAttestKeychain(scope: scope)
+        let loaded = try await vault.load()
+        let before = try XCTUnwrap(loaded)
+        let identity = try JSONDecoder().decode(LiteAttestClient.Identity.self, from: before)
+        XCTAssertEqual(identity.phase, "pending")
+        let proof = try XCTUnwrap(identity.attestation)
+        var outer = CBOR(bytes: Array(proof))
+        let map = try XCTUnwrap(try outer.read() as? [AnyHashable: Any])
+        XCTAssertEqual(outer.offset, proof.count)
+        let auth = try XCTUnwrap(map["authData"] as? Data)
+        XCTAssertGreaterThan(auth.count, 87)
+        let credentialSize = Int(auth[53]) << 8 | Int(auth[54])
+        XCTAssertEqual(credentialSize, 32)
+        var tail = CBOR(bytes: Array(auth.dropFirst(55 + credentialSize)))
+        _ = try tail.read() // credential public key, deliberately not exported
+        let ext = try XCTUnwrap(try tail.read() as? [AnyHashable: Any])
+        let categoryBytes = try XCTUnwrap(ext["apple_validation_category_01"] as? Data)
+        XCTAssertEqual(categoryBytes.count, 4)
+        let category = categoryBytes.enumerated().reduce(UInt32(0)) { $0 | UInt32($1.element) << (8 * $1.offset) }
+        let version = try XCTUnwrap(ext["apple_bundle_version_01"] as? String)
+        let production = Data(auth[37..<53]) == Data("appattest".utf8) + Data(repeating: 0, count: 7)
+        let after = try await vault.load()
+        XCTAssertEqual(before, after)
+        let summary: [String: Any] = ["phase": identity.phase, "production_aaguid": production,
+            "observed_launch_category": category, "observed_bundle_version": version,
+            "proof_bytes": proof.count, "identity_unchanged": before == after,
+            "signature_verified_by_this_diagnostic": false, "network_requests": 0,
+            "private_key_access": false, "authentication_material_exported": false]
+        let data = try JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys, .prettyPrinted])
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "lite-attest-safe-summary"; attachment.lifetime = .keepAlways; add(attachment)
+        try data.write(to: base.appendingPathComponent("lite-attest-safe-summary.json"), options: [.atomic, .completeFileProtection])
+    }
+}
+#endif
+
 actor AttestMemory: LiteAttestPersistence {
     var bytes: Data?
     var saves = 0
@@ -29,7 +118,10 @@ actor AttestDeviceDouble: LiteAttestDevice {
     var permission: AttestPermission?
     let key = Data(repeating: 7, count: 32).base64EncodedString()
     func supported() -> Bool { available }
-    func generateKey() -> String { generated += 1; return key }
+    func generateKey() -> String {
+        generated += 1
+        return generated == 1 ? key : Data(repeating: UInt8(7 + generated), count: 32).base64EncodedString()
+    }
     func attest(key: String, hash: Data) throws -> Data {
         attested += 1
         if failApple { failApple = false; throw LiteAttestFailure.appleTemporarilyUnavailable }
@@ -51,9 +143,19 @@ actor AttestHTTPDouble: LiteAttestTransport {
     var business: [URLRequest] = []
     var challengePurposes: [String] = []
     func purposes() -> [String] { challengePurposes }
+    func recoveryOptions(rejectChallenge: Bool = false, fixedID: String? = nil, deny: AttestPermission? = nil) {
+        self.rejectChallenge = rejectChallenge; fixedChallengeID = fixedID; denyPermissionAfterChallenge = deny
+    }
     var challenges = 0
     var failRegistration = false
     var rejectRegistration = false
+    var rejectChallenge = false
+    var omitRecoveryLineage = false
+    func omitLineage() { omitRecoveryLineage = true }
+    var wrongRecoveryLineage = false
+    func wrongLineage() { wrongRecoveryLineage = true }
+    var fixedChallengeID: String?
+    var denyPermissionAfterChallenge: AttestPermission?
     var wrongAudience = false
     var expire = false
     var delay = false
@@ -80,6 +182,12 @@ actor AttestHTTPDouble: LiteAttestTransport {
             challenges += 1; lastNonce = Data(repeating: UInt8(challenges), count: 32)
             json = ["challenge_id": String(format: "%032x", challenges), "challenge": lastNonce.base64EncodedString(),
                     "expires_at": expire ? 900 : 1120, "audience": wrongAudience ? "other" : "lite-test"]
+            if let fixedChallengeID { json["challenge_id"] = fixedChallengeID }
+            if body["purpose"] == "recover_register", !omitRecoveryLineage {
+                json["replaces_challenge_id"] = wrongRecoveryLineage ? String(repeating: "f", count: 32) : body["previous_challenge_id"]
+            }
+            if rejectChallenge { status = 401 }
+            if challenges > 1 { await denyPermissionAfterChallenge?.deny() }
         } else if url.path.hasSuffix("/attest/register") {
             registrations.append(request.httpBody!)
             if failRegistration { failRegistration = false; throw URLError(.timedOut) }
@@ -156,6 +264,162 @@ final class LiteAttestClientTests: XCTestCase {
             catch { XCTAssertEqual(error as? LiteAttestFailure, .registrationRejected) }
         }
         let counts = await device.counts(); XCTAssertEqual(counts.0, 1); XCTAssertEqual(counts.1, 1)
+    }
+
+    private func rejectedPending() async throws -> (LiteAttestClient, AttestDeviceDouble, AttestMemory, AttestHTTPDouble) {
+        let device = AttestDeviceDouble(), vault = AttestMemory(), http = AttestHTTPDouble()
+        await http.options(rejectRegistration: true)
+        let c = try client(device, vault, http)
+        do { _ = try await c.registeredInstallation(); XCTFail() }
+        catch { XCTAssertEqual(error as? LiteAttestFailure, .registrationRejected) }
+        return (c, device, vault, http)
+    }
+
+    func testExplicitRecoveryArchivesExactProofAndPreservesAuditAfterRegistration() async throws {
+        let (c, device, vault, http) = try await rejectedPending()
+        let beforeData = await vault.load()
+        let before = try JSONDecoder().decode(LiteAttestClient.Identity.self, from: XCTUnwrap(beforeData))
+        _ = try await c.recoverUnregisteredIdentity(allowRecovery: { true })
+        let afterData = await vault.load()
+        let fresh = try JSONDecoder().decode(LiteAttestClient.Identity.self, from: XCTUnwrap(afterData))
+        XCTAssertEqual(fresh.phase, "generated"); XCTAssertNil(fresh.installation)
+        XCTAssertNotEqual(fresh.key, before.key)
+        let audit = try XCTUnwrap(fresh.registrationRecoveries?.first)
+        XCTAssertEqual(audit.oldKey, before.key); XCTAssertEqual(audit.oldAttestation, before.attestation)
+        XCTAssertEqual(audit.oldChallengeID, before.challengeID)
+        XCTAssertNotEqual(audit.invalidatingChallengeID, audit.oldChallengeID)
+        let calls = await http.snapshot(); XCTAssertEqual(calls.0.count, 2)
+        XCTAssertEqual(calls.0[0], calls.0[1]); XCTAssertTrue(calls.1.isEmpty)
+        let counts = await device.counts(); XCTAssertEqual(counts.0, 2); XCTAssertEqual(counts.1, 1)
+        await http.options()
+        _ = try await c.registeredInstallation()
+        let registeredData = await vault.load()
+        let registered = try JSONDecoder().decode(LiteAttestClient.Identity.self, from: XCTUnwrap(registeredData))
+        XCTAssertEqual(registered.phase, "registered"); XCTAssertEqual(registered.registrationRecoveries, fresh.registrationRecoveries)
+        // Decoder/stored validation accepts the persisted audit after restart.
+        let restored = try await client(device, vault, http).existingInstallation()
+        XCTAssertEqual(restored, registered.installation)
+    }
+
+    func testExplicitRecoveryRecoversLostAcknowledgementWithoutNewKey() async throws {
+        let (c, device, vault, http) = try await rejectedPending()
+        await http.options()
+        let result = try await c.recoverUnregisteredIdentity(allowRecovery: { true })
+        if case .restoredExistingRegistration = result {} else { XCTFail() }
+        let counts = await device.counts(); XCTAssertEqual(counts.0, 1)
+        let calls = await http.snapshot(); XCTAssertEqual(calls.2, 1)
+        let data = await vault.load()
+        let identity = try JSONDecoder().decode(LiteAttestClient.Identity.self, from: XCTUnwrap(data))
+        XCTAssertEqual(identity.phase, "registered"); XCTAssertNil(identity.registrationRecoveries)
+    }
+
+    func testRecoveryDeniedForBoundRecordsOrWithdrawalDoesNotContactServer() async throws {
+        let (c, device, vault, http) = try await rejectedPending()
+        let before = await vault.load(), callsBefore = await http.snapshot()
+        do { _ = try await c.recoverUnregisteredIdentity(allowRecovery: { false }); XCTFail() }
+        catch { XCTAssertEqual(error as? LiteAttestFailure, .registrationRecoveryNotAllowed) }
+        let after = await vault.load(), callsAfter = await http.snapshot(), counts = await device.counts()
+        XCTAssertEqual(before, after); XCTAssertEqual(callsBefore.0.count, callsAfter.0.count); XCTAssertEqual(counts.0, 1)
+    }
+
+    func testRecoveryRejectsUnexpiredSameChallengeWithoutRotating() async throws {
+        let (c, device, vault, http) = try await rejectedPending()
+        await http.recoveryOptions(fixedID: String(format: "%032x", 1))
+        let before = await vault.load()
+        do { _ = try await c.recoverUnregisteredIdentity(allowRecovery: { true }); XCTFail() }
+        catch { XCTAssertEqual(error as? LiteAttestFailure, .registrationRecoveryNotReady) }
+        let after = await vault.load(), counts = await device.counts()
+        XCTAssertEqual(before, after); XCTAssertEqual(counts.0, 1)
+    }
+
+    func testRecoveryRejectedChallengeNeverReplacesActiveRevokedOrUnknownIdentity() async throws {
+        let (c, device, vault, http) = try await rejectedPending()
+        await http.recoveryOptions(rejectChallenge: true)
+        let before = await vault.load()
+        do { _ = try await c.recoverUnregisteredIdentity(allowRecovery: { true }); XCTFail() }
+        catch { XCTAssertEqual(error as? LiteAttestFailure, .registrationRejected) }
+        let after = await vault.load(), counts = await device.counts()
+        XCTAssertEqual(before, after); XCTAssertEqual(counts.0, 1)
+    }
+
+    func testRecoveryMissingOrWrongServerLineageNeverRotatesKey() async throws {
+        for wrong in [false, true] {
+            let (c, device, vault, http) = try await rejectedPending()
+            let before = await vault.load()
+            if wrong { await http.wrongLineage() } else { await http.omitLineage() }
+            do { _ = try await c.recoverUnregisteredIdentity(allowRecovery: { true }); XCTFail() }
+            catch { XCTAssertEqual(error as? LiteAttestFailure, .invalidResponse) }
+            let after = await vault.load(), counts = await device.counts(), purposes = await http.purposes()
+            XCTAssertEqual(before, after); XCTAssertEqual(counts.0, 1)
+            XCTAssertEqual(purposes, ["register", "recover_register"])
+        }
+    }
+    func testRecoveryTimeoutRetainsExactPendingIdentity() async throws {
+        let (c, device, vault, http) = try await rejectedPending()
+        await http.options(failRegistration: true)
+        let before = await vault.load()
+        do { _ = try await c.recoverUnregisteredIdentity(allowRecovery: { true }); XCTFail() } catch { }
+        let after = await vault.load(), counts = await device.counts()
+        XCTAssertEqual(before, after); XCTAssertEqual(counts.0, 1)
+    }
+
+    func testRecoveryRechecksConsentAfterNetworkBeforeGeneratingKey() async throws {
+        let (c, device, vault, http) = try await rejectedPending()
+        let permission = AttestPermission()
+        await http.recoveryOptions(deny: permission)
+        let before = await vault.load()
+        do { _ = try await c.recoverUnregisteredIdentity(allowRecovery: { await permission.read() }); XCTFail() }
+        catch { XCTAssertEqual(error as? LiteAttestFailure, .registrationRecoveryNotAllowed) }
+        let after = await vault.load(), counts = await device.counts()
+        XCTAssertEqual(before, after); XCTAssertEqual(counts.0, 1)
+    }
+
+    func testRecoveryWriteFailurePreservesOldProof() async throws {
+        let (c, _, vault, _) = try await rejectedPending()
+        await vault.fail(at: 4)
+        let before = await vault.load()
+        do { _ = try await c.recoverUnregisteredIdentity(allowRecovery: { true }); XCTFail() } catch { }
+        let after = await vault.load(); XCTAssertEqual(before, after)
+    }
+
+    func testRegisteredIdentityCannotBeResetByRecovery() async throws {
+        let device = AttestDeviceDouble(), vault = AttestMemory(), http = AttestHTTPDouble()
+        let c = try client(device, vault, http)
+        _ = try await c.registeredInstallation()
+        let before = await vault.load()
+        do { _ = try await c.recoverUnregisteredIdentity(allowRecovery: { true }); XCTFail() }
+        catch { XCTAssertEqual(error as? LiteAttestFailure, .registrationRecoveryNotAllowed) }
+        let after = await vault.load(), counts = await device.counts()
+        XCTAssertEqual(before, after); XCTAssertEqual(counts.0, 1)
+    }
+
+    func testRecoveryAuditSurvivesInterruptedAppleAttestationAndRestart() async throws {
+        let (c, device, vault, http) = try await rejectedPending()
+        _ = try await c.recoverUnregisteredIdentity(allowRecovery: { true })
+        let bytes = await vault.load()
+        var interrupted = try JSONDecoder().decode(LiteAttestClient.Identity.self, from: XCTUnwrap(bytes))
+        interrupted.phase = "attesting"
+        try await vault.save(JSONEncoder().encode(interrupted))
+        await http.options()
+        _ = try await client(device, vault, http).registeredInstallation()
+        let finalData = await vault.load()
+        let final = try JSONDecoder().decode(LiteAttestClient.Identity.self, from: XCTUnwrap(finalData))
+        XCTAssertEqual(final.phase, "registered")
+        XCTAssertEqual(final.registrationRecoveries, interrupted.registrationRecoveries)
+        XCTAssertNotEqual(final.key, interrupted.key)
+    }
+
+    func testInterruptedReplacementWriteFailureKeepsAuditAtomically() async throws {
+        let (c, device, vault, http) = try await rejectedPending()
+        _ = try await c.recoverUnregisteredIdentity(allowRecovery: { true })
+        let bytes = await vault.load()
+        var interrupted = try JSONDecoder().decode(LiteAttestClient.Identity.self, from: XCTUnwrap(bytes))
+        interrupted.phase = "attesting"
+        try await vault.save(JSONEncoder().encode(interrupted))
+        let before = await vault.load()
+        await vault.fail(at: 6)
+        do { _ = try await client(device, vault, http).registeredInstallation(); XCTFail() } catch { }
+        let after = await vault.load(); XCTAssertEqual(before, after)
     }
     func testWrongAudienceOrExpiredChallengeNeverAttests() async throws {
         for expired in [false, true] {

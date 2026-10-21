@@ -50,7 +50,7 @@ struct LiteHistoryView: View {
                         } header: {
                             Text("選擇傷口")
                         }
-                        Section("傷口表面積變化趨勢（cm²）") {
+                        Section("LiDAR 表面積估算趨勢（cm²）") {
                             if !woundFilter.isEmpty, woundFilter != ungrouped {
                                 LiteTrendChart(woundID: woundFilter, records: store.records)
                                 Text("只比較同一處傷口。拍攝角度、距離與圈選差異都會影響數值；變化不等於癒合判定。")
@@ -107,7 +107,8 @@ struct LiteHistoryView: View {
         HStack(spacing: 10) {
             LiteThumb(name: r.imageName, store: store)
             VStack(alignment: .leading, spacing: 2) {
-                Text(String(format: "%.2f cm²", r.surfaceCm2)).font(.headline)
+                Text(String(format: r.areaSeries == nil ? "面積紀錄 %.2f cm²" : "LiDAR %.2f cm²", r.surfaceCm2)).font(.headline)
+                Text(r.areaSeries?.rawValue ?? "量測來源待核對").font(.caption2).foregroundStyle(.secondary)
                 Text([r.woundName ?? "未分組", r.woundLocation?.label ?? "待補位置"].joined(separator: "・")).font(.caption).foregroundStyle(.secondary)
                 Text(Self.pretty(r.dateISO) + (r.source == "cloud" ? "・雲端辨識" : "・手動圈選"))
                     .font(.caption).foregroundStyle(.secondary)
@@ -185,6 +186,44 @@ private struct LiteThumb: View {
 
  以 `recordId` 對 store 即時查值而不是快照傳入——重新量測更新後，畫面跟著變。
  */
+/// Each presentation owns its baseline and accepts completion once. A dismissed editor cannot
+/// overwrite the next session or replace a successful save with an old "unchanged" notice.
+struct LiteContourEditFlow {
+    struct Session: Identifiable {
+        let id = UUID()
+        let record: LiteRecord
+        let polygons: [[[Int]]]
+    }
+    private(set) var session: Session?
+
+    mutating func begin(record: LiteRecord, fallback: [[[Int]]]) {
+        guard session == nil else { return }
+        let polygons = record.polysJson?.data(using: .utf8)
+            .flatMap { try? JSONDecoder().decode([[[Int]]].self, from: $0) } ?? fallback
+        session = Session(record: record, polygons: polygons)
+    }
+    mutating func finish(_ id: UUID) -> Session? {
+        guard let current = session, current.id == id else { return nil }
+        session = nil
+        return current
+    }
+    mutating func cancel() { session = nil }
+}
+
+struct LiteContourChangeSummary: Equatable {
+    let before: Double
+    let after: Double
+    var comparable = true
+    var text: String {
+        let old = String(format: "%.2f", before), new = String(format: "%.2f", after)
+        guard comparable else {
+            return "圈選已修正 · LiDAR 表面積估算 \(new) cm²。原值來源不同，保留但不作前後比較。"
+        }
+        return old == new ? "圈選已修正；LiDAR 表面積估算仍顯示 \(new) cm²。"
+            : "圈選已修正 · LiDAR 表面積估算 \(old) → \(new) cm²"
+    }
+}
+
 struct LiteRecordDetailView: View {
     @ObservedObject private var withdrawal = LiteWithdrawalModel.shared
     let recordId: String
@@ -192,9 +231,11 @@ struct LiteRecordDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var image: UIImage?
     @State private var polys: [[[Int]]] = []
-    @State private var editing = false
+    @State private var editFlow = LiteContourEditFlow()
+    @State private var changeSummary: LiteContourChangeSummary?
     @State private var busy = false
     @State private var note: String?
+    @State private var noteIsInformational = false
     @State private var assigningWound: LiteWoundGroup?
     @State private var assignmentSide = ""
     @State private var assignmentSite = ""
@@ -212,45 +253,44 @@ struct LiteRecordDetailView: View {
                                         imageH: img.cgImage?.height ?? 1)
                         }
                         detailCard(r)
-                        if let binding = r.cloudSync?.binding,
-                           let status = LiteWithdrawalJournal.standard.status(for: binding) {
-                            Text(status).font(.footnote).foregroundStyle(.secondary)
-                        } else {
+                        DisclosureGroup("影像與深度保存詳情") {
                             if let binding = r.cloudSync?.binding,
-                               let status = LiteStorageReceipt.message(imageStored: true, receipt: binding.storageReceipt) {
+                               let status = LiteWithdrawalJournal.standard.status(for: binding) {
+                                Text(status).font(.footnote).foregroundStyle(.secondary)
+                            } else if let binding = r.cloudSync?.binding,
+                                      let status = LiteStorageReceipt.message(imageStored: true, receipt: binding.storageReceipt) {
                                 Text(status).font(.footnote).foregroundStyle(.secondary)
                             }
-                            Text(r.cloudSyncDescription).font(.footnote).foregroundStyle(.secondary)
                         }
-                        if r.cloudSync != nil, (r.manuallyConfirmed == true || (r.manuallyConfirmed == false && r.source == "cloud")) {
-                            Button(store.syncingRecordIDs.contains(recordId) ? "同步確認中…" : "檢查並同步修改") {
-                                Task { await store.syncRevision(recordID: recordId) }
-                            }
-                            .disabled(busy || store.syncingRecordIDs.contains(recordId) || withdrawal.blocksUploads || LitePrefs.researchConsent != true)
-                            if LitePrefs.researchConsent != true {
-                                Text("研究上傳已關閉，修改只存於此裝置。").font(.caption)
-                            }
-                        }
-                        if busy {
-                            HStack(spacing: 8) { ProgressView(); Text("重新計算中…").font(.footnote) }
-                        }
-                        if let n = note {
-                            Text(n).font(.footnote)
-                                .padding(10).frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color.orange.opacity(0.15)).cornerRadius(8)
-                        }
-                        if r.depthName != nil, image != nil {
-                            Button("修正圈選・重新量測") { editing = true }
-                                .buttonStyle(.bordered)
-                                .disabled(busy)
-                        } else {
-                            Text("此筆沒有深度側檔（舊版儲存），僅供檢視，無法重新量測。")
-                                .font(.caption2).foregroundStyle(.secondary)
+                        if r.depthName == nil {
+                            Text("此筆沒有可供重新量測的影像或深度資料，原紀錄保留。")
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                     }
                     .padding()
                 } else {
                     Text("紀錄不存在").padding()
+                }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if let r = record {
+                    LiteRevisionActionCard(
+                        status: LiteRevisionPresentation.make(record: r,
+                            syncing: store.syncingRecordIDs.contains(recordId),
+                            consent: LitePrefs.researchConsent == true,
+                            withdrawalBlocked: withdrawal.blocksUploads),
+                        calculating: busy, change: changeSummary,
+                        note: note, noteIsInformational: noteIsInformational,
+                        canEdit: r.depthName != nil && image != nil,
+                        syncAllowed: r.cloudSync != nil && LitePrefs.researchConsent == true && !withdrawal.blocksUploads,
+                        onEdit: {
+                            note = nil; noteIsInformational = false; changeSummary = nil
+                            editFlow.begin(record: r, fallback: polys)
+                        },
+                        onRetry: {
+                            note = nil
+                            Task { await store.syncRevision(recordID: recordId) }
+                        })
                 }
             }
             .navigationTitle("量測紀錄")
@@ -282,16 +322,19 @@ struct LiteRecordDetailView: View {
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { assigningWound = nil } } }
             }
         }
-        .fullScreenCover(isPresented: $editing) {
+        .fullScreenCover(item: Binding(get: { editFlow.session }, set: { value in
+            if value == nil { editFlow.cancel() }
+        })) { session in
             if let img = image {
-                WoundEditView(image: img, initialPolygons: polys, originalArea: nil,
+                WoundEditView(image: img, initialPolygons: session.polygons, originalArea: nil,
                               tissueFrac: [:], exudate: nil, mmPerPx: nil, resume: nil,
                               wbGains: nil, boundaryOnly: true,
-                              onCancel: { editing = false },
+                              onCancel: { _ = editFlow.finish(session.id) },
                               onDone: { _, all, iou, _, _, _ in
-                                  editing = false
-                                  applyEdited(all, correctionIoU: iou)
+                                  guard let baseline = editFlow.finish(session.id) else { return }
+                                  applyEdited(all, correctionIoU: iou, baseline: baseline)
                               })
+                    .id(session.id)
             }
         }
     }
@@ -322,11 +365,19 @@ struct LiteRecordDetailView: View {
             .disabled(busy)
             Text(r.woundLocation?.label ?? "位置尚未填寫，可由上方分組選單補齊。")
                 .font(.footnote).foregroundStyle(.secondary)
-            Text(String(format: "傷口面積：%.2f cm²", r.surfaceCm2)).font(.title3).bold()
-            Text("（LiDAR 輔助表面積估算）").font(.caption).foregroundStyle(.secondary)
-            Text(String(format: "投影面積 %.2f cm²（平面對照）", r.projectedCm2)).font(.footnote)
-            if let v = r.volumeMl, let md = r.maxDepthMm {
-                Text(String(format: "估算參考：容積約 %.2f mL・最深約 %.1f mm（相對周邊皮膚擬合面）", v, md)).font(.footnote)
+            Text(String(format: r.areaSeries == nil ? "面積紀錄：%.2f cm²" : "LiDAR 表面積估算：%.2f cm²", r.surfaceCm2)).font(.title3).bold()
+            Text(r.areaSeries?.rawValue ?? "量測來源待核對，不納入趨勢").font(.caption).foregroundStyle(.secondary)
+            Text(String(format: r.areaSeries == nil ? "另一面積紀錄 %.2f cm²（來源待核對）" : "相機方向投影估算 %.2f cm²（不同於表面積）", r.projectedCm2)).font(.footnote)
+            LiteVolumeReferenceView(volume: r.volumeMl, depth: r.maxDepthMm)
+            if let context = r.measurementContext {
+                ForEach(context.warnings, id: \.self) { Text("⚠ " + $0).font(.caption).foregroundStyle(.orange) }
+                Text(context.isKnownSurface
+                     ? "影像與深度通過資料對應檢查，不代表已完成實物精度驗證。"
+                     : "這筆量測的來源版本目前無法核對，保留原值供檢視，不納入趨勢。")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text("舊版紀錄保留原數值；當時的完整品質資訊未記錄，不與本版量測連成同一條趨勢。")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             NavigationLink("精確度與限制") { LiteMeasurementInfoView() }
             if let t = r.tiltDeg {
@@ -359,24 +410,42 @@ struct LiteRecordDetailView: View {
     }
 
     /// 修正圈選完成：讀回深度側檔 → 背景重算 → 品質過閘才覆寫紀錄。
-    private func applyEdited(_ all: [[[Int]]], correctionIoU: Double?) {
-        guard correctionIoU != 1 || polys.isEmpty else {
-            note = "圈選範圍未變更，保留原量測與來源。"
+    private func applyEdited(_ all: [[[Int]]], correctionIoU: Double?, baseline: LiteContourEditFlow.Session) {
+        guard correctionIoU != 1 || baseline.polygons.isEmpty else {
+            noteIsInformational = true
+            note = "本次未新增圈選修改；原紀錄與同步狀態保持不變。"
             return
         }
-        guard let original = record, let name = original.depthName, let img = image else { return }
+        noteIsInformational = false
+        guard let original = record, let name = original.depthName, let img = image,
+              original.polysJson == baseline.record.polysJson,
+              original.imageName == baseline.record.imageName,
+              original.depthName == baseline.record.depthName else {
+            note = "編輯期間原紀錄已變更，未覆寫。請關閉此頁後重新開啟核對。"
+            return
+        }
         guard let d = store.loadDepth(name, matchingImage: original.imageName) else {
             note = "照片或深度資料不完整或不相符，未更新紀錄。請保留原紀錄並重新拍攝。"
             return
         }
         let iw = img.cgImage?.width ?? 1
         let ih = img.cgImage?.height ?? 1
-        guard d.matchesImageAspect(width: iw, height: ih) else {
-            note = "這筆舊紀錄的照片與深度方向不相符，無法可靠重新計算。原紀錄保留；請重新拍攝。"
+        guard d.geometryIssue(imageW: iw, imageH: ih, requireOrientation: true) == nil else {
+            note = "這筆紀錄的影像、深度或方向資訊無法完整核對，未重新計算。原紀錄保留；新量測請重新拍攝。"
             return
         }
         let picked = LiteMeasureVM.centerWound(all, w: iw, h: ih)
-        guard !picked.isEmpty else { return }
+        guard !picked.isEmpty else {
+            note = "未取得有效圈選，原紀錄保留。請重新確認圈選範圍。"
+            return
+        }
+        // Raster edits can be outside the selected component or disappear during contour
+        // simplification. Do not claim a saved revision when the retained contour is identical.
+        guard picked != baseline.polygons else {
+            noteIsInformational = true
+            note = "保留的圈選輪廓與原紀錄相同，未建立新修訂；原同步狀態保持不變。"
+            return
+        }
         busy = true
         note = nil
         Task {
@@ -391,11 +460,13 @@ struct LiteRecordDetailView: View {
                 note = "修正圈選後品質不足，未更新紀錄。\(v.blocker ?? "")"
                 return
             }
-            guard var r = record, r.imageName == original.imageName, r.depthName == original.depthName else {
+            guard var r = record, r.imageName == original.imageName, r.depthName == original.depthName,
+                  r.polysJson == original.polysJson else {
                 note = "原紀錄已變更或移除，未覆寫。"
                 return
             }
             r.manuallyConfirmed = true
+            r.measurementContext = LiteMeasurementContext(depth: d, result: est, warnings: v.warnings)
             r.source = "manual"
             r.surfaceCm2 = est.surfaceAreaCm2
             r.projectedCm2 = est.projectedAreaCm2
@@ -407,7 +478,9 @@ struct LiteRecordDetailView: View {
                 .flatMap { String(data: $0, encoding: .utf8) }
             guard store.update(r) else { note = store.storageError; return }
             polys = picked
-            note = "✓ 已依新輪廓更新此筆本機紀錄。"
+            changeSummary = LiteContourChangeSummary(before: original.surfaceCm2, after: r.surfaceCm2,
+                comparable: original.areaSeries != nil && original.areaSeries == r.areaSeries)
+            note = nil
             await store.syncRevision(recordID: recordId)
         }
     }
@@ -420,14 +493,104 @@ struct LiteRecordDetailView: View {
     }
 }
 
+/// Fixed beside the actions: local persistence and cloud acknowledgement are separate facts.
+/// Acknowledged records have no upload button. Only unfinished work offers retry.
+struct LiteRevisionActionCard: View {
+    let status: LiteRevisionPresentation
+    var calculating = false
+    var change: LiteContourChangeSummary? = nil
+    var note: String? = nil
+    var noteIsInformational = false
+    var canEdit = true
+    var syncAllowed = true
+    let onEdit: () -> Void
+    let onRetry: () -> Void
+
+    private var active: Bool { calculating || status.phase == .syncing }
+    private var statusColor: Color {
+        switch status.phase {
+        case .synced: return .green
+        case .failed, .unavailable: return .orange
+        default: return .blue
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if calculating {
+                HStack { ProgressView(); Text("正在依新圈選計算面積…").font(.headline) }
+                Text("完成計算並保存後，會自動同步已同意上傳的修改。")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Label("本機紀錄已保存", systemImage: "checkmark.circle.fill")
+                    .font(.subheadline).bold()
+                if let change {
+                    Text(change.text).font(.subheadline).bold()
+                        .accessibilityIdentifier("lite.revision.areaChange")
+                }
+                HStack(alignment: .top, spacing: 8) {
+                    if status.phase == .syncing { ProgressView() }
+                    else {
+                        Image(systemName: status.phase == .synced ? "checkmark.icloud.fill" : "icloud")
+                            .foregroundStyle(statusColor)
+                    }
+                    Text(status.title).font(.headline).foregroundStyle(statusColor)
+                        .accessibilityIdentifier("lite.revision.status")
+                }
+                Text(status.detail).font(.caption).foregroundStyle(.secondary)
+            }
+            if let note {
+                Text(note).font(.caption)
+                    .foregroundStyle(noteIsInformational ? Color.secondary : Color.orange)
+                    .accessibilityIdentifier("lite.revision.notice")
+            }
+            if !active, let retry = status.retryTitle {
+                Button(action: onRetry) {
+                    Label(retry, systemImage: "arrow.clockwise.icloud")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("lite.revision.retry")
+            }
+            if canEdit {
+                Button(action: onEdit) {
+                    Label("修正圈選並更新紀錄", systemImage: "pencil.tip.crop.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(active)
+                .accessibilityIdentifier("lite.revision.edit")
+                if !active {
+                    Text(syncAllowed ? "完成圈選後自動保存並同步修改。" : "完成圈選後保存於此手機。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial)
+        .overlay(alignment: .top) { Divider() }
+        .accessibilityElement(children: .contain)
+    }
+}
+
 /// 單一已指定傷口的表面積折線；水平軸為紀錄順序，不代表等距日期。
 struct LiteTrendChart: View {
     let woundID: String
     let records: [LiteRecord]
+    @State private var selectedSeries: LiteAreaSeries?
 
     var body: some View {
-        let points = LiteWoundTrend.points(woundID: woundID, records: records)
+        let available = LiteAreaSeries.allCases.filter { series in records.contains { $0.woundID == woundID && $0.areaSeries == series } }
+        let series = selectedSeries.flatMap { available.contains($0) ? $0 : nil } ?? available.first
+        let points = LiteWoundTrend.points(woundID: woundID, records: records, series: series)
         VStack(alignment: .leading, spacing: 12) {
+            if available.count > 1 {
+                Picker("比較的面積紀錄", selection: Binding(get: { series }, set: { selectedSeries = $0 })) {
+                    ForEach(available) { Text($0.rawValue).tag(Optional($0)) }
+                }
+                Text("本版與舊版紀錄分開比較，原有數值保留。").font(.caption).foregroundStyle(.secondary)
+            }
             if let latest = points.last {
                 Text("最近一次：\(latest.area, specifier: "%.2f") cm²")
                     .font(.headline)

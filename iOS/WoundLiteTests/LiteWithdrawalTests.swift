@@ -181,6 +181,159 @@ final class LiteWithdrawalJournalTests: XCTestCase {
         await model.request(server:server)
         XCTAssertTrue(model.blocksUploads); XCTAssertFalse(model.finished); XCTAssertNotNil(model.message)
     }
+    func testMissingIdentityExplanationSurvivesRestartWithoutChangingWithdrawal() async throws {
+        let model = LiteWithdrawalModel(journal:journal, stopUploads:{}, owner:{ _ in nil }, send:{ _,_ in XCTFail(); return .liveMediaRemoved })
+        await model.request(server:server)
+        let bytes = try Data(contentsOf:journal.url)
+        let reopened = LiteWithdrawalModel(journal:journal, stopUploads:{ XCTFail() },
+            owner:{ _ in XCTFail(); return nil }, send:{ _,_ in XCTFail(); return .liveMediaRemoved })
+        XCTAssertEqual(reopened.statusTitle, "撤回對象尚未確認")
+        XCTAssertTrue(reopened.message?.contains("未取得雲端撤回收據") == true)
+        XCTAssertTrue(reopened.blocksUploads); XCTAssertFalse(reopened.finished)
+        XCTAssertNil(reopened.record?.owner)
+        XCTAssertEqual(try Data(contentsOf:journal.url), bytes)
+    }
+    private func cancellationModel(existingOwner: String? = nil) -> LiteWithdrawalModel {
+        LiteWithdrawalModel(journal: journal, stopUploads: { XCTFail("Must not change consent implicitly") },
+            owner: { origin in XCTAssertEqual(origin, self.server); return existingOwner },
+            send: { _,_ in XCTFail("Cancellation must never send deletion"); return .pending })
+    }
+    func testExplicitUnsentCancellationPreservesExactLegacyRequestAndConsentAudit() async throws {
+        // A legacy request has no time. Preserve the fact that it was not recorded.
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let original = Data(#"{"phase":"pending","server":"https://lite.invalid"}"#.utf8)
+        try original.write(to: journal.url)
+        let model = cancellationModel()
+        let before = Date()
+        let success = await model.reconsentUnsentWithdrawal(server: server,
+            consentVersion: LitePrefs.consentVersion, hasBoundRecords: { false })
+        XCTAssertTrue(success); XCTAssertFalse(model.blocksUploads)
+        let current = try XCTUnwrap(journal.load())
+        XCTAssertNil(current.owner); XCTAssertNil(current.requestedAt)
+        let auditPath = try folder.appendingPathComponent("history/" + XCTUnwrap(current.cancellationAudit) + ".json")
+        let auditBytes = try Data(contentsOf: auditPath)
+        let audit = try XCTUnwrap(JSONSerialization.jsonObject(with: auditBytes) as? [String:Any])
+        XCTAssertEqual(Data(base64Encoded: try XCTUnwrap(audit["previousRequest"] as? String)), original)
+        XCTAssertEqual(audit["consentVersion"] as? String, LitePrefs.consentVersion)
+        XCTAssertEqual(audit["renewalDisclosureVersion"] as? String, LiteWithdrawalJournal.renewalDisclosureVersion)
+        let date = Date(timeIntervalSinceReferenceDate: try XCTUnwrap(audit["at"] as? Double))
+        XCTAssertGreaterThanOrEqual(date, before)
+        let restarted = cancellationModel()
+        XCTAssertTrue(restarted.cancelledBeforeSubmission); XCTAssertFalse(restarted.blocksUploads)
+        XCTAssertFalse(restarted.mayReviewUnsentCancellation)
+        XCTAssertEqual(try Data(contentsOf: auditPath), auditBytes)
+    }
+    func testCancellationRejectsKnownOwnerBoundDataWrongServiceAndUnreadableIndex() async throws {
+        for scenario in 0..<5 {
+            let original = LiteWithdrawalRecord(server: server, owner: scenario == 0 ? owner : nil)
+            try journal.save(original)
+            let bytes = try Data(contentsOf: journal.url)
+            let model = cancellationModel(existingOwner: scenario == 1 ? owner : nil)
+            let success = await model.reconsentUnsentWithdrawal(server: scenario == 3 ? "https://other.invalid" : server,
+                consentVersion: LitePrefs.consentVersion, hasBoundRecords: {
+                    if scenario == 4 { throw LiteWithdrawalFailure.invalidState }
+                    return scenario == 2
+                })
+            XCTAssertFalse(success); XCTAssertTrue(model.blocksUploads)
+            XCTAssertEqual(try Data(contentsOf: journal.url), bytes)
+        }
+    }
+    func testIdentityReadFailureKeepsWithdrawalAndDoesNotEnroll() async throws {
+        try journal.save(LiteWithdrawalRecord(server: server))
+        let bytes = try Data(contentsOf: journal.url)
+        let model = LiteWithdrawalModel(journal: journal, stopUploads: { XCTFail() },
+            owner: { _ in throw LiteAttestFailure.invalidRequest }, send: { _,_ in XCTFail(); return .pending })
+        let success = await model.reconsentUnsentWithdrawal(server: server,
+            consentVersion: LitePrefs.consentVersion, hasBoundRecords: { false })
+        XCTAssertFalse(success); XCTAssertTrue(model.blocksUploads)
+        XCTAssertEqual(try Data(contentsOf: journal.url), bytes)
+    }
+    func testCancellationRechecksJournalAndBindingsAfterIdentityLookup() async throws {
+        for changeJournal in [false,true] {
+            try journal.save(LiteWithdrawalRecord(server: server))
+            var identityChecked = false
+            let model = LiteWithdrawalModel(journal: journal, stopUploads: { XCTFail() }, owner: { _ in
+                identityChecked = true
+                if changeJournal { try self.journal.save(LiteWithdrawalRecord(server: self.server, owner: self.owner)) }
+                return nil
+            }, send: { _,_ in XCTFail(); return .pending })
+            let success = await model.reconsentUnsentWithdrawal(server: server,
+                consentVersion: LitePrefs.consentVersion, hasBoundRecords: { !changeJournal && identityChecked })
+            XCTAssertFalse(success); XCTAssertTrue(model.blocksUploads)
+            XCTAssertEqual(try journal.load()?.phase, .pending)
+        }
+    }
+    func testCompletedWithdrawalCannotBeCancelledLocally() async throws {
+        try journal.save(LiteWithdrawalRecord(server: server, owner: owner, phase: .liveMediaRemoved))
+        let bytes = try Data(contentsOf: journal.url)
+        let model = cancellationModel()
+        let success = await model.reconsentUnsentWithdrawal(server: server,
+            consentVersion: LitePrefs.consentVersion, hasBoundRecords: { false })
+        XCTAssertFalse(success); XCTAssertTrue(model.blocksUploads); XCTAssertTrue(model.finished)
+        XCTAssertEqual(try Data(contentsOf: journal.url), bytes)
+    }
+    func testMissingOrCorruptedCancellationAuditBlocksUploads() async throws {
+        try journal.save(LiteWithdrawalRecord(server: server))
+        let model = cancellationModel()
+        let success = await model.reconsentUnsentWithdrawal(server: server,
+            consentVersion: LitePrefs.consentVersion, hasBoundRecords: { false })
+        XCTAssertTrue(success)
+        let current = try XCTUnwrap(journal.load())
+        let path = try folder.appendingPathComponent("history/" + XCTUnwrap(current.cancellationAudit) + ".json")
+        let original = try Data(contentsOf: path)
+        var data = try XCTUnwrap(JSONSerialization.jsonObject(with: original) as? [String:Any])
+        data["previousSHA256"] = "wrong"
+        try JSONSerialization.data(withJSONObject: data).write(to: path)
+        XCTAssertTrue(cancellationModel().blocksUploads)
+        try original.write(to: path)
+        XCTAssertFalse(cancellationModel().blocksUploads)
+        try FileManager.default.removeItem(at: path)
+        XCTAssertTrue(cancellationModel().blocksUploads)
+    }
+    func testUnsentCancellationRejectsOldConsentVersionAndArchiveWriteFailure() async throws {
+        try journal.save(LiteWithdrawalRecord(server: server))
+        let bytes = try Data(contentsOf: journal.url)
+        let model = cancellationModel()
+        let obsolete = await model.reconsentUnsentWithdrawal(server: server,
+            consentVersion: "old", hasBoundRecords: { false })
+        XCTAssertFalse(obsolete); XCTAssertEqual(try Data(contentsOf: journal.url), bytes)
+        try Data([0]).write(to: folder.appendingPathComponent("history"))
+        let failed = await model.reconsentUnsentWithdrawal(server: server,
+            consentVersion: LitePrefs.consentVersion, hasBoundRecords: { false })
+        XCTAssertFalse(failed); XCTAssertTrue(model.blocksUploads)
+        XCTAssertEqual(try Data(contentsOf: journal.url), bytes)
+    }
+    func testNewExplicitWithdrawalRetainsCancelledRequestAudit() async throws {
+        try journal.save(LiteWithdrawalRecord(server: server))
+        let model = cancellationModel()
+        let success = await model.reconsentUnsentWithdrawal(server: server,
+            consentVersion: LitePrefs.consentVersion, hasBoundRecords: { false })
+        XCTAssertTrue(success)
+        let current = try XCTUnwrap(journal.load())
+        let path = try folder.appendingPathComponent("history/" + XCTUnwrap(current.cancellationAudit) + ".json")
+        let bytes = try Data(contentsOf: path)
+        var stopped = false
+        let fresh = LiteWithdrawalModel(journal: journal, stopUploads: { stopped = true },
+            owner: { _ in self.owner }, send: { _,_ in
+                XCTAssertTrue(stopped); XCTAssertTrue(self.journal.blocksUploads); return .liveMediaRemoved
+            })
+        await fresh.request(server: server)
+        XCTAssertTrue(fresh.finished); XCTAssertTrue(fresh.blocksUploads)
+        XCTAssertNil(fresh.record?.cancellationAudit); XCTAssertNotNil(fresh.record?.requestedAt)
+        XCTAssertEqual(try Data(contentsOf: path), bytes)
+    }
+    func testBindingCheckPreservesLegacyServiceIsolationAndFailsOnMalformedOrigin() throws {
+        var r = LiteRecord(id: "test", dateISO: "2026-10-21", surfaceCm2: 1, projectedCm2: 1,
+            quality: "ok", imageName: "unused", source: "cloud")
+        XCTAssertFalse(try LiteWithdrawalModel.hasBoundRecords([r], server: server))
+        r.cloudSync = LiteCloudSyncState(binding: LiteCloudBinding(server: "https://old.invalid",
+            anonID: owner, imageID: "unused", imageW: 10, imageH: 10))
+        XCTAssertFalse(try LiteWithdrawalModel.hasBoundRecords([r], server: server))
+        r.cloudSync?.binding.server = "https://LITE.invalid:443/"
+        XCTAssertTrue(try LiteWithdrawalModel.hasBoundRecords([r], server: server))
+        r.cloudSync?.binding.server = "not-an-origin"
+        XCTAssertThrowsError(try LiteWithdrawalModel.hasBoundRecords([r], server: server))
+    }
     func testCorruptJournalFailsClosedAndCannotOverwriteOrSend() async throws {
         try FileManager.default.createDirectory(at:folder, withIntermediateDirectories:true)
         try Data("corrupt".utf8).write(to:journal.url)

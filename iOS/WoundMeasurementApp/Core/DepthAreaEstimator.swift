@@ -10,22 +10,18 @@ import UniformTypeIdentifiers
  交叉驗證過 34 項）：
 
  - **表面積**：每個深度格點反投影成 3D 點（X=(u−cx)Z/fx），相鄰四點拆兩個三角形，
-   面積取 3D 三角形面積和。**斜面／曲面因此不會被低估**——這是比 ArUco 平面假設
-   更真的地方，也是免貼紙版的立足點。
- - **投影面積**：Σ (Z/fx)(Z/fy)，供與 ArUco 值對照（ArUco 量的本質上是投影面積）。
- - **體積**：傷口環外健康皮膚擬合基準面，Σ max(0, Z_表面 − Z_基準)×格點腳印。
+   面積取 3D 三角形面積和。結果依賴深度的真實起伏；公式正確不保證感測準確。
+ - **投影面積**：Σ (Z/fx)(Z/fy)，相機方向的近似投影；不是 ArUco 貼紙平面的面積。
+ - **體積**：指定參考點擬合 3D 平面（逆深度），以原始深度沿相機射線積分；凹陷與凸起分開。
    參考值等級——潛行與隧道單視角量不到，這裡不假裝量得到。
 
- ## 誤差預算（為什麼敢說「約 5%」要靠實測）
-
- 面積 ∝ Z²：LiDAR 近距 ~1% 深度誤差 → ~2% 面積；分割邊界 1.5–3%；
- 內參 <0.5%。合計 3–5% 是**平面～中曲面、25–40cm、傷口 ≥2cm** 的預期，
- 小傷口與濕亮面會更差。行銷數字等 phantom 誤差表，不先承諾。
+ 工程模擬只驗證幾何計算；實拍精度需獨立真值驗證。不得以覆蓋率、
+ 感測器 confidence 或數字小數位推論醫療精度。
  */
 struct DepthAreaResult {
     /// 三角化 3D 表面積（cm²）。
     var surfaceAreaCm2: Double
-    /// 投影面積（cm²），與 ArUco 同語意，供對照。
+    /// 相機方向近似投影面積（cm²），不同於貼紙平面校正面積。
     var projectedAreaCm2: Double
     /// 相對基準面的研究容積（mL）。基準面失敗或遮罩內深度缺值為 nil。
     var volumeMl: Double?
@@ -37,6 +33,8 @@ struct DepthAreaResult {
     var medianDistanceM: Double
     /// 表面相對光軸的傾角（度，來自環帶平面擬合）。>25° 建議改近正拍。
     var tiltDeg: Double?
+    /// Shared native-grid diagnostics; not a validated clinical volume.
+    var referenceVolume: DepthReferenceVolume.Result? = nil
 
     /// Gross disagreement screen, not an accuracy certification. Either scale
     /// may be wrong; never rescale the raw depth to force agreement with a marker.
@@ -58,8 +56,11 @@ enum DepthAreaEstimator {
      */
     static func estimate(polygons: [[[Int]]], depth: DepthCapture,
                          imageW: Int, imageH: Int,
-                         smoothMm: Double = 8) -> DepthAreaResult? {
+                         smoothMm: Double = 8,
+                         normalReferenceMask: [Bool]? = nil) -> DepthAreaResult? {
         let dw = depth.width, dh = depth.height
+        guard depth.geometryIssue(imageW: imageW, imageH: imageH) == nil,
+              DepthCapture.polygonsFit(polygons, width: imageW, height: imageH) else { return nil }
         guard dw >= 8, dh >= 8, imageW > 0, imageH > 0,
               dw <= 4096, dh <= 4096, depth.map.count == dw * dh,
               depth.matchesImageAspect(width: imageW, height: imageH),
@@ -107,9 +108,7 @@ enum DepthAreaEstimator {
         var valid = z.map { $0.isFinite && $0 > 0.05 && $0 < 5.0 }
         // Volume uses only captured observations. Surface denoising and hole filling
         // must not flatten the cavity or move its reference rim. Copy-on-write keeps
-        // this input separate; DepthCapture.map and upload bytes remain untouched.
-        let volumeZ = z
-        let volumeValid = valid
+        // the original map separate; DepthCapture.map and upload bytes remain untouched.
         var inMaskValid = 0, inMaskTotal = 0
         var distances: [Double] = []
         for i in 0..<(dw * dh) where frac[i] > 0 {
@@ -193,72 +192,28 @@ enum DepthAreaEstimator {
             }
         }
 
-        // 體積：環帶（遮罩外 2–6 格）擬合基準面 Z=au+bv+c，正深度積分。
-        var volume: Double? = nil
-        var maxDepthMm: Double? = nil
-        var tiltOut: Double? = nil
-        var su = 0.0, sv = 0.0, sz = 0.0, suu = 0.0, svv = 0.0, suv = 0.0, suz = 0.0, svz = 0.0
-        var rn = 0
-        for y in 0..<dh { for x in 0..<dw {
-            let i = y * dw + x
-            guard frac[i] == 0, volumeValid[i] else { continue }
-            // 距遮罩 2–6 格的環帶
-            var near = false, far = true
-            for dy in -6...6 { for dx in -6...6 {
-                let nx = x + dx, ny = y + dy
-                guard nx >= 0, nx < dw, ny >= 0, ny < dh else { continue }
-                if frac[ny * dw + nx] > 0 {
-                    let d2 = dx * dx + dy * dy
-                    if d2 <= 36 { near = true }
-                    if d2 < 4 { far = false }
-                }
-            } }
-            guard near, far else { continue }
-            let u = Double(x), v = Double(y), Z = volumeZ[i]
-            su += u; sv += v; sz += Z
-            suu += u*u; svv += v*v; suv += u*v; suz += u*Z; svz += v*Z
-            rn += 1
-        } }
-        if rn >= 12 {
-            // 3×3 正規方程求 (a,b,c)
-            let n = Double(rn)
-            let d = suu*(svv*n - sv*sv) - suv*(suv*n - sv*su) + su*(suv*sv - svv*su)
-            if abs(d) > 1e-9 {
-                let a = (suz*(svv*n - sv*sv) - suv*(svz*n - sv*sz) + su*(svz*sv - svv*sz)) / d
-                let b = (suu*(svz*n - sv*sz) - suz*(suv*n - sv*su) + su*(suv*sz - svz*su)) / d
-                let c = (suu*(svv*sz - svz*sv) - suv*(suv*sz - svz*su) + suz*(suv*sv - svv*su)) / d
-                var vol = 0.0, dmax = 0.0
-                for y in 0..<dh { for x in 0..<dw {
-                    let i = y * dw + x
-                    guard frac[i] > 0, volumeValid[i] else { continue }
-                    let planeZ = a * Double(x) + b * Double(y) + c
-                    let dep = volumeZ[i] - planeZ               // 傷口面比皮膚遠＝凹陷
-                    if dep > 0 {
-                        let Z = volumeZ[i]
-                        vol += frac[i] * dep * (Z / fx) * (Z / fy)
-                        if dep > dmax { dmax = dep }
-                    }
-                } }
-                // Missing cavity observations cannot establish the complete volume
-                // or deepest point. Keep the area/coverage result, but do not invent
-                // these measurements from interpolated pixels.
-                if inMaskValid == inMaskTotal {
-                    volume = vol * 1e6      // m³ → mL
-                    maxDepthMm = dmax * 1e3
-                }
-                let tu = a * fx / max(1e-9, medianZ)   // dZ/du ÷ (dX/du=Z/fx)
-                let tv = b * fy / max(1e-9, medianZ)
-                tiltOut = atan((tu * tu + tv * tv).squareRoot()) * 180 / .pi
-            }
+        // Reference selection and integration remain on the original native grid.
+        // Caller-selected masks are explicit diagnostics, never inferred healthy skin.
+        let reference = normalReferenceMask ?? (try? DepthReferenceVolume.separatedReferenceMask(
+            width: dw, height: dh, roiWeights: frac)) ?? [Bool](repeating: false,count: dw*dh)
+        let diagnostic = try? DepthReferenceVolume.estimate(
+            metres: depth.map, width: dw, height: dh,
+            intrinsics: .init(fx: fx, fy: fy, cx: cx, cy: cy),
+            roiWeights: frac, referenceMask: reference,
+            source: normalReferenceMask == nil ? .automaticRing : .rgbSelectedNormal,
+            minimumReferenceDistance: DepthReferenceVolume.recommendedReferenceClearance(width: dw,height: dh))
+        let tiltOut = diagnostic.map { r in
+            let c = r.inverseDepthPlane
+            return atan2(hypot(c[0], c[1]), abs(c[2])) * 180 / .pi
         }
 
         return DepthAreaResult(surfaceAreaCm2: surface * 1e4,
                                projectedAreaCm2: projected * 1e4,
-                               volumeMl: volume,
-                               maxDepthMm: maxDepthMm,
+                               volumeMl: diagnostic?.deficitMl,
+                               maxDepthMm: diagnostic?.maxDeficitMm,
                                coverage: coverage,
                                medianDistanceM: medianZ,
-                               tiltDeg: tiltOut)
+                               tiltDeg: tiltOut, referenceVolume: diagnostic)
     }
 
     // MARK: - 上傳編碼（契約 docs/depth_capture_contract.md：png16_mm，0＝無效）

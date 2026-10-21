@@ -104,4 +104,35 @@ final class TissueEditCountTests: XCTestCase {
             tissueRaster: invalid, consentTrain: true, doctorVerified: true))
         try payload.write(to: FileManager.default.temporaryDirectory.appendingPathComponent("tissue-reedit-contract-ios.json"))
     }
+
+    @MainActor
+    func testLargeMaskFallbackIsAutomaticAndBaselineSurvivesPNGReopen() async throws {
+        let f=UIGraphicsImageRendererFormat();f.scale=1
+        let image=UIGraphicsImageRenderer(size:CGSize(width:1200,height:1000),format:f).image { c in
+            UIColor.orange.setFill();c.fill(CGRect(x:0,y:0,width:1200,height:1000))
+        }
+        let poly=[[[121,123],[1067,181],[921,893],[210,751]]]
+        let m=EditCanvasModel(image:image,initialPolygons:poly,originalArea:nil,tissueFrac:[:],mmPerPx:nil,resume:nil,wbGains:nil)
+        await m.runSeed()
+        var r=try XCTUnwrap(m.finish()).raster
+        XCTAssertEqual(r.tissueEditedPx,0,"Downsampling holes filled automatically must not become human edits")
+        XCTAssertNotNil(r.autoBaseline)
+        let i=try XCTUnwrap(r.mask.indices.first { r.mask[$0] != 0 })
+        r.tissue[i] = r.tissue[i] == 3 ? 1 : 3; r.tissueEditedPx=1
+        r.planarCalibration=PlanarAreaCalibration(version:1,status:"accepted",reason:"test",h:[1,0,0,0,1,0,0,0,1],bounds:[-1,-1,1200,1000],corner_error_px:0.5,relative_sensitivity:0.02,profile:"woundai-a4-coplanar-v1",marker_ids:[40,41,42,43],reprojection_rms_px:0.25,holdout_max_px:1.2)
+        let encoded=try XCTUnwrap(EditRasterCodec.encode(r))
+        let restored=try XCTUnwrap(EditRasterCodec.decode(png:encoded.0,meta:encoded.1,canvasW:1200,canvasH:1000))
+        XCTAssertEqual(restored.autoBaseline,r.autoBaseline)
+        XCTAssertEqual(restored.planarCalibration,r.planarCalibration)
+        let reopened=EditCanvasModel(image:image,initialPolygons:poly,originalArea:nil,tissueFrac:[:],mmPerPx:nil,resume:restored,wbGains:[2,0.5,1])
+        await reopened.runSeed()
+        XCTAssertEqual(reopened.finish()?.raster.tissueEditedPx,1,"Reclassification must not replace a historical baseline")
+        XCTAssertEqual(reopened.finish()?.raster.tissue,r.tissue)
+    }
+    @MainActor
+    func testLegacyBaselineIsUnknownRatherThanInvented() async throws {
+        let m=await editor();var r=try XCTUnwrap(m.finish()).raster;r.autoBaseline=nil
+        let reopened=await editor(resume:r)
+        XCTAssertFalse(try XCTUnwrap(reopened.finish()).raster.tissueEditCountKnown)
+    }
 }

@@ -27,6 +27,8 @@ enum LiteDepthCodec {
         var unit: String?
         var rgbSHA256: String?
         var sourceExifOrientation: Int? = nil
+        var captureID: UUID? = nil
+        var capturedAt: Date? = nil
     }
 
     static func encode(_ depth: DepthCapture, matchingJPEG jpeg: Data) throws -> Data {
@@ -36,6 +38,8 @@ enum LiteDepthCodec {
                         rgbW: depth.rgbWidth, rgbH: depth.rgbHeight, mapB64: "",
                         format: "float32_le", unit: "m", rgbSHA256: hash(jpeg))
         p.sourceExifOrientation = depth.sourceExifOrientation
+        p.captureID = depth.captureProvenance?.id
+        p.capturedAt = depth.captureProvenance?.observedAt
         let count = try validate(p)
         guard depth.map.count == count else { throw Failure.invalidLength }
         try validateImage(jpeg, width: p.rgbW, height: p.rgbH)
@@ -80,13 +84,20 @@ enum LiteDepthCodec {
             Float(bitPattern: UInt32(bytes[i]) | UInt32(bytes[i+1]) << 8
                   | UInt32(bytes[i+2]) << 16 | UInt32(bytes[i+3]) << 24)
         }
-        return DepthCapture(map: map, width: p.w, height: p.h, fx: p.fx, fy: p.fy,
+        var result = DepthCapture(map: map, width: p.w, height: p.h, fx: p.fx, fy: p.fy,
                             cx: p.cx, cy: p.cy, refWidth: p.refW, refHeight: p.refH,
                             accuracy: p.accuracy, filtered: p.filtered,
                             rgbWidth: p.rgbW, rgbHeight: p.rgbH, sourceExifOrientation: p.sourceExifOrientation)
+        if let id = p.captureID, let time = p.capturedAt {
+            result.captureProvenance = .init(id: id, observedAt: time)
+        }
+        return result
     }
 
     private static func validate(_ p: Payload) throws -> Int {
+        guard (p.captureID == nil) == (p.capturedAt == nil),
+              p.capturedAt.map({ $0.timeIntervalSinceReferenceDate.isFinite }) ?? true,
+              p.sourceExifOrientation.map({ (1...8).contains($0) }) ?? true else { throw Failure.invalidMetadata }
         guard p.w >= 8, p.h >= 8, p.w <= 1024, p.h <= 1024,
               p.w <= maxPixels / p.h,
               p.rgbW > 0, p.rgbH > 0, p.rgbW <= 16384, p.rgbH <= 16384,
