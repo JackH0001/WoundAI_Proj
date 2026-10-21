@@ -4,6 +4,101 @@ import SwiftUI
 
 final class LiteRevisionSyncTests: XCTestCase {
     @MainActor
+    func testCaptureClearsOnlyAfterSavedRecordAndDoesNotDeletePendingWork() async throws {
+        let (store, dir) = try setup(); defer { try? FileManager.default.removeItem(at: dir) }
+        let vm = LiteMeasureVM()
+        XCTAssertEqual(vm.captureButtonTitle, "拍攝傷口")
+        let picture = UIGraphicsImageRenderer(size: CGSize(width: 16, height: 16)).image { c in
+            UIColor.red.setFill(); c.fill(CGRect(x: 0, y: 0, width: 16, height: 16))
+        }
+        _ = await vm.ingest(picture, depth: nil) // no cloud call without depth
+        XCTAssertEqual(vm.captureButtonTitle, "重新拍攝")
+        XCTAssertNotNil(vm.captureJPEG)
+        vm.savedId = "not-saved"
+        XCTAssertNil(vm.finishSavedCapture(in: store))
+        XCTAssertNotNil(vm.image)
+        var r = store.records[0]
+        let payload = try XCTUnwrap(r.revisionJSON())
+        r.cloudSync?.pending = LitePendingRevision(revision: 1, payloadJSON: payload)
+        XCTAssertTrue(store.update(r))
+        let before = try Data(contentsOf: dir.appendingPathComponent("records.json"))
+        vm.savedId = r.id
+        XCTAssertEqual(vm.finishSavedCapture(in: store), r.id)
+        XCTAssertNil(vm.image); XCTAssertNil(vm.captureJPEG); XCTAssertNil(vm.depth)
+        XCTAssertNil(vm.estimate); XCTAssertTrue(vm.polys.isEmpty)
+        XCTAssertNil(vm.note); XCTAssertNil(vm.savedId); XCTAssertNil(vm.cloudBinding)
+        XCTAssertEqual(vm.captureButtonTitle, "拍攝傷口")
+        XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("records.json")), before)
+        XCTAssertEqual(LiteStore(fileURL: dir.appendingPathComponent("records.json")).records[0].cloudSync?.pending, r.cloudSync?.pending)
+        XCTAssertNil(vm.finishSavedCapture(in: store), "Repeated completion cannot navigate/save twice")
+    }
+
+    @MainActor
+    func testSavePersistsFirstRevisionBeforeNavigationAndRestart() async throws {
+        let (store, dir) = try setup(); defer { try? FileManager.default.removeItem(at: dir) }
+        var r = store.records[0]; r.id = "new-capture"
+        let saved = try XCTUnwrap(store.saveMeasurement(r, selectedWoundID: "",
+            enteredLocation: LiteWoundLocation(side: "right", site: "knee_back"), queueResearchSync: true))
+        let pending = try XCTUnwrap(saved.cloudSync?.pending)
+        XCTAssertEqual(pending.revision, 1)
+        XCTAssertEqual(pending.payloadJSON, try saved.revisionJSON())
+        XCTAssertNotNil(saved.cloudSync?.automaticRetryAt)
+        let restarted = LiteStore(fileURL: dir.appendingPathComponent("records.json"))
+        XCTAssertEqual(restarted.records.first?.cloudSync?.pending, pending)
+        var attempts = 0
+        await restarted.syncRevision(recordID: saved.id, consent: { true }) { _, value in
+            attempts += 1; XCTAssertEqual(value, pending)
+        }
+        await restarted.syncRevision(recordID: saved.id, consent: { true }) { _, _ in attempts += 1 }
+        XCTAssertEqual(attempts, 1)
+        XCTAssertEqual(restarted.records.first?.cloudSync?.acknowledgedRevision, 1)
+        XCTAssertEqual(restarted.records.first?.imageName, r.imageName)
+        XCTAssertEqual(restarted.records.first?.depthName, r.depthName)
+    }
+
+    @MainActor
+    func testLocalSaveDoesNotQueueWithoutConsentOrCloudBinding() throws {
+        let (store, dir) = try setup(); defer { try? FileManager.default.removeItem(at: dir) }
+        for bound in [true, false] {
+            var r = store.records.last!; r.id = UUID().uuidString
+            if !bound { r.cloudSync = nil }
+            let saved = try XCTUnwrap(store.saveMeasurement(r, selectedWoundID: "",
+                enteredLocation: LiteWoundLocation(side: "right", site: "knee_back"),
+                queueResearchSync: !bound))
+            XCTAssertNil(saved.cloudSync?.pending)
+            XCTAssertNil(saved.cloudSync?.automaticRetryAt)
+        }
+    }
+
+    @MainActor
+    func testFailedSaveKeepsDraftAndOldIndexUnchanged() throws {
+        let (store, dir) = try setup(); defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("records.json")
+        let original = try Data(contentsOf: file)
+        var r = store.records[0]; r.id = "not-saved"
+        let vm = LiteMeasureVM(); vm.image = UIImage(); vm.savedId = r.id
+        XCTAssertNil(store.saveMeasurement(r, selectedWoundID: "missing-group",
+            enteredLocation: LiteWoundLocation(side: "right", site: "knee_back"), queueResearchSync: true))
+        XCTAssertNil(vm.finishSavedCapture(in: store)); XCTAssertNotNil(vm.image)
+        XCTAssertEqual(try Data(contentsOf: file), original)
+        XCTAssertEqual(store.records.count, 1)
+    }
+
+    @MainActor
+    func testAuthenticationFailureKeepsPendingWithoutBlindAutomaticRetries() async throws {
+        let (store, dir) = try setup(); defer { try? FileManager.default.removeItem(at: dir) }
+        await store.syncRevision(recordID: "record", consent: { true }) { _, _ in
+            throw BackendError.http(status: 401, message: "lite_attestation_required")
+        }
+        let restored = LiteStore(fileURL: dir.appendingPathComponent("records.json")).records[0]
+        XCTAssertEqual(restored.cloudSync?.pending?.revision, 1)
+        XCTAssertEqual(restored.cloudSync?.acknowledgedRevision, 0)
+        XCTAssertNil(restored.cloudSync?.automaticRetryAt)
+        XCTAssertTrue(restored.cloudSync?.lastError?.contains("驗證未通過（401）") == true)
+        XCTAssertEqual(restored.imageName, "unused")
+    }
+
+    @MainActor
     func testNoLidarStillRendersRecordAndSettingsTabsWithoutConsentWall() async throws {
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 430, height: 932))
         let host = UIHostingController(rootView: LiteRootView(lidarAvailable: false))

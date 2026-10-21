@@ -6,10 +6,25 @@ import Charts
  */
 struct LiteHistoryView: View {
     @ObservedObject var store: LiteStore
+    @Binding var recordToOpen: String?
     @State private var selected: LiteRecord?
     @State private var woundFilter = ""
     @State private var choseInitialWound = false
     private let ungrouped = "__ungrouped__"
+
+    init(store: LiteStore, recordToOpen: Binding<String?> = .constant(nil)) {
+        self.store = store
+        self._recordToOpen = recordToOpen
+    }
+
+    private func openSavedRecord() {
+        guard let id = recordToOpen,
+              let record = store.records.first(where: { $0.id == id }) else { return }
+        woundFilter = record.woundID ?? ""
+        choseInitialWound = true
+        selected = record
+        recordToOpen = nil
+    }
 
     private var visibleRecords: [LiteRecord] {
         if woundFilter.isEmpty { return store.records }
@@ -74,11 +89,13 @@ struct LiteHistoryView: View {
             }
             .navigationTitle("紀錄")
             .onAppear {
+                openSavedRecord()
                 if !choseInitialWound, !store.records.isEmpty {
                     woundFilter = LiteGrouping.mostRecentWoundID(store.records) ?? ""
                     choseInitialWound = true
                 }
             }
+            .onChange(of: recordToOpen) { _, _ in openSavedRecord() }
             .onChange(of: store.wounds) { _, wounds in
                 if !woundFilter.isEmpty, woundFilter != ungrouped,
                    !wounds.contains(where: { $0.id == woundFilter }) { woundFilter = "" }

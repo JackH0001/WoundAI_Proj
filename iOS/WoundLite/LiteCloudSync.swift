@@ -198,6 +198,8 @@ extension LiteStore {
                     current.lastError = wait.localizedDescription
                 } else if (error as? LiteAttestFailure) == .serviceChanged {
                     current.lastError = "本機已保存；此紀錄屬於舊服務，未轉送到目前服務。請保留原紀錄，另行核對舊資料。"
+                } else if case BackendError.http(status: 401, message: _) = error {
+                    current.lastError = "本機已保存；App或裝置驗證未通過（401），雲端尚未保存修改。請保留原紀錄並核對App版本與服務設定，不必重拍或反覆重試。"
                 } else {
                     current.lastError = (error as? LiteAttestFailure) == .identityMismatch
                         ? "本機已保存；這筆影像的原上傳身分無法由目前裝置驗證，尚未同步。舊資料不會自動轉移或重傳。"
