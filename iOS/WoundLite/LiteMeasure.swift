@@ -35,6 +35,22 @@ final class LiteMeasureVM: ObservableObject {
     private var userEdited = false
     private var gen = 0
 
+    var captureButtonTitle: String { image == nil ? "拍攝傷口" : "重新拍攝" }
+
+    /// Clear only after the durable index contains this capture. Pending sync belongs
+    /// to the store, not this transient screen, and survives navigation/relaunch.
+    func finishSavedCapture(in store: LiteStore) -> String? {
+        guard !busy, let id = savedId,
+              store.records.contains(where: { $0.id == id }) else { return nil }
+        gen += 1
+        image = nil; captureJPEG = nil; depth = nil; polys = []
+        imageW = 0; imageH = 0; estimate = nil
+        busyHint = ""; note = nil; uploadMessage = nil; savedId = nil
+        cloudImageId = nil; cloudBinding = nil; cloudHadPolys = false
+        userEdited = false; source = "manual"
+        return id
+    }
+
     /// 長邊 ≤2048＋方向烘進像素（與醫療版 `normalizeForBackend` 同規則；
     /// 座標空間正確性的前提，詳見該處註解）。
     nonisolated static func normalize(_ img: UIImage, maxDim: CGFloat = 2048) -> UIImage {
@@ -342,6 +358,7 @@ func liteVerdict(_ e: DepthAreaResult) -> LiteVerdict {
 
 struct LiteMeasureView: View {
     @ObservedObject var store: LiteStore
+    var onSaved: (String) -> Void = { _ in }
     @StateObject private var vm = LiteMeasureVM()
     @State private var showCamera = false
     @State private var showTrace = false
@@ -352,18 +369,22 @@ struct LiteMeasureView: View {
     @State private var saveTarget: LiteWoundSaveTarget?
     @State private var showSaveConfirmation = false
     @State private var saveNotice: String?
+    @State private var confirmRetake = false
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     Button {
-                        showCamera = true
+                        if vm.image != nil, vm.savedId == nil { confirmRetake = true }
+                        else { showCamera = true }
                     } label: {
-                        Label("拍攝傷口", systemImage: "camera.fill")
+                        Label(vm.captureButtonTitle, systemImage: "camera.fill")
                             .frame(maxWidth: .infinity).padding(.vertical, 10)
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(vm.busy)
+                    .accessibilityIdentifier("lite.capture")
 
                     Text("正對傷口、距離 25–40 公分，等中央對焦框變綠再拍。")
                         .font(.footnote).foregroundStyle(.secondary)
@@ -386,6 +407,7 @@ struct LiteMeasureView: View {
                         if vm.depth != nil {
                             Button(vm.polys.isEmpty ? "圈選傷口" : "修正圈選") { showTrace = true }
                                 .buttonStyle(.bordered)
+                                .disabled(vm.busy)
                         }
                     }
 
@@ -397,6 +419,12 @@ struct LiteMeasureView: View {
                 .padding()
             }
             .navigationTitle("量測")
+            .alert("重新拍攝？", isPresented: $confirmRetake) {
+                Button("保留目前量測", role: .cancel) { }
+                Button("重新拍攝") { showCamera = true }
+            } message: {
+                Text("目前量測尚未存入紀錄。拍下新照片後會取代這個畫面；已存入的紀錄不受影響。取消相機可回到目前量測。")
+            }
             .onAppear { if vm.image == nil { selectLastWound() } }
             .alert("確認傷口位置", isPresented: $showSaveConfirmation, presenting: saveTarget) { target in
                 Button("返回修改", role: .cancel) { saveTarget = nil }
@@ -543,7 +571,10 @@ struct LiteMeasureView: View {
             return
         }
         guard let jpeg = vm.captureJPEG,
-              let name = store.images.save(jpeg: jpeg) else { return }
+              let name = store.images.save(jpeg: jpeg) else {
+            saveNotice = "照片尚未成功存入手機，請保留此畫面並重試存檔。"
+            return
+        }
         let v = liteVerdict(e)
         // 輪廓與深度側檔一併落地：詳情頁「修正圈選・重新量測」靠它們
         // 把當時的幾何完整還原（只有影像沒有深度，就只能看不能重算）。
@@ -552,6 +583,7 @@ struct LiteMeasureView: View {
         guard let depth = vm.depth,
               let depthName = store.saveDepth(depth, matchingJPEG: jpeg) else {
             store.images.delete(name)
+            saveNotice = "深度資料尚未成功存入手機，請保留此畫面並重試存檔。"
             return
         }
         var rec = LiteRecord(
@@ -570,7 +602,9 @@ struct LiteMeasureView: View {
         rec.cloudSync = vm.cloudBinding.map { LiteCloudSyncState(binding: $0) }
         rec.measurementContext = LiteMeasurementContext(depth: depth, result: e, warnings: v.warnings)
         rec.manuallyConfirmed = vm.hasManualContour
-        guard let saved = store.saveMeasurement(rec, selectedWoundID: target.woundID, enteredLocation: target.location) else {
+        guard let saved = store.saveMeasurement(rec, selectedWoundID: target.woundID,
+                                                enteredLocation: target.location,
+                                                queueResearchSync: LitePrefs.researchConsent == true) else {
             store.images.delete(name)
             store.images.delete(depthName)
             return
@@ -580,6 +614,10 @@ struct LiteMeasureView: View {
         vm.savedId = saved.id
         // Only the server receipt confirms annotation delivery; local saving stays independent.
         vm.submitLayLabel(store: store)
+        if let id = vm.finishSavedCapture(in: store) {
+            saveNotice = nil
+            onSaved(id)
+        }
     }
 }
 

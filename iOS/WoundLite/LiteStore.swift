@@ -94,7 +94,8 @@ final class LiteStore: ObservableObject {
     /// The user-facing save gate. Resolve the existing group here, not from a stale Picker snapshot.
     /// Legacy records remain readable; completing their location and adding the new record is one write.
     func saveMeasurement(_ record: LiteRecord, selectedWoundID: String,
-                         enteredLocation: LiteWoundLocation) -> LiteRecord? {
+                         enteredLocation: LiteWoundLocation,
+                         queueResearchSync: Bool = false) -> LiteRecord? {
         let wound: LiteWoundGroup
         if selectedWoundID.isEmpty {
             wound = newWound()
@@ -115,6 +116,15 @@ final class LiteStore: ObservableObject {
         saved.woundID = wound.id
         saved.woundName = wound.name
         saved.woundLocation = location
+        // Persist the first exact revision with the local record before the UI
+        // clears its capture. An interrupted first send can then resume safely.
+        if queueResearchSync, var sync = saved.cloudSync, sync.pending == nil,
+           let json = try? saved.revisionJSON(),
+           LitePendingRevision.digest(json) != sync.acknowledgedDigest {
+            sync.pending = LitePendingRevision(revision: sync.acknowledgedRevision + 1, payloadJSON: json)
+            sync.automaticRetryAt = Date()
+            saved.cloudSync = sync
+        }
         guard persist([saved] + next) else { return nil }
         return saved
     }

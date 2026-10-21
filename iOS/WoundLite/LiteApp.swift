@@ -82,6 +82,7 @@ struct LiteRootView: View {
     }
     @State private var askConsent = false
     @State private var selectedTab: LiteRootTab = .measure
+    @State private var savedRecordToOpen: String?
     /// Hardware gates new capture only; records and privacy controls stay accessible.
     let lidarOK: Bool
 
@@ -93,12 +94,17 @@ struct LiteRootView: View {
     var body: some View {
         TabView(selection: $selectedTab) {
             Group {
-                if lidarOK { LiteMeasureView(store: store) }
+                if lidarOK {
+                    LiteMeasureView(store: store) { id in
+                        savedRecordToOpen = id
+                        selectedTab = .history
+                    }
+                }
                 else { lidarGate }
             }
             .tag(LiteRootTab.measure)
             .tabItem { Label("量測", systemImage: "camera.metering.center.weighted") }
-            LiteHistoryView(store: store)
+            LiteHistoryView(store: store, recordToOpen: $savedRecordToOpen)
                 .tag(LiteRootTab.history)
                 .tabItem { Label("紀錄", systemImage: "chart.line.uptrend.xyaxis") }
             LiteSettingsView()
