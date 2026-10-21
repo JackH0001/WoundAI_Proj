@@ -1,5 +1,9 @@
 import XCTest
+#if WOUND_INSTITUTION_TESTS
+@testable import WoundAIInstitution
+#else
 @testable import WoundMeasurementApp
+#endif
 
 /**
  深度面積估算的解析解金標（對齊後端 `measure3d.py` 的合成驗證思路）。
@@ -135,6 +139,27 @@ final class DepthAreaTests: XCTestCase {
         }
     }
 
+    /// AVFoundation commonly uses 6 RGB pixels per depth pixel, ARKit 7.5.
+    /// The same physical cavity must not change when intrinsics/RGB reference grids change.
+    func testVolumeInvariantAcrossRGBAndIntrinsicsReferenceScales() throws {
+        let base = synth(dw:128,dh:128,fx:200) { x,y in
+            (44..<84).contains(x) && (44..<84).contains(y) ? 0.3043 : 0.3
+        }
+        var volumes:[Double]=[]
+        for scale in [1.0,4.0,6.0,7.5,8.0] {
+            let size=Int(128*scale)
+            let d=DepthCapture(map:base.map,width:128,height:128,fx:200*scale,fy:200*scale,
+                cx:64*scale,cy:64*scale,refWidth:Double(size),refHeight:Double(size),
+                accuracy:"absolute",filtered:false,rgbWidth:size,rgbHeight:size)
+            let poly=[[44,44],[84,44],[84,84],[44,84]].map { $0.map { Int(Double($0)*scale) } }
+            let result=try XCTUnwrap(DepthAreaEstimator.estimate(polygons:[poly],depth:d,imageW:size,imageH:size,smoothMm:0))
+            volumes.append(try XCTUnwrap(result.volumeMl))
+            XCTAssertEqual(try XCTUnwrap(result.maxDepthMm),4.3,accuracy:0.001)
+            XCTAssertEqual(d.map,base.map)
+        }
+        for volume in volumes { XCTAssertEqual(volume,volumes[0],accuracy:1e-8) }
+    }
+
     func testMissingCavityDepthDoesNotBecomeInventedVolume() throws {
         let d = synth(dw:64,dh:64,fx:100) { x,y in
             if x == 32 && y == 32 { return 0 }
@@ -145,6 +170,39 @@ final class DepthAreaTests: XCTestCase {
         XCTAssertLessThan(r.coverage,1)
         XCTAssertNil(r.volumeMl, "Filled pixels are not measured cavity depth")
         XCTAssertNil(r.maxDepthMm)
+    }
+
+    func testExplicitNormalReferenceBypassesContaminatedRing() throws {
+        let d = synth(dw:64,dh:64,fx:200) { x,y in
+            (14..<50).contains(x) && (14..<50).contains(y) ? 0.304 : 0.3
+        }
+        let poly = [[176,176],[336,176],[336,336],[176,336]]
+        let independent = (0..<4096).map { i in
+            let x = i % 64, y = i / 64
+            return x < 10 || x > 54 || y < 10 || y > 54
+        }
+        let automatic = try XCTUnwrap(DepthAreaEstimator.estimate(polygons:[poly],depth:d,imageW:512,imageH:512))
+        let selected = try XCTUnwrap(DepthAreaEstimator.estimate(polygons:[poly],depth:d,imageW:512,imageH:512,
+            normalReferenceMask:independent))
+        XCTAssertEqual(automatic.volumeMl!,0,accuracy:1e-7)
+        XCTAssertGreaterThan(selected.volumeMl!,3)
+        XCTAssertEqual(selected.maxDepthMm!,4,accuracy:0.001)
+        XCTAssertEqual(selected.referenceVolume?.referenceSource,.rgbSelectedNormal)
+        XCTAssertEqual(automatic.referenceVolume?.referenceSource,.automaticRing)
+        XCTAssertEqual(selected.surfaceAreaCm2,automatic.surfaceAreaCm2)
+        XCTAssertEqual(selected.referenceVolume?.metricGroundTruthAllowed,false)
+    }
+
+    func testInvalidExplicitReferenceCannotFallBackSilently() throws {
+        let d = synth(dw:64,dh:64,fx:200) { _,_ in 0.3 }
+        let poly = [[176,176],[336,176],[336,336],[176,336]]
+        for ref in [[Bool](repeating:true,count:4096),[false]] {
+            let r = try XCTUnwrap(DepthAreaEstimator.estimate(polygons:[poly],depth:d,imageW:512,imageH:512,
+                normalReferenceMask:ref))
+            XCTAssertNil(r.volumeMl)
+            XCTAssertNil(r.referenceVolume)
+            XCTAssertGreaterThan(r.projectedAreaCm2,0)
+        }
     }
 
 }

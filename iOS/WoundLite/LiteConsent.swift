@@ -9,19 +9,24 @@ import SwiftUI
  */
 struct LiteConsentView: View {
     let onChoose: (Bool) -> Void
+    var renewingUnsentWithdrawal = false
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("選擇您的量測方式").font(.title2).bold()
+                    if renewingUnsentWithdrawal {
+                        Text("您正在重新同意研究上傳。僅在確認撤回尚未送出、此服務沒有已登記身分或綁定紀錄後，才會取消這次未送出的撤回。原撤回與本次選擇會保留；舊服務紀錄不會移轉或重傳。")
+                            .font(.subheadline)
+                    }
 
                     box(title: "🔬 同意研究上傳（啟用自動辨識）", tint: .blue, lines: [
                         "拍攝後由雲端 AI 自動圈出傷口，再由您確認或修改。",
                         "上傳傷口影像、LiDAR 深度圖與相機參數，以及您修改的輪廓、量測估算、傷口分組與側別部位。隨機安裝代碼會串聯同一安裝的資料；請勿拍入臉部、姓名或證件。",
                         "已上傳影像的紀錄修正圈選後，會同步修訂輪廓與量測資料；不重傳照片。舊紀錄若無雲端識別碼則只更新本機。",
                         "用途：改進傷口辨識與 3D 量測精度的研究與模型訓練。",
-                        "本版使用獨立 WoundLite 服務；舊服務的影像與紀錄不會自動轉移。切換服務後須重新選擇是否上傳。",
+                        "本版使用獨立 WoundAILite 服務；舊服務的影像與紀錄不會自動轉移。切換服務後須重新選擇是否上傳。",
                         "可在設定關閉未來上傳；另可要求撤回研究並清除本安裝目前可見的雲端影像與深度。本機紀錄保留；備份、歷史版本、研究標註與既有模型的刪除仍待驗證。",
                     ])
 
@@ -37,7 +42,7 @@ struct LiteConsentView: View {
                     Button {
                         onChoose(true)
                     } label: {
-                        Text("同意研究上傳，使用自動辨識")
+                        Text(renewingUnsentWithdrawal ? "重新同意並取消尚未送出的撤回" : "同意研究上傳，使用自動辨識")
                             .frame(maxWidth: .infinity).padding(.vertical, 6)
                     }
                     .buttonStyle(.borderedProminent)
@@ -45,14 +50,14 @@ struct LiteConsentView: View {
                     Button {
                         onChoose(false)
                     } label: {
-                        Text("不同意，完全離線手動圈選")
+                        Text(renewingUnsentWithdrawal ? "保留撤回，繼續離線使用" : "不同意，完全離線手動圈選")
                             .frame(maxWidth: .infinity).padding(.vertical, 6)
                     }
                     .buttonStyle(.bordered)
                 }
                 .padding()
             }
-            .navigationTitle("WoundLite")
+            .navigationTitle("WoundAILite")
         }
     }
 
@@ -82,12 +87,53 @@ struct LiteSettingsView: View {
     @State private var consent = LitePrefs.researchConsent ?? false
     @StateObject private var withdrawal = LiteWithdrawalModel.shared
     @State private var confirmWithdrawal = false
+    @State private var reviewRenewedConsent = false
+    @State private var checkingConnection = false
+    @State private var connectionMessage: String?
+    @State private var mayRepairRegistration = false
+    @State private var confirmRegistrationRepair = false
+
+    @MainActor private static func recoveryAllowed(server: String) throws -> Bool {
+        guard LitePrefs.researchConsent == true, !LiteWithdrawalJournal.standard.blocksUploads,
+              AppSettings.backendURL() == server else { return false }
+        let store = LiteStore()
+        guard store.storageError == nil, !store.needsReload else { throw LiteAttestFailure.invalidState }
+        return try !LiteWithdrawalModel.hasBoundRecords(store.records, server: server)
+    }
+
+    @MainActor private func checkConnection(repair: Bool = false) async {
+        guard !checkingConnection, LitePrefs.researchConsent == true, !withdrawal.blocksUploads else { return }
+        checkingConnection = true; defer { checkingConnection = false }
+        mayRepairRegistration = false
+        let server = AppSettings.backendURL()
+        do {
+            guard let origin = URL(string: server) else { throw LiteAttestFailure.invalidConfiguration }
+            let client = try await LiteAttestClients.shared.client(origin: origin, audience: "woundlite-research-v1")
+            if repair {
+                _ = try await client.recoverUnregisteredIdentity(allowRecovery: {
+                    try await Self.recoveryAllowed(server: server)
+                })
+            }
+            _ = try await client.registeredInstallation()
+            connectionMessage = "裝置登記已確認。本次沒有傳送照片；影像與深度仍須逐筆取得雲端保存確認。"
+        } catch {
+            if error as? LiteAttestFailure == .registrationRejected {
+                mayRepairRegistration = (try? Self.recoveryAllowed(server: server)) == true
+            }
+            if error as? LiteAttestFailure == .registrationRecoveryNotReady {
+                connectionMessage = "原驗證仍在有效期間，未更換裝置身分。請稍後再核對，原紀錄保留。"
+            } else {
+                connectionMessage = (error as? LiteAttestFailure)?.captureFailureMessage
+                    ?? "雲端登記尚未確認，已保留原身分與紀錄。請稍後再核對，不用重拍。"
+            }
+        }
+    }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section("App 資訊") {
-                    LabeledContent("App", value: "WoundLite")
+                    LabeledContent("App", value: "WoundAILite")
                     LabeledContent("版本（建置號）", value: installedVersion)
                         .textSelection(.enabled)
                 }
@@ -99,11 +145,38 @@ struct LiteSettingsView: View {
                          ? "拍攝影像、深度、修正輪廓、量測估算與傷口側別部位會上傳供辨識與研究；紀錄修改也會同步。可隨時關閉。"
                          : "完全離線：照片與深度只留在手機，輪廓手動圈選。")
                         .font(.footnote).foregroundStyle(.secondary)
+                    if withdrawal.blocksUploads {
+                        Text("研究上傳已因撤回停用。請查看下方「資料與撤回」狀態；重試查核不會重新開啟研究上傳。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
                 Section("個人雲端辨識") {
                     LiteQuotaView()
                     Text("免費額度用完仍可手動圈選、量測與保存本機紀錄。機構及多人個案管理請洽 WoundAI。")
                         .font(.footnote).foregroundStyle(.secondary)
+                }
+                Section("雲端連線核對") {
+                    #if DEBUG
+                    Text("此為本機開發簽章版，目前雲端只接受 TestFlight 或 App Store 版本。可使用本機量測與保存；雲端驗收須改用符合簽章要求的版本。")
+                        .font(.footnote)
+                    #else
+                    Button(checkingConnection ? "核對中…" : "核對裝置登記（不傳照片）") {
+                        Task { await checkConnection() }
+                    }
+                    .disabled(checkingConnection || !consent || withdrawal.blocksUploads || withdrawal.busy)
+                    if let connectionMessage { Text(connectionMessage).font(.footnote) }
+                    if mayRepairRegistration {
+                        Button("修復尚未完成的裝置登記") { confirmRegistrationRepair = true }
+                            .disabled(checkingConnection || !consent || withdrawal.blocksUploads || withdrawal.busy)
+                            .confirmationDialog("核對並修復未完成的登記？", isPresented: $confirmRegistrationRepair,
+                                                titleVisibility: .visible) {
+                                Button("核對並修復") { Task { await checkConnection(repair: true) } }
+                                Button("取消", role: .cancel) { }
+                            } message: {
+                                Text("先查詢原登記是否已成功；僅伺服器確認尚未完成登記、目前服務沒有綁定紀錄且研究上傳仍獲同意時，才建立新的驗證。原驗證與處置稽核會保留，不刪紀錄、不恢復已撤回資料，也不傳送照片。")
+                            }
+                    }
+                    #endif
                 }
                 Section("拍攝要領") {
                     Text("・正對傷口拍攝（斜拍會造成面積誤差，App 會提醒）\n"
@@ -126,7 +199,7 @@ struct LiteSettingsView: View {
                     Text("關閉研究上傳只停止未來傳送，不會刪除已上傳資料。以下撤回適用於目前服務、此 App 保有可驗證身分的安裝；不刪除手機紀錄，也不代表其他服務或舊版匿名資料已刪除。")
                         .font(.footnote).foregroundStyle(.secondary)
                     if withdrawal.record != nil {
-                        Text(withdrawal.finished ? "已確認清除目前可見媒體" : "撤回尚待完成確認")
+                        Text(withdrawal.statusTitle)
                             .font(.subheadline).bold()
                     }
                     if let message = withdrawal.message {
@@ -134,8 +207,12 @@ struct LiteSettingsView: View {
                     }
                     Text("歷史版本、備份、既有研究標註及已訓練模型的處理尚未完成驗證，不能保證全部刪除。撤回後本安裝維持離線，不會自動建立新身分或恢復研究上傳。")
                         .font(.footnote).foregroundStyle(.secondary)
-                    Button(withdrawal.busy ? "撤回處理中…" : (withdrawal.record == nil ? "撤回研究並要求清除雲端媒體" : "重試／查核撤回"), role: .destructive) {
-                        if withdrawal.record == nil { confirmWithdrawal = true }
+                    if withdrawal.mayReviewUnsentCancellation {
+                        Button("閱讀說明並重新同意研究上傳") { reviewRenewedConsent = true }
+                            .disabled(withdrawal.busy)
+                    }
+                    Button(withdrawal.busy ? "撤回處理中…" : (withdrawal.record == nil || withdrawal.cancelledBeforeSubmission ? "撤回研究並要求清除雲端媒體" : "重試／查核撤回"), role: .destructive) {
+                        if withdrawal.record == nil || withdrawal.cancelledBeforeSubmission { confirmWithdrawal = true }
                         else { Task { await withdrawal.request(server: AppSettings.backendURL()) } }
                     }
                     .disabled(withdrawal.busy || withdrawal.finished)
@@ -153,6 +230,28 @@ struct LiteSettingsView: View {
                 }
             }
             .navigationTitle("設定")
+            .sheet(isPresented: $reviewRenewedConsent) {
+                LiteConsentView(onChoose: { choice in
+                    reviewRenewedConsent = false
+                    guard choice else { return }
+                    let server = AppSettings.backendURL()
+                    Task {
+                        let restored = await withdrawal.reconsentUnsentWithdrawal(server: server,
+                            consentVersion: LitePrefs.consentVersion, hasBoundRecords: {
+                                // Reload on both sides of the asynchronous identity check.
+                                // An unreadable index must never be treated as an empty one.
+                                let store = LiteStore()
+                                guard store.storageError == nil, !store.needsReload,
+                                      AppSettings.backendURL() == server else { throw LiteWithdrawalFailure.invalidState }
+                                return try LiteWithdrawalModel.hasBoundRecords(store.records, server: server)
+                            })
+                        if restored {
+                            LitePrefs.researchConsent = true
+                            consent = LitePrefs.researchConsent == true
+                        }
+                    }
+                }, renewingUnsentWithdrawal: true)
+            }
         }
     }
 }

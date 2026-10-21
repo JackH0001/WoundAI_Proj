@@ -29,7 +29,7 @@
 	<key>LiteAttestAudience</key>
 	<string>woundlite-research-v1</string>
 	<key>CFBundleDisplayName</key>
-	<string>WoundLite</string>
+	<string>WoundAILite</string>
 
 	<key>UILaunchScreen</key>
 	<dict/>

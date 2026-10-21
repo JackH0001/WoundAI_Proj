@@ -46,6 +46,58 @@ struct LiteCloudSyncState: Codable {
     var automaticRetryAt: Date? = nil
 }
 
+/// Presentation follows the CURRENT payload receipt, not a sticky message from a previous edit.
+/// This does not enqueue uploads or change consent, identity, or revision numbering.
+struct LiteRevisionPresentation: Equatable {
+    enum Phase: Equatable { case synced, syncing, waiting, failed, pending, localOnly, unavailable }
+    var phase: Phase
+    var title: String
+    var detail: String
+    var retryTitle: String? = nil
+
+    static func make(record: LiteRecord, syncing: Bool, consent: Bool,
+                     withdrawalBlocked: Bool, now: Date = Date()) -> Self {
+        guard let sync = record.cloudSync else {
+            return Self(phase: .unavailable, title: "僅存於此手機",
+                        detail: "此筆未取得雲端影像保存確認，無法直接同步修改。原紀錄保留。")
+        }
+        if withdrawalBlocked {
+            return Self(phase: .localOnly, title: "研究上傳已暫停",
+                        detail: "撤回處理期間不送出新的修訂；本機紀錄保留。")
+        }
+        let json = try? record.revisionJSON()
+        let currentAcknowledged = json.map { LitePendingRevision.digest($0) == sync.acknowledgedDigest } == true
+        if sync.pending == nil, currentAcknowledged, sync.acknowledgedRevision > 0 {
+            return Self(phase: .synced, title: "雲端已確認第 \(sync.acknowledgedRevision) 版",
+                        detail: "目前輪廓與面積已同步，無須再次上傳。")
+        }
+        if !consent {
+            return Self(phase: .localOnly, title: "修改已保留，尚未同步",
+                        detail: "研究上傳已關閉，修改只存於此手機。")
+        }
+        guard json != nil || sync.pending != nil else {
+            return Self(phase: .unavailable, title: "圈選來源待確認",
+                        detail: "尚未建立可同步的輪廓與面積資料，原紀錄保留。")
+        }
+        let revision = sync.pending?.revision ?? (sync.acknowledgedRevision + 1)
+        if let until = sync.capacityNotBefore, until > now {
+            return Self(phase: .waiting, title: "第 \(revision) 版等待服務處理",
+                        detail: "\(until.formatted(date: .omitted, time: .shortened)) 後自動續傳；可先離開此頁。")
+        }
+        if syncing {
+            return Self(phase: .syncing, title: "正在同步第 \(revision) 版…",
+                        detail: "等待雲端保存確認，不需再次點按。")
+        }
+        if let error = sync.lastError {
+            return Self(phase: .failed, title: "第 \(revision) 版尚未獲雲端確認",
+                        detail: error, retryTitle: "重試同步已保存的修改")
+        }
+        return Self(phase: .pending, title: "修改已保存，等待同步",
+                    detail: "同步沿用這張照片與深度，不會重新辨識或扣除辨識次數。",
+                    retryTitle: "同步已保存的修改")
+    }
+}
+
 extension LiteRecord {
     func revisionJSON() throws -> String? {
         guard (manuallyConfirmed == true || (manuallyConfirmed == false && source == "cloud")), let cloudSync,
@@ -67,7 +119,7 @@ extension LiteRecord {
 
     var cloudSyncDescription: String {
         guard let sync = cloudSync else {
-            return "未保存可核對的雲端影像識別碼；此筆不會自動補傳或猜測配對。"
+            return "此筆已存於手機，但尚未取得可核對的雲端保存確認，未列為已上傳。請保留原紀錄，先不要重拍或反覆修邊送出。"
         }
         if let until = sync.capacityNotBefore, until > Date() {
             return "後端容量等待中；原修訂已保留，\(until.formatted(date: .omitted, time: .standard)) 後自動續傳。"

@@ -19,12 +19,37 @@ enum LiteAttestFailure: Error, Equatable {
     case unsupported, invalidConfiguration, invalidState, invalidResponse, invalidRequest
     case appleTemporarilyUnavailable, registrationRejected, unavailable, busy, consentRequired
     case identityMismatch, serviceChanged
+    case registrationRecoveryNotAllowed, registrationRecoveryNotReady
     case http(Int)
+
+    /// Authentication happens before sending image/depth bytes. Do not describe
+    /// its rejection as an empty segmentation result or ask for another capture.
+    var captureFailureMessage: String? {
+        switch self {
+        case .registrationRejected:
+            return "裝置身分驗證未通過，雲端辨識與上傳尚未開始。可手動圈選並存入手機；請保留原紀錄，先不要重拍或反覆送出，待驗證問題修復後再處理。"
+        case .http(403):
+            return "雲端服務入口目前無法使用，辨識與上傳尚未開始。可手動圈選並存入手機；請保留原紀錄，待入口恢復後再處理。"
+        case .unsupported:
+            return "此裝置目前不支援所需的身分驗證，未開始雲端辨識或上傳。仍可手動圈選並存入手機。"
+        case .invalidState, .identityMismatch, .serviceChanged:
+            return "裝置身分或服務設定需要核對，未開始雲端辨識或上傳。請保留原紀錄，不要刪除 App 或重新建立帳號。"
+        default: return nil
+        }
+    }
 }
 
 /// One instance per origin/audience/install scope. Lock spans the final HTTP
 /// response, so concurrent UI tasks cannot deliver assertion counters backwards.
 actor LiteAttestClient {
+    struct RegistrationRecovery: Codable, Equatable {
+        let oldKey: String
+        let oldChallengeID: String
+        let oldAttestation: Data
+        let invalidatingChallengeID: String
+        let confirmedAt: Date
+        let reason: String
+    }
     struct Identity: Codable, Equatable {
         var version = 1
         var origin: String
@@ -34,9 +59,13 @@ actor LiteAttestClient {
         var challengeID: String?
         var attestation: Data?
         var installation: String?
+        // Preserved with the replacement identity, including after registration.
+        // Contains public proofs only; never a Secure Enclave private key.
+        var registrationRecoveries: [RegistrationRecovery]?
     }
     private struct Challenge: Decodable {
         let challenge_id: String; let challenge: String; let expires_at: Int; let audience: String
+        let replaces_challenge_id: String?
     }
     private struct Registration: Decodable { let installation: String; let key_id: String }
     let origin: URL
@@ -76,6 +105,22 @@ actor LiteAttestClient {
         guard bytes.count <= 100_000, let value = try? JSONDecoder().decode(Identity.self, from: bytes),
               value.version == 1, value.origin == origin.absoluteString, value.audience == audience else { throw LiteAttestFailure.invalidState }
         _ = try keyData(value.key)
+        if let audits = value.registrationRecoveries {
+            guard !audits.isEmpty, audits.count <= 4 else { throw LiteAttestFailure.invalidState }
+            var previousKeys = Set<String>()
+            for audit in audits {
+                _ = try keyData(audit.oldKey)
+                guard audit.oldKey != value.key, previousKeys.insert(audit.oldKey).inserted,
+                      Self.matches(audit.oldChallengeID, "[0-9a-f]{32}"),
+                      Self.matches(audit.invalidatingChallengeID, "[0-9a-f]{32}"),
+                      audit.oldChallengeID != audit.invalidatingChallengeID,
+                      (1...65536).contains(audit.oldAttestation.count),
+                      audit.confirmedAt.timeIntervalSince1970.isFinite,
+                      audit.reason == "server_pending_challenge_replaced_no_bound_records" else {
+                    throw LiteAttestFailure.invalidState
+                }
+            }
+        }
         switch value.phase {
         case "generated", "attesting":
             guard value.installation == nil, value.attestation == nil, value.challengeID == nil else { throw LiteAttestFailure.invalidState }
@@ -89,7 +134,11 @@ actor LiteAttestClient {
         }
         return value
     }
-    private func persist(_ value: Identity) async throws { try await persistence.save(JSONEncoder().encode(value)) }
+    private func persist(_ value: Identity) async throws {
+        let bytes = try JSONEncoder().encode(value)
+        guard bytes.count <= 100_000 else { throw LiteAttestFailure.invalidState }
+        try await persistence.save(bytes)
+    }
     private func control(_ path: String, body: [String: String]) async throws -> Data {
         var request = URLRequest(url: origin.appendingPathComponent(path))
         request.httpMethod = "POST"; request.timeoutInterval = 45
@@ -104,21 +153,33 @@ actor LiteAttestClient {
         }
         return data
     }
-    private func challenge(key: String, purpose: String) async throws -> Challenge {
-        let bytes = try await control("api/v1/lite/attest/challenge", body: ["key_id": key, "purpose": purpose])
+    private func challenge(key: String, purpose: String, replacing: String? = nil) async throws -> Challenge {
+        var body = ["key_id": key, "purpose": purpose]
+        if let replacing { body["previous_challenge_id"] = replacing }
+        let bytes = try await control("api/v1/lite/attest/challenge", body: body)
         guard let value = try? JSONDecoder().decode(Challenge.self, from: bytes), value.audience == audience,
               Self.matches(value.challenge_id, "[0-9a-f]{32}"), let nonce = Data(base64Encoded: value.challenge),
               nonce.count == 32, nonce.base64EncodedString() == value.challenge,
               Double(value.expires_at) > now().timeIntervalSince1970,
-              Double(value.expires_at) <= now().timeIntervalSince1970 + 180 else { throw LiteAttestFailure.invalidResponse }
+              Double(value.expires_at) <= now().timeIntervalSince1970 + 180,
+              replacing == value.replaces_challenge_id else { throw LiteAttestFailure.invalidResponse }
         return value
     }
     private func enroll() async throws -> Identity {
         guard await device.supported() else { throw LiteAttestFailure.unsupported }
         var identity = try await stored()
-        if identity?.phase == "attesting" {
+        if let interrupted = identity, interrupted.phase == "attesting" {
             // Interrupted before proof persistence; no registration HTTP was sent.
-            try await persistence.remove(); identity = nil
+            // Atomically replace the unusable key while retaining recovery audit.
+            // Removing the Keychain item first could lose the audit on a crash.
+            let key = try await device.generateKey(); _ = try keyData(key)
+            guard key != interrupted.key,
+                  !(interrupted.registrationRecoveries ?? []).contains(where: { $0.oldKey == key }) else {
+                throw LiteAttestFailure.invalidState
+            }
+            identity = Identity(origin: interrupted.origin, audience: interrupted.audience, key: key,
+                                phase: "generated", registrationRecoveries: interrupted.registrationRecoveries)
+            try await persist(identity!)
         }
         if identity == nil {
             let key = try await device.generateKey(); _ = try keyData(key)
@@ -135,7 +196,11 @@ actor LiteAttestClient {
             catch LiteAttestFailure.appleTemporarilyUnavailable {
                 value.phase = "generated"; try await persist(value)
                 throw LiteAttestFailure.appleTemporarilyUnavailable
-            } catch { try await persistence.remove(); throw error }
+            } catch {
+                // Keep attesting state and audit; the next explicit attempt can
+                // replace this never-registered key without erasing history.
+                throw error
+            }
             guard (1...65536).contains(proof.count) else { throw LiteAttestFailure.invalidResponse }
             value.phase = "pending"; value.challengeID = c.challenge_id; value.attestation = proof
             // Persist exact bytes BEFORE HTTP so lost responses do not re-attest.
@@ -161,6 +226,67 @@ actor LiteAttestClient {
     func registeredInstallation() async throws -> String {
         try await acquire(); defer { release() }; try Task.checkCancellation()
         return try await enroll().installation!
+    }
+
+    enum RegistrationRecoveryResult { case restoredExistingRegistration, preparedFreshRegistration }
+
+    /// Explicit user recovery only. The recover_register contract requires the
+    /// exact original expired pending challenge. Missing/active/revoked/corrupt
+    /// states are rejected. Its echoed lineage and DIFFERENT challenge prove
+    /// old proof invalidation, closing a race with a delayed registration.
+    /// The caller must re-read consent, withdrawal and records on every check.
+    /// No media is sent and no record is rebound by this operation.
+    func recoverUnregisteredIdentity(
+        allowRecovery: @Sendable () async throws -> Bool
+    ) async throws -> RegistrationRecoveryResult {
+        try await acquire(); defer { release() }; try Task.checkCancellation()
+        guard try await allowRecovery(), let original = try await stored(),
+              original.phase == "pending", original.installation == nil,
+              (original.registrationRecoveries?.count ?? 0) < 4 else {
+            throw LiteAttestFailure.registrationRecoveryNotAllowed
+        }
+        // A lost registration acknowledgement is not permission to rotate.
+        // Recover the original installation first, using the exact old proof.
+        do {
+            let bytes = try await control("api/v1/lite/attest/register", body: ["key_id": original.key,
+                "challenge_id": original.challengeID!, "attestation": original.attestation!.base64EncodedString()])
+            guard let result = try? JSONDecoder().decode(Registration.self, from: bytes), result.key_id == original.key,
+                  Self.matches(result.installation, "[0-9a-f]{32}"), try await stored() == original,
+                  try await allowRecovery() else { throw LiteAttestFailure.invalidState }
+            var restored = original
+            restored.phase = "registered"; restored.installation = result.installation
+            restored.challengeID = nil; restored.attestation = nil
+            try await persist(restored)
+            return .restoredExistingRegistration
+        } catch LiteAttestFailure.registrationRejected {
+            // An explicit rejection alone is NOT sufficient to rotate a key.
+        }
+        guard try await stored() == original, try await allowRecovery() else {
+            throw LiteAttestFailure.registrationRecoveryNotAllowed
+        }
+        let pending = try await challenge(key: original.key, purpose: "recover_register", replacing: original.challengeID!)
+        guard pending.challenge_id != original.challengeID else {
+            throw LiteAttestFailure.registrationRecoveryNotReady
+        }
+        guard try await stored() == original, try await allowRecovery() else {
+            throw LiteAttestFailure.registrationRecoveryNotAllowed
+        }
+        try Task.checkCancellation()
+        let replacement = try await device.generateKey(); _ = try keyData(replacement)
+        guard replacement != original.key,
+              !(original.registrationRecoveries ?? []).contains(where: { $0.oldKey == replacement }),
+              try await stored() == original, try await allowRecovery() else {
+            throw LiteAttestFailure.registrationRecoveryNotAllowed
+        }
+        var audits = original.registrationRecoveries ?? []
+        audits.append(RegistrationRecovery(oldKey: original.key, oldChallengeID: original.challengeID!,
+            oldAttestation: original.attestation!, invalidatingChallengeID: pending.challenge_id,
+            confirmedAt: now(), reason: "server_pending_challenge_replaced_no_bound_records"))
+        let fresh = Identity(origin: original.origin, audience: original.audience, key: replacement,
+                             phase: "generated", registrationRecoveries: audits)
+        // One Keychain update preserves old proof/audit together with new state.
+        try await persist(fresh)
+        return .preparedFreshRegistration
     }
     func send(_ original: URLRequest, installation: String, requestID: UUID,
               allowSending: @Sendable () async -> Bool) async throws -> (Data, HTTPURLResponse) {

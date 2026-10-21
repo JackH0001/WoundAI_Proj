@@ -4,14 +4,15 @@ import UIKit
 
 final class EditorOriginalPreviewTests: XCTestCase {
     @MainActor
-    private func model(boundaryOnly: Bool = true) -> EditCanvasModel {
+    private func model(boundaryOnly: Bool = true,
+                       polygons: [[[Int]]] = [[[32,32],[96,32],[96,96],[32,96]]]) -> EditCanvasModel {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         let image = UIGraphicsImageRenderer(size: CGSize(width: 128, height: 128), format: format).image { ctx in
             UIColor.orange.setFill()
             ctx.fill(CGRect(x: 0, y: 0, width: 128, height: 128))
         }
-        let model = EditCanvasModel(image: image, initialPolygons: [[[32,32],[96,32],[96,96],[32,96]]],
+        let model = EditCanvasModel(image: image, initialPolygons: polygons,
                                     originalArea: nil, tissueFrac: [:], mmPerPx: nil, resume: nil,
                                     wbGains: nil, boundaryOnly: boundaryOnly)
         model.boxSize = CGSize(width: 300, height: 300)
@@ -85,5 +86,28 @@ final class EditorOriginalPreviewTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(m.finish()).raster.mask, before)
         m.redo()
         XCTAssertEqual(try XCTUnwrap(m.finish()).raster.mask, painted)
+    }
+
+    @MainActor
+    func testSuccessiveBoundaryEditsUseFreshBaselineAndUndoIsSessionLocal() throws {
+        let first = model()
+        first.tool = .bErase
+        first.touchesChanged(.began, [CGPoint(x: 80, y: 150)])
+        first.touchesChanged(.ended, [])
+        let saved = try XCTUnwrap(first.finish())
+        XCTAssertLessThan(saved.iou, 1)
+        let second = model(polygons: saved.all)
+        let entry = try XCTUnwrap(second.finish())
+        XCTAssertEqual(entry.iou, 1)
+        second.tool = .bErase
+        second.touchesChanged(.began, [CGPoint(x: 220, y: 150)])
+        second.touchesChanged(.ended, [])
+        let edited = try XCTUnwrap(second.finish())
+        XCTAssertLessThan(edited.iou, 1)
+        XCTAssertNotEqual(edited.raster.mask, entry.raster.mask)
+        XCTAssertNotEqual(edited.all, saved.all)
+        second.undo()
+        XCTAssertEqual(try XCTUnwrap(second.finish()).iou, 1)
+        XCTAssertEqual(try XCTUnwrap(second.finish()).raster.mask, entry.raster.mask)
     }
 }

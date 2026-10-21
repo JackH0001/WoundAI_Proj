@@ -250,7 +250,8 @@ private func seedAutoSync(_ st: RasterState, src: CGImage, wbGains: [Double]?) {
     if let auto = computeAutoGrid(rx0: st.rx0, ry0: st.ry0, mw: st.mw, mh: st.mh,
                                   mScale: st.mScale, mask: st.mask, src: src, wbGains: wbGains),
        auto.count == st.mw * st.mh {
-        st.auto = auto
+        // Preserve prior suggestions and human edits when the ROI expands.
+        for i in st.auto.indices where st.auto[i] == 0 { st.auto[i] = auto[i] }
         st.recount()
     }
 }
@@ -284,8 +285,10 @@ final class EditCanvasModel: ObservableObject {
     let defaultClass: Int
     let wbGains: [Double]?
     let originalArea: Double?
+    let planarCalibration: PlanarAreaCalibration?
     /// true＝全新編修（底稿算完要拿 auto 種 tissue）；false＝續編（tissue 已有人修過，auto 只供自動筆用）。
     private let freshSeed: Bool
+    private let baselineKnown: Bool
     /// 民眾版借用：只圈邊界，不算組織底稿（TissueSeg 對 Lite 無意義，白耗 2–5 秒）。
     let boundaryOnly: Bool
     private var viewInit = false
@@ -314,7 +317,7 @@ final class EditCanvasModel: ObservableObject {
 
     init(image: UIImage, initialPolygons: [[[Int]]], originalArea: Double?,
          tissueFrac: [String: Double], mmPerPx: Double?, resume: EditRaster?,
-         wbGains: [Double]?, boundaryOnly: Bool = false) {
+         wbGains: [Double]?, boundaryOnly: Bool = false, planarCalibration: PlanarAreaCalibration? = nil) {
         self.boundaryOnly = boundaryOnly
         let cgImg = image.cgImage
         self.cg = cgImg
@@ -322,6 +325,7 @@ final class EditCanvasModel: ObservableObject {
         self.bh = cgImg?.height ?? 1
         self.wbGains = wbGains
         self.originalArea = originalArea
+        self.planarCalibration = planarCalibration ?? resume?.planarCalibration
         // 比例最高且 >0 的那一類；全 0 退回肉芽。只有 auto 算不出來時才用它——降級，不是預設。
         let cand: [(String, Int)] = [("granulation", 1), ("slough", 2), ("necrosis", 3), ("epithelial", 4)]
         self.defaultClass = cand.max { (tissueFrac[$0.0] ?? 0) < (tissueFrac[$1.0] ?? 0) }
@@ -334,8 +338,8 @@ final class EditCanvasModel: ObservableObject {
             let s = RasterState(rx0: r.rx0, ry0: r.ry0, mw: r.mw, mh: r.mh,
                                 mScale: r.mScale, bw: bw, bh: bh)
             s.mask = r.mask; s.tissue = r.tissue; s.orig = r.origMask
-            // 續編時 auto 不隨 EditRaster 保存，開畫面後由 runSeed() 背景重算
-            //（原本在這裡同步算＝進畫面白凍的根因）。
+            if let baseline = r.autoBaseline, baseline.count == s.auto.count { s.auto = baseline }
+            self.baselineKnown = r.autoBaseline?.count == s.auto.count && r.tissueEditCountKnown
             s.cm2PerPx = mmPerPx.map { ($0 * $0 / 100.0) / (r.mScale * r.mScale) } ?? r.cm2PerPx
             s.recount(); s.syncAll()
             self.freshSeed = false
@@ -379,6 +383,7 @@ final class EditCanvasModel: ObservableObject {
                 ?? (originalArea != nil && c > 0 ? originalArea! / Double(c) : nil)
             s.recount(); s.syncAll()
             self.freshSeed = true
+            self.baselineKnown = true
             self.st = s
         }
         // 有影像才需要底稿；設了這個旗標，畫布觸控與「完成修邊」會鎖到 runSeed 完成。
@@ -404,16 +409,16 @@ final class EditCanvasModel: ObservableObject {
                             mask: mask, src: src, wbGains: gains)
         }.value
         defer { seeding = false; bump() }
-        guard let auto, auto.count == mw * mh else { return }
-        s.auto = auto
+        let safeAuto = (auto?.count == mw * mh) ? auto! : [UInt8](repeating: 0, count: mw * mh)
+        if freshSeed || !baselineKnown { s.auto = safeAuto }
         if freshSeed {
             for i in 0..<(mw * mh) where s.mask[i] != 0 {
-                let a = Int(auto[i])
-                s.tissue[i] = UInt8((a >= 1 && a <= TissueCode.maxCode) ? a : defaultClass)
+                let a = Int(s.auto[i])
+                s.auto[i] = UInt8((a >= 1 && a <= TissueCode.maxCode) ? a : defaultClass)
+                s.tissue[i] = s.auto[i]
             }
         }
-        // Reopening also replaces the baseline. Incremental brush counters must
-        // start from that baseline, not the temporary all-zero grid from init.
+        // A saved baseline remains immutable across reopening and classifier changes.
         s.recount(); s.syncAll()
     }
 
@@ -572,6 +577,7 @@ final class EditCanvasModel: ObservableObject {
                         // GT 裡就多一塊「其實沒人判斷過」的組織。
                         let a = Int(st.auto[i])
                         let nc = (a >= 1 && a <= TissueCode.maxCode) ? a : defaultClass
+                        st.auto[i] = UInt8(nc) // Automatic fallback is not a human tissue edit.
                         st.tissue[i] = UInt8(nc); st.tCounts[nc] += 1
                         if st.tissue[i] != st.auto[i] { st.editedCount += 1 }
                     }
@@ -747,7 +753,7 @@ final class EditCanvasModel: ObservableObject {
     private var currentAreaRaster: EditRaster {
         EditRaster(mask: st.mask, tissue: [], origMask: [], rx0: st.rx0, ry0: st.ry0,
                    mw: st.mw, mh: st.mh, mScale: st.mScale, cm2PerPx: st.cm2PerPx,
-                   canvasW: bw, canvasH: bh)
+                   canvasW: bw, canvasH: bh, planarCalibration: planarCalibration)
     }
     var liveArea: Double? {
         EditAreaPolicy.area(original: originalArea, entry: entryAreaRaster, current: currentAreaRaster)
@@ -785,7 +791,10 @@ final class EditCanvasModel: ObservableObject {
                                 canvasW: bw, canvasH: bh,
                                 // 白平衡增益跟著存：下次從時間軸回頭修邊沒有後端回應，
                                 // 底稿要靠它才能重建成與這次相同的分區。
-                                wbGains: wbGains)
+                                wbGains: wbGains,
+                                planarCalibration: planarCalibration,
+                                autoBaseline: baselineKnown ? st.auto : nil,
+                                tissueEditCountKnown: baselineKnown)
         // Preserve the entry value only when this session's boundary AND scale are unchanged.
         let areaOut = liveArea
         return (poly, polys, iou, areaOut, liveFrac(), raster)
@@ -841,6 +850,7 @@ struct WoundEditView: View {
     let image: UIImage
     let initialPolygons: [[[Int]]]
     let originalArea: Double?
+    let planarCalibration: PlanarAreaCalibration?
     let tissueFrac: [String: Double]
     let exudate: Int?
     let mmPerPx: Double?
@@ -860,6 +870,7 @@ struct WoundEditView: View {
          tissueFrac: [String: Double], exudate: Int?, mmPerPx: Double?,
          resume: EditRaster?, wbGains: [Double]?,
          boundaryOnly: Bool = false,
+         planarCalibration: PlanarAreaCalibration? = nil,
          onCancel: @escaping () -> Void,
          onDone: @escaping (_ edited: [[Int]], _ all: [[[Int]]], _ correctionIou: Double?,
                             _ newArea: Double?, _ tissue: [String: Double],
@@ -867,6 +878,7 @@ struct WoundEditView: View {
         self.image = image
         self.initialPolygons = initialPolygons
         self.originalArea = originalArea
+        self.planarCalibration = planarCalibration ?? resume?.planarCalibration
         self.tissueFrac = tissueFrac
         self.exudate = exudate
         self.mmPerPx = mmPerPx
@@ -878,7 +890,7 @@ struct WoundEditView: View {
         _m = StateObject(wrappedValue: EditCanvasModel(
             image: image, initialPolygons: initialPolygons, originalArea: originalArea,
             tissueFrac: tissueFrac, mmPerPx: mmPerPx, resume: resume, wbGains: wbGains,
-            boundaryOnly: boundaryOnly))
+            boundaryOnly: boundaryOnly, planarCalibration: planarCalibration))
     }
 
     var body: some View {

@@ -139,7 +139,7 @@ final class LiteRevisionSyncTests: XCTestCase {
         var old = store.records[0]; old.cloudSync = nil; XCTAssertTrue(store.update(old))
         await store.syncRevision(recordID: "record", consent: { true }, identity: { "installation" }) { _, _ in calls += 1 }
         XCTAssertEqual(calls, 0)
-        XCTAssertTrue(store.records[0].cloudSyncDescription.contains("未保存"))
+        XCTAssertTrue(store.records[0].cloudSyncDescription.contains("未列為已上傳"))
     }
 
     @MainActor
@@ -293,4 +293,220 @@ final class LiteRevisionSyncTests: XCTestCase {
         XCTAssertTrue(saved.lastError?.contains("屬於舊服務") == true)
     }
 
+}
+
+final class LiteRevisionPresentationTests: XCTestCase {
+    private func record() -> LiteRecord {
+        var r = LiteRecord(id: "synthetic", dateISO: "2026-10-21", surfaceCm2: 80.36,
+            projectedCm2: 80.07, quality: "ok", imageName: "preserved.jpg", source: "manual",
+            polysJson: "[[[20,20],[80,20],[80,80],[20,80]]]", depthName: "preserved.depth")
+        r.manuallyConfirmed = true
+        r.cloudSync = LiteCloudSyncState(binding: LiteCloudBinding(server: "https://test.invalid",
+            anonID: "owner", imageID: "original", imageW: 128, imageH: 128))
+        return r
+    }
+    private func state(_ record: LiteRecord, syncing: Bool = false, consent: Bool = true,
+                       withdrawn: Bool = false, now: Date = Date()) -> LiteRevisionPresentation {
+        .make(record: record, syncing: syncing, consent: consent, withdrawalBlocked: withdrawn, now: now)
+    }
+    private func acknowledged(_ revision: Int = 1) throws -> LiteRecord {
+        var r = record()
+        r.cloudSync?.acknowledgedRevision = revision
+        let json = try XCTUnwrap(r.revisionJSON())
+        r.cloudSync?.acknowledgedDigest = LitePendingRevision.digest(json)
+        return r
+    }
+
+    func testCurrentReceiptHidesUploadAndShowsExactRevision() throws {
+        let r = try acknowledged(3)
+        XCTAssertEqual(state(r).phase, .synced)
+        XCTAssertTrue(state(r).title.contains("第 3 版"))
+        XCTAssertNil(state(r).retryTitle)
+    }
+
+    func testChangedContourWithSameAreaIsStillPending() throws {
+        var r = try acknowledged(3)
+        r.polysJson = "[[[21,20],[81,20],[81,80],[21,80]]]"
+        XCTAssertEqual(r.surfaceCm2, 80.36)
+        XCTAssertEqual(state(r).phase, .pending)
+        XCTAssertNotNil(state(r).retryTitle)
+        XCTAssertEqual(state(r, syncing: true).phase, .syncing)
+        XCTAssertTrue(state(r, syncing: true).title.contains("第 4 版"))
+        XCTAssertNil(state(r, syncing: true).retryTitle)
+    }
+
+    func testOlderReceiptDoesNotClaimNewerLocalEditSynced() throws {
+        var r = try acknowledged(2)
+        r.surfaceCm2 = 74.55
+        XCTAssertEqual(state(r).phase, .pending)
+        let json = try XCTUnwrap(r.revisionJSON())
+        r.cloudSync?.pending = LitePendingRevision(revision: 3, payloadJSON: json)
+        XCTAssertEqual(state(r, syncing: true).phase, .syncing)
+        XCTAssertTrue(state(r, syncing: true).title.contains("第 3 版"))
+    }
+
+    func testCapacityConsentWithdrawalAndMissingIdentityNeverOfferInvalidRetry() throws {
+        var r = try acknowledged()
+        r.surfaceCm2 = 78.02
+        let now = Date(timeIntervalSince1970: 1000)
+        r.cloudSync?.capacityNotBefore = now.addingTimeInterval(300)
+        XCTAssertEqual(state(r, now: now).phase, .waiting)
+        XCTAssertNil(state(r, now: now).retryTitle)
+        XCTAssertNotNil(state(r, now: now.addingTimeInterval(301)).retryTitle)
+        XCTAssertEqual(state(r, consent: false).phase, .localOnly)
+        XCTAssertNil(state(r, consent: false).retryTitle)
+        XCTAssertEqual(state(try acknowledged(), withdrawn: true).phase, .localOnly)
+        XCTAssertNil(state(r, withdrawn: true).retryTitle)
+        r.cloudSync = nil
+        XCTAssertEqual(state(r).phase, .unavailable)
+        XCTAssertNil(state(r).retryTitle)
+    }
+
+    @MainActor
+    func testFailureRetryAndReceiptDriveRealStorePresentationWithoutDuplicateSend() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = LiteStore(fileURL: dir.appendingPathComponent("records.json"))
+        var r = try acknowledged(1); r.surfaceCm2 = 78.02
+        XCTAssertTrue(store.add(r))
+        var requests = 0
+        await store.syncRevision(recordID: r.id, consent: { true }) { _, pending in
+            requests += 1
+            XCTAssertEqual(self.state(store.records[0], syncing: true).phase, .syncing)
+            XCTAssertEqual(pending.revision, 2)
+            throw URLError(.notConnectedToInternet)
+        }
+        let failed = state(store.records[0])
+        XCTAssertEqual(failed.phase, .failed); XCTAssertNotNil(failed.retryTitle)
+        let bytes = store.records[0].cloudSync?.pending
+        let restarted = LiteStore(fileURL: dir.appendingPathComponent("records.json"))
+        await restarted.syncRevision(recordID: r.id, consent: { true }) { _, pending in
+            requests += 1; XCTAssertEqual(pending, bytes)
+        }
+        XCTAssertEqual(state(restarted.records[0]).phase, .synced)
+        XCTAssertTrue(state(restarted.records[0]).title.contains("第 2 版"))
+        XCTAssertNil(state(restarted.records[0]).retryTitle)
+        await restarted.syncRevision(recordID: r.id, consent: { true }) { _, _ in requests += 1 }
+        XCTAssertEqual(requests, 2)
+        XCTAssertEqual(restarted.records[0].imageName, "preserved.jpg")
+        XCTAssertEqual(restarted.records[0].depthName, "preserved.depth")
+    }
+
+    func testAreaSummaryExplicitlyDistinguishesChangedMaskFromRoundedArea() {
+        XCTAssertTrue(LiteContourChangeSummary(before: 80.358, after: 78.016).text.contains("80.36 → 78.02"))
+        let same = LiteContourChangeSummary(before: 80.361, after: 80.363).text
+        XCTAssertTrue(same.contains("圈選已修正")); XCTAssertTrue(same.contains("仍顯示"))
+        XCTAssertFalse(same.contains("未修改"))
+        let legacy = LiteContourChangeSummary(before: 80, after: 75, comparable: false).text
+        XCTAssertFalse(legacy.contains("→")); XCTAssertTrue(legacy.contains("來源不同"))
+    }
+
+    func testEditorSessionUsesLatestRecordAndRejectsDuplicateOrLateCompletion() throws {
+        var flow = LiteContourEditFlow()
+        let first = try acknowledged()
+        flow.begin(record: first, fallback: [])
+        let session1 = try XCTUnwrap(flow.session)
+        XCTAssertEqual(session1.polygons[0][0], [20,20])
+        XCTAssertNotNil(flow.finish(session1.id))
+        XCTAssertNil(flow.finish(session1.id))
+        var second = first; second.polysJson = "[[[21,20],[81,20],[81,80],[21,80]]]"
+        flow.begin(record: second, fallback: session1.polygons)
+        let session2 = try XCTUnwrap(flow.session)
+        XCTAssertNotEqual(session1.id, session2.id)
+        XCTAssertEqual(session2.polygons[0][0], [21,20])
+        XCTAssertNil(flow.finish(session1.id))
+        XCTAssertEqual(flow.session?.id, session2.id)
+        flow.cancel()
+        XCTAssertNil(flow.finish(session2.id))
+    }
+
+    @MainActor
+    func testThreeRevisionsLostReceiptAndRepeatedChecksReuseOneImageAndStableVersions() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var store = LiteStore(fileURL: dir.appendingPathComponent("records.json"))
+        XCTAssertTrue(store.add(record()))
+        var received: [Int: LitePendingRevision] = [:]
+        var attempts: [Int] = []
+        var loseReceipt = true
+        let sender: (LiteCloudBinding, LitePendingRevision) async throws -> Void = { binding, pending in
+            attempts.append(pending.revision)
+            XCTAssertEqual(binding.imageID, "original")
+            if let previous = received[pending.revision] { XCTAssertEqual(previous, pending) }
+            received[pending.revision] = pending
+            let payload = try JSONDecoder().decode(LiteRevisionPayload.self, from: Data(pending.payloadJSON.utf8))
+            XCTAssertEqual(payload.image_w, 128)
+            let keys = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(pending.payloadJSON.utf8)) as? [String: Any])
+            XCTAssertNil(keys["image"]); XCTAssertNil(keys["depth_map"]); XCTAssertNil(keys["rgbd"])
+            XCTAssertLessThan(pending.payloadJSON.utf8.count, 2048)
+            if pending.revision == 2 && loseReceipt {
+                loseReceipt = false
+                throw URLError(.timedOut) // Server stored it, but its receipt did not arrive.
+            }
+        }
+        await store.syncRevision(recordID: "synthetic", consent: { true }, send: sender)
+        var r = store.records[0]; r.surfaceCm2 = 78.02
+        r.polysJson = "[[[21,20],[80,20],[80,80],[20,80]]]"
+        XCTAssertTrue(store.update(r))
+        await store.syncRevision(recordID: r.id, consent: { true }, send: sender)
+        XCTAssertEqual(store.records[0].cloudSync?.acknowledgedRevision, 1)
+        store = LiteStore(fileURL: dir.appendingPathComponent("records.json"))
+        await store.syncRevision(recordID: r.id, consent: { true }, send: sender)
+        XCTAssertEqual(store.records[0].cloudSync?.acknowledgedRevision, 2)
+        r = store.records[0]; r.surfaceCm2 = 74.55
+        r.polysJson = "[[[22,20],[80,20],[80,80],[20,80]]]"
+        XCTAssertTrue(store.update(r))
+        await store.syncRevision(recordID: r.id, consent: { true }, send: sender)
+        for _ in 0..<20 { await store.syncRevision(recordID: r.id, consent: { true }, send: sender) }
+        XCTAssertEqual(attempts, [1, 2, 2, 3])
+        XCTAssertEqual(received.keys.sorted(), [1, 2, 3])
+        XCTAssertEqual(store.records[0].cloudSync?.acknowledgedRevision, 3)
+        XCTAssertEqual(store.records[0].imageName, "preserved.jpg")
+        XCTAssertEqual(store.records[0].depthName, "preserved.depth")
+        XCTAssertEqual(state(store.records[0]).phase, .synced)
+    }
+
+    @MainActor
+    func testActionCardSnapshotsForSuccessProgressFailureAndUnchangedReturn() async throws {
+        let good = try acknowledged(3)
+        var failed = good; failed.surfaceCm2 = 73.2
+        failed.cloudSync?.lastError = "連線中斷，本機修改已保留，可稍後重試。"
+        let variants: [(String, LiteRevisionPresentation, String?)] = [
+            ("synced", state(good), nil),
+            ("syncing", state(failed, syncing: true), nil),
+            ("failed", state(failed), nil),
+            ("unchanged-return", state(good), "本次未新增圈選修改；原紀錄與同步狀態保持不變。")
+        ]
+        for (name, status, note) in variants {
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+            let view = NavigationStack {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        RoundedRectangle(cornerRadius: 12).fill(Color.pink.opacity(0.4))
+                            .frame(height: 250).overlay(Text("合成標靶預覽"))
+                        Text("LiDAR 表面積估算：74.55 cm²").font(.title3).bold()
+                        Text("研究參考估算 · 保留原始影像與深度").foregroundStyle(.secondary)
+                    }.padding()
+                }
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    LiteRevisionActionCard(status: status,
+                        change: .init(before: 78.02, after: 74.55), note: note,
+                        noteIsInformational: true, onEdit: {}, onRetry: {})
+                }
+                .navigationTitle("量測紀錄")
+            }.environment(\.locale, Locale(identifier: "zh_TW"))
+            let host = UIHostingController(rootView: view)
+            window.rootViewController = host; window.makeKeyAndVisible()
+            host.view.setNeedsLayout(); host.view.layoutIfNeeded()
+            try await Task.sleep(nanoseconds: 150_000_000)
+            let image = UIGraphicsImageRenderer(bounds: host.view.bounds).image { _ in
+                host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
+            }
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "lite-revision-\(name)"; attachment.lifetime = .keepAlways; add(attachment)
+            window.isHidden = true; window.rootViewController = nil
+        }
+    }
 }

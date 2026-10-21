@@ -140,7 +140,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.woundai.lite
-        CURRENT_PROJECT_VERSION: "35"
+        CURRENT_PROJECT_VERSION: "36"
         WOUNDLITE_BACKEND_URL: "https://woundai-lite-candidate-421209514056.asia-east1.run.app"
         CODE_SIGN_ENTITLEMENTS: WoundLite/WoundLite.entitlements
         INFOPLIST_FILE: WoundLite/Info.plist

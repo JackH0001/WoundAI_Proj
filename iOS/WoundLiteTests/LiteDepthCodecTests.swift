@@ -45,6 +45,8 @@ final class LiteDepthCodecTests: XCTestCase {
     func testFloatBitsAndAllCalibrationMetadataSurviveRoundTrip() throws {
         var input = depth()
         input.sourceExifOrientation = 6
+        input.captureProvenance = .init(id: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,
+                                       observedAt: Date(timeIntervalSince1970: 1_792_537_000.125))
         let bits: [UInt32] = [0, 0x80000000, 0x7fc01234, 0x7f800000, 0x3e99aabb]
         for (i, value) in bits.enumerated() { input.map[i] = Float(bitPattern: value) }
         let image = jpeg()
@@ -55,6 +57,8 @@ final class LiteDepthCodecTests: XCTestCase {
         XCTAssertEqual(output.accuracy, "absolute")
         XCTAssertTrue(output.filtered)
         XCTAssertEqual(output.sourceExifOrientation, 6)
+        XCTAssertEqual(output.captureProvenance?.id, input.captureProvenance?.id)
+        XCTAssertEqual(output.captureProvenance?.observedAt, input.captureProvenance?.observedAt)
     }
 
     func testWireByteOrderAndLegacyCompatibilityUseIndependentFixture() throws {
@@ -65,6 +69,43 @@ final class LiteDepthCodecTests: XCTestCase {
         XCTAssertEqual(p["unit"] as? String, "m")
         let decoded = try LiteDepthCodec.decode(json(legacy()), matchingJPEG: image)
         XCTAssertEqual(decoded.map, Array(repeating: 1, count: 64))
+        XCTAssertNil(decoded.captureProvenance)
+    }
+
+    func testIncompleteOrContradictoryCaptureProvenanceIsRejected() throws {
+        let image = jpeg()
+        var p = try payload(LiteDepthCodec.encode(depth(), matchingJPEG: image))
+        p["captureID"] = "00000000-0000-4000-8000-000000000001"
+        XCTAssertThrowsError(try LiteDepthCodec.decode(envelope(p), matchingJPEG: image))
+        p.removeValue(forKey: "captureID")
+        p["sourceExifOrientation"] = 9
+        XCTAssertThrowsError(try LiteDepthCodec.decode(envelope(p), matchingJPEG: image))
+    }
+
+    func testReloadedCaptureProducesIdenticalResearchPacketWithoutInventingPose() throws {
+        var input = DepthCapture(map: Array(repeating: 0.3, count: 64),
+                                 width: 8, height: 8, fx: 50, fy: 50,
+                                 cx: 32, cy: 32, refWidth: 64, refHeight: 64,
+                                 accuracy: "absolute", filtered: false, rgbWidth: 64, rgbHeight: 64)
+        input.sourceExifOrientation = 6
+        input.captureProvenance = .init(id: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,
+                                       observedAt: Date(timeIntervalSince1970: 1_792_537_000.125))
+        // Include invalid sensor samples: preservation must not fill or discard them.
+        input.map[0] = Float(bitPattern: 0x7fc01234)
+        input.map[1] = Float(bitPattern: 0x80000000)
+        let image = jpeg(width: 64, height: 64)
+        let before = try LiteRawDepthPacket.make(depth: input, jpeg: image)
+        let restored = try LiteDepthCodec.decode(LiteDepthCodec.encode(input, matchingJPEG: image),
+                                                matchingJPEG: image)
+        let after = try LiteRawDepthPacket.make(depth: restored, jpeg: image)
+        XCTAssertEqual(after.jpeg, before.jpeg)
+        XCTAssertEqual(after.rawDepth, before.rawDepth)
+        XCTAssertEqual(after.metadata, before.metadata)
+        let metadata = try object(after.metadata)
+        XCTAssertEqual(metadata["schema"] as? String, "lite.rgbd/2")
+        XCTAssertEqual(metadata["pose"] as? String, "unavailable")
+        XCTAssertEqual(metadata["registration"] as? String, "not_verified")
+        XCTAssertEqual(metadata["capture_time_source"] as? String, "photo_callback_wall_clock")
     }
 
     func testTruncationAndOneToFourTrailingBytesAreRejected() throws {

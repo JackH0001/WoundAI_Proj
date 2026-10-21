@@ -37,10 +37,12 @@ enum LiteGrouping {
     /// 僅比較已明確歸組的同一傷口；相同時間或無效時間不推測先後。
     static func changePercent(_ record: LiteRecord, in records: [LiteRecord]) -> Double? {
         guard let id = record.woundID, !id.isEmpty,
+              let series = record.areaSeries,
               let date = ISO8601DateFormatter().date(from: record.dateISO),
               record.surfaceCm2.isFinite, record.surfaceCm2 >= 0 else { return nil }
         let earlier = Self.records(for: id, in: records).compactMap { candidate -> (LiteRecord, Date)? in
             guard let candidateDate = ISO8601DateFormatter().date(from: candidate.dateISO),
+                  candidate.areaSeries == series,
                   candidateDate < date else { return nil }
             return (candidate, candidateDate)
         }.max { $0.1 < $1.1 }?.0
@@ -82,11 +84,19 @@ enum LiteWoundTrend {
         let area: Double
     }
 
-    static func points(woundID: String, records: [LiteRecord]) -> [Point] {
+    static func points(woundID: String, records: [LiteRecord], series: LiteAreaSeries? = nil) -> [Point] {
         guard !woundID.isEmpty else { return [] }
         let formatter = ISO8601DateFormatter()
+        let valid = records.compactMap { record -> (LiteRecord, Date)? in
+            guard record.woundID == woundID, record.surfaceCm2.isFinite,
+                  record.surfaceCm2 >= 0, record.areaSeries != nil,
+                  let date = formatter.date(from: record.dateISO) else { return nil }
+            return (record, date)
+        }
+        let chosen = series ?? valid.max { $0.1 < $1.1 }?.0.areaSeries
         return records.compactMap { record -> Point? in
             guard record.woundID == woundID, record.surfaceCm2.isFinite,
+                  let source = record.areaSeries, source == chosen,
                   record.surfaceCm2 >= 0,
                   let date = formatter.date(from: record.dateISO) else { return nil }
             return Point(id: record.id, date: date, area: record.surfaceCm2)

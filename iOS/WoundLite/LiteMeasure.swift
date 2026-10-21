@@ -86,9 +86,9 @@ final class LiteMeasureVM: ObservableObject {
             return true   // 沒深度就不必進圈選——圈了也算不出來
         }
 
-        guard dd?.matchesImageAspect(width: imageW, height: imageH) == true else {
+        guard dd?.geometryIssue(imageW: imageW, imageH: imageH, requireOrientation: true) == nil else {
             depth = nil
-            note = "照片與深度方向不相符，未送出辨識或計算。請重新拍攝。"
+            note = "照片、深度或相機校正資料無法對應，未送出辨識或計算。請重新拍攝。"
             return true
         }
 
@@ -173,7 +173,7 @@ final class LiteMeasureVM: ObservableObject {
 
     /// 單一中心傷口：取質心最靠近畫面中央的輪廓（民眾版產品決策 2026-08-18）。
     nonisolated static func centerWound(_ all: [[[Int]]], w: Int, h: Int) -> [[[Int]]] {
-        let valid = all.filter { $0.count >= 3 }
+        let valid = all.filter { DepthCapture.polygonsFit([$0], width: w, height: h) }
         guard valid.count > 1 else { return valid }
         let cx = Double(w) / 2, cy = Double(h) / 2
         let best = valid.min { a, b in
@@ -199,6 +199,13 @@ final class LiteMeasureVM: ObservableObject {
             DepthAreaEstimator.estimate(polygons: p, depth: d, imageW: iw, imageH: ih)
         }.value
         if gen == g { estimate = est }
+    }
+
+    /// The segmentation service must reply in the exact submitted JPEG space.
+    /// Do not silently resize/crop depth or replace its bound RGB dimensions.
+    func acceptsCloudGeometry(_ result: BackendClient.LiteSegmentResult) -> Bool {
+        result.imageW == imageW && result.imageH == imageH && imageW > 0 && imageH > 0
+            && DepthCapture.polygonsFit(result.polygons, width: imageW, height: imageH)
     }
 
     func submitLayLabel(store: LiteStore) {
@@ -254,19 +261,21 @@ final class LiteMeasureVM: ObservableObject {
                                             cameraIntrinsics: payload.k, rawCapture: payload.raw)
             LiteUsageState.shared.record(r.quota, server: server, anonId: anonId)
             if let m = r.userMessage { return .softFail(m) }
+            guard acceptsCloudGeometry(r) else {
+                return .softFail("辨識回傳的影像尺寸或輪廓與原照片不符，未套用結果。請在原照片手動圈選；這不代表先前送出的影像已撤回。")
+            }
             cloudImageId = r.imageId   // 落地鍵（stored=false 時後端本來就回 nil）
             if r.stored, let imageID = r.imageId, !imageID.isEmpty,
                r.imageW == work.cgImage?.width, r.imageH == work.cgImage?.height {
                 cloudBinding = LiteCloudBinding(server: server, anonID: anonId, imageID: imageID,
                     imageW: r.imageW > 0 ? r.imageW : imageW, imageH: r.imageH > 0 ? r.imageH : imageH, storageReceipt: r.storageReceipt)
             }
-            // 以後端回覆的座標空間為準（它處理的那張圖才是輪廓所在的空間）。
-            if r.imageW > 0 { imageW = r.imageW }
-            if r.imageH > 0 { imageH = r.imageH }
-            depth?.rgbWidth = imageW
-            depth?.rgbHeight = imageH
+            // Keep the original JPEG/depth coordinate binding unchanged.
             return .ok(r.polygons, stored: r.stored, route: r.route, raw: r.rawPolyCount, receipt: r.storageReceipt)
         } catch {
+            if let message = (error as? LiteAttestFailure)?.captureFailureMessage {
+                return .softFail(message)
+            }
             // Debug 組建把確切錯誤（HTTP 狀態＋伺服器訊息／逾時）掛上畫面——
             // 「連線或服務問題」六個字對排錯毫無鑑別力（2026-08-19 教訓：
             // 端點 500、404、逾時、DNS 全都長這樣）。
@@ -288,6 +297,12 @@ struct LiteVerdict {
 }
 
 func liteVerdict(_ e: DepthAreaResult) -> LiteVerdict {
+    guard [e.surfaceAreaCm2, e.projectedAreaCm2, e.coverage, e.medianDistanceM].allSatisfy(\.isFinite),
+          e.surfaceAreaCm2 > 0, e.projectedAreaCm2 > 0, (0...1).contains(e.coverage),
+          e.medianDistanceM > 0,
+          e.tiltDeg.map({ $0.isFinite && (0...90).contains($0) }) ?? true else {
+        return LiteVerdict(usable: false, blocker: "量測資料不完整，無法提供面積。請保留原紀錄並重新拍攝。", warnings: [])
+    }
     let ratio = e.projectedAreaCm2 > 0 ? e.surfaceAreaCm2 / e.projectedAreaCm2 : 99
     if ratio > 1.25, (e.tiltDeg ?? 0) < 25 {
         return LiteVerdict(usable: false,
@@ -296,7 +311,7 @@ func liteVerdict(_ e: DepthAreaResult) -> LiteVerdict {
     }
     if e.medianDistanceM < 0.22 {
         return LiteVerdict(usable: false,
-                           blocker: "拍攝距離太近（LiDAR 在 22 公分內不可靠）。請退後一些重拍。",
+                           blocker: "拍攝距離太近，低於目前使用的距離檢查範圍。請退後至約 25–40 公分重拍。",
                            warnings: [])
     }
     if e.coverage < 0.5 {
@@ -313,9 +328,10 @@ func liteVerdict(_ e: DepthAreaResult) -> LiteVerdict {
     if e.medianDistanceM > 0.5 {
         warns.append("距離偏遠（約 \(Int(e.medianDistanceM * 100)) 公分），建議 25–40 公分。")
     }
-    if e.coverage < 0.7 {
-        warns.append("部分區域缺深度資料（已補洞估算），數值可能略偏。")
+    if e.coverage < 1 {
+        warns.append("部分區域缺少深度，面積含補值估算；缺漏可能造成偏差，無法保證誤差大小。")
     }
+    if e.tiltDeg == nil { warns.append("無法估計周邊參考面與拍攝傾角；請正對傷口，勿把未知傾角視為零度。") }
     if e.surfaceAreaCm2 < 1.0 {
         warns.append("傷口小於 1 cm²，相對誤差較大，數字僅供趨勢參考。")
     }
@@ -552,6 +568,7 @@ struct LiteMeasureView: View {
             polysJson: polysJson,
             depthName: depthName)
         rec.cloudSync = vm.cloudBinding.map { LiteCloudSyncState(binding: $0) }
+        rec.measurementContext = LiteMeasurementContext(depth: depth, result: e, warnings: v.warnings)
         rec.manuallyConfirmed = vm.hasManualContour
         guard let saved = store.saveMeasurement(rec, selectedWoundID: target.woundID, enteredLocation: target.location) else {
             store.images.delete(name)
@@ -588,18 +605,17 @@ struct LiteResultCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if verdict.usable {
-                Text(String(format: "傷口面積：%.2f cm²", e.surfaceAreaCm2))
+                Text(String(format: "LiDAR 表面積估算：%.2f cm²", e.surfaceAreaCm2))
                     .font(.title3).bold()
                 Text("（LiDAR 輔助表面積估算，僅供個人紀錄參考）")
                     .font(.caption).foregroundStyle(.secondary)
-                if let v = e.volumeMl, let md = e.maxDepthMm {
-                    Text(String(format: "估算參考：容積約 %.2f mL・最深約 %.1f mm（相對周邊皮膚擬合面，非醫療判定）", v, md))
-                        .font(.footnote)
-                }
-                Text(String(format: "投影面積 %.2f cm²（平面對照用）・攝距 %.0f cm・深度覆蓋 %d%%",
+                LiteVolumeReferenceView(volume: e.volumeMl, depth: e.maxDepthMm)
+                Text(String(format: "相機方向投影估算 %.2f cm²・攝距 %.0f cm・深度覆蓋 %d%%",
                             e.projectedAreaCm2, e.medianDistanceM * 100,
                             Int(e.coverage * 100)))
                     .font(.caption2).foregroundStyle(.secondary)
+                Text("免貼紙深度估算；投影面積與表面積不同。深度覆蓋完整也不代表小凹凸已量準。")
+                    .font(.caption).foregroundStyle(.secondary)
                 ForEach(verdict.warnings, id: \.self) { w in
                     Text("⚠ " + w).font(.footnote).foregroundStyle(.orange)
                 }
