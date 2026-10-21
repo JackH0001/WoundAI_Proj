@@ -1,6 +1,28 @@
 import Foundation
 import CryptoKit
 
+/// Pin participation when the camera result arrives, before asynchronous image
+/// processing. Renewed consent cannot reclassify an already-processing capture.
+struct LiteCaptureResearchScope: Equatable, Sendable {
+    let origin: String
+    let epoch: String?
+    @MainActor
+    static func capture(server: String, consent: Bool, journal: LiteWithdrawalJournal = .standard) throws -> Self? {
+        guard consent, !journal.blocksUploads else { return nil }
+        let origin = try LiteWithdrawalJournal.origin(server)
+        let record = try journal.load()
+        if let record {
+            guard try LiteWithdrawalJournal.origin(record.server) == origin else { return nil }
+        }
+        return Self(origin: origin, epoch: record?.researchEpoch)
+    }
+    @MainActor
+    func permits(server: String, consent: Bool, journal: LiteWithdrawalJournal = .standard) -> Bool {
+        guard let current = try? Self.capture(server: server, consent: consent, journal: journal) else { return false }
+        return current == self
+    }
+}
+
 /// A new participation epoch keeps the SAME attested installation. It never
 /// restores deleted media or changes any saved photo/mask/revision binding.
 struct LiteReconsentRequest: Codable, Equatable, Sendable {

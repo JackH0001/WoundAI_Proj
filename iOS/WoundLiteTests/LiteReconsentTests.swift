@@ -145,4 +145,22 @@ final class LiteReconsentTests: XCTestCase {
         XCTAssertEqual(state.phase, .localOnly); XCTAssertNil(state.retryTitle)
         XCTAssertTrue(state.title.contains("已撤回"))
     }
+    func testCaptureCannotCrossWithdrawalAndRenewalDuringImageProcessing() async throws {
+        let old = try XCTUnwrap(LiteCaptureResearchScope.capture(server: server, consent: true, journal: journal))
+        XCTAssertTrue(old.permits(server: server, consent: true, journal: journal))
+        _ = try complete()
+        XCTAssertFalse(old.permits(server: server, consent: true, journal: journal))
+        let renewed = await model().reconsentCompletedWithdrawal(server: server) { self.receipt($0.request) }
+        XCTAssertTrue(renewed)
+        XCTAssertFalse(old.permits(server: server, consent: true, journal: journal))
+        let new = try XCTUnwrap(LiteCaptureResearchScope.capture(server: server, consent: true, journal: journal))
+        XCTAssertTrue(new.permits(server: server, consent: true, journal: journal))
+        XCTAssertFalse(new.permits(server: "https://other.invalid", consent: true, journal: journal))
+        XCTAssertFalse(new.permits(server: server, consent: false, journal: journal))
+    }
+    func testOfflineOrWithdrawnCaptureHasNoFutureUploadScope() throws {
+        XCTAssertNil(try LiteCaptureResearchScope.capture(server: server, consent: false, journal: journal))
+        _ = try complete()
+        XCTAssertNil(try LiteCaptureResearchScope.capture(server: server, consent: true, journal: journal))
+    }
 }
