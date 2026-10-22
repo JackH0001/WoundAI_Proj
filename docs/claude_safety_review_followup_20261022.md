@@ -53,6 +53,10 @@ Android 模擬器 57 項不是整個專案全部 instrumentation tests。
 另一項測試以權限回呼次數模擬撤回，改為實際送出後切換權限，以驗證真正的網路階段。
 初次 XCTest 的檔案附加屬性簽署失敗、測試舊等待值失敗，以及 sandbox loopback 限制均保留本機紀錄；上表使用修正後完整重跑的結果。
 
+新 head 的第一次 CI 另發現 `test_manual_consistency.py` 只搜尋舊 helper 名稱，
+將新保存路徑誤判為缺少持久化。該靜態契約已對齊「網路前保存」的新路徑，107 項檢查通過；
+撤回競態的實際保護仍由上述兩平台行為測試證明，而非單憑字串檢查。
+
 ## 覆核入口
 
 - [iOS 同意佇列](../iOS/WoundMeasurementApp/Core/MedicalAccountPreferences.swift)、[排程](../iOS/WoundMeasurementApp/Core/ConsentSync.swift)。
