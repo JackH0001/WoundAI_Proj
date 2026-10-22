@@ -936,8 +936,11 @@ def withdrawn_keys(withdrawn_path=None, *, codes=None, image_ids=None, faults=No
     image_codes={}
     for iid in wanted_images:
         try:
-            refs={r['code'] for r in order.image_subjects(iid)}
-            wanted_codes.update(refs); indexed_codes.update(refs); image_codes[iid]=refs
+            owners=order.image_subjects(iid)
+            refs={r['code'] for r in owners}
+            wanted_codes.update(refs)
+            indexed_codes.update(r['code'] for r in owners if r['consent_root_required'])
+            image_codes[iid]=refs
         except (ConsentOrderError,ValueError,TypeError,IOError):
             index_fault_images.add(iid)
         for row in queue + legacy:
@@ -969,24 +972,25 @@ def withdrawn_keys(withdrawn_path=None, *, codes=None, image_ids=None, faults=No
             if state['status']=='fault':
                 blocked_images.update(i for i,refs in image_codes.items() if code in refs)
                 logger.error("consent subject excluded: %s", state.get('fault'))
+    restored_codes={s['code'] for s in states if s['status']=='restored' and s.get('sequence',0)>0}
+    for iid in wanted_images-blocked_images:
+        if not (image_codes.get(iid) and image_codes[iid] <= restored_codes):
+            if _store().exists(_key(os.path.join(QUARANTINE_DIR,iid+'.jpg'))): blocked_images.add(iid)
     return blocked_codes,blocked_images
 
 
 def is_quarantined(image_id, quarantine_dir=None):
     if not image_id or not ID_RE.fullmatch(str(image_id)): return False
     if quarantine_dir is None or os.path.abspath(quarantine_dir)==os.path.abspath(QUARANTINE_DIR):
-        if image_id in withdrawn_keys(image_ids=[image_id])[1]: return True
-        # A historical physical copy may remain after an explicitly ordered
-        # restore. Reverse refs are complete only after the index gate passes.
-        try:
-            if _consent_order().image_subjects(image_id): return False
-        except (ValueError,TypeError,IOError): return True
-    return _store().exists(_key(os.path.join(quarantine_dir or QUARANTINE_DIR, f"{image_id}.jpg")))
+        return image_id in withdrawn_keys(image_ids=[image_id])[1]
+    return _store().exists(_key(os.path.join(quarantine_dir, f"{image_id}.jpg")))
 
 
 def is_consent_blocked(image_id, withdrawn_path=None, quarantine_dir=None):
     if not image_id: return False
-    return str(image_id) in withdrawn_keys(withdrawn_path, image_ids=[image_id])[1] or is_quarantined(image_id,quarantine_dir)
+    if withdrawn_path or quarantine_dir:
+        return str(image_id) in withdrawn_keys(withdrawn_path,image_ids=[image_id])[1] or is_quarantined(image_id,quarantine_dir)
+    return str(image_id) in withdrawn_keys(image_ids=[image_id])[1]
 
 
 def rec_source(rec):

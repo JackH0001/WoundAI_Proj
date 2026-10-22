@@ -99,8 +99,9 @@ def cleanup_subject(order, code, org, policy, *, apply=False, now=None):
     state=order._state(chain)
     due=(state['status']=='withdrawn' and chain[-1]['action']=='withdraw'
          and type(state['committed_at']) is int and now>=state['committed_at']+policy['retention_seconds'])
+    owned,_=order.owned_images(code,org)
     images=set(state['purged_image_ids'])
-    if due: images.update(state['image_ids'])
+    if due: images.update(set(state['image_ids'])|owned)
     result=dict(code=code,status='dry_run',due=due,image_count=len(images),policy=policy,
                 media=[dict(image_id=i,objects=inventory(order.store,i)) for i in sorted(images)])
     if chain[-1]['action']=='withdraw' and type(state['committed_at']) is not int:

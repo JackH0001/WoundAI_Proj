@@ -17,6 +17,8 @@ EVENTS = 'receipts/medical_consent_events'
 IMAGE_INDEX = 'receipts/medical_consent_images'
 INDEX_MARKER = 'receipts/medical_consent_index/v1.json'
 INDEX_SCHEMA = 'medical-consent-image-index/1'
+MEDIA_OWNERS = 'receipts/medical_media_owners'
+MEDIA_IMAGE_OWNERS = 'receipts/medical_media_image_owners'
 
 def valid_image(value):
     return isinstance(value, str) and re.fullmatch(r'[0-9a-f]{16}', value) is not None
@@ -56,6 +58,17 @@ def legacy_state(rows, code):
         images.update(split_images(ids)[0])
         blocked = row.get('action', 'withdraw') != 'restore'
     return relevant, blocked, sorted(images)
+
+def record_media_owner(store, code, org, image_id):
+    """Call only after care token / immutable image binding verification."""
+    token=subject(code)
+    if not valid_image(image_id) or not isinstance(org,str) or not org:
+        raise ConsentOrderError('invalid_media_owner',400)
+    value=dict(schema='medical-media-owner/1',code=code,org=org,image_id=image_id)
+    # Both directions precede the final admission guard and first media write.
+    store.put_json_immutable(MEDIA_IMAGE_OWNERS+'/'+image_id+'/'+token+'.json',value)
+    store.put_json_immutable(MEDIA_OWNERS+'/'+token+'/'+image_id+'.json',value)
+
 
 class ConsentOrder:
     def __init__(self, store, legacy, now=None):
@@ -156,15 +169,33 @@ class ConsentOrder:
     def image_subjects(self, iid):
         if not valid_image(iid): return []
         self.ensure_index()
-        out = []
-        for key in self._keys(IMAGE_INDEX+'/'+iid):
-            row = self.store.get_json(key)
-            if (not isinstance(row,dict) or row.get('image_id')!=iid
-                    or not isinstance(row.get('org'),str)
-                    or key!=IMAGE_INDEX+'/'+iid+'/'+subject(row.get('code'))+'.json'):
-                raise ConsentOrderError('consent_image_index_invalid',503)
-            out.append(row)
+        out=[]
+        for prefix in (IMAGE_INDEX,MEDIA_IMAGE_OWNERS):
+            for key in self._keys(prefix+'/'+iid):
+                row=self.store.get_json(key)
+                if (not isinstance(row,dict) or row.get('image_id')!=iid
+                        or not isinstance(row.get('org'),str)
+                        or key!=prefix+'/'+iid+'/'+subject(row.get('code'))+'.json'):
+                    raise ConsentOrderError('consent_image_index_invalid',503)
+                out.append(dict(row,consent_root_required=prefix==IMAGE_INDEX))
         return out
+
+    def owned_images(self, code, org, tolerate_faults=False):
+        images, faults = set(), []
+        prefix=MEDIA_OWNERS+'/'+subject(code)
+        for key in self._keys(prefix):
+            try:
+                row=self.store.get_json(key)
+                if (not isinstance(row,dict) or row.get('schema')!='medical-media-owner/1'
+                        or row.get('code')!=code or row.get('org')!=org
+                        or not valid_image(row.get('image_id'))
+                        or key!=prefix+'/'+row['image_id']+'.json'):
+                    raise ConsentOrderError('media_owner_invalid',503)
+                images.add(row['image_id'])
+            except (ValueError,TypeError,KeyError,IOError):
+                if not tolerate_faults: raise
+                faults.append(digest(key))
+        return images,faults
 
     def safe_state(self, code, org=None, require_root=False):
         """Fail closed for this code, without poisoning unrelated subjects."""
@@ -242,6 +273,9 @@ class ConsentOrder:
                 raise ConsentOrderError('consent_revision_conflict',409)
             if action=='purge' and chain[-1]['action']!='withdraw':
                 raise ConsentOrderError('consent_purge_not_withdrawn',409)
+            owned, owner_faults=self.owned_images(code,org,tolerate_faults=action=='withdraw')
+            images=sorted(set(images)|owned)
+            rejected_image_digests=sorted(set(rejected_image_digests)|set(owner_faults))
             root=chain[0]
             # Publish reverse references before the state event. A failed writer
             # may leave an extra reference, never a missing committed exclusion.

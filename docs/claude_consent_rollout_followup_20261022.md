@@ -13,7 +13,7 @@ purge claim arbitrates against restore; it preserves the old withdrawal/audit
 and prevents old media being re-admitted. Media inventories cover RGB, staging,
 quarantine, masks and raw/PNG depth, including versioned GCS objects. Deletions
 are generation-pinned, failures resume, and later reconciliations catch orphan
-writes. Soft-deleted recoverable versions stay pending. Retained annotation,
+writes. Verified care staging also records both directions of media ownership before its final admission guard and first image write. This covers unannotated staging and a writer crossing a withdrawal snapshot; the cleanup claim includes registered media, not only the annotation queue. Six additional tests cover registration failure, invalid care and those races. Soft-deleted recoverable versions stay pending. Retained annotation,
 consent/audit metadata, backups, exports and models are explicitly outside the
 media-absence receipt. Missing legacy timestamps or corrupt histories require
 review, not invented ages. Both mobile messages, manuals and the IRB draft now
@@ -36,11 +36,11 @@ subjects, same history shape):
 
 | Storage interface calls | 5c8e414, 1 | 5c8e414, 200 | candidate, 1 | candidate, 200 |
 |---|---:|---:|---:|---:|
-| get_json | 8 | 1202 | 14 | 14 |
-| list_keys | 4 | 402 | 5 | 5 |
-| read_lines_fresh | 2 | 400 | 2 | 2 |
+| get_json | 8 | 1202 | 6 | 6 |
+| list_keys | 4 | 402 | 3 | 3 |
+| read_lines_fresh | 2 | 400 | 1 | 1 |
 
-For a blocked image the candidate is 5 / 2 / 1 in both populations. These are
+For a blocked image the candidate is 5 / 3 / 1 in both populations. These are
 LocalStore interface counts, not measured GCS requests/latency. GCS get_json
 currently performs existence plus download; do not report the table as actual
 network bills or throughput. Legacy queue length and per-subject history still
@@ -65,8 +65,8 @@ Unresolvable historical media references need operator review for cleanup.
 
 ## Verification on this candidate
 
-- Medical server/storage/guards: **125 passed**, 83 subtests, no failures.
-  This includes **22 new rollout tests**, separately from the previous 22
+- Medical server/storage/guards: **131 passed**, 83 subtests, no failures.
+  This includes **28 new rollout tests**, separately from the previous 22
   consent-order tests.
 - Lite backend: **452 passed**, 463 subtests, no failures.
 - Build/contract/RGB-D/retention tools: **62 passed, 4 skipped** (PowerShell

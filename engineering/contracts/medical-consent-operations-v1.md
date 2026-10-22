@@ -27,6 +27,18 @@ once and isolate subject errors. Large legacy logs, long per-subject chains,
 GCS latency and whole-service load require separate deployment acceptance; the
 synthetic read-budget test is not a cloud latency/load benchmark.
 
+Verified medical staging additionally writes create-only ownership receipts at
+`receipts/medical_media_owners/<subject_hash>/<image_id>.json` and the reverse
+`receipts/medical_media_image_owners/<image_id>/<subject_hash>.json` before its
+final admission guard and first media write. Ownership is not consent and does
+not grant training permission. Withdrawal and purge collect these registered
+IDs even before an annotation exists. Invalid care cannot register ownership;
+failed registration prevents media storage. A late owner crossing the initial
+withdrawal snapshot is included when cleanup claims its disposition.
+For an existing deployment, inventory/backfill of pre-update staging ownership
+must be reviewed alongside the consent reverse index; do not assume old
+unannotated staging is covered just because the consent index is complete.
+
 ## Subject fault isolation (P3)
 
 Malformed JSON, gaps, scope/hash mismatch or a changed sealed baseline exclude

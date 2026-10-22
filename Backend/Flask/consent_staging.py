@@ -263,6 +263,12 @@ class Promotion:
                 raise ConsentError("promotion_code_mismatch")
             if self.store.exists("images/" + iid + ".jpg"):
                 self._bytes("images/" + iid + ".jpg", iid, p)
+                from medical_consent_order import record_media_owner
+                try:
+                    record_media_owner(self.store, care["code"], org, iid)
+                except Exception as exc:
+                    raise ConsentError("persistence_state_unknown",503) from exc
+                self._guard(care["code"], iid)
                 return {"persisted": True, "persistence_reason": "already_promoted",
                         "image_id": iid, "image_reused": True}
         self.intent("care_receipt_consume", care["code"],
@@ -291,6 +297,11 @@ class Promotion:
                 # The request may have committed but lost its response.  The
                 # caller must not report analysis-only success in that state.
                 raise ConsentError("persistence_state_unknown", 503) from exc
+        from medical_consent_order import record_media_owner
+        try:
+            record_media_owner(self.store, care["code"], org, iid)
+        except Exception as exc:
+            raise ConsentError("persistence_state_unknown",503) from exc
         self._guard(care["code"], iid)
         try:
             created = self.store.put_blob_immutable("staging/" + iid + ".jpg", image.data)

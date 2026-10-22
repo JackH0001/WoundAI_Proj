@@ -203,4 +203,55 @@ class HTTP(unittest.TestCase):
         resp=self.client.post('/api/v1/consent/withdraw',headers=self.headers['dr1'],json=dict(code='WD-SYNTH'))
         self.assertEqual(resp.status_code,200,resp.json);self.assertIn('a'*16,resp.json['image_ids'])
 
+import test_p0_4_staging as staging_fixtures
+from medical_consent_order import record_media_owner, MEDIA_OWNERS
+from consent_staging import ConsentError
+
+class StagingOwnership(unittest.TestCase):
+    setUp=staging_fixtures.StagingTests.setUp
+    stage=staging_fixtures.StagingTests.stage
+    token=staging_fixtures.StagingTests.token
+    prepare=staging_fixtures.StagingTests.prepare
+    def order(self):return ConsentOrder(self.st,lambda:[],now=lambda:self.clock)
+    def withdraw(self):
+        return self.order().apply(self.code,self.org,self.actor,'withdraw','withdraw-stage-001',None,[])
+    def test_unannotated_staging_is_included_in_withdrawal_and_cleanup(self):
+        self.stage();self.assertEqual(self.queue,[])
+        receipt=self.withdraw();self.assertIn(self.iid,receipt['image_ids'])
+        result=cleanup_subject(self.order(),self.code,self.org,POLICY,apply=True,now=self.clock+30*86400)
+        self.assertEqual(result['status'],'media_versions_absent_at_check')
+        self.assertFalse(self.st.exists('staging/'+self.iid+'.jpg'))
+    def test_owner_write_failure_prevents_media_storage(self):
+        original=self.st.put_json_immutable
+        def fail(key,value):
+            if key.startswith(MEDIA_OWNERS+'/'):raise IOError('owner receipt failure')
+            return original(key,value)
+        with patch.object(self.st,'put_json_immutable',side_effect=fail),self.assertRaises(ConsentError):self.stage()
+        self.assertFalse(self.st.exists('staging/'+self.iid+'.jpg'))
+    def test_promoted_retry_owner_failure_is_unknown_not_analysis_only(self):
+        self.stage();self.prepare()
+        self.assertTrue(self.st.exists('images/'+self.iid+'.jpg'))
+        with patch('medical_consent_order.record_media_owner',side_effect=IOError('synthetic outage')):
+            with self.assertRaises(ConsentError) as caught:self.stage()
+        self.assertEqual(caught.exception.status,503)
+        self.assertTrue(self.st.exists('images/'+self.iid+'.jpg'))
+    def test_invalid_care_never_registers_owner(self):
+        with self.assertRaises(ConsentError):self.svc.stage(self.image,'bad-token',self.actor,'physician',self.org)
+        self.assertFalse(self.order().owned_images(self.code,self.org)[0])
+    def test_withdraw_during_owner_registration_blocks_first_media_write(self):
+        def registered(st,code,org,iid):
+            record_media_owner(st,code,org,iid);self.withdraw();self.withdrawn.add(code)
+        with patch('medical_consent_order.record_media_owner',side_effect=registered),self.assertRaises(ConsentError):self.stage()
+        self.assertFalse(self.st.exists('staging/'+self.iid+'.jpg'))
+        self.assertIn(self.iid,self.order().state(self.code,self.org)['image_ids'])
+    def test_cleanup_includes_owner_registered_after_withdrawal_snapshot(self):
+        self.withdraw()
+        # Model a suspended pre-withdrawal staging writer. No annotation exists.
+        record_media_owner(self.st,self.code,self.org,self.iid)
+        self.st.put_blob('staging/'+self.iid+'.jpg',self.image.data)
+        result=cleanup_subject(self.order(),self.code,self.org,POLICY,apply=True,now=self.clock+30*86400)
+        self.assertEqual(result['status'],'media_versions_absent_at_check')
+        self.assertFalse(self.st.exists('staging/'+self.iid+'.jpg'))
+        self.assertIn(self.iid,self.order().state(self.code,self.org)['purged_image_ids'])
+
 if __name__=='__main__':unittest.main(verbosity=2)
