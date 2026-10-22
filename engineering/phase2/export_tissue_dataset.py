@@ -55,6 +55,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..", "..", "Backend", "Flask")))
 
 CLASSES = {0: "背景/未標註", 1: "肉芽", 2: "腐肉", 3: "壞死", 4: "上皮", 5: "其他"}
 MAX_CODE = 5

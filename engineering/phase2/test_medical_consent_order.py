@@ -139,3 +139,16 @@ class ConsentHTTP(unittest.TestCase):
         response=self.client.get('/api/v1/consent/state?code=WD-SYNTH',headers=self.headers['dr1'])
         self.assertEqual(response.status_code,409,response.json)
         self.assertNotIn('image_ids',response.json)
+    def test_custom_legacy_file_cannot_bypass_live_ordered_ledger(self):
+        self.assertEqual(self.post('withdraw').status_code,200)
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'withdrawn.jsonl';path.write_text('')
+            with self.assertRaisesRegex(ValueError,'cannot bypass ordered consent'):
+                fw.withdrawn_keys(str(path))
+    def test_custom_local_source_with_receipts_requires_full_store_configuration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local=LocalStore(tmp);order=ConsentOrder(local,lambda:[])
+            order.apply('WD-OTHER','default','default:doctor','withdraw','withdraw-offline01',None,[])
+            path=Path(tmp)/'withdrawn.jsonl';path.write_text('')
+            with self.assertRaisesRegex(ValueError,'cannot bypass ordered consent'):
+                fw.withdrawn_keys(str(path))

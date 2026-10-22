@@ -917,6 +917,12 @@ def _consent_order():
 def withdrawn_keys(withdrawn_path=None):
     codes, imgs = _legacy_withdrawn_keys(withdrawn_path)
     if withdrawn_path and os.path.abspath(withdrawn_path) != os.path.abspath(WITHDRAWN):
+        # Legacy offline tools may override just the JSONL path. That is not a
+        # complete v2 consent source: do not silently omit its ordered receipts.
+        root = os.path.dirname(os.path.abspath(withdrawn_path))
+        local_ledger = os.path.join(root, "receipts", "medical_consent")
+        if _store().list_keys("receipts/medical_consent") or (os.path.isdir(local_ledger) and os.listdir(local_ledger)):
+            raise ValueError("custom withdrawal path cannot bypass ordered consent; configure the complete store")
         return codes, imgs
     states = _consent_order().all_states()
     for state in states:

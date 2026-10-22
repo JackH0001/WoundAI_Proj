@@ -39,7 +39,7 @@ a tested candidate, not an applied live policy.
 | Android Debug JVM | 141 | 2 | 0 |
 | Android MMH validation JVM | 143 | 0 | 0 |
 | Android MMH emulator, five relevant classes | 62 | 0 | 0 |
-| Medical server/storage/guard regression selection | 101 | 0 | 0 |
+| Medical server/storage/guard regression selection | 103 | 0 | 0 |
 | Lite backend regression | 452 | 0 | 0 |
 | Build/contract/RGB-D tool selection | 58 | 1 | 0 |
 
@@ -49,7 +49,7 @@ iOS skips cover device file protection / system folder-picker acceptance; Debug
 JVM skips are MMH-only tests that pass in the MMH build. The emulator selection
 is not the entire instrumentation suite. Seven isolated legacy script suites
 also passed, including 107 manual consistency checks; the synthetic HTTP
-consent lifecycle passed. The new ordering suite runs 20 tests via the CI
+consent lifecycle passed. The new ordering suite runs 22 tests via the CI
 unittest entry point, including the cross-org state-read regression.
 These are synthetic/local tests, not a cloud race test.
 
@@ -60,6 +60,17 @@ duplicate DEX files in the existing build directory required a fresh isolated
 build output. A parity check caught dynamically constructed Android consent URLs;
 the client now lists the two supported endpoints explicitly, without relaxing
 the checker. Earlier failed logs are retained alongside the final evidence.
+
+The export-reader audit also found that overriding only the legacy withdrawal
+JSONL could omit the new ledger. This incomplete override now fails closed when
+ordered receipts exist; two tests cover the configured store and a separate
+local source. Normal exports use `effective_queue` / `classify_queue`; remote
+exports obtain an authenticated manifest. Snapshot expiry, independent bucket
+copies and production export policy still require rollout verification.
+Five relevant export/record script suites passed after this guard. The tissue
+export CLI also needed its backend import path initialized before its environment
+guard; the existing end-to-end export test caught this and then passed all 17
+checks. This fix changes import setup, not mask geometry or export eligibility.
 
 ## Reproduce and inspect
 

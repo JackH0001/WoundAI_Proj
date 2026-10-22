@@ -59,6 +59,10 @@ must first prove every serving/training/export reader honors the ledger, then
 use a v2-aware recovery image. Direct bucket exports must not bypass eligibility
 checks. The old local queue-archive tool refuses to archive a store containing
 v2 consent roots; it needs a separate version-aware migration.
+An offline `--withdrawn` override cannot replace a v2 store with just its legacy
+JSONL: readers reject the override when ordered receipts are present in either
+the configured store or the supplied local directory. Configure the complete
+store, including receipts, rather than copying only legacy files.
 
 This implementation scans fresh state; large-subject/long-history performance,
 real GCS multi-instance behavior and device-to-cloud acceptance are not yet
