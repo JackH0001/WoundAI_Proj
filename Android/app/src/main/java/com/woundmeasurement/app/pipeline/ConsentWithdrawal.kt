@@ -58,10 +58,19 @@ object ConsentWithdrawal {
      * 2026-08-07 實測到這個狀態：test001 撤回後重新簽署，重新修邊都成功，
      * 但補送標註一律被擋，畫面上完全看不出該怎麼辦。
      */
-    suspend fun restoreOnBackend(ctx: Context, codes: Collection<String>, runtime: MedicalRuntime = MedicalRuntime(ctx)): Result =
-        sync(ctx, codes, Dir.RESTORE, runtime)
+    suspend fun prepareRestore(codes: Collection<String>, runtime: MedicalRuntime): Map<String,String> = withContext(Dispatchers.IO) {
+        if(codes.isEmpty()) return@withContext emptyMap()
+        val current=runtime.operation();val backend=runtime.acquire()
+        val revisions=codes.distinct().associateWith { code ->
+            check(current()) { "同意核對已失效" };backend.consentRevision(code)
+        }
+        check(current()) { "同意核對已失效" };revisions
+    }
 
-    private suspend fun sync(ctx: Context, codes: Collection<String>, dir: Dir, runtime: MedicalRuntime, newIntent:Boolean=true): Result {
+    suspend fun restoreOnBackend(ctx: Context, codes: Collection<String>, runtime: MedicalRuntime = MedicalRuntime(ctx), observedRevisions:Map<String,String> = emptyMap()): Result =
+        sync(ctx, codes, Dir.RESTORE, runtime, observedRevisions=observedRevisions)
+
+    private suspend fun sync(ctx: Context, codes: Collection<String>, dir: Dir, runtime: MedicalRuntime, newIntent:Boolean=true, observedRevisions:Map<String,String> = emptyMap()): Result {
         val list = codes.filter { it.isNotBlank() }.distinct()
         val queue = if (dir == Dir.WITHDRAW) com.woundmeasurement.app.data.store.MedicalAccountPreferences.ConsentQueue.WITHDRAWAL
             else com.woundmeasurement.app.data.store.MedicalAccountPreferences.ConsentQueue.RESTORE
@@ -69,6 +78,9 @@ object ConsentWithdrawal {
         // Persist before the first suspension; a closed environment must keep its own pending work.
         if(newIntent) runtime.accounts.add(list,queue)
         val tokens=list.mapNotNull { code -> runtime.accounts.token(code,queue)?.let {code to it} }.toMap()
+        if(newIntent && dir==Dir.RESTORE) tokens.forEach { (code,token) ->
+            observedRevisions[code]?.let { runtime.accounts.pinConsentRevision(it,code,token) }
+        }
         return withContext(Dispatchers.IO) {
             if(runtime.accounts.retryAfter(queue)>System.currentTimeMillis() || !processing.tryLock()) return@withContext Result(emptyList(),list)
             try {
@@ -85,10 +97,8 @@ object ConsentWithdrawal {
                 val token=tokens[code] ?: continue
                 if(runtime.accounts.token(code,queue)!=token) continue
                 val ok = current() && !capacityWaiting && runCatching {
-                    if(dir==Dir.RESTORE && newIntent && runtime.accounts.consentRevision(code,token)==null) {
-                        val revision=backend.consentRevision(code)
-                        if(!current() || !runtime.accounts.pinConsentRevision(revision,code,token)) return@runCatching false
-                    }
+                    // The consent form observed its base before confirmation.
+                    // Delayed login and retries must never acquire a newer base.
                     if(runtime.accounts.token(code,queue)!=token) return@runCatching false
                     if (dir == Dir.WITHDRAW) backend.withdrawConsent(code,token)
                     else backend.restoreConsent(code,token,runtime.accounts.consentRevision(code,token))

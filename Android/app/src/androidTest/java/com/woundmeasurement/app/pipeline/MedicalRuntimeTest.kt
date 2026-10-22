@@ -52,11 +52,23 @@ class MedicalRuntimeTest {
                 BackendClient(o,"",http,c,false,org)
             }
             runtime.setCredentials("dr01",UUID.randomUUID().toString())
-            assertEquals(listOf("synthetic"),ConsentWithdrawal.restoreOnBackend(ctx,listOf("synthetic"),runtime).pending)
+            val observed=ConsentWithdrawal.prepareRestore(listOf("synthetic"),runtime)
+            assertEquals(listOf("synthetic"),ConsentWithdrawal.restoreOnBackend(ctx,listOf("synthetic"),runtime,observed).pending)
             runtime.accounts.deferRetry(ConsentQueue.RESTORE,0)
             ConsentWithdrawal.retryPending(ctx,runtime)
             assertEquals(listOf("/api/v1/consent/state","/api/v1/consent/restore","/api/v1/consent/restore"),paths)
             assertEquals(2,posted.size);assertEquals(posted[0],posted[1])
+        } finally {ctx.clear()}
+    }
+    @Test fun newRestoreWithoutPreconfirmationObservationNeverFetchesFreshState()=runBlocking {
+        val ctx=context();val sent=mutableListOf<String>()
+        try {
+            val runtime=MedicalRuntime(ctx,MedicalDataScope.SYNTHETIC_REVIEW) { o,c,v ->
+                client(o,c,v) {r -> if(r.url.encodedPath.startsWith("/api/v1/consent/"))sent.add(r.url.encodedPath)}
+            }
+            runtime.setCredentials("dr01",UUID.randomUUID().toString())
+            val result=ConsentWithdrawal.restoreOnBackend(ctx,listOf("synthetic"),runtime)
+            assertEquals(listOf("synthetic"),result.pending);assertTrue(sent.isEmpty())
         } finally {ctx.clear()}
     }
     @Test fun accountChangeAndClosingRejectOldClients() {

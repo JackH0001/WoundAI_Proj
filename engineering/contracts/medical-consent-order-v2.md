@@ -9,8 +9,12 @@ An authenticated `GET /api/v1/consent/state?code=...` returns
 `protocol=medical-consent/2`, code, org, sequence, revision (SHA-256), status and
 known image IDs. The endpoint requires `patient.manage`.
 
-A newly confirmed restore observes this revision once and persists it with its
-stable intent ID before POST. Background retries reuse that exact pair:
+The app observes this revision before opening the consent form. After the user
+confirms, it persists that already-observed revision with its stable intent ID
+before POST. Login delays and background retries must never fetch a newer base
+after confirmation. If preflight failed, local consent may be saved with a clear
+pending notice, but cloud restore requires reopening and confirming the form.
+Background retries reuse that exact pair:
 
 ```json
 {"protocol":"medical-consent/2","code":"WD-SYNTH","intent_id":"restore-example-01","consent_revision":"<64 lowercase hex characters>"}

@@ -108,7 +108,9 @@ final class BackendLoginAndCaptureTests: XCTestCase {
         let client=BackendClient(baseUrl:"https://test.invalid",institutionTransport:transport)
         _ = try await client.login(username:"fixture",password:UUID().uuidString)
         let context=ConsentSync.Context(accounts:accounts,acquire:{client},active:{true})
-        let first=await ConsentSync.restoreOnBackend(codes:["fixture"],context:context)
+        let observed=try await ConsentSync.prepareRestore(codes:["fixture"],context:context)
+        await transport.setStateRevision(String(repeating:"b",count:64))
+        let first=await ConsentSync.restoreOnBackend(codes:["fixture"],context:context,observedRevisions:observed)
         XCTAssertEqual(first.pending,["fixture"])
         accounts.deferRetry(.restore,until:.distantPast)
         await transport.setStateRevision(String(repeating:"b",count:64))
@@ -128,6 +130,16 @@ final class BackendLoginAndCaptureTests: XCTestCase {
         let transport=CaptureTransportFixture();let client=BackendClient(baseUrl:"https://test.invalid",institutionTransport:transport)
         _ = try await client.login(username:"fixture",password:UUID().uuidString)
         let result=await ConsentSync.retryPending(context:.init(accounts:accounts,acquire:{client},active:{true}))
+        XCTAssertEqual(result.pending,["fixture"])
+        let paths=await transport.consentRequests();XCTAssertTrue(paths.isEmpty)
+    }
+    func testNewRestoreWithoutPreconfirmationObservationNeverFetchesFreshState() async throws {
+        let name="consent-no-preflight-"+UUID().uuidString;let store=UserDefaults(suiteName:name)!
+        defer {store.removePersistentDomain(forName:name)}
+        let accounts=MedicalAccountPreferences(scope:.syntheticReview,defaults:store)
+        let transport=CaptureTransportFixture();let client=BackendClient(baseUrl:"https://test.invalid",institutionTransport:transport)
+        _ = try await client.login(username:"fixture",password:UUID().uuidString)
+        let result=await ConsentSync.restoreOnBackend(codes:["fixture"],context:.init(accounts:accounts,acquire:{client},active:{true}))
         XCTAssertEqual(result.pending,["fixture"])
         let paths=await transport.consentRequests();XCTAssertTrue(paths.isEmpty)
     }

@@ -11,10 +11,12 @@ the historical record for that baseline.
   sequence and conditional restores. A stale restore arriving after a withdrawal
   returns 409. Concurrent instances cannot both publish different events into
   the same slot. Replaying an old intent does not create a new consent event.
-* **iOS and Android:** a new restore observes and persists one server revision;
-  retries keep it. A conflict or missing observation requires fresh confirmation,
-  rather than quietly acquiring a newer revision. Local latest-intent checks
-  remain before sending and after receiving the response.
+* **iOS and Android:** opening the consent form first observes one server
+  revision. Confirmation pins that already-observed revision; login delays and
+  retries cannot fetch a newer base afterwards. This also covers another device
+  withdrawing while the form is open. Missing preflight shows a local-only
+  notice; a conflict or missing observation requires reopening and confirming
+  the form. Local latest-intent checks remain before sending and after response.
 * **R1:** encrypted research jobs with excessively distant retry/capacity dates
   are bounded to one hour on load and saved once. Reopening does not slide the
   deadline. Payloads, raw depth references and receipts are retained.
@@ -33,12 +35,12 @@ a tested candidate, not an applied live policy.
 
 | Suite | Passed | Skipped | Failed |
 |---|---:|---:|---:|
-| Medical iOS Release XCTest | 261 | 1 | 0 |
+| Medical iOS Release XCTest | 262 | 1 | 0 |
 | Lite iOS Release XCTest | 234 | 1 | 0 |
-| MMH iOS Release XCTest | 165 | 1 | 0 |
+| MMH iOS Release XCTest | 166 | 1 | 0 |
 | Android Debug JVM | 141 | 2 | 0 |
 | Android MMH validation JVM | 143 | 0 | 0 |
-| Android MMH emulator, five relevant classes | 62 | 0 | 0 |
+| Android MMH emulator, five relevant classes | 63 | 0 | 0 |
 | Medical server/storage/guard regression selection | 103 | 0 | 0 |
 | Lite backend regression | 452 | 0 | 0 |
 | Build/contract/RGB-D tool selection | 58 | 1 | 0 |
@@ -91,6 +93,10 @@ preserved old deadlines/media receipts.
 Local evidence (not in the public repository):
 `/Users/Jack.Hou/Documents/Codex/2026-06-28/woundai-area-upload-acceptance-20261021/server-consent-ordering-20261022/`.
 It contains XCTest bundles, Gradle XML, pytest XML/logs and isolated HTTP output.
+The final preconfirmation run additionally checks that even a newly submitted
+restore with no pre-confirmation observation sends neither a state GET nor a
+restore POST. The conflict fixture changes server state between opening and
+submitting the form; both attempts retain the original revision.
 The separate Claude handoff contains changed source/tests/docs and hashes only,
 without research media or device identities. CI must be checked against the
 new commit, not inherited from `de187cc`.

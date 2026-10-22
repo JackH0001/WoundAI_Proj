@@ -65,11 +65,24 @@ enum ConsentSync {
     }
 
     /// 重新取得同意 → 解除雲端的撤回封鎖。沒有這一步，撤回就是死局。
-    static func restoreOnBackend(codes: [String], context: Context? = nil) async -> Result {
-        return await sync(codes, .restore, context ?? .legacy)
+    static func prepareRestore(codes: [String], context: Context? = nil) async throws -> [String:String] {
+        if codes.isEmpty { return [:] }
+        let context = context ?? .legacy
+        let backend = try await context.acquire()
+        var revisions: [String:String] = [:]
+        for code in Set(codes) {
+            guard context.active(), !Task.isCancelled else { throw CancellationError() }
+            revisions[code] = try await backend.consentRevision(code: code)
+        }
+        guard context.active(), !Task.isCancelled else { throw CancellationError() }
+        return revisions
     }
 
-    private static func sync(_ codes: [String], _ dir: Dir, _ context: Context, newIntent: Bool = true) async -> Result {
+    static func restoreOnBackend(codes: [String], context: Context? = nil, observedRevisions: [String:String] = [:]) async -> Result {
+        return await sync(codes, .restore, context ?? .legacy, observedRevisions: observedRevisions)
+    }
+
+    private static func sync(_ codes: [String], _ dir: Dir, _ context: Context, newIntent: Bool = true, observedRevisions: [String:String] = [:]) async -> Result {
         var seen = Set<String>()
         let list = codes
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -83,6 +96,13 @@ enum ConsentSync {
         let tokens = Dictionary(uniqueKeysWithValues: list.compactMap { code in
             context.accounts.token(code, in: queue).map { (code, $0) }
         })
+        if newIntent && dir == .restore {
+            for (code, token) in tokens {
+                if let revision = observedRevisions[code] {
+                    _ = context.accounts.pinConsentRevision(revision, code: code, token: token)
+                }
+            }
+        }
         guard !running, !(context.accounts.retryAfter(queue).map { $0 > Date() } ?? false) else { return Result(done: [], pending: list) }
         running = true; defer { running = false }
         context.accounts.deferRetry(queue, until: Date().addingTimeInterval(60))
@@ -100,17 +120,8 @@ enum ConsentSync {
             // 而重試時只重試真正沒完成的那些。
             guard let token = tokens[c], context.accounts.token(c, in: queue) == token else { continue }
             guard context.active(), !Task.isCancelled, !capacityWaiting else { fail.append(c); continue }
-            // Only an explicit new confirmation may observe a fresh server revision.
-            // Background retries reuse the pinned revision and never rebase a conflict.
-            if dir == .restore && newIntent && context.accounts.consentRevision(c, token: token) == nil {
-                do {
-                    let revision = try await backend.consentRevision(code: c)
-                    guard context.active(), context.accounts.pinConsentRevision(revision, code: c, token: token) else { continue }
-                } catch let wait as ResearchCapacityWait {
-                    capacityWaiting = true; context.accounts.deferRetry(queue, until: wait.notBefore)
-                    fail.append(c); continue
-                } catch { fail.append(c); continue }
-            }
+            // The form observed its revision before the user confirmed. Neither
+            // delayed login nor a retry may acquire a newer revision afterwards.
             guard context.active(), !Task.isCancelled, context.accounts.token(c, in: queue) == token else { continue }
             let ok = dir == .withdraw
                 ? await backend.withdrawConsent(code: c, intentID: token, onCapacity: { capacityWaiting = true; context.accounts.deferRetry(queue, until: $0.notBefore) })

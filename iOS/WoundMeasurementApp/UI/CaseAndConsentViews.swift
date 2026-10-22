@@ -14,6 +14,9 @@ struct CaseSelectView: View {
     @State private var cases: [WoundCase] = []
     @State private var consent: Consent?
     @State private var signing = false
+    @State private var preparingConsent = false
+    @State private var observedConsentRevisions: [String:String] = [:]
+    @State private var cloudConsentReady = false
     @State private var newName = ""
     @State private var newMrn = ""
     /// 新增傷口個案的部位／類型。**不給預設值**——「未指定・未指定」的兩個個案在清單上
@@ -75,7 +78,9 @@ struct CaseSelectView: View {
                         } else {
                             Text("尚未簽署").foregroundStyle(.secondary)
                         }
-                        Button("簽署／重新簽署同意書") { signing = true }
+                        Button(preparingConsent ? "正在核對同意狀態…" : "簽署／重新簽署同意書") {
+                            Task { await prepareConsent(p) }
+                        }.disabled(preparingConsent)
                     }
 
                     Section("傷口個案") {
@@ -191,8 +196,9 @@ struct CaseSelectView: View {
             }
             .sheet(isPresented: $signing) {
                 if let p = selected {
-                    ConsentSignatureView(patientLabel: p.name) { care, train, png in
-                        Task { await sign(p, care: care, train: train, png: png) }
+                    ConsentSignatureView(patientLabel: p.name, cloudConsentReady: cloudConsentReady) { care, train, png in
+                        let revisions = observedConsentRevisions
+                        Task { await sign(p, care: care, train: train, png: png, revisions: revisions) }
                         signing = false
                     } onCancel: { signing = false }
                 }
@@ -263,7 +269,21 @@ struct CaseSelectView: View {
         }
     }
 
-    private func sign(_ p: Patient, care: Bool, train: Bool, png: Data?) async {
+    private func prepareConsent(_ p: Patient) async {
+        guard !preparingConsent else { return }
+        preparingConsent = true
+        defer { preparingConsent = false }
+        observedConsentRevisions = [:]; cloudConsentReady = false
+        do {
+            let codes = await app.repo.wdCodes(patientId: p.id)
+            observedConsentRevisions = try await ConsentSync.prepareRestore(codes: codes, context: app.runtime.consent)
+            cloudConsentReady = true
+        } catch { /* Local consent remains available; no unobserved cloud restore. */ }
+        guard selected?.id == p.id, !Task.isCancelled else { return }
+        signing = true
+    }
+
+    private func sign(_ p: Patient, care: Bool, train: Bool, png: Data?, revisions: [String:String]) async {
         do {
             _ = try await app.repo.signConsent(patientId: p.id, care: care, train: train,
                                                signaturePng: png)
@@ -273,8 +293,8 @@ struct CaseSelectView: View {
                 //   少了這一步就是死局：App 顯示「訓練同意 ✓」而雲端持續擋下每一次送出，
                 //   錯誤訊息還會把內部端點路徑印給醫師看，而他沒有辦法自己呼叫它。
                 let codes = await app.repo.wdCodes(patientId: p.id)
-                let r = await ConsentSync.restoreOnBackend(codes: codes, context: app.runtime.consent)
-                if !r.allOK { message = "部分代碼尚未同步到雲端，已排入重試佇列。" }
+                let r = await ConsentSync.restoreOnBackend(codes: codes, context: app.runtime.consent, observedRevisions: revisions)
+                if !r.allOK { message = "本機同意已保存，雲端尚未確認恢復；若核對未完成或狀態已變動，請重新開啟同意書確認。" }
                 app.refreshBanner()
             }
         } catch {
@@ -304,6 +324,7 @@ struct CaseSelectView: View {
  */
 struct ConsentSignatureView: View {
     let patientLabel: String
+    var cloudConsentReady: Bool = true
     let onSigned: (Bool, Bool, Data?) -> Void
     let onCancel: () -> Void
 
@@ -320,6 +341,10 @@ struct ConsentSignatureView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     Text("受試者：\(patientLabel)").font(.headline)
+                    if !cloudConsentReady {
+                        Text("雲端同意狀態尚未核對；本次簽署只先保存本機。請連線後重新開啟同意書確認，才可恢復雲端研究上傳。")
+                            .font(.footnote).foregroundStyle(.orange)
+                    }
 
                     Toggle(isOn: $care) {
                         VStack(alignment: .leading, spacing: 2) {
