@@ -85,7 +85,13 @@ object ConsentWithdrawal {
                 val token=tokens[code] ?: continue
                 if(runtime.accounts.token(code,queue)!=token) continue
                 val ok = current() && !capacityWaiting && runCatching {
-                    if (dir == Dir.WITHDRAW) backend.withdrawConsent(code) else backend.restoreConsent(code)
+                    if(dir==Dir.RESTORE && newIntent && runtime.accounts.consentRevision(code,token)==null) {
+                        val revision=backend.consentRevision(code)
+                        if(!current() || !runtime.accounts.pinConsentRevision(revision,code,token)) return@runCatching false
+                    }
+                    if(runtime.accounts.token(code,queue)!=token) return@runCatching false
+                    if (dir == Dir.WITHDRAW) backend.withdrawConsent(code,token)
+                    else backend.restoreConsent(code,token,runtime.accounts.consentRevision(code,token))
                 }.onFailure { failure ->
                     if(failure is ResearchCapacityException) {
                         capacityWaiting=true;runtime.accounts.deferRetry(queue,failure.notBefore)
@@ -130,7 +136,7 @@ object ConsentWithdrawal {
             "尚未取得雲端停止使用的確認，請優先完成撤回核對。")
         if (rs.isNotEmpty()) parts.add(
             "⚠ 有 ${rs.size} 筆重新簽署尚未同步到雲端：${rs.sorted().joinToString("、")}\n" +
-            "這些代碼在雲端仍被標記為已撤回，補送訓練標註會被擋下。")
+            "雲端尚未確認恢復。若同意版次已變動或先前離線，請重新開啟同意表單核對並確認；重試不會自動解除新的撤回。")
         parts.add("請確認網路與後端帳密後重試；若持續失敗，請由管理者到主控台處理。")
         return parts.joinToString("\n")
     }

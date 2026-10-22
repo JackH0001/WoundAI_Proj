@@ -8,6 +8,11 @@ import UIKit
 
 private actor CaptureTransportFixture: InstitutionAuthenticatedTransport {
     var consentPaths: [String] = []
+    var consentBodies: [Data] = []
+    var stateRevision: String?
+    func setStateRevision(_ value: String) { stateRevision = value }
+    func postedBodies() -> [Data] { consentBodies }
+
     func consentRequests() -> [String] { consentPaths }
     var consentStatus = 200
     var consentBody = "{}"
@@ -25,7 +30,13 @@ private actor CaptureTransportFixture: InstitutionAuthenticatedTransport {
         let path = request.url!.path
         var status = 200
         var body = "{}"
-        if path.hasPrefix("/api/v1/consent/") { consentPaths.append(path); status=consentStatus; body=consentBody }
+        if path.hasPrefix("/api/v1/consent/") {
+            consentPaths.append(path); status=consentStatus; body=consentBody
+            if let data=request.httpBody { consentBodies.append(data) }
+            if path.hasSuffix("/state"), let stateRevision {
+                status=200; body="{\"protocol\":\"medical-consent/2\",\"code\":\"fixture\",\"revision\":\"\(stateRevision)\"}"
+            }
+        }
         else if path == "/api/auth/login" {
             loginCount += 1; status = loginStatus
             body = #"{"access_token":"synthetic-app-token","identity":"mmhps20261007:dr01","org":"mmhps20261007","user":"dr01","role":"physician","perms":["gt.verify","annotation.submit"]}"#
@@ -81,10 +92,44 @@ final class BackendLoginAndCaptureTests: XCTestCase {
         XCTAssertTrue(accounts.pending(.restore).isEmpty)
         XCTAssertEqual(accounts.pending(.withdrawal),["fixture"])
         await transport.setConsent(200,#"{"status":"withdrawn","code":"fixture"}"#)
+        let token=try XCTUnwrap(accounts.token("fixture",in:.withdrawal))
+        await transport.setConsent(200,"{\"status\":\"withdrawn\",\"code\":\"fixture\",\"protocol\":\"medical-consent/2\",\"intent_id\":\"\(token)\",\"revision\":\"\(String(repeating:"a",count:64))\"}")
         let result=await ConsentSync.retryPending(context:context)
         XCTAssertEqual(result.done,["fixture"])
         let paths=await transport.consentRequests();XCTAssertEqual(paths,["/api/v1/consent/withdraw"])
         XCTAssertTrue(accounts.pending(.restore).isEmpty)
+    }
+    func testRestoreConflictRetriesPinnedRevisionWithoutRefreshingState() async throws {
+        let name="consent-pin-"+UUID().uuidString;let store=UserDefaults(suiteName:name)!
+        defer {store.removePersistentDomain(forName:name)}
+        let accounts=MedicalAccountPreferences(scope:.syntheticReview,defaults:store)
+        let transport=CaptureTransportFixture();let base=String(repeating:"a",count:64)
+        await transport.setStateRevision(base);await transport.setConsent(409,"{}")
+        let client=BackendClient(baseUrl:"https://test.invalid",institutionTransport:transport)
+        _ = try await client.login(username:"fixture",password:UUID().uuidString)
+        let context=ConsentSync.Context(accounts:accounts,acquire:{client},active:{true})
+        let first=await ConsentSync.restoreOnBackend(codes:["fixture"],context:context)
+        XCTAssertEqual(first.pending,["fixture"])
+        accounts.deferRetry(.restore,until:.distantPast)
+        await transport.setStateRevision(String(repeating:"b",count:64))
+        _ = await ConsentSync.retryPending(context:context)
+        let paths=await transport.consentRequests()
+        XCTAssertEqual(paths,["/api/v1/consent/state","/api/v1/consent/restore","/api/v1/consent/restore"])
+        let bodies=await transport.postedBodies()
+        XCTAssertEqual(bodies.count,2)
+        let objects=try bodies.map {try JSONSerialization.jsonObject(with:$0) as! [String:String]}
+        XCTAssertEqual(objects[0],objects[1]);XCTAssertEqual(objects[0]["consent_revision"],base)
+    }
+    func testPendingRestoreWithoutObservedRevisionDoesNotFetchOrSend() async throws {
+        let name="consent-offline-"+UUID().uuidString;let store=UserDefaults(suiteName:name)!
+        defer {store.removePersistentDomain(forName:name)}
+        let accounts=MedicalAccountPreferences(scope:.syntheticReview,defaults:store)
+        accounts.add(["fixture"],to:.restore)
+        let transport=CaptureTransportFixture();let client=BackendClient(baseUrl:"https://test.invalid",institutionTransport:transport)
+        _ = try await client.login(username:"fixture",password:UUID().uuidString)
+        let result=await ConsentSync.retryPending(context:.init(accounts:accounts,acquire:{client},active:{true}))
+        XCTAssertEqual(result.pending,["fixture"])
+        let paths=await transport.consentRequests();XCTAssertTrue(paths.isEmpty)
     }
     func testSavedPasswordIsNotAuthenticatedAndVerifiedBusyIsNotLoggingIn() {
         let saved = BackendLoginPresentation(entryReady:true,verified:false,busy:false,saved:true)

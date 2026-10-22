@@ -100,9 +100,21 @@ enum ConsentSync {
             // 而重試時只重試真正沒完成的那些。
             guard let token = tokens[c], context.accounts.token(c, in: queue) == token else { continue }
             guard context.active(), !Task.isCancelled, !capacityWaiting else { fail.append(c); continue }
+            // Only an explicit new confirmation may observe a fresh server revision.
+            // Background retries reuse the pinned revision and never rebase a conflict.
+            if dir == .restore && newIntent && context.accounts.consentRevision(c, token: token) == nil {
+                do {
+                    let revision = try await backend.consentRevision(code: c)
+                    guard context.active(), context.accounts.pinConsentRevision(revision, code: c, token: token) else { continue }
+                } catch let wait as ResearchCapacityWait {
+                    capacityWaiting = true; context.accounts.deferRetry(queue, until: wait.notBefore)
+                    fail.append(c); continue
+                } catch { fail.append(c); continue }
+            }
+            guard context.active(), !Task.isCancelled, context.accounts.token(c, in: queue) == token else { continue }
             let ok = dir == .withdraw
-                ? await backend.withdrawConsent(code: c, onCapacity: { capacityWaiting = true; context.accounts.deferRetry(queue, until: $0.notBefore) })
-                : await backend.restoreConsent(code: c, onCapacity: { capacityWaiting = true; context.accounts.deferRetry(queue, until: $0.notBefore) })
+                ? await backend.withdrawConsent(code: c, intentID: token, onCapacity: { capacityWaiting = true; context.accounts.deferRetry(queue, until: $0.notBefore) })
+                : await backend.restoreConsent(code: c, intentID: token, revision: context.accounts.consentRevision(c, token: token), onCapacity: { capacityWaiting = true; context.accounts.deferRetry(queue, until: $0.notBefore) })
             guard context.accounts.token(c, in: queue) == token else { continue }
             if ok && context.active() && !Task.isCancelled {
                 done.append(c); context.accounts.remove(c, from: queue, expectedToken: token)
@@ -148,7 +160,7 @@ enum ConsentSync {
         if !rs.isEmpty {
             parts.append("""
             ⚠ 有 \(rs.count) 筆重新簽署尚未同步到雲端：\(rs.joined(separator: "、"))
-            這些代碼在雲端仍被標記為已撤回，補送訓練標註會被擋下。
+            雲端尚未確認恢復。若同意版次已變動或先前離線，請重新開啟同意表單核對並確認；重試不會自動解除新的撤回。
             """)
         }
         parts.append("請確認網路與後端帳密後重試；若持續失敗，請由管理者到主控台處理。")

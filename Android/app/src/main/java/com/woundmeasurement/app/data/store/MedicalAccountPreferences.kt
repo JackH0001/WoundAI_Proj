@@ -73,6 +73,16 @@ class MedicalAccountPreferences private constructor(
         }
         check(prefs.edit().putString("consent_intents_v1",next.toString()).commit())
     }
+    fun consentRevision(code:String,token:String):String? = synchronized(lock) {
+        val entry=intents().optJSONObject(code)
+        if(entry?.optString("token")==token) entry.optString("consent_revision").takeIf {it.isNotBlank()} else null
+    }
+    fun pinConsentRevision(revision:String,code:String,token:String):Boolean = synchronized(lock) {
+        val values=intents();val entry=values.optJSONObject(code)
+        if(entry?.optString("token")!=token || entry.optString("queue")!=ConsentQueue.RESTORE.key || entry.has("consent_revision")) return@synchronized false
+        entry.put("consent_revision",revision)
+        check(prefs.edit().putString("consent_intents_v1",values.toString()).commit());true
+    }
     fun remove(code: String, queue: ConsentQueue, expectedToken:String?=null) = synchronized(lock) {
         val next=intents();val entry=next.optJSONObject(code)
         if(entry?.getString("queue")==queue.key && (expectedToken==null || entry.getString("token")==expectedToken)) {

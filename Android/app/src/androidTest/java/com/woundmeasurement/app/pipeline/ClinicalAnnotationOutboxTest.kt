@@ -76,6 +76,24 @@ class ClinicalAnnotationOutboxTest {
         assertEquals(clock+600_000,restored.capacityNotBefore)
         queue().process(job.id,binding,allow,{error("no early network")},{error("no ack")},retryPaused=true)
     }
+    @Test fun legacyLongResearchWaitIsBoundedOnceAndPayloadRetained()=fixture {
+        val q=queue();val job=enqueue(q,binding)
+        q.deferAttempts(binding.origin,binding.configuredUser,Long.MAX_VALUE,true)
+        val loaded=queue().jobs().single()
+        assertEquals(clock+3_600_000,loaded.capacityNotBefore);assertEquals(clock+3_600_000,loaded.nextAttemptAt)
+        assertEquals(job.rowJson,loaded.rowJson);assertEquals(job.rasterBase64,loaded.rasterBase64)
+        clock+=300_000
+        assertEquals(loaded.capacityNotBefore,queue().jobs().single().capacityNotBefore)
+    }
+    @Test fun clearedImagePathRetiresWithMediaReasonNotNewRevision()=fixture {
+        val q=queue();val job=enqueue(q,binding)
+        runtime.database.measurementDao().clearImagePath(row.id)
+        q.retireSuperseded(binding.origin,binding.configuredUser){runtime.database.measurementDao().getById(it.id)}
+        val retired=q.jobs().single()
+        assertEquals("media_unavailable",retired.issue);assertEquals(job.rowJson,retired.rowJson)
+        assertEquals(job.rasterBase64,retired.rasterBase64)
+        q.process(job.id,binding,allow,{error("retired media cannot upload")},{error("no ack")})
+    }
     @Test fun encryptedRestartRetainsExactFrozenSnapshotAndTimestamp()=fixture {
         val q=queue();val job=enqueue(q,binding);val loaded=queue().jobs().single()
         assertEquals(job,loaded);assertEquals(row,loaded.measurement());assertArrayEquals(raster,loaded.rasterBytes())

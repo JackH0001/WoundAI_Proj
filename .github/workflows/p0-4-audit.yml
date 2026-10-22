@@ -96,6 +96,7 @@ on:
       - 'engineering/phase2/test_medical_revision_assets.py'
       - 'engineering/phase2/test_research_format_guards.py'
       - 'engineering/phase2/test_native_wound_mask.py'
+      - 'engineering/phase2/test_medical_consent_order.py'
       - 'engineering/phase2/test_medical_wound_profile.py'
       - 'engineering/contracts/**'
       - 'tools/generate_medical_wound_catalog.py'
@@ -243,6 +244,7 @@ on:
       - 'engineering/phase2/test_medical_revision_assets.py'
       - 'engineering/phase2/test_research_format_guards.py'
       - 'engineering/phase2/test_native_wound_mask.py'
+      - 'engineering/phase2/test_medical_consent_order.py'
       - 'engineering/phase2/test_medical_wound_profile.py'
       - 'engineering/contracts/**'
       - 'tools/generate_medical_wound_catalog.py'
@@ -415,6 +417,7 @@ jobs:
           python -B engineering/phase2/test_medical_revision_assets.py
           python -B engineering/phase2/test_research_format_guards.py
           python -B engineering/phase2/test_native_wound_mask.py
+          python -B -m unittest discover -s engineering/phase2 -p test_medical_consent_order.py
           python -B engineering/phase2/test_medical_wound_profile.py
           python -B engineering/phase2/test_review_service_profile.py
           python -B engineering/phase2/test_medical_depth_geometry.py

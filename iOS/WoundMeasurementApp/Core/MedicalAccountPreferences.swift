@@ -74,6 +74,18 @@ final class MedicalAccountPreferences {
         }
         defaults.set(values, forKey: "consent_intents_v1")
     } }
+    func consentRevision(_ code: String, token: String) -> String? { locked {
+        guard queues()[code]?["token"] == token else { return nil }
+        return queues()[code]?["consent_revision"]
+    } }
+    func pinConsentRevision(_ revision: String, code: String, token: String) -> Bool { locked {
+        var values = queues()
+        guard values[code]?["token"] == token, values[code]?["queue"] == ConsentQueue.restore.rawValue,
+              values[code]?["consent_revision"] == nil else { return false }
+        values[code]?["consent_revision"] = revision
+        defaults.set(values, forKey: "consent_intents_v1")
+        return true
+    } }
     func remove(_ code: String, from queue: ConsentQueue, expectedToken: String? = nil) { locked {
         var values = queues()
         guard values[code]?["queue"] == queue.rawValue,

@@ -71,6 +71,20 @@ class MedicalAccountPreferencesTest {
             assertEquals("", MedicalAccountPreferences(ctx, MedicalDataScope.SYNTHETIC_REVIEW).user())
         } finally { ctx.clear() }
     }
+    @Test fun observedRevisionIsPinnedOnceAndCannotAttachToNewIntent() {
+        val ctx=context()
+        try {
+            val a=MedicalAccountPreferences(ctx)
+            a.add(listOf("synthetic"),MedicalAccountPreferences.ConsentQueue.RESTORE)
+            val token=requireNotNull(a.token("synthetic",MedicalAccountPreferences.ConsentQueue.RESTORE))
+            assertTrue(a.pinConsentRevision("a".repeat(64),"synthetic",token))
+            assertFalse(a.pinConsentRevision("b".repeat(64),"synthetic",token))
+            assertEquals("a".repeat(64),MedicalAccountPreferences(ctx).consentRevision("synthetic",token))
+            a.add(listOf("synthetic"),MedicalAccountPreferences.ConsentQueue.WITHDRAWAL)
+            assertNull(a.consentRevision("synthetic",token))
+            assertFalse(a.pinConsentRevision("b".repeat(64),"synthetic",token))
+        } finally {ctx.clear()}
+    }
     @Test fun latestIntentSupersedesOppositeInItsOwnScope() {
         val ctx = context()
         try {

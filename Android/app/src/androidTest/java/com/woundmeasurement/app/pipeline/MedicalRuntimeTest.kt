@@ -34,6 +34,31 @@ class MedicalRuntimeTest {
         }.build()
         return BackendClient(origin,"",http,current,!review,org)
     }
+    @Test fun conflictRetryUsesPinnedRevisionWithoutFetchingNewState()=runBlocking {
+        val ctx=context();val paths=mutableListOf<String>();val posted=mutableListOf<String>()
+        try {
+            val runtime=MedicalRuntime(ctx,MedicalDataScope.SYNTHETIC_REVIEW) { o,c,_ ->
+                val org="mmh-review-demo"
+                val http=OkHttpClient.Builder().addInterceptor { chain ->
+                    val r=chain.request();val path=r.url.encodedPath
+                    val body=when {
+                        path.endsWith("/login") -> """{"access_token":"synthetic-token","identity":"$org:dr01","org":"$org","user":"dr01","role":"physician","perms":["measure.sample","annotation.submit"]}"""
+                        path.endsWith("/state") -> {paths.add(path);"""{"protocol":"medical-consent/2","code":"synthetic","revision":"${"a".repeat(64)}"}"""}
+                        path.endsWith("/restore") -> {paths.add(path);val b=okio.Buffer();r.body!!.writeTo(b);posted.add(b.readUtf8());"{}"}
+                        else -> """{"session_contract":"account-revision-v1","identity":"$org:dr01","org":"$org","user":"dr01","role":"physician","role_zh":"醫師","perms":["measure.sample","annotation.submit"],"expires_at":9999999999}"""
+                    }
+                    Response.Builder().request(r).protocol(Protocol.HTTP_1_1).code(if(path.endsWith("/restore"))409 else 200).message("Fixture").body(body.toResponseBody()).build()
+                }.build()
+                BackendClient(o,"",http,c,false,org)
+            }
+            runtime.setCredentials("dr01",UUID.randomUUID().toString())
+            assertEquals(listOf("synthetic"),ConsentWithdrawal.restoreOnBackend(ctx,listOf("synthetic"),runtime).pending)
+            runtime.accounts.deferRetry(ConsentQueue.RESTORE,0)
+            ConsentWithdrawal.retryPending(ctx,runtime)
+            assertEquals(listOf("/api/v1/consent/state","/api/v1/consent/restore","/api/v1/consent/restore"),paths)
+            assertEquals(2,posted.size);assertEquals(posted[0],posted[1])
+        } finally {ctx.clear()}
+    }
     @Test fun accountChangeAndClosingRejectOldClients() {
         val ctx=context()
         try {

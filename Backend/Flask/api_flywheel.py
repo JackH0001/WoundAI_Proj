@@ -886,7 +886,7 @@ def depth_for_record(rec, index):
     return index.get((rec.get("image_id"), revision_id(rec)), {})
 
 
-def withdrawn_keys(withdrawn_path=None):
+def _legacy_withdrawn_keys(withdrawn_path=None):
     """回 (撤回的 code 集合, 撤回的 image_id 集合)。
 
     - 撤回涵蓋**整張影像**:一個 code 可能對到多張影像(受試者多次回診),
@@ -905,9 +905,44 @@ def withdrawn_keys(withdrawn_path=None):
     return codes, imgs
 
 
+def _consent_order():
+    from medical_consent_order import ConsentOrder
+    def legacy():
+        # Consent reads cannot use the JSONL cache: a legacy writer changing the
+        # sealed prefix must fail closed, not be mistaken for current consent.
+        return [json.loads(line) for line in _store().read_lines_fresh(_key(WITHDRAWN)) if line.strip()]
+    return ConsentOrder(_store(), legacy)
+
+
+def withdrawn_keys(withdrawn_path=None):
+    codes, imgs = _legacy_withdrawn_keys(withdrawn_path)
+    if withdrawn_path and os.path.abspath(withdrawn_path) != os.path.abspath(WITHDRAWN):
+        return codes, imgs
+    states = _consent_order().all_states()
+    for state in states:
+        codes.discard(state["code"])
+        imgs.difference_update(state["image_ids"])
+    managed = {state["code"] for state in states}
+    legacy_codes, _ = _legacy_withdrawn_keys(withdrawn_path)
+    for row in read_jsonl(withdrawn_path or WITHDRAWN):
+        if row.get("code") in legacy_codes - managed:
+            imgs.update(row.get("image_ids") or [])
+            if row.get("image_id"): imgs.add(row["image_id"])
+    # Apply exclusions last: another subject's withdrawal always wins.
+    for state in states:
+        if state["status"] == "withdrawn":
+            codes.add(state["code"])
+            imgs.update(state["image_ids"])
+    return codes, imgs
+
+
 def is_quarantined(image_id, quarantine_dir=None):
     """影像是否在隔離區。classify 重複上傳同一張已撤回的照片時,不可把它復活寫回 images/。"""
     if not image_id or not ID_RE.match(str(image_id)): return False
+    if quarantine_dir is None or os.path.abspath(quarantine_dir) == os.path.abspath(QUARANTINE_DIR):
+        matching = [s for s in _consent_order().all_states() if image_id in s["image_ids"]]
+        if matching:
+            return any(s["status"] == "withdrawn" for s in matching)
     return _store().exists(_key(os.path.join(quarantine_dir or QUARANTINE_DIR, f"{image_id}.jpg")))
 
 
@@ -2431,86 +2466,85 @@ try:
             "note": "影像與遮罩請用 pull_dataset.ps1 直接對 GCS 抓；此端點只回清單。",
         }), 200
 
+    @flywheel_bp.route("/api/v1/consent/state", methods=["GET"])
+    @jwt_required()
+    def get_consent_state():
+        actor, role, org = _who()
+        if not _can(role, "patient.manage"):
+            return jsonify({"error": "權限不足"}), 403
+        from medical_consent_order import ConsentOrderError
+        try:
+            code = request.args.get("code")
+            if any(r.get("org", org) != org for r in read_jsonl(QUEUE) if r.get("code") == code):
+                return jsonify({"error": "consent_scope_conflict"}), 409
+            state = _consent_order().state(code, org)
+            return jsonify(state), 200
+        except ConsentOrderError as exc:
+            return jsonify({"error": exc.code}), exc.status
+
+    def ordered_consent(action):
+        from medical_consent_order import ConsentOrderError, PROTOCOL
+        import uuid
+        d = request.get_json(silent=True) or {}
+        if not isinstance(d, dict):
+            return jsonify({"error": "invalid_consent_request"}), 400
+        actor, role, org = _who()
+        if not _can(role, "patient.manage"):
+            return jsonify({"error": "權限不足", "issues": [f"角色 {role} 不得變更同意（僅醫師/護理師）。"]}), 403
+        code = d.get("code")
+        try:
+            order = _consent_order()
+            state = order.state(code, org)
+            if action == "restore" and (d.get("protocol") != PROTOCOL or not d.get("intent_id") or not d.get("consent_revision")):
+                return jsonify({"error": "consent_revision_required", "issues": ["請使用支援同意版次核對的版本重新確認同意；舊恢復不會自動補送。"]}), 428
+            requested = d.get("image_id")
+            if requested is not None and not ID_RE.fullmatch(str(requested)):
+                return jsonify({"error": "image_id 格式不合"}), 400
+            rows = [r for r in read_jsonl(QUEUE) if r.get("code") == code]
+            if any(r.get("org", org) != org for r in rows):
+                return jsonify({"error": "consent_scope_conflict"}), 409
+            imgs = {r["image_id"] for r in rows if r.get("image_id")} | set(state["image_ids"])
+            if requested:
+                if any(r.get("image_id") == requested and (r.get("code") != code or r.get("org", org) != org) for r in read_jsonl(QUEUE)):
+                    return jsonify({"error": "consent_image_scope_conflict"}), 409
+                imgs.add(requested)
+            intent_id = d.get("intent_id") or str(uuid.uuid4())
+            audit_intent(actor, "consent_" + action, code, role, org,
+                         {"intent_id": intent_id, "consent_revision": d.get("consent_revision"), "image_ids": sorted(imgs)})
+            if action == "restore" and state["revision"] == d.get("consent_revision"):
+                # Copy old quarantined bytes, never move/delete. Permission still
+                # depends on the ordered ledger, including during concurrent withdrawal.
+                for i in sorted(imgs):
+                    src = _key(os.path.join(QUARANTINE_DIR, f"{i}.jpg"))
+                    dst = _key(os.path.join(IMAGES_DIR, f"{i}.jpg"))
+                    if _store().exists(src) and not _store().exists(dst):
+                        _store().copy_immutable(src, dst)
+            receipt = order.apply(code, org, actor, action, intent_id,
+                                  d.get("consent_revision"), imgs, requested)
+            audit(actor, "consent_" + action, code,
+                  "ordered revision=" + receipt["revision"] + "; intent=" + intent_id, role, org)
+            return jsonify(dict(receipt, quarantine_mode="logical", quarantined=[], restored=[],
+                effect="同意狀態已核對；原始資料與歷史保留，存取與訓練依最新同意版次判斷。")), 200
+        except ConsentOrderError as exc:
+            return jsonify({"error": exc.code, "issues": ["同意狀態已變動或尚無法核對；請保留紀錄並重新確認，不會自動恢復同意。"]}), exc.status
+        except (AuditUnavailable, IOError):
+            return jsonify({"error": "consent_storage_unavailable"}), 503
+
     @flywheel_bp.route("/api/v1/consent/withdraw", methods=["POST"])
     @jwt_required()
     def post_withdraw():
-        d = request.get_json(silent=True) or {}
-        code = d.get("code")
-        actor, role, org = _who()
+        _actor, role, _org = _who()
         if not _can(role, "patient.manage"):
-            return jsonify({"error": "權限不足",
-                            "issues": [f"角色 {role} 不得撤回同意（僅醫師/護理師）。"]}), 403
-        if not code:
-            return jsonify({"error": "缺 code"}), 400
-        # 撤回涵蓋整張影像:由 code 回查其 image_id(可能多張,受試者多次回診),連同呼叫端直接指定者
-        imgs = {r["image_id"] for r in read_jsonl(QUEUE)
-                if r.get("code") == code and r.get("image_id")}
-        if d.get("image_id"):
-            # 未驗證就收會讓呼叫端傳個 "000" 把整個影像層排除規則廢掉
-            if not ID_RE.match(str(d["image_id"])):
-                return jsonify({"error": "image_id 格式不合(應為 16 位小寫十六進位)"}), 400
-            imgs.add(str(d["image_id"]))
-        try:
-            audit_intent(actor, "consent_withdraw", code, role, org,
-                         {"image_ids": sorted(imgs)})
-        except AuditUnavailable:
-            return jsonify({"error": "audit_unavailable"}), 503
-        append_jsonl(WITHDRAWN, {"code": code, "action": "withdraw",
-                                 "image_id": (sorted(imgs)[0] if imgs else None),
-                                 "image_ids": sorted(imgs), "withdrawn_at": utc_now(), "actor": actor})
-        moved = [i for i in sorted(imgs) if quarantine_image(i)]
-        audit(actor, "consent_withdraw", code,
-              f"排除訓練;影像隔離 {len(moved)}/{len(imgs)}", role, org)
-        return jsonify({"status": "withdrawn", "code": code, "image_ids": sorted(imgs),
-                        "quarantined": moved,
-                        "effect": "已撤回:該影像的所有標註(含修訂版)一律排除於訓練集與統計,"
-                                  "影像檔移入 quarantine/ 不再進任何資料集。"
-                                  "佇列檔為 append-only 稽核軌跡故保留原紀錄(不竄改);"
-                                  "實體銷毀請另走資料刪除程序並留紀錄。"}), 200
+            return jsonify({"error": "權限不足"}), 403
+        return ordered_consent("withdraw")
 
     @flywheel_bp.route("/api/v1/consent/restore", methods=["POST"])
     @jwt_required()
     def post_restore():
-        """重新取得同意(re-consent)。沒有這條,撤回就是死局:影像被隔離、code 被封,
-        受試者日後再次同意也補不回來,而端點只會回一句「已撤回」。
-        寫入 action:"restore" 紀錄(不刪除原撤回紀錄,稽核軌跡保持完整),並把影像搬回 images/。"""
-        d = request.get_json(silent=True) or {}
-        code = d.get("code")
-        actor, role, org = _who()
-        # restore 是 withdraw 的**反向操作**：它把病人已撤回的同意復原，並把隔離中的
-        # 影像搬回訓練區。權限要求必須與 withdraw 完全相同——先前這裡只有
-        # @jwt_required()，任何已登入角色（含 assistant／lite）都能撤銷病人的撤回。
+        _actor, role, _org = _who()
         if not _can(role, "patient.manage"):
-            return jsonify({"error": "權限不足",
-                            "issues": [f"角色 {role} 不得恢復同意（僅醫師/護理師）。"]}), 403
-        if not code:
-            return jsonify({"error": "缺 code"}), 400
-        _, wd_imgs = withdrawn_keys()
-        imgs = {r["image_id"] for r in read_jsonl(QUEUE)
-                if r.get("code") == code and r.get("image_id") and r["image_id"] in wd_imgs}
-        if d.get("image_id"):
-            if not ID_RE.match(str(d["image_id"])):
-                return jsonify({"error": "image_id 格式不合(應為 16 位小寫十六進位)"}), 400
-            imgs.add(str(d["image_id"]))
-        try:
-            audit_intent(actor, "consent_restore", code, role, org,
-                         {"image_ids": sorted(imgs)})
-        except AuditUnavailable:
-            return jsonify({"error": "audit_unavailable"}), 503
-        restored = []
-        for i in sorted(imgs):
-            if _store().move(_key(os.path.join(QUARANTINE_DIR, f"{i}.jpg")),
-                             _key(os.path.join(IMAGES_DIR, f"{i}.jpg"))):
-                restored.append(i)
-        append_jsonl(WITHDRAWN, {"code": code, "action": "restore", "image_ids": sorted(imgs),
-                                 "restored_at": utc_now(), "actor": actor,
-                                 "note": d.get("note")})
-        audit(actor, "consent_restore", code,
-              f"重新同意;影像回復 {len(restored)}/{len(imgs)}", role, org)
-        return jsonify({"status": "restored", "code": code, "image_ids": sorted(imgs),
-                        "restored": restored,
-                        "effect": "已重新納入:該 code/影像不再被排除,可重新上傳標註。"
-                                  "原撤回紀錄保留於 withdrawn.jsonl(稽核軌跡不刪改)。"}), 200
+            return jsonify({"error": "權限不足"}), 403
+        return ordered_consent("restore")
 
     @flywheel_bp.route("/api/v1/flywheel/stats", methods=["GET"])
     @jwt_required()

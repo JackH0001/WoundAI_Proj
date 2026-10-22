@@ -1248,37 +1248,44 @@ actor BackendClient {
 
     // MARK: - ⑦ 同意：撤回／重新取得
 
-    /// `POST /api/v1/consent/withdraw`。
-    func withdrawConsent(code: String, imageId: String? = nil, onCapacity: (ResearchCapacityWait) -> Void = { _ in }) async -> Bool {
-        return await consentCall(path: "/api/v1/consent/withdraw", code: code, imageId: imageId, onCapacity: onCapacity)
+    func consentRevision(code: String) async throws -> String {
+        let escaped = code.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let (httpCode, data) = try await send(request("GET", "/api/v1/consent/state?code=" + escaped))
+        guard httpCode == 200, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              obj["protocol"] as? String == "medical-consent/2", obj["code"] as? String == code,
+              let revision = obj["revision"] as? String,
+              revision.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else {
+            throw BackendError.badResponse("同意版次尚未核對，請重新確認同意")
+        }
+        return revision
     }
 
-    /**
-     `POST /api/v1/consent/restore`。
-
-     ⚠ 沒有這一支，撤回就是**死局**：病患改變主意重新簽署後，App 顯示「訓練同意 ✓」，
-     而雲端仍以「已撤回訓練同意」擋下每一次送出——錯誤訊息還會把內部端點路徑直接印給
-     醫師看，而他沒有辦法自己呼叫它。
-     */
-    func restoreConsent(code: String, imageId: String? = nil, onCapacity: (ResearchCapacityWait) -> Void = { _ in }) async -> Bool {
-        return await consentCall(path: "/api/v1/consent/restore", code: code, imageId: imageId, onCapacity: onCapacity)
+    func withdrawConsent(code: String, imageId: String? = nil, intentID: String? = nil, onCapacity: (ResearchCapacityWait) -> Void = { _ in }) async -> Bool {
+        await consentCall(path: "/api/v1/consent/withdraw", code: code, imageId: imageId, intentID: intentID, revision: nil, onCapacity: onCapacity)
     }
-
-    private func consentCall(path: String, code: String, imageId: String?, onCapacity: (ResearchCapacityWait) -> Void) async -> Bool {
+    func restoreConsent(code: String, imageId: String? = nil, intentID: String? = nil, revision: String? = nil, onCapacity: (ResearchCapacityWait) -> Void = { _ in }) async -> Bool {
+        guard intentID != nil, revision != nil else { return false }
+        return await consentCall(path: "/api/v1/consent/restore", code: code, imageId: imageId, intentID: intentID, revision: revision, onCapacity: onCapacity)
+    }
+    private func consentCall(path: String, code: String, imageId: String?, intentID: String?, revision: String?, onCapacity: (ResearchCapacityWait) -> Void) async -> Bool {
         do {
-            var body: [String: Any] = ["code": code]
+            var body: [String: Any] = ["code": code, "protocol": "medical-consent/2"]
             if let i = imageId { body["image_id"] = i }
+            if let intentID { body["intent_id"] = intentID }
+            if let revision { body["consent_revision"] = revision }
             var r = try request("POST", path)
             r.setValue("application/json", forHTTPHeaderField: "Content-Type")
             r.httpBody = try JSONSerialization.data(withJSONObject: body)
             let (httpCode, data) = try await send(r)
             guard httpCode == 200, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+            if let intentID {
+                guard obj["protocol"] as? String == "medical-consent/2", obj["intent_id"] as? String == intentID,
+                      let r = obj["revision"] as? String,
+                      r.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else { return false }
+            }
             return obj["code"] as? String == code && obj["status"] as? String == (path.hasSuffix("/withdraw") ? "withdrawn" : "restored")
-        } catch let wait as ResearchCapacityWait {
-            onCapacity(wait); return false
-        } catch {
-            return false
-        }
+        } catch let wait as ResearchCapacityWait { onCapacity(wait); return false }
+        catch { return false }
     }
 
     // MARK: - 工具
