@@ -3,6 +3,7 @@ package com.woundmeasurement.app.data.store
 import android.content.Context
 import android.content.SharedPreferences
 import com.woundmeasurement.app.data.crypto.PhiCrypto
+import com.woundmeasurement.app.pipeline.ResearchCapacityWait
 
 /** Immutable settings namespace; shared lock covers read-modify-write across instances. */
 class MedicalAccountPreferences private constructor(
@@ -39,17 +40,44 @@ class MedicalAccountPreferences private constructor(
     enum class ConsentQueue(val key: String) {
         WITHDRAWAL("pending_withdrawals"), RESTORE("pending_restores")
     }
-    fun retryAfter(queue:ConsentQueue):Long = synchronized(lock) { prefs.getLong(queue.key+"_retry_at",0) }
-    fun deferRetry(queue:ConsentQueue,until:Long) = synchronized(lock) { check(prefs.edit().putLong(queue.key+"_retry_at",until).commit()) }
+    fun retryAfter(queue:ConsentQueue):Long = synchronized(lock) {
+        val raw=prefs.getLong(queue.key+"_retry_at",0)
+        val bounded=ResearchCapacityWait.privacyDeadline(raw)
+        if(raw!=bounded) check(prefs.edit().putLong(queue.key+"_retry_at",bounded).commit())
+        bounded
+    }
+    fun deferRetry(queue:ConsentQueue,until:Long) = synchronized(lock) { check(prefs.edit().putLong(queue.key+"_retry_at",ResearchCapacityWait.privacyDeadline(until)).commit()) }
+    private fun intents(): org.json.JSONObject {
+        prefs.getString("consent_intents_v1", null)?.let { return org.json.JSONObject(it) }
+        val result = org.json.JSONObject()
+        for(queue in listOf(ConsentQueue.RESTORE, ConsentQueue.WITHDRAWAL)) {
+            for(code in prefs.getStringSet(queue.key, emptySet()) ?: emptySet()) {
+                result.put(code, org.json.JSONObject().put("queue",queue.key).put("token",java.util.UUID.randomUUID().toString()))
+            }
+        }
+        check(prefs.edit().putString("consent_intents_v1",result.toString()).commit())
+        return result
+    }
     fun pending(queue: ConsentQueue): Set<String> = synchronized(lock) {
-        prefs.getStringSet(queue.key, emptySet())?.toSet() ?: emptySet()
+        val values=intents()
+        values.keys().asSequence().filter { values.getJSONObject(it).getString("queue")==queue.key }.toSet()
+    }
+    fun token(code:String, queue:ConsentQueue):String? = synchronized(lock) {
+        val entry=intents().optJSONObject(code)
+        if(entry?.getString("queue")==queue.key) entry.getString("token") else null
     }
     fun add(codes: Collection<String>, queue: ConsentQueue) = synchronized(lock) {
-        val next = pending(queue).toMutableSet().apply { addAll(codes.filter { it.isNotBlank() }) }
-        prefs.edit().putStringSet(queue.key, next).apply()
+        val next=intents()
+        for(code in codes.map {it.trim()}.filter {it.isNotBlank()}) {
+            next.put(code,org.json.JSONObject().put("queue",queue.key).put("token",java.util.UUID.randomUUID().toString()))
+        }
+        check(prefs.edit().putString("consent_intents_v1",next.toString()).commit())
     }
-    fun remove(code: String, queue: ConsentQueue) = synchronized(lock) {
-        val next = pending(queue).toMutableSet().apply { remove(code) }
-        prefs.edit().putStringSet(queue.key, next).apply()
+    fun remove(code: String, queue: ConsentQueue, expectedToken:String?=null) = synchronized(lock) {
+        val next=intents();val entry=next.optJSONObject(code)
+        if(entry?.getString("queue")==queue.key && (expectedToken==null || entry.getString("token")==expectedToken)) {
+            next.remove(code)
+            check(prefs.edit().putString("consent_intents_v1",next.toString()).commit())
+        }
     }
 }

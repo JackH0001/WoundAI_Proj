@@ -60,6 +60,16 @@ class ReconsentTests(unittest.TestCase):
         second = self.rejoin(); self.assertEqual(second.status_code, 200)
         self.assertEqual(first.json, second.json)
 
+    def test_completed_renewal_replay_after_consent_update_returns_original_receipt(self):
+        self.clear()
+        first = self.renew.resume(self.owner, self.body())
+        before = dict(self.f.bucket.live)
+        with patch('lite_reconsent.CONSENT', '2026-11-01.1'), patch('lite_reconsent.DISCLOSURE', '2026-11-01.rejoin.1'):
+            self.assertEqual(self.renew.resume(self.owner, self.body()), first)
+            with self.assertRaises(ReconsentRejected):
+                self.renew.resume(self.owner, self.body(previous_epoch=self.new, new_epoch='c' * 32))
+        self.assertEqual(before, self.f.bucket.live)
+
     def test_new_rgbd_and_revision_retries_preserve_exact_media_and_old_tombstones(self):
         from lite_raw_depth_store import unpack
         self.clear(); old = dict(self.f.bucket.live)

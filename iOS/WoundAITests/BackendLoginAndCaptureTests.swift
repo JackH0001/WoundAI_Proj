@@ -7,6 +7,8 @@ import UIKit
 #endif
 
 private actor CaptureTransportFixture: InstitutionAuthenticatedTransport {
+    var consentPaths: [String] = []
+    func consentRequests() -> [String] { consentPaths }
     var consentStatus = 200
     var consentBody = "{}"
     var retryAfter: String?
@@ -23,7 +25,7 @@ private actor CaptureTransportFixture: InstitutionAuthenticatedTransport {
         let path = request.url!.path
         var status = 200
         var body = "{}"
-        if path.hasPrefix("/api/v1/consent/") { status=consentStatus; body=consentBody }
+        if path.hasPrefix("/api/v1/consent/") { consentPaths.append(path); status=consentStatus; body=consentBody }
         else if path == "/api/auth/login" {
             loginCount += 1; status = loginStatus
             body = #"{"access_token":"synthetic-app-token","identity":"mmhps20261007:dr01","org":"mmhps20261007","user":"dr01","role":"physician","perms":["gt.verify","annotation.submit"]}"#
@@ -60,6 +62,29 @@ final class BackendLoginAndCaptureTests: XCTestCase {
         var wait: ResearchCapacityWait?
         let pending = await client.withdrawConsent(code:"fixture",onCapacity:{ wait=$0 })
         XCTAssertFalse(pending); XCTAssertGreaterThan(try XCTUnwrap(wait).notBefore.timeIntervalSinceNow,295)
+    }
+    func testWithdrawalDuringRestoreLoginPreventsStaleRestoreFromSendingOrRequeueing() async throws {
+        let name="consent-race-"+UUID().uuidString
+        let store=UserDefaults(suiteName:name)!
+        defer {UserDefaults.standard.removePersistentDomain(forName:name)}
+        let accounts=MedicalAccountPreferences(scope:.syntheticReview,defaults:store)
+        let transport=CaptureTransportFixture()
+        let client=BackendClient(baseUrl:"https://test.invalid",institutionTransport:transport)
+        let loggedIn=try await client.login(username:"fixture",password:UUID().uuidString);XCTAssertTrue(loggedIn)
+        var switched=false
+        let context=ConsentSync.Context(accounts:accounts,acquire:{
+            if !switched { switched=true;accounts.add(["fixture"],to:.withdrawal) }
+            return client
+        },active:{true})
+        _ = await ConsentSync.restoreOnBackend(codes:["fixture"],context:context)
+        let sent = await transport.consentRequests();XCTAssertTrue(sent.isEmpty)
+        XCTAssertTrue(accounts.pending(.restore).isEmpty)
+        XCTAssertEqual(accounts.pending(.withdrawal),["fixture"])
+        await transport.setConsent(200,#"{"status":"withdrawn","code":"fixture"}"#)
+        let result=await ConsentSync.retryPending(context:context)
+        XCTAssertEqual(result.done,["fixture"])
+        let paths=await transport.consentRequests();XCTAssertEqual(paths,["/api/v1/consent/withdraw"])
+        XCTAssertTrue(accounts.pending(.restore).isEmpty)
     }
     func testSavedPasswordIsNotAuthenticatedAndVerifiedBusyIsNotLoggingIn() {
         let saved = BackendLoginPresentation(entryReady:true,verified:false,busy:false,saved:true)

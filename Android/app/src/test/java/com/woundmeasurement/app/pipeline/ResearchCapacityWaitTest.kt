@@ -9,6 +9,7 @@ class ResearchCapacityWaitTest {
         assertEquals(60_000,delay("-10","{\"retry_after\":true}"))
         assertEquals(60_000,delay("NaN","{\"retry_after\":-1}"))
     }
-    @Test fun neverCapsValidServerWaitEarly() {assertEquals(90_000_000,delay("90000","{}"))}
-    @Test fun cannotOverflowIntoImmediateRetry() {assertEquals(Long.MAX_VALUE,ResearchCapacityWait.deadline("1e300",null,"{}",1_000_000,jitterMs=0))}
+    @Test fun capsExcessiveServerWait() {assertEquals(3_600_000,delay("90000","{}"))}
+    @Test fun cannotOverflowIntoImmediateRetry() {assertEquals(4_600_000,ResearchCapacityWait.deadline("1e300",null,"{}",1_000_000,jitterMs=0))}
+    @Test fun privacyWaitHasShorterBound() { assertEquals(1_300_000L,ResearchCapacityWait.privacyDeadline(Long.MAX_VALUE,1_000_000)) }
 }

@@ -27,6 +27,11 @@ struct LiteCaptureResearchScope: Equatable, Sendable {
 /// restores deleted media or changes any saved photo/mask/revision binding.
 struct LiteReconsentRequest: Codable, Equatable, Sendable {
     static let disclosure = "2026-10-21.rejoin.1"
+    // Historical evidence is checked against its own receipt, not today's text.
+    // Current consent for future uploads is separately enforced by LitePrefs.
+    static func validVersion(_ value: String) -> Bool {
+        LiteAttestClient.matches(value, "[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
+    }
     let anon_id: String
     let research_consent: Bool
     let previous_epoch: String
@@ -46,6 +51,8 @@ struct LiteReconsentReceipt: Codable, Equatable, Sendable {
     let scope: String
     let historical_media_restored: Bool
     func validates(_ request: LiteReconsentRequest) -> Bool {
+        LiteReconsentRequest.validVersion(request.consent_version) &&
+        LiteReconsentRequest.validVersion(request.disclosure_version) &&
         status == "reconsented" && anon_id == request.anon_id && consent_epoch == request.new_epoch &&
         previous_epoch == request.previous_epoch && consent_version == request.consent_version &&
         disclosure_version == request.disclosure_version && scope == "future_captures_only" &&

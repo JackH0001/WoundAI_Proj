@@ -61,13 +61,14 @@ object ConsentWithdrawal {
     suspend fun restoreOnBackend(ctx: Context, codes: Collection<String>, runtime: MedicalRuntime = MedicalRuntime(ctx)): Result =
         sync(ctx, codes, Dir.RESTORE, runtime)
 
-    private suspend fun sync(ctx: Context, codes: Collection<String>, dir: Dir, runtime: MedicalRuntime): Result {
+    private suspend fun sync(ctx: Context, codes: Collection<String>, dir: Dir, runtime: MedicalRuntime, newIntent:Boolean=true): Result {
         val list = codes.filter { it.isNotBlank() }.distinct()
         val queue = if (dir == Dir.WITHDRAW) com.woundmeasurement.app.data.store.MedicalAccountPreferences.ConsentQueue.WITHDRAWAL
             else com.woundmeasurement.app.data.store.MedicalAccountPreferences.ConsentQueue.RESTORE
         val current = runtime.operation()
         // Persist before the first suspension; a closed environment must keep its own pending work.
-        if (dir == Dir.WITHDRAW) runtime.addPendingWithdrawals(list) else runtime.addPendingRestores(list)
+        if(newIntent) runtime.accounts.add(list,queue)
+        val tokens=list.mapNotNull { code -> runtime.accounts.token(code,queue)?.let {code to it} }.toMap()
         return withContext(Dispatchers.IO) {
             if(runtime.accounts.retryAfter(queue)>System.currentTimeMillis() || !processing.tryLock()) return@withContext Result(emptyList(),list)
             try {
@@ -81,6 +82,8 @@ object ConsentWithdrawal {
             val done = ArrayList<String>(); val fail = ArrayList<String>()
             var capacityWaiting=false
             for (code in list) {
+                val token=tokens[code] ?: continue
+                if(runtime.accounts.token(code,queue)!=token) continue
                 val ok = current() && !capacityWaiting && runCatching {
                     if (dir == Dir.WITHDRAW) backend.withdrawConsent(code) else backend.restoreConsent(code)
                 }.onFailure { failure ->
@@ -88,7 +91,8 @@ object ConsentWithdrawal {
                         capacityWaiting=true;runtime.accounts.deferRetry(queue,failure.notBefore)
                     }
                 }.getOrDefault(false)
-                if (ok && current()) { done.add(code); runtime.accounts.remove(code, queue) }
+                if(runtime.accounts.token(code,queue)!=token) continue
+                if (ok && current()) { done.add(code); runtime.accounts.remove(code, queue, token) }
                 else fail.add(code)
             }
             if(fail.isEmpty()) runtime.accounts.deferRetry(queue,0)
@@ -106,10 +110,9 @@ object ConsentWithdrawal {
     suspend fun retryPending(ctx: Context, runtime: MedicalRuntime = MedicalRuntime(ctx)): Result {
         // 兩個方向都要補做。只補撤回的話，重新簽署的病患會永遠卡在「雲端說已撤回」。
         val wd = runtime.accounts.pending(com.woundmeasurement.app.data.store.MedicalAccountPreferences.ConsentQueue.WITHDRAWAL)
+        val a = if (wd.isEmpty()) Result(emptyList(), emptyList()) else sync(ctx, wd, Dir.WITHDRAW, runtime, false)
         val rs = runtime.accounts.pending(com.woundmeasurement.app.data.store.MedicalAccountPreferences.ConsentQueue.RESTORE)
-        if (wd.isEmpty() && rs.isEmpty()) return Result(emptyList(), emptyList())
-        val a = if (wd.isEmpty()) Result(emptyList(), emptyList()) else sync(ctx, wd, Dir.WITHDRAW, runtime)
-        val b = if (rs.isEmpty()) Result(emptyList(), emptyList()) else sync(ctx, rs, Dir.RESTORE, runtime)
+        val b = if (rs.isEmpty()) Result(emptyList(), emptyList()) else sync(ctx, rs, Dir.RESTORE, runtime, false)
         return Result(a.done + b.done, a.pending + b.pending)
     }
 
@@ -124,7 +127,7 @@ object ConsentWithdrawal {
         val parts = ArrayList<String>()
         if (wd.isNotEmpty()) parts.add(
             "⚠ 有 ${wd.size} 筆撤回尚未同步到雲端：${wd.sorted().joinToString("、")}\n" +
-            "這些代碼的資料目前仍在雲端訓練佇列中。")
+            "尚未取得雲端停止使用的確認，請優先完成撤回核對。")
         if (rs.isNotEmpty()) parts.add(
             "⚠ 有 ${rs.size} 筆重新簽署尚未同步到雲端：${rs.sorted().joinToString("、")}\n" +
             "這些代碼在雲端仍被標記為已撤回，補送訓練標註會被擋下。")

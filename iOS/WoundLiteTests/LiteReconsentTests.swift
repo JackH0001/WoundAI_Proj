@@ -49,6 +49,33 @@ final class LiteReconsentTests: XCTestCase {
         XCTAssertTrue(journal.status(for: old)?.contains("不會自動重傳") == true)
         XCTAssertTrue(model().renewed); XCTAssertFalse(model().blocksUploads)
     }
+    func testHistoricalConsentRemainsReadableAndWithdrawableAfterTextUpdate() async throws {
+        _ = try complete()
+        let original = try Data(contentsOf: journal.url)
+        let request = LiteReconsentRequest(anon_id: owner, research_consent: true,
+            previous_epoch: "legacy", new_epoch: String(repeating: "e", count: 32),
+            consent_version: "2026-10-04.1", disclosure_version: "2026-10-04.rejoin.1")
+        let intent = LiteReconsentIntent(server: server, previousWithdrawal: original, requestedAt: Date(), request: request)
+        _ = try journal.finishRenewal(intent, receipt: receipt(request))
+        let before = try Data(contentsOf: journal.url)
+        XCTAssertEqual(try journal.load()?.phase, .reconsented)
+        XCTAssertEqual(try Data(contentsOf: journal.url), before)
+        XCTAssertNil(LiteBackendConfiguration.consentChoice(true, savedVersion: request.consent_version,
+            requiredVersion: LitePrefs.consentVersion, savedOrigin: server, currentOrigin: server))
+        var calls = 0
+        let m = LiteWithdrawalModel(journal: journal, stopUploads: {}, owner: { _ in XCTFail(); return nil },
+            sendScoped: { _,_,epoch in calls += 1; XCTAssertEqual(epoch, request.new_epoch); return .liveMediaRemoved })
+        await m.request(server: server)
+        XCTAssertTrue(m.finished); XCTAssertEqual(calls, 1)
+    }
+    func testHistoricalReceiptMustStillMatchItsOwnConsentVersion() {
+        let old = LiteReconsentRequest(anon_id: owner, research_consent: true, previous_epoch: "legacy",
+            new_epoch: String(repeating: "e", count: 32), consent_version: "old.1", disclosure_version: "old.1")
+        let mismatched = LiteReconsentRequest(anon_id: owner, research_consent: true, previous_epoch: "legacy",
+            new_epoch: old.new_epoch, consent_version: "old.2", disclosure_version: "old.1")
+        XCTAssertTrue(receipt(old).validates(old))
+        XCTAssertFalse(receipt(old).validates(mismatched))
+    }
     func testLostReplyRetainsSameIntentAcrossRestartAndKeepsUploadsOff() async throws {
         _ = try complete(); let original = try Data(contentsOf: journal.url)
         var first: LiteReconsentIntent?

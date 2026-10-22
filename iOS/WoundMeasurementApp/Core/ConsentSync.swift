@@ -69,7 +69,7 @@ enum ConsentSync {
         return await sync(codes, .restore, context ?? .legacy)
     }
 
-    private static func sync(_ codes: [String], _ dir: Dir, _ context: Context) async -> Result {
+    private static func sync(_ codes: [String], _ dir: Dir, _ context: Context, newIntent: Bool = true) async -> Result {
         var seen = Set<String>()
         let list = codes
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -77,11 +77,12 @@ enum ConsentSync {
         if list.isEmpty { return .empty }
 
         let queue: MedicalAccountPreferences.ConsentQueue = dir == .withdraw ? .withdrawal : .restore
-        func remember(_ codes: [String]) { context.accounts.add(codes, to: queue) }
-        func forget(_ code: String) { context.accounts.remove(code, from: queue) }
         // Persist before awaiting: switching environments or terminating during
         // a request must not lose the requested consent change.
-        remember(list)
+        if newIntent { context.accounts.add(list, to: queue) }
+        let tokens = Dictionary(uniqueKeysWithValues: list.compactMap { code in
+            context.accounts.token(code, in: queue).map { (code, $0) }
+        })
         guard !running, !(context.accounts.retryAfter(queue).map { $0 > Date() } ?? false) else { return Result(done: [], pending: list) }
         running = true; defer { running = false }
         context.accounts.deferRetry(queue, until: Date().addingTimeInterval(60))
@@ -97,13 +98,17 @@ enum ConsentSync {
         for c in list {
             // 逐筆處理而非整批：一個代碼失敗不該讓其他的也留在佇列裡，
             // 而重試時只重試真正沒完成的那些。
+            guard let token = tokens[c], context.accounts.token(c, in: queue) == token else { continue }
             guard context.active(), !Task.isCancelled, !capacityWaiting else { fail.append(c); continue }
             let ok = dir == .withdraw
                 ? await backend.withdrawConsent(code: c, onCapacity: { capacityWaiting = true; context.accounts.deferRetry(queue, until: $0.notBefore) })
                 : await backend.restoreConsent(code: c, onCapacity: { capacityWaiting = true; context.accounts.deferRetry(queue, until: $0.notBefore) })
-            if ok && context.active() && !Task.isCancelled { done.append(c); forget(c) } else { fail.append(c) }
+            guard context.accounts.token(c, in: queue) == token else { continue }
+            if ok && context.active() && !Task.isCancelled {
+                done.append(c); context.accounts.remove(c, from: queue, expectedToken: token)
+            } else { fail.append(c) }
         }
-        if !fail.isEmpty { remember(fail) } else { context.accounts.deferRetry(queue, until: .distantPast) }
+        if fail.isEmpty { context.accounts.deferRetry(queue, until: .distantPast) }
         return Result(done: done, pending: fail)
     }
 
@@ -117,10 +122,9 @@ enum ConsentSync {
         let context = context ?? .legacy
         // 兩個方向都要補做。只補撤回的話，重新簽署的病患會永遠卡在「雲端說已撤回」。
         let wd = Array(context.accounts.pending(.withdrawal))
+        let a = wd.isEmpty ? Result.empty : await sync(wd, .withdraw, context, newIntent: false)
         let rs = Array(context.accounts.pending(.restore))
-        if wd.isEmpty && rs.isEmpty { return .empty }
-        let a = wd.isEmpty ? Result.empty : await sync(wd, .withdraw, context)
-        let b = rs.isEmpty ? Result.empty : await sync(rs, .restore, context)
+        let b = rs.isEmpty ? Result.empty : await sync(rs, .restore, context, newIntent: false)
         return Result(done: a.done + b.done, pending: a.pending + b.pending)
     }
 
@@ -138,7 +142,7 @@ enum ConsentSync {
         if !wd.isEmpty {
             parts.append("""
             ⚠ 有 \(wd.count) 筆撤回尚未同步到雲端：\(wd.joined(separator: "、"))
-            這些代碼的資料目前仍在雲端訓練佇列中。
+            尚未取得雲端停止使用的確認，請優先完成撤回核對。
             """)
         }
         if !rs.isEmpty {

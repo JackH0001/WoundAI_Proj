@@ -61,6 +61,24 @@ class MedicalRuntimeTest {
             assertNotEquals(mmh.backendUrl(),review.backendUrl())
         } finally {ctx.clear()}
     }
+    @Test fun withdrawalDuringRestoreLoginPreventsStaleRestoreSend() = runBlocking {
+        val ctx=context();val reached=CountDownLatch(1);val release=CountDownLatch(1)
+        val sent=java.util.concurrent.CopyOnWriteArrayList<String>()
+        try {
+            val runtime=MedicalRuntime(ctx,MedicalDataScope.SYNTHETIC_REVIEW) { o,c,v ->
+                client(o,c,v) { request ->
+                    if(request.url.encodedPath.endsWith("/login")) { reached.countDown();check(release.await(10,TimeUnit.SECONDS)) }
+                    if(request.url.encodedPath.startsWith("/api/v1/consent/")) sent.add(request.url.encodedPath)
+                }
+            }
+            runtime.setCredentials("dr01",UUID.randomUUID().toString())
+            val work=async(Dispatchers.Default) {ConsentWithdrawal.restoreOnBackend(ctx,listOf("SYNTH-CONSENT"),runtime)}
+            assertTrue(reached.await(10,TimeUnit.SECONDS))
+            runtime.addPendingWithdrawals(listOf("SYNTH-CONSENT"));release.countDown();work.await()
+            assertTrue(sent.isEmpty());assertTrue(runtime.accounts.pending(ConsentQueue.RESTORE).isEmpty())
+            assertEquals(setOf("SYNTH-CONSENT"),runtime.accounts.pending(ConsentQueue.WITHDRAWAL))
+        } finally {release.countDown();ctx.clear()}
+    }
     @Test fun closingDuringConsentLoginKeepsPendingOnlyInOriginalEnvironment() = runBlocking {
         val ctx=context();val reached=CountDownLatch(1);val release=CountDownLatch(1)
         try {

@@ -186,9 +186,9 @@ class ClinicalAnnotationOutboxTest {
         assertEquals(newer,runtime.database.measurementDao().getById(row.id))
     }
     @Test fun permissionLostAfterNetworkKeepsReceiptButDoesNotMarkLocal()=fixture {
-        val q=queue();val job=enqueue(q,binding);var count=0
-        val result=q.process(job.id,binding,{if(count++==0) ClinicalAnnotationOutbox.Permission.ALLOW else ClinicalAnnotationOutbox.Permission.REVOKED},
-            {receipt(it)},{error("must not ack")})
+        val q=queue();val job=enqueue(q,binding);var revoked=false
+        val result=q.process(job.id,binding,{if(!revoked) ClinicalAnnotationOutbox.Permission.ALLOW else ClinicalAnnotationOutbox.Permission.REVOKED},
+            {revoked=true;receipt(it)},{error("must not ack")})
         assertNotNull(result.receiptID);assertEquals(ClinicalAnnotationOutbox.State.CANCELLED,result.state)
     }
     @Test fun cancellationLeavesDurableAttemptForRecovery()=fixture {

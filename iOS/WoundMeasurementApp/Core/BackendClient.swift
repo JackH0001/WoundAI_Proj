@@ -300,10 +300,14 @@ actor BackendClient {
         return try await liteTransport.installation()
     }
 
-    private func sendLite(_ request: URLRequest, installation: String) async throws -> (Int, Data) {
+    private func sendLite(_ request: URLRequest, installation: String, handlesQuota: Bool = false) async throws -> (Int, Data) {
         guard let liteTransport else { throw BackendError.badResponse("缺少裝置驗證設定") }
         let (data, response) = try await liteTransport.send(request, installation: installation)
-        try ResearchCapacityWait.check(response, data: data)
+        // Segmentation consumes a quota reply as a result, without retrying the
+        // image. Revision/deletion requests still use durable capacity waiting.
+        if !(handlesQuota && response.statusCode == 429) {
+            try ResearchCapacityWait.check(response, data: data)
+        }
         return (response.statusCode, data)
     }
 
@@ -647,7 +651,7 @@ actor BackendClient {
                                             fileField: "image", fileName: "wound.jpg",
                                             mime: "image/jpeg", fileData: jpeg)
         }
-        let (code, data) = try await sendLite(r, installation: anonId)
+        let (code, data) = try await sendLite(r, installation: anonId, handlesQuota: true)
         let jOpt = JSONAny(data: data)
         if code == 429 || (code == 400 && jOpt?["error"].string == "face_detected") {
             let msg = jOpt?["message"].string ?? ""

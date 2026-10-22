@@ -176,6 +176,30 @@ final class LiteSignedBusinessTests: XCTestCase {
         XCTAssertNotNil(requests.1[0].value(forHTTPHeaderField: "X-Lite-Assertion"))
     }
 
+    func testQuotaExhaustionReturnsServerCountsAndMessageWithoutRetryingImage() async throws {
+        let (backend, _, _, http) = try setup(); let owner = try await backend.liteInstallation()
+        await http.options(status: 429)
+        await http.businessReply(["error": "rate_limited", "reason": "device_quota",
+            "message": "今日雲端辨識額度已用完，可手動圈選並保存。",
+            "quota": ["limit": 5, "used": 5, "remaining": 0, "scope": "installation",
+                      "operation": "segment", "resets_at": "2026-10-23T00:00:00Z"]])
+        let result = try await backend.liteSegment(jpeg: Data([1]), anonId: owner)
+        XCTAssertEqual(result.quota?.remaining, 0)
+        XCTAssertTrue(result.userMessage?.contains("額度已用完") == true)
+        XCTAssertFalse(result.stored); XCTAssertNil(result.imageId)
+        let requests = await http.snapshot(); XCTAssertEqual(requests.1.count, 1)
+    }
+    func testQuotaBypassDoesNotSuppressBusyServiceOrRevisionWait() async throws {
+        let (backend, _, _, http) = try setup(); let owner = try await backend.liteInstallation()
+        await http.options(status: 503)
+        do { _ = try await backend.liteSegment(jpeg: Data([1]), anonId: owner); XCTFail() }
+        catch is ResearchCapacityWait { }
+        await http.options(status: 429)
+        do { try await backend.liteRevision(bindingAnonID: owner, imageID: "image", revision: 1,
+            payloadJSON: "{}", digest: LitePendingRevision.digest("{}")); XCTFail() }
+        catch is ResearchCapacityWait { }
+        let requests = await http.snapshot(); XCTAssertEqual(requests.1.count, 2)
+    }
     func testPackagedAudienceIsExplicit() throws {
         XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "LiteAttestAudience") as? String, "woundlite-research-v1")
     }

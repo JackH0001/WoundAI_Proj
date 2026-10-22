@@ -209,10 +209,13 @@ final class LiteWithdrawalJournalTests: XCTestCase {
         let until = Date().addingTimeInterval(600)
         let model = LiteWithdrawalModel(journal:journal, stopUploads:{}, owner:{ _ in self.owner }, send:{ _,_ in .pendingUntil(until) })
         await model.request(server:server)
-        XCTAssertEqual(try journal.load()?.retryAt, until)
+        let bounded = try XCTUnwrap(journal.load()?.retryAt)
+        XCTAssertLessThanOrEqual(bounded.timeIntervalSinceNow, 300)
+        XCTAssertGreaterThan(bounded.timeIntervalSinceNow, 295)
         let restarted = LiteWithdrawalModel(journal:journal, stopUploads:{}, owner:{ _ in XCTFail(); return nil }, send:{ _,_ in XCTFail(); return .liveMediaRemoved })
         await restarted.request(server:server)
         XCTAssertFalse(restarted.finished); XCTAssertTrue(restarted.blocksUploads)
+        XCTAssertEqual(try journal.load()?.retryAt, bounded)
     }
     func test202RemainsPendingAcrossRestart() async throws {
         let model = LiteWithdrawalModel(journal:journal, stopUploads:{}, owner:{ _ in self.owner }, send:{ _,_ in .pending })
@@ -267,6 +270,38 @@ final class LiteWithdrawalJournalTests: XCTestCase {
         XCTAssertTrue(restarted.cancelledBeforeSubmission); XCTAssertFalse(restarted.blocksUploads)
         XCTAssertFalse(restarted.mayReviewUnsentCancellation)
         XCTAssertEqual(try Data(contentsOf: auditPath), auditBytes)
+    }
+    func testHistoricalUnsentCancellationCanLoadWithoutGrantingCurrentConsent() async throws {
+        try journal.save(LiteWithdrawalRecord(server: server, owner: nil))
+        let ok = await cancellationModel().reconsentUnsentWithdrawal(server: server,
+            consentVersion: LitePrefs.consentVersion, hasBoundRecords: { false })
+        XCTAssertTrue(ok)
+        let current = try XCTUnwrap(journal.load())
+        let path = folder.appendingPathComponent("history/" + current.cancellationAudit! + ".json")
+        var audit = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: path)) as? [String:Any])
+        audit["consentVersion"] = "2026-10-04.1"; audit["renewalDisclosureVersion"] = "2026-10-04.1"
+        try JSONSerialization.data(withJSONObject: audit).write(to: path)
+        let bytes = try Data(contentsOf: path)
+        XCTAssertEqual(try journal.load(), current)
+        XCTAssertFalse(journal.blocksUploads)
+        XCTAssertNil(LiteBackendConfiguration.consentChoice(true, savedVersion: "2026-10-04.1",
+            requiredVersion: LitePrefs.consentVersion, savedOrigin: server, currentOrigin: server))
+        XCTAssertEqual(try Data(contentsOf: path), bytes)
+        audit["renewalDisclosureVersion"] = ""
+        try JSONSerialization.data(withJSONObject: audit).write(to: path)
+        XCTAssertThrowsError(try journal.load())
+    }
+    func testLegacyExcessiveWithdrawalDelayIsBoundedOnceAndDoesNotSlideOnRestart() throws {
+        let raw = LiteWithdrawalRecord(server: server, owner: nil, retryAt: Date.distantFuture)
+        try journal.save(raw)
+        let before = Date()
+        let first = cancellationModel()
+        let bounded = try XCTUnwrap(journal.load()?.retryAt)
+        XCTAssertLessThanOrEqual(bounded.timeIntervalSince(before), 301)
+        XCTAssertGreaterThan(bounded.timeIntervalSince(before), 299)
+        _ = cancellationModel()
+        XCTAssertEqual(try journal.load()?.retryAt, bounded)
+        XCTAssertTrue(first.blocksUploads)
     }
     func testCancellationRejectsKnownOwnerBoundDataWrongServiceAndUnreadableIndex() async throws {
         for scenario in 0..<5 {

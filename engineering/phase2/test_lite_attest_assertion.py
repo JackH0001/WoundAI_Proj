@@ -151,6 +151,18 @@ class AssertionTests(unittest.TestCase):
             with self.subTest(ext=ext), self.assertRaises(AssertionRejected):
                 self.verify(self.signed(auth=self.auth(extension=ext)))
 
+    def test_latest_only_policy_accepts_upgraded_assertion_on_same_key(self):
+        latest = replace(self.policy, allowed_bundle_versions=frozenset({'38'}))
+        # Existing enrollment identity/key is retained; each assertion carries
+        # its own signed current bundle version. No unsigned header can override it.
+        for old in ('35', '36', '37'):
+            with self.subTest(old=old), self.assertRaises(AssertionRejected):
+                self.verify(self.signed(auth=self.auth(counter=2, extension={CATEGORY: 2, VERSION: old})),
+                    policy=latest, previous_counter=1)
+        current = self.verify(self.signed(auth=self.auth(counter=2, extension={CATEGORY: 2, VERSION: '38'})),
+            policy=latest, previous_counter=1)
+        self.assertEqual((current.bundle_version, current.counter), ('38', 2))
+
     def test_legacy_absence_requires_explicit_server_policy(self):
         old = self.signed(auth=self.auth(flags=1))
         with self.assertRaises(AssertionRejected): self.verify(old)

@@ -65,6 +65,22 @@ The Lite candidate does not expose an administrator/reviewer console. This chang
 does not claim an epoch-aware management UI, global historical-media purge,
 backup deletion, model unlearning, or restoration of withdrawn datasets.
 
+## Historical consent versions and latest-build policy
+
+Completed audits validate their own consent/disclosure strings and exact receipt
+bindings, independently of today's consent text. An old completed audit remains
+readable and withdrawable; it does not authorize uploads under a newer consent.
+New renewal still requires current consent. Replaying the exact completed request
+returns the original receipt/versions, not a rewritten historical receipt.
+Malformed versions or request/receipt mismatches still fail closed.
+
+The current rollout decision is latest-verified-build only, not a 35–38 allowlist.
+Build 38 is a candidate until deployment and device acceptance complete. A valid
+assertion from the upgraded app can retain its enrolled key/identity; obsolete
+builds are refused without resetting identity or deleting audit/history.
+See [Claude follow-up](../../docs/claude_safety_review_followup_20261022.md)
+for test counts, remaining medical findings, and unvalidated network races.
+
 ## Verification and release gate
 
 Synthetic signed HTTP tests cover exact RGB-D readback, mask revisions, duplicate

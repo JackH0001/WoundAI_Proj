@@ -90,8 +90,6 @@ struct LiteWithdrawalJournal: Sendable {
                   let bytes = try? Data(contentsOf: url.deletingLastPathComponent().appendingPathComponent("history/" + name + ".json")),
                   let audit = try? JSONDecoder().decode(LiteReconsentAudit.self, from: bytes),
                   audit.receipt.validates(audit.intent.request), audit.intent.request.research_consent,
-                  audit.intent.request.disclosure_version == LiteReconsentRequest.disclosure,
-                  audit.intent.request.consent_version == LitePrefs.consentVersion,
                   audit.receipt.anon_id == value.owner, audit.receipt.consent_epoch == value.researchEpoch,
                   try Self.origin(audit.intent.server) == Self.origin(value.server),
                   let old = try? JSONDecoder().decode(LiteWithdrawalRecord.self, from: audit.intent.previousWithdrawal),
@@ -106,8 +104,9 @@ struct LiteWithdrawalJournal: Sendable {
             guard let data = try? Data(contentsOf: auditURL),
                   let audit = try? JSONDecoder().decode(LiteUnsentWithdrawalCancellation.self, from: data),
                   audit.action == "cancel_unsent_withdrawal_and_reconsent",
-                  audit.at.timeIntervalSince1970.isFinite, !audit.consentVersion.isEmpty,
-                  audit.renewalDisclosureVersion == Self.renewalDisclosureVersion,
+                  audit.at.timeIntervalSince1970.isFinite,
+                  LiteReconsentRequest.validVersion(audit.consentVersion),
+                  LiteReconsentRequest.validVersion(audit.renewalDisclosureVersion),
                   audit.noRegisteredOwner, audit.noBoundRecordsForService,
                   SHA256.hash(data: audit.previousRequest).map({ String(format: "%02x", $0) }).joined() == audit.previousSHA256,
                   let prior = try? JSONDecoder().decode(LiteWithdrawalRecord.self, from: audit.previousRequest),
@@ -230,6 +229,12 @@ final class LiteWithdrawalModel: ObservableObject {
         self.sendScoped = sendScoped
         do {
             record = try journal.load()
+            // Normalize a legacy excessive wait once and persist it; reopening
+            // must not keep moving the privacy deadline into the future.
+            if var value = record, value.phase == .pending, let raw = value.retryAt {
+                let bounded = ResearchCapacityWait.privacyDeadline(raw)
+                if bounded != raw { value.retryAt = bounded; try journal.save(value); record = value }
+            }
             if record?.phase == .pending, record?.owner == nil {
                 message = "尚未確認此服務的原上傳身分，未取得雲端撤回收據；本機紀錄保留，不能視為雲端資料已刪除。"
             } else if record?.phase == .cancelledBeforeSubmission {
@@ -333,14 +338,14 @@ final class LiteWithdrawalModel: ObservableObject {
             if let epoch = value.researchEpoch { result = try await sendScoped(value.server, value.owner!, epoch) }
             else { result = try await send(value.server, value.owner!) }
             if result == .liveMediaRemoved { value.phase = .liveMediaRemoved; value.retryAt = nil }
-            if case .pendingUntil(let deadline) = result { value.retryAt = deadline }
+            if case .pendingUntil(let deadline) = result { value.retryAt = ResearchCapacityWait.privacyDeadline(deadline) }
             try journal.save(value); record = value
             message = result == .liveMediaRemoved
                 ? "雲端確認目前可見的影像與深度媒體已清除，該安裝的研究索引已停用。"
                 : "雲端已受理撤回，正在等待先前的上傳結束。本機已保留撤回要求，App 開啟時會自動接續查核。"
         } catch let wait as ResearchCapacityWait {
             if var value = record {
-                value.retryAt = wait.notBefore
+                value.retryAt = ResearchCapacityWait.privacyDeadline(wait.notBefore)
                 do { try journal.save(value); record = value } catch { message = LiteWithdrawalFailure.invalidState.localizedDescription; return }
             }
             message = "後端忙碌；撤回要求已保留，等待後自動查核。研究上傳保持停用。"

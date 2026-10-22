@@ -51,7 +51,9 @@ final class ClinicalUploadOutboxTests: XCTestCase {
         XCTAssertEqual(delay("Sat, 17 Oct 2026 03:05:00 GMT", "{}", "Sat, 17 Oct 2026 03:00:00 GMT"), 300)
         XCTAssertEqual(delay("-10", "{\"retry_after\":true}"), 60)
         XCTAssertEqual(delay("NaN", "{\"retry_after\":-1}"), 60)
-        XCTAssertEqual(delay("90000", "{}"), 90000)
+        XCTAssertEqual(delay("90000", "{}"), 3600)
+        XCTAssertEqual(delay("1e300", "{}"), 3600)
+        XCTAssertEqual(ResearchCapacityWait.privacyDeadline(.distantFuture, now: now).timeIntervalSince(now), 300)
     }
     func testEncryptedSnapshotSurvivesReopenWithoutCredentials() throws {
         let box = ClinicalUploadOutbox(directory: directory)

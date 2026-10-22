@@ -39,21 +39,46 @@ final class MedicalAccountPreferences {
     } }
     enum ConsentQueue: String { case withdrawal = "pending_withdrawals", restore = "pending_restores" }
     func retryAfter(_ queue: ConsentQueue) -> Date? { locked {
-        (defaults.object(forKey: queue.rawValue + "_retry_at") as? Double).map(Date.init(timeIntervalSince1970:))
+        guard let raw = defaults.object(forKey: queue.rawValue + "_retry_at") as? Double else { return nil }
+        let bounded = ResearchCapacityWait.privacyDeadline(Date(timeIntervalSince1970: raw))
+        if bounded.timeIntervalSince1970 != raw { defaults.set(bounded.timeIntervalSince1970, forKey: queue.rawValue + "_retry_at") }
+        return bounded
     } }
     func deferRetry(_ queue: ConsentQueue, until: Date) { locked {
-        defaults.set(until.timeIntervalSince1970, forKey: queue.rawValue + "_retry_at")
+        defaults.set(ResearchCapacityWait.privacyDeadline(until).timeIntervalSince1970, forKey: queue.rawValue + "_retry_at")
     } }
+    private func queues() -> [String: [String: String]] {
+        // One atomic object records direction AND generation. Keep legacy arrays
+        // as migration evidence; ambiguous legacy pairs resolve to withdrawal.
+        if let saved = defaults.dictionary(forKey: "consent_intents_v1") as? [String: [String: String]] { return saved }
+        var result: [String: [String: String]] = [:]
+        for queue in [ConsentQueue.restore, .withdrawal] {
+            for code in defaults.stringArray(forKey: queue.rawValue) ?? [] {
+                result[code] = ["queue": queue.rawValue, "token": UUID().uuidString]
+            }
+        }
+        defaults.set(result, forKey: "consent_intents_v1")
+        return result
+    }
     func pending(_ queue: ConsentQueue) -> Set<String> { locked {
-        Set(defaults.stringArray(forKey: queue.rawValue) ?? [])
+        Set(queues().filter { $0.value["queue"] == queue.rawValue }.keys)
+    } }
+    func token(_ code: String, in queue: ConsentQueue) -> String? { locked {
+        let entry = queues()[code]
+        return entry?["queue"] == queue.rawValue ? entry?["token"] : nil
     } }
     func add(_ codes: [String], to queue: ConsentQueue) { locked {
-        var values = pending(queue)
-        values.formUnion(codes.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
-        defaults.set(Array(values).sorted(), forKey: queue.rawValue)
+        var values = queues()
+        for code in codes.map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }).filter({ !$0.isEmpty }) {
+            values[code] = ["queue": queue.rawValue, "token": UUID().uuidString]
+        }
+        defaults.set(values, forKey: "consent_intents_v1")
     } }
-    func remove(_ code: String, from queue: ConsentQueue) { locked {
-        var values = pending(queue); values.remove(code)
-        defaults.set(Array(values).sorted(), forKey: queue.rawValue)
+    func remove(_ code: String, from queue: ConsentQueue, expectedToken: String? = nil) { locked {
+        var values = queues()
+        guard values[code]?["queue"] == queue.rawValue,
+              expectedToken == nil || values[code]?["token"] == expectedToken else { return }
+        values.removeValue(forKey: code)
+        defaults.set(values, forKey: "consent_intents_v1")
     } }
 }
