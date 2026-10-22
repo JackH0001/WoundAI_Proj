@@ -308,7 +308,7 @@ struct CaseSelectView: View {
         consent = await app.repo.activeConsent(patientId: p.id)
         let r = await ConsentSync.pushToBackend(codes: codes, context: app.runtime.consent)
         message = r.allOK
-            ? "已撤回，雲端同步完成。"
+            ? "已撤回，雲端已停止存取與後續訓練；媒體清理另依核定期限辦理，尚未代表已銷毀。"
             : "本機已撤回；雲端尚有 \(r.pending.count) 筆未完成，已排入重試佇列。"
         app.refreshBanner()
     }

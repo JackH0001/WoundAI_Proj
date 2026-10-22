@@ -50,10 +50,10 @@ LocalStore's unpublished `.immutable-*` files are excluded from enumeration.
 
 ## Media, audit and migration limits
 
-New withdrawals use logical exclusion: original bytes remain, while API access,
+New withdrawals use logical exclusion: bytes remain pending the approved cleanup worker, while API access,
 training eligibility and statistics consult the ordered state. Existing
 quarantined bytes may be copied back during a conditional restore, never moved
-or deleted; that copy does not itself grant access. Legacy JSONL and historical
+or deleted during restore; that copy does not itself grant access. Purge-claimed images cannot be restored. Legacy JSONL and historical
 receipts remain unchanged. Intent audit is written before mutation; the durable
 event is the authoritative outcome even if the HTTP response is lost.
 
@@ -68,8 +68,13 @@ JSONL: readers reject the override when ordered receipts are present in either
 the configured store or the supplied local directory. Configure the complete
 store, including receipts, rather than copying only legacy files.
 
-This implementation scans fresh state; large-subject/long-history performance,
-real GCS multi-instance behavior and device-to-cloud acceptance are not yet
-validated. Local races and a mocked GCS create-only storage contract are not
+Single-image guards resolve only related subject histories through a protected reverse index; bulk exports scan each subject once using one fresh legacy snapshot. Subject faults exclude that subject, not unrelated subjects. The 1-versus-200 subject synthetic read-budget test is constant, but real GCS latency, large histories, multi-instance behavior and device-to-cloud acceptance remain unvalidated. Local races and a mocked GCS create-only storage contract are not
 production deployment evidence. Revision ordering for already in-flight medical
 annotation uploads is a separate problem; this protocol orders consent only.
+
+## Operational update
+
+The additional index, fault isolation, purge event, cleanup outcomes and mandatory
+cutover gates are defined in [medical-consent-operations-v1.md](medical-consent-operations-v1.md).
+Pre-update v2 readers do not understand purge events or index completeness. They
+are not safe rollback images. No live store was changed in this code review.

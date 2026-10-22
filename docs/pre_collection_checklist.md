@@ -14,7 +14,7 @@
 |---|---|---|
 | **PII 不上雲** | 姓名／病歷號以 Keystore AES-GCM 加密存在手機，離開裝置的只有 `WD-` 代碼 | 後端全域搜尋無姓名欄位；`/console` 明示不顯示個資 |
 | **新鎖定紀元的稽核鏈實作** | v4 稽核物件以 immutable numeric slot 序列化，記錄帶 nonce、版本化雜湊與前一筆連結 | 先在拋棄式 smoke bucket 跑 `smoke_audit_chain_gcs.py`，再對**全新空白**正式稽核桶驗證 |
-| **撤回同意即排除** | code ∪ image_id 雙鍵排除、影像移入隔離區、可重新簽署恢復 | `python engineering/phase2/test_resubmit_from_timeline.py` |
+| **撤回同意即排除** | code ∪ image_id 雙鍵封鎖、條件式重新同意；實體清理須另核定並部署 | `python engineering/phase2/test_resubmit_from_timeline.py` |
 | **孤兒 GT 阻擋** | 缺 `image_id`／尺寸的標註一律拒收（曾有 8/8 筆不可訓練） | `python engineering/phase2/test_flywheel_datachain.py` |
 | **範例圖誤標偵測** | classify 回報 `image_reused`，臨床模式警示 | 同上測試第 4 項 |
 | **座標空間一致性** | 影像一律以當次畫布重存；review 畫面比對尺寸不符即停用修邊 | `docs/v3_review_findings.md` M1 |
@@ -51,7 +51,7 @@ IRB 承諾的是「結案逾 90 天銷毀」，而「結案」是臨床事件，
 用單純的年齡規則會刪掉仍在追蹤中的傷口影像——那是**病歷滅失**，比留著更嚴重。
 P0-4 Phase A 腳本會精確設定四條規則，並逐條讀回；多一條、少一條都中止：
 
-- `quarantine/` 逾 30 天銷毀 —— 已撤回同意的影像，保留只為短期稽核，不刪就違背「撤回即下架」
+- `quarantine/` 逾 30 天清理 —— 只涵蓋舊隔離路徑。新版邏輯撤回不可依賴這條規則；須核定並部署同意序列驅動的媒體清理工作，含原圖／遮罩／深度及版本，詳見 `engineering/contracts/medical-consent-operations-v1.md`。
 - `staging/` 逾 30 天刪除 —— 尚未取得訓練資格的短期處理中影像
 - `staging_meta/` 逾 37 天刪除 —— bind 證據比影像多保留 7 天供失敗追查
 - 非最新版本逾 30 天清除 —— 否則版本控制會讓「已刪除」的物件實際上永遠留著

@@ -22,7 +22,7 @@ distill_teacher_gen.py / distill_pseudo_gen.py → distill_pseudo_train.py（見
 ```
 
 ⚠ **2026-07-28 前的佇列樣本一律不可訓練**(只有 polygon、無影像無尺寸的「孤兒 GT」,已歸檔)。
-撤回同意以 **code ∪ image_id 雙鍵**排除且影像移入 `quarantine/`;重新同意走 `/api/v1/consent/restore`。
+撤回同意以 **code ∪ image_id 雙鍵**封鎖存取／訓練；媒體依核定期限由同意序列清理工作處置並留回執。重新同意走 `/api/v1/consent/restore`。
 細節見 `Backend/Flask/flywheel/README.md`、`docs/api_contract_classify.md`。
 
 ## 1. 觸發條件(任一即啟動)

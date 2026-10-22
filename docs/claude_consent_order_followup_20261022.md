@@ -111,3 +111,9 @@ remain pending. All medical readers/exporters and rollback safety must be
 verified before patient research. Parent repository PR #13 synchronization is
 pending review; this draft does not merge or publish it. Volume research remains
 in WoundAI3D. No additional captures are requested for these software regressions.
+
+## Subsequent operational review
+
+P1–P4 findings on this baseline and the next candidate are recorded in
+[claude_consent_rollout_followup_20261022.md](claude_consent_rollout_followup_20261022.md).
+This report retains its historical test counts and must not be treated as deployment approval.

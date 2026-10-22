@@ -289,7 +289,7 @@ fun CaseSelectScreen(
                         val r = ConsentWithdrawal.pushToBackend(ctx, codes, runtime = runtime)
                         msg = if (r.allOk)
                             "✅ 已撤回訓練同意，雲端也已排除：${r.done.joinToString("、")}\n" +
-                            "這些代碼的影像已移入隔離區，不再進入任何訓練集。"
+                            "這些代碼已停止雲端存取與後續訓練；媒體清理另依核定期限辦理，尚未代表已銷毀。"
                         else
                             // 3) 失敗**不可以**顯示成功。誠實地說「本機已撤回、雲端尚未完成」，
                             //    至少有人會去處理；顯示「已撤回」則沒有人會再看它一眼。
