@@ -84,6 +84,13 @@ def require_delete_policy(store):
     return 0
 
 
+def validate_policy(policy):
+    if (not isinstance(policy,dict) or set(policy)!={'id','retention_seconds'}
+            or not isinstance(policy['id'],str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}',policy['id'])
+            or type(policy['retention_seconds']) is not int or policy['retention_seconds']<0):
+        raise ValueError('explicit approved retention policy required')
+
+
 def cleanup_subject(order, code, org, policy, *, apply=False, now=None):
     """Repeatable worker unit; errors never produce a completion receipt.
 
@@ -91,10 +98,7 @@ def cleanup_subject(order, code, org, policy, *, apply=False, now=None):
     default. This function does not change any bucket policy or job schedule.
     """
     now=int(time.time() if now is None else now)
-    if (not isinstance(policy,dict) or set(policy)!={'id','retention_seconds'}
-            or not isinstance(policy['id'],str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}',policy['id'])
-            or type(policy['retention_seconds']) is not int or policy['retention_seconds']<0):
-        raise ValueError('explicit approved retention policy required')
+    validate_policy(policy)
     _,chain=order.history(code,org)
     state=order._state(chain)
     due=(state['status']=='withdrawn' and chain[-1]['action']=='withdraw'
@@ -127,7 +131,9 @@ def cleanup_subject(order, code, org, policy, *, apply=False, now=None):
         order.store.put_json_immutable(key+'.intent.json',job)
         for item in items: _delete(order.store,item)
         if inventory(order.store,iid): raise IOError('media remains; keep cleanup pending')
-        soft=inventory(order.store,iid,soft_deleted=True) if soft_seconds else []
+        # Current policy does not describe older retained versions. Disabling
+        # soft delete never shortens an existing object's original expiry.
+        soft=inventory(order.store,iid,soft_deleted=True)
         recoverable=bool(soft) or recoverable
         complete=dict(job,status='recoverable_media_pending' if soft else 'media_versions_absent_at_check',
                       soft_delete_seconds=soft_seconds,soft_deleted_objects=soft,

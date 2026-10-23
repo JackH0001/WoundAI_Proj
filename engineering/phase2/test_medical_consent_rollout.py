@@ -174,8 +174,12 @@ class ScopedReads(unittest.TestCase):
         code,iid,_=self.add(1);Path(self.st._p(INDEX_MARKER)).unlink()
         self.assertTrue(fw.is_consent_blocked(iid))
         with self.assertRaisesRegex(ValueError,'writers paused'):backfill(self.order,apply=True)
-        self.assertEqual(backfill(self.order,apply=True,writers_paused=True)['status'],'completed')
-        self.assertEqual(len(self.order.image_subjects(iid)),1)
+        plan=backfill(self.order)
+        self.assertEqual(backfill(self.order,apply=True,writers_paused=True,plan=plan,
+                                 expected_sha256=plan['sha256'])['status'],'completed')
+        references=self.order.image_subjects(iid)
+        self.assertEqual({r['code'] for r in references},{code})
+        self.assertEqual({r['consent_root_required'] for r in references},{True,False})
 
 class HTTP(unittest.TestCase):
     setUp=fixtures.TissueHTTP.setUp

@@ -16,9 +16,11 @@ No cross-request consent cache is used; each admission guard refreshes state.
 
 `receipts/medical_consent_index/v1.json` seals completion. An empty store may
 initialize it before its first event. Existing v2 roots with no marker fail
-closed for image lookup/write until an offline backfill completes. Pause every
-old/new writer, verify all chains, backfill references, verify unchanged roots
-and tips, and only then publish the marker. Runtime never lazily declares an
+closed for image lookup/write until an offline backfill completes. Pause and drain every
+old/new writer, create and approve the exact migration manifest, backfill both
+consent references and verified ownership, read back unchanged sources/outputs,
+and only then publish the marker. The CLI requires --plan and
+--expected-sha256 with --writers-paused for apply. Runtime never lazily declares an
 old partial index complete. A root referenced by the index but missing is a
 fault, not new/restored consent. Index access errors block that image.
 
@@ -111,3 +113,11 @@ an invented deletion age. Corrupt subjects are `blocked_fault`.
 
 No scheduler, IAM, retention policy, cloud image or app distribution changed in
 this revision. Code tests do not complete these deployment gates.
+
+## Deployment preparation follow-up (2026-10-23)
+
+See [operations acceptance plan](medical-consent-operations-acceptance-v1.md) for
+manifest-bound migration, audited bounded worker execution, the initially paused
+schedule proposal, and remaining real-GCS / worker-scope gates. This plan does not
+authorize cloud execution. Even when current soft deletion is disabled, old
+recoverable versions are always queried; they cannot be marked destroyed.
