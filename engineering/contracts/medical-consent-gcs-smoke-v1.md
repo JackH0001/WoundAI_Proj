@@ -59,7 +59,8 @@ automatic whole-bucket cleanup or policy changes are included.
    generation; deletion requires an inventoried generation and known media path.
    Staging-binding inventory is read-only. There are no bucket/IAM update methods.
    Permission/policy checks run again before every write or deletion.
-6. Limits: 1,000 attempted writes, 16 MiB attempted upload bytes, 20,000 SDK
+6. Limits: 1,000 attempted mutations (uploads **and generation deletes share this
+   cap**, including failed attempts), 16 MiB attempted upload bytes, 20,000 SDK
    operations/list pages, 1,000 entries per listing, 10-second request timeout,
    no SDK retry and a 20-minute budget checked before calls (and manifest expiry).
    Authentication/transport setup or an in-flight call can exceed the checkpoint;

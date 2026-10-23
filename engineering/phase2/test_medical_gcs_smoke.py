@@ -162,6 +162,24 @@ class SDKTests(unittest.TestCase):
         with self.assertRaises(PermissionError):blob.upload_from_string(b'bad',if_generation_match=0)
         with self.assertRaises(PermissionError):blob.delete(if_generation_match=1)
         self.assertFalse(self.raw.uploads);self.assertFalse(self.raw.deletes)
+    def test_delete_counts_toward_shared_mutation_limit(self):
+        key=PREFIX+'/images/'+'a'*16+'.jpg'
+        self.clients[0].bucket(MEDIA).blob(key).upload_from_string(b'synthetic',if_generation_match=0)
+        listed=list(self.clients[1].list_blobs(MEDIA,prefix=PREFIX+'/images/',versions=True))[0]
+        blob=self.clients[1].bucket(MEDIA).blob(key,generation=listed.generation)
+        before=self.budget.writes
+        blob.delete(if_generation_match=blob.generation)
+        self.assertEqual(self.budget.writes,before+1)
+        self.assertTrue(self.budget.summary()['mutation_count_includes_deletes'])
+    def test_exhausted_mutation_limit_preserves_pinned_media(self):
+        key=PREFIX+'/images/'+'b'*16+'.jpg'
+        self.clients[0].bucket(MEDIA).blob(key).upload_from_string(b'synthetic',if_generation_match=0)
+        listed=list(self.clients[1].list_blobs(MEDIA,prefix=PREFIX+'/images/',versions=True))[0]
+        blob=self.clients[1].bucket(MEDIA).blob(key,generation=listed.generation)
+        self.budget.writes=LIMITS['max_writes']
+        with self.assertRaises(RuntimeError):blob.delete(if_generation_match=blob.generation)
+        self.assertFalse(self.raw.deletes)
+        self.assertEqual(self.raw.rows[MEDIA,key,blob.generation]['state'],'live')
     def test_expired_run_stops_before_next_sdk_operation(self):
         budget=Budget(expires_at=1)
         with self.assertRaises(RuntimeError):budget.take(write=True,size=1)

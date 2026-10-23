@@ -117,10 +117,11 @@ class PerimeterTests(unittest.TestCase):
         def business(**kwargs):self.calls.append('business');return {'hit':True}
         self.app.add_url_rule('/<path:anything>','business',business,methods=['GET','POST','PUT','DELETE','OPTIONS'])
         self.client=self.app.test_client()
-    def test_all_five_post_routes_and_withdrawal_allowed(self):
+    def test_post_routes_and_legacy_or_epoch_withdrawal_allowed(self):
         for path in POST_ROUTES:
             self.assertEqual(self.client.post(path).status_code,200,path)
         self.assertEqual(self.client.delete('/api/v1/lite/data/'+'a'*32).status_code,200)
+        self.assertEqual(self.client.delete('/api/v1/lite/data/'+'a'*32+'/'+'b'*32).status_code,200)
         self.assertEqual(self.client.get('/api/health').status_code,200)
         self.assertEqual(self.client.head('/api/health').status_code,200)
     def test_clinical_console_future_routes_and_reviewer_reads_never_reach_hooks(self):
@@ -139,6 +140,18 @@ class PerimeterTests(unittest.TestCase):
                             ('/api/v1/lite/data/'+'A'*32,'DELETE')]:
             with self.subTest(path=path,method=method):self.assertEqual(self.client.open(path,method=method).status_code,404)
         self.assertEqual(self.client.post('/api/v1/lite/segment',environ_overrides={'SCRIPT_NAME':'/prefix'}).status_code,404)
+        self.assertEqual(self.calls,[])
+    def test_epoch_routes_keep_canonical_method_and_identifier_checks(self):
+        path='/api/v1/lite/data/'+'a'*32+'/'+'b'*32
+        for invalid,method in [(path,'GET'),(path,'POST'),(path,'OPTIONS'),
+                (path+'?x=1','DELETE'),(path+'/extra','DELETE'),(path+'/','DELETE'),
+                (path[:-1],'DELETE'),(path[:-1]+'B','DELETE'),
+                (path.replace('/'+'b'*32,'/%62'+'b'*31),'DELETE'),
+                ('/api/v1/lite/research/rejoin','GET'),
+                ('/api/v1/lite/research/rejoin/','POST'),
+                ('/api/v1/lite/research/rejoin?x=1','POST')]:
+            with self.subTest(path=invalid,method=method):
+                self.assertEqual(self.client.open(invalid,method=method).status_code,404)
         self.assertEqual(self.calls,[])
     def test_fence_cannot_be_registered_after_existing_hooks(self):
         app=Flask('late')
@@ -199,6 +212,8 @@ class RealApplicationTests(unittest.TestCase):
                     assert not Path('wound_analysis.db').exists()
                     for mock in (boot,seed,secret,database):mock.assert_not_called()
                 assert client.post('/api/v1/lite/segment',data=b'unsigned',content_type='application/json').status_code==401
+                assert client.post('/api/v1/lite/research/rejoin',json={}).status_code==401
+                assert client.delete('/api/v1/lite/data/'+'a'*32+'/'+'b'*32).status_code==401
             finally:f.doCleanups()
         ''')
     def test_actual_app_refuses_start_when_lite_security_configuration_fails(self):
@@ -221,6 +236,19 @@ class RealApplicationTests(unittest.TestCase):
         install_lite_perimeter(f.app)
         f.app.before_request_funcs[None].extend(hooks)
         f.test_full_registration_segment_revision_and_delete()
+
+    def test_signed_epoch_withdrawal_reaches_attestation_and_fence(self):
+        import test_lite_reconsent as fixture
+        f=fixture.ReconsentTests();f.setUp();self.addCleanup(f.doCleanups)
+        f.clear()
+        # Arrange a completed renewal independently, so this regression catches
+        # the epoch DELETE fence even when the POST renewal route is broken.
+        f.renew.resume(f.owner,f.body())
+        self.assertEqual(f.new_upload().status_code,200)
+        path='/api/v1/lite/data/'+f.owner+'/'+f.new
+        response=f.h.app.test_client().delete(path,headers=f.h.headers(path,b'','',method='DELETE'))
+        self.assertEqual(response.status_code,200,response.json)
+        self.assertEqual(f.new_upload().status_code,410)
 
 
 if __name__=='__main__':unittest.main()

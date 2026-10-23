@@ -55,6 +55,7 @@ class Budget:
             self.calls += 1; self.writes += int(write); self.bytes += size
     def summary(self):
         return dict(sdk_calls_or_list_pages=self.calls, attempted_writes=self.writes,
+                    mutation_count_includes_deletes=True,
                     attempted_upload_bytes=self.bytes, elapsed_seconds=self.clock()-self.start,
                     http_request_count_verified=False)
 
@@ -165,7 +166,7 @@ class ScopedBlob:
                 or self.generation != if_generation_match
                 or (MEDIA, self.name, self.generation) not in self.bucket.client.budget.observed):
             raise PermissionError('only inventoried pinned synthetic media can be deleted')
-        self.bucket.check(); self.bucket.client.budget.take()
+        self.bucket.check(); self.bucket.client.budget.take(write=True)
         self.raw.delete(if_generation_match=if_generation_match, **_options())
 
 

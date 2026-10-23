@@ -12,7 +12,17 @@ import test_lite_fenced_http as fixture
 
 class ReconsentTests(unittest.TestCase):
     def setUp(self):
-        self.f = fixture.FencedHTTPTests(); self.f.setUp(); self.addCleanup(self.f.doCleanups)
+        # Exercise the public first hook from registration onwards, not just
+        # blueprint handlers: an ingress 404 otherwise bypasses all rejoin tests.
+        import test_lite_attest_http as http_fixture
+        from lite_service_profile import install_lite_perimeter
+        original = http_fixture.install_lite_attest
+        def secured_install(app, **kwargs):
+            install_lite_perimeter(app)
+            return original(app, **kwargs)
+        self.f = fixture.FencedHTTPTests(); self.addCleanup(self.f.doCleanups)
+        with patch.object(http_fixture, 'install_lite_attest', side_effect=secured_install):
+            self.f.setUp()
         self.h, self.privacy = self.f.h, self.f.privacy
         self.renew = Reconsent(self.privacy)
         self.owner, self.new = self.h.owner, 'a' * 32
