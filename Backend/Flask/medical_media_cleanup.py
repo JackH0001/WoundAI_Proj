@@ -84,6 +84,24 @@ def require_delete_policy(store):
     return 0
 
 
+def require_soft_inventory(store):
+    """Prove recoverable-version listing is usable BEFORE claiming disposal.
+
+    GCS currently returns 400 when the bucket's soft-delete policy is zero.
+    Disabling that policy does not establish absence of older retained versions.
+    Do not change the policy, skip verification, or delete first and fail later.
+    """
+    if isinstance(store, GcsStore):
+        from google.api_core.exceptions import BadRequest
+        _, bucket = store._target('images')
+        try:
+            probe = store._client.list_blobs(bucket, prefix=store._k('images')+'/',
+                                           soft_deleted=True, max_results=1)
+            next(iter(probe), None)  # listing is lazy in the real SDK
+        except BadRequest as exc:
+            raise PermissionError('soft-deleted inventory unavailable; disposition policy review required') from exc
+
+
 def validate_policy(policy):
     if (not isinstance(policy,dict) or set(policy)!={'id','retention_seconds'}
             or not isinstance(policy['id'],str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}',policy['id'])
@@ -112,6 +130,7 @@ def cleanup_subject(order, code, org, policy, *, apply=False, now=None):
         return dict(result,status='blocked_missing_timestamp')
     if not apply: return result
     soft_seconds=require_delete_policy(order.store)
+    if due or images: require_soft_inventory(order.store)
     if due:
         # CAS makes a restore winning first prevent deletion. A purge winning
         # first remains a permanent image disposition, even after later consent.

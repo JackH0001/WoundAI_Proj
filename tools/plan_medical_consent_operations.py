@@ -54,6 +54,7 @@ def plan(commit, files, clean):
         gates=['clean reviewed source and CI', 'separate cloud creation/write/delete/cost authorization',
                'read back isolated bucket IAM/versioning/soft-delete/holds before writes',
                'smoke-only adapter scope review; never spoof MMH/Demo K_SERVICE',
+               'soft-version LIST capability before any purge; current policy-zero GCS returns 400, no automatic policy change',
                'real GCS evidence, including natural soft expiry or status kept pending',
                'approved production retention and retained-metadata disclosures',
                'pause and drain all writers, reviewed migration digest and zero unresolved owners',

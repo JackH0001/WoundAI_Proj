@@ -184,7 +184,7 @@ class GCSBoundary(unittest.TestCase):
         self.assertFalse(inventory(self.st, IID)); self.assertEqual(len(self.c.deletes), 2)
         self.assertTrue(all(k[2] == pin for k, pin in self.c.deletes))
         self.assertEqual(before, {k: self.audit()[k] for k in before})
-    def test_soft_versions_survive_current_policy_disabled(self):
+    def test_soft_versions_survive_policy_disabled_when_inventory_available(self):
         self.st._bucket._properties = {'softDeletePolicy': {'retentionDurationSeconds': '604800'}}
         self.assertEqual(self.clean()['status'], 'recoverable_media_pending')
         self.st._bucket._properties = {'softDeletePolicy': {'retentionDurationSeconds': '0'}}
@@ -196,6 +196,32 @@ class GCSBoundary(unittest.TestCase):
         self.c.before_list = deny
         with self.assertRaises(PermissionError): self.clean()
         self.assertFalse(any(k[1].endswith('outcome.json') for k in self.c.rows))
+        self.assertEqual(self.o.state(CODE, 'default')['sequence'], 1)
+        self.assertEqual(len(inventory(self.st, IID)), 2)
+    def test_real_gcs_policy_zero_error_blocks_claim_and_delete(self):
+        from google.api_core.exceptions import BadRequest
+        before = self.audit()
+        def reject(bucket, prefix, versions, soft):
+            if soft: raise BadRequest('Soft delete policy is required to list soft-deleted versions')
+        self.c.before_list = reject
+        with self.assertRaisesRegex(PermissionError, 'policy review required'): self.clean()
+        self.assertEqual(self.audit(), before)
+        self.assertEqual(self.c.deletes, [])
+        self.assertEqual(self.o.state(CODE, 'default')['sequence'], 1)
+        self.assertEqual(len(inventory(self.st, IID)), 2)
+    def test_lazy_soft_listing_failure_also_blocks_claim(self):
+        from google.api_core.exceptions import BadRequest
+        original = self.c.list_blobs
+        def lazy(*args, **kwargs):
+            if kwargs.get('soft_deleted'):
+                def fail():
+                    raise BadRequest('Soft delete policy is required to list soft-deleted versions')
+                    yield
+                return fail()
+            return original(*args, **kwargs)
+        with patch.object(self.c, 'list_blobs', side_effect=lazy), self.assertRaises(PermissionError): self.clean()
+        self.assertEqual(self.o.state(CODE, 'default')['sequence'], 1)
+        self.assertEqual(self.c.deletes, [])
     def test_restore_wins_cas_prevents_all_deletes(self):
         def before(blob, data, pre):
             if '/medical_consent_events/' in blob.name and b'"action":"purge"' in data:

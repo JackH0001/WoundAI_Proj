@@ -161,7 +161,11 @@ Real-service acceptance must run two independent clients and preserve:
    retained after reconsent, unrelated subject unchanged.
 4. Multiple live/noncurrent generations; pinned deletion; late replacement not
    confused with inventoried generation. Record every generation and readback.
-5. Soft-deleted versions still pending after the *current* soft policy is disabled.
+5. Disable the *synthetic test* bucket's current soft policy only with explicit
+   approval; existing retained versions do not expire early. Current GCS returns
+   400 for soft-version LIST at policy 0: confirm the worker stops before a new
+   purge claim/deletion. To inspect older retained versions, separately approve
+   re-enabling a policy on that isolated bucket; never change MMH/Demo/Lite policy.
    Disabling does not shorten an already deleted object's original retention.
    This cannot be declared passed merely by a mocked clock. If the live retained
    duration exceeds the acceptance window, retain evidence and leave expiry as
@@ -175,8 +179,14 @@ Real-service acceptance must run two independent clients and preserve:
 Google references: [preconditions and pinned generations](https://docs.cloud.google.com/storage/docs/request-preconditions),
 [versioning](https://docs.cloud.google.com/storage/docs/object-versioning),
 [soft deletion and changes to retention](https://docs.cloud.google.com/storage/docs/soft-delete).
-Current code now always queries soft-deleted objects, even when the current policy
-reports 0. An unsupported SDK/list failure is pending, not destruction complete.
+Current code first verifies soft-version LIST capability before a purge claim
+or any deletion, then checks recoverable versions again after deletion. A real
+read-only probe on 2026-10-23 returned HTTP 400 for both current MMH buckets at
+policy 0 ("Soft delete policy is required to list soft-deleted versions"). The
+worker therefore blocks before claiming/deleting under that configuration. It
+must NOT skip inspection or enable a policy automatically. A separately reviewed
+policy/inspection strategy is a prerequisite for live cleanup. Immediate and lazy
+SDK errors are tested; an unavailable listing is not a destruction-complete result.
 
 ## 5. Evidence boundary and rollout
 

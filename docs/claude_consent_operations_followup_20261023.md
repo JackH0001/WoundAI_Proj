@@ -25,8 +25,14 @@ or credentials belong in the package.
 3. **Actual additional bug fixed: older soft-deleted versions.** The prior worker
    checked soft versions only when the current bucket policy was nonzero. Turning
    the policy off does not shorten already deleted objects' retention. It now
-   queries soft versions regardless of current policy. Failed/unsupported queries
-   stay pending. This does not change the bucket policy or delete original data.
+   queries soft versions regardless of current policy. A real READ-ONLY probe of
+   the two existing MMH buckets at policy zero returned HTTP 400: "Soft delete
+   policy is required to list soft-deleted versions". Therefore a lazy-iterator
+   capability preflight now runs BEFORE a purge claim or any media deletion.
+   Unsupported/denied enumeration blocks disposal; it never changes the policy
+   or substitutes an absence claim. Two regressions reproduce immediate and lazy
+   BadRequest responses and verify unchanged media/audit/sequence. A separately
+   approved policy/inspection path is needed before actual cleanup can run.
 4. **Scheduling/GCS plan and packaging.** A deterministic review-only plan pins
    source hashes; it cannot execute cloud commands. Candidate schedule stays
    paused/dry-run with separate worker/invoker identities. New module added to the
@@ -36,10 +42,10 @@ or credentials belong in the package.
 
 | Selection | Result | Meaning |
 |---|---:|---|
-| New operations + plan tests | 44 passed, 6 subtests | Included in the medical total below; do not add twice |
-| Consent order/rollout/operations/plan + staging + research guards | 135 passed, 78 subtests | Local synthetic data and offline GCS SDK boundary |
+| New operations + plan tests | 46 passed, 6 subtests | Included in the medical total below; do not add twice |
+| Consent order/rollout/operations/plan + staging + research guards | 137 passed, 78 subtests | Local synthetic data and offline GCS SDK boundary |
 | All `engineering/phase2/test_lite_*.py` | 452 passed, 463 subtests | Includes local loopback HTTP and explicit build-context packaging |
-| CI unittest entrypoints for new suites | 39 + 5 passed | Same 44 tests, verifying CI invocation compatibility |
+| CI unittest entrypoints for new suites | 41 + 5 passed | Same 46 tests, verifying CI invocation compatibility |
 | `git diff --check` | passed | Whitespace only |
 
 The first sandboxed Lite run had four loopback listener failures (`Operation not
@@ -91,6 +97,9 @@ These are caller/logic tests, **not actual cloud acceptance** or latency/load da
 ## What remains deliberately unexecuted / not closed
 
 See [full operations acceptance contract](../engineering/contracts/medical-consent-operations-acceptance-v1.md).
+Only bucket metadata and soft-version LIST calls on a dedicated unused prefix
+were read from GCS; no research images were listed/downloaded or altered. The
+400 response is a live compatibility finding, not a successful live race test.
 No live index migration, cloud build/deploy, bucket/IAM creation or mutation,
 Scheduler activation, real-media deletion, app distribution or public release.
 The plan proposes isolated new synthetic GCS buckets, bounded one-time workload,

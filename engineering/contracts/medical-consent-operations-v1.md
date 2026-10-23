@@ -90,7 +90,9 @@ account objects and unknown references are never deletion targets. Local tests
 also protect other subjects. Failed/partial deletion resumes from the immutable
 claim. Every run rechecks old claims, catching late in-flight orphan writes.
 
-GCS soft-deleted versions are checked separately: while recoverable, outcome is
+GCS soft-version LIST capability is verified before any purge claim or media
+deletion; unavailable listing blocks apply without changing the bucket policy.
+GCS soft-deleted versions are then checked separately: while recoverable, outcome is
 `recoverable_media_pending`, never a destruction-complete claim. Once absent,
 `media_versions_absent_at_check` describes only that checked store and moment;
 it does not cover backups, exports or trained models. Retention holds block

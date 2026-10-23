@@ -2,6 +2,8 @@
 
 Uses the production GcsStore methods with no credentials or network. Models
 create-only CAS, pinned generations, noncurrent/soft versions and object holds.
+Policy/API errors are injected by tests (including the real policy-zero 400);
+metadata alone is not a complete emulation of the server's capability rules.
 """
 import threading
 from types import SimpleNamespace
@@ -20,14 +22,15 @@ class Client:
         if name not in self.buckets: self.buckets[name] = Bucket(self, name)
         return self.buckets[name]
 
-    def list_blobs(self, name, prefix='', versions=False, soft_deleted=False):
+    def list_blobs(self, name, prefix='', versions=False, soft_deleted=False, max_results=None):
         if self.before_list: self.before_list(name, prefix, versions, soft_deleted)
         if versions and soft_deleted: raise ValueError('incompatible GCS list modes')
         with self.lock:
             self.lists.append((name, prefix, versions, soft_deleted))
-            return [SimpleNamespace(name=n, generation=g, size=len(r['data']))
+            rows = [SimpleNamespace(name=n, generation=g, size=len(r['data']))
                     for (b, n, g), r in sorted(self.rows.items()) if b == name and n.startswith(prefix)
                     and (r['state'] == 'soft' if soft_deleted else r['state'] in ('live', 'noncurrent') if versions else r['state'] == 'live')]
+            return rows if max_results is None else rows[:max_results]
 
     def restore_soft(self, bucket, name, generation):
         with self.lock:
