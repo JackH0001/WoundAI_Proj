@@ -156,6 +156,11 @@ class HistoricalStaging(unittest.TestCase):
     def test_missing_care_does_not_fall_back_to_queue(self):
         for p in Path(self.st._p('receipts/care')).glob('*.json'): p.unlink()
         self.assertFalse(plan_migration(self.o, self.keys)['apply_allowed'])
+    def test_imageless_root_still_fixes_institution_scope(self):
+        self.o.apply(self.fixture.code, 'other', 'other:doctor', 'withdraw', 'withdraw-other-org-001', None, [])
+        p = plan_migration(self.o, self.keys)
+        self.assertFalse(p['apply_allowed'])
+        self.assertIn('conflicting subject institution', [b['reason'] for b in p['blockers']])
 
 
 class GCSBoundary(unittest.TestCase):

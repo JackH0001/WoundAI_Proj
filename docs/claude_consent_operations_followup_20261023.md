@@ -36,10 +36,10 @@ or credentials belong in the package.
 
 | Selection | Result | Meaning |
 |---|---:|---|
-| New operations + plan tests | 43 passed, 6 subtests | Included in the medical total below; do not add twice |
-| Consent order/rollout/operations/plan + staging + research guards | 134 passed, 78 subtests | Local synthetic data and offline GCS SDK boundary |
+| New operations + plan tests | 44 passed, 6 subtests | Included in the medical total below; do not add twice |
+| Consent order/rollout/operations/plan + staging + research guards | 135 passed, 78 subtests | Local synthetic data and offline GCS SDK boundary |
 | All `engineering/phase2/test_lite_*.py` | 452 passed, 463 subtests | Includes local loopback HTTP and explicit build-context packaging |
-| CI unittest entrypoints for new suites | 38 + 5 passed | Same 43 tests, verifying CI invocation compatibility |
+| CI unittest entrypoints for new suites | 39 + 5 passed | Same 44 tests, verifying CI invocation compatibility |
 | `git diff --check` | passed | Whitespace only |
 
 The first sandboxed Lite run had four loopback listener failures (`Operation not

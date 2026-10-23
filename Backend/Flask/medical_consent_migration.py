@@ -115,6 +115,10 @@ def plan_migration(order, care_keys=None):
             raise ValueError('invalid migration root')
         state = order.state(root['code'], root['org'])
         if state['sequence'] == 0: raise ValueError('uncommitted root requires investigation')
+        if not ORG.fullmatch(str(root['org'])): raise ValueError('invalid root institution')
+        # A root without image IDs still fixes the subject's institution. A
+        # staging receipt for another institution must not silently fill it.
+        scopes[root['code']] = root['org']
         roots.add(subject(root['code'])); states.append(state)
         for iid in state['image_ids']: own(root['code'], root['org'], iid)
     for key in sorted(k for k in rows if k.startswith(EVENTS+'/')):
