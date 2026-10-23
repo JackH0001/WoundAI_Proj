@@ -45,7 +45,7 @@
   資料一律靠瀏覽器帶 token 去打 API——不必為主控台再開一套權限模型，
   也少一個可以被繞過的入口。
 """
-from flask import Blueprint, Response
+from flask import Blueprint, Response, current_app, has_app_context
 
 console_bp = Blueprint("console", __name__)
 
@@ -209,7 +209,7 @@ code{font-family:ui-monospace,monospace;font-size:12.5px;word-break:break-all}
 </section>
 
 <section id="tab-lite">
-  <h1>民眾版資料（WoundLite）</h1>
+  <h1>民眾版資料（WoundAILite）</h1>
   <p class="sub">匿名研究資料的盤點。與臨床樣本完全分開——這裡的數字不計入收案進度，
   民眾自畫的輪廓（lay）也<b>不會</b>進入醫師 GT 訓練佇列（結構隔離，見 lite_labels.jsonl）。</p>
   <div id="lite_stats" class="row"></div>
@@ -263,14 +263,20 @@ async function api(path, opt){
    改前端 JS 打得出請求，但會拿到 403 並留下稽核紀錄。            */
 const TABS = {dash:"flywheel.stats", recs:"flywheel.stats", sys:"audit.read",
               audit:"audit.read", users:"user.manage", lite:"audit.read"};
+// Availability follows this service's registered routes, independently of role.
+const CONSOLE_CAPABILITIES = {lite:false};
+function tabAllowed(name){
+  return !!TABS[name] && perms.includes(TABS[name]) &&
+    (name !== "lite" || CONSOLE_CAPABILITIES.lite);
+}
 const loaded = {};
 let cur = "login";
 
 function go(name){
   if(!tok){ name = "login"; }
-  else if(TABS[name] && !perms.includes(TABS[name])){
+  else if(!tabAllowed(name)){
     // 沒權限的頁籤：退回第一個看得到的，而不是給一張空白頁讓人以為壞了。
-    name = Object.keys(TABS).find(t => perms.includes(TABS[t])) || "login";
+    name = Object.keys(TABS).find(tabAllowed) || "login";
   }
   cur = name;
   document.querySelectorAll("section").forEach(s => s.classList.remove("on"));
@@ -286,7 +292,7 @@ function go(name){
 
 function applyPerms(){
   document.querySelectorAll("nav a").forEach(a =>
-    a.classList.toggle("hide", !perms.includes(TABS[a.dataset.tab])));
+    a.classList.toggle("hide", !tabAllowed(a.dataset.tab)));
   const want = location.hash.slice(1);
   go(TABS[want] ? want : "dash");
 }
@@ -783,6 +789,7 @@ function copyAnchor(){
 
 /* ───────── 民眾版資料（WoundLite）───────── */
 async function loadLite(){
+  if(!tabAllowed("lite")) return;
   let j; try{ j = await api("/api/v1/lite/records"); }
   catch(e){ $("lite").innerHTML = "<p class='bad'>讀取失敗："+esc(e.message)+"</p>"; return; }
   const b = j.route_buckets || {}, p = j.route_pct || {};
@@ -998,4 +1005,10 @@ def _page_html():
     """
     import auth_users as _au
     opts = "".join('<option value="%s">%s</option>' % (k, v) for k, v in _au.ROLES.items())
-    return _PAGE.replace("<!--ROLE_OPTIONS-->", opts)
+    # A shared console must not advertise absent Lite APIs on MMH/demo. This
+    # changes presentation only; endpoint authorization/perimeters stay intact.
+    required = {"lite.lite_records", "lite.lite_record_image", "lite.lite_record_preview"}
+    enabled = has_app_context() and required.issubset(current_app.view_functions)
+    return _PAGE.replace("<!--ROLE_OPTIONS-->", opts).replace(
+        "const CONSOLE_CAPABILITIES = {lite:false};",
+        "const CONSOLE_CAPABILITIES = {lite:%s};" % ("true" if enabled else "false"))

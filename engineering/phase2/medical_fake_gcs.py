@@ -22,7 +22,7 @@ class Client:
         if name not in self.buckets: self.buckets[name] = Bucket(self, name)
         return self.buckets[name]
 
-    def list_blobs(self, name, prefix='', versions=False, soft_deleted=False, max_results=None):
+    def list_blobs(self, name, prefix='', versions=False, soft_deleted=False, max_results=None, **kw):
         if self.before_list: self.before_list(name, prefix, versions, soft_deleted)
         if versions and soft_deleted: raise ValueError('incompatible GCS list modes')
         with self.lock:
@@ -43,7 +43,9 @@ class Bucket:
     def __init__(self, client, name):
         self.client, self.name = client, name
         self._properties = {}
-    def reload(self): pass
+    def reload(self, **kw): pass
+    def get_iam_policy(self, **kw): return SimpleNamespace(bindings=self.bindings)
+    def test_iam_permissions(self, permissions, **kw): return set(permissions) & self.permissions
     def blob(self, name, generation=None): return Blob(self, name, generation)
 
 
@@ -59,23 +61,27 @@ class Blob:
             for key, row in c.rows.items():
                 if key[:2] == (self.bucket.name, self.name) and row['state'] == 'live': return key
         raise NotFound('offline synthetic missing object')
-    def exists(self):
+    @property
+    def size(self): return len(self.bucket.client.rows[self._key()]['data'])
+    def exists(self, **kw):
         with self.bucket.client.lock:
             try: self._key(); return True
             except NotFound: return False
-    def download_as_bytes(self):
+    def download_as_bytes(self, **kw):
         with self.bucket.client.lock: return self.bucket.client.rows[self._key()]['data']
-    def upload_from_string(self, data, content_type=None, if_generation_match=None):
+    def upload_from_string(self, data, content_type=None, if_generation_match=None, **kw):
         c = self.bucket.client
         if c.before_upload: c.before_upload(self, data, if_generation_match)
         with c.lock:
             live = Blob(self.bucket, self.name, None)
             if if_generation_match == 0 and live.exists(): raise PreconditionFailed('offline CAS lost')
+            if if_generation_match not in (None, 0) and (not live.exists() or live._key()[2] != if_generation_match):
+                raise PreconditionFailed('offline replacement generation changed')
             if live.exists(): c.rows[live._key()]['state'] = 'noncurrent'
             c.generation += 1
             c.rows[self.bucket.name, self.name, c.generation] = dict(data=data, state='live', hold=False)
             c.uploads.append((self.bucket.name, self.name, if_generation_match))
-    def delete(self, if_generation_match=None):
+    def delete(self, if_generation_match=None, **kw):
         c = self.bucket.client
         if c.before_delete: c.before_delete(self, if_generation_match)
         with c.lock:

@@ -116,3 +116,10 @@ operations change. This stage does not move Lite to external/public release.
 Official references: [GCS preconditions](https://docs.cloud.google.com/storage/docs/request-preconditions),
 [GCS soft deletion](https://docs.cloud.google.com/storage/docs/soft-delete),
 [Cloud Run Jobs scheduling and OAuth](https://docs.cloud.google.com/run/docs/execute/jobs-on-schedule).
+
+## Subsequent preparation
+
+The tools-only smoke runner and offline Job configuration checks are now
+implemented in the [next handoff](claude_consent_gcs_harness_followup_20261023.md).
+This supersedes the implementation-pending note above, but not the requirements
+for separate cloud authorization, live GCS evidence or formal Job audit policy.

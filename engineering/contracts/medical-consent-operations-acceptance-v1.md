@@ -143,13 +143,16 @@ IAM, public-access prevention, versioning, soft deletion, retention and holds;
 archive pre/post metadata. No allUsers entry, production deploy, secret rotation,
 7-year test-data lock, or blanket cleanup.
 
-A smoke-only adapter, patterned after the repository's existing GCS audit smoke
-harness, must verify the exact empty disposable bucket tuple and run manifest
-before testing protected writes. That adapter is **not implemented or approved in
-this revision**; production GcsStore still requires its existing audit policy.
-The offline double models a locked bucket but does not create one. Review this
-remaining implementation before any live run; never monkeypatch the live runtime
-or reuse MMH/Demo environment variables to get around admission.
+`tools/medical_consent_gcs_smoke.py` now implements an explicitly synthetic-only
+adapter, outside application packaging and `get_store()`. It verifies the exact
+empty disposable bucket tuple, source pins, expiring run manifest, dedicated
+executor identity, bucket policy/IAM and probed effective permissions. It never
+creates resources, changes policies, deletes audit or tears down failed runs.
+The formal GcsStore gate is unchanged. See
+[bounded first-run contract](medical-consent-gcs-smoke-v1.md) for the implemented
+subset, guard tests and deferred live cases. **Implementation and offline tests
+are not live-run authorization or real GCS acceptance.** Never monkeypatch the
+live runtime or reuse MMH/Demo environment variables to get around admission.
 
 Real-service acceptance must run two independent clients and preserve:
 

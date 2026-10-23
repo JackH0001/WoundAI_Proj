@@ -11,6 +11,7 @@ on:
       - 'engineering/phase2/test_mmh_unlocked_audit.py'
       - 'engineering/phase2/test_audit_chain_versioning.py'
       - 'engineering/phase2/test_admin_console.py'
+      - 'engineering/phase2/test_console_capabilities.py'
       - 'engineering/phase2/test_deployment_scripts_static.py'
       - 'engineering/phase2/check_locked_epoch_gate.py'
       - 'engineering/phase2/test_check_locked_epoch_gate.py'
@@ -101,6 +102,9 @@ on:
       - 'engineering/phase2/test_medical_consent_operations.py'
       - 'engineering/phase2/medical_fake_gcs.py'
       - 'engineering/phase2/test_medical_operations_plan.py'
+      - 'engineering/phase2/test_medical_gcs_smoke.py'
+      - 'tools/medical_consent_gcs_smoke.py'
+      - 'tools/medical_consent_smoke_scope.py'
       - 'tools/plan_medical_consent_operations.py'
       - 'tools/run_medical_consent_maintenance.py'
       - 'engineering/contracts/medical-consent-operations-acceptance-v1.md'
@@ -166,6 +170,7 @@ on:
       - 'engineering/phase2/test_mmh_unlocked_audit.py'
       - 'engineering/phase2/test_audit_chain_versioning.py'
       - 'engineering/phase2/test_admin_console.py'
+      - 'engineering/phase2/test_console_capabilities.py'
       - 'engineering/phase2/test_deployment_scripts_static.py'
       - 'engineering/phase2/check_locked_epoch_gate.py'
       - 'engineering/phase2/test_check_locked_epoch_gate.py'
@@ -256,6 +261,9 @@ on:
       - 'engineering/phase2/test_medical_consent_operations.py'
       - 'engineering/phase2/medical_fake_gcs.py'
       - 'engineering/phase2/test_medical_operations_plan.py'
+      - 'engineering/phase2/test_medical_gcs_smoke.py'
+      - 'tools/medical_consent_gcs_smoke.py'
+      - 'tools/medical_consent_smoke_scope.py'
       - 'tools/plan_medical_consent_operations.py'
       - 'tools/run_medical_consent_maintenance.py'
       - 'engineering/contracts/medical-consent-operations-acceptance-v1.md'
@@ -348,6 +356,7 @@ jobs:
           python -B engineering/phase2/test_audit_chain_concurrency.py
           python -B engineering/phase2/test_mmh_unlocked_audit.py
           python -B engineering/phase2/test_admin_console.py
+          python -B -m unittest discover -s engineering/phase2 -p test_console_capabilities.py
           python -B engineering/phase2/test_deployment_scripts_static.py
           python -B engineering/phase2/test_deployment_input_gate.py
           python -B engineering/phase2/test_check_locked_epoch_gate.py
@@ -435,6 +444,7 @@ jobs:
           python -B -m unittest discover -s engineering/phase2 -p test_medical_consent_rollout.py
           python -B -m unittest discover -s engineering/phase2 -p test_medical_consent_operations.py
           python -B -m unittest discover -s engineering/phase2 -p test_medical_operations_plan.py
+          python -B -m unittest discover -s engineering/phase2 -p test_medical_gcs_smoke.py
           python -B engineering/phase2/test_medical_wound_profile.py
           python -B engineering/phase2/test_review_service_profile.py
           python -B engineering/phase2/test_medical_depth_geometry.py
