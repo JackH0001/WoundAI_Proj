@@ -122,6 +122,14 @@ probe, audited run claim, lazy pagination and missing-permission behavior. The
 synthetic adapter is not in `Backend/Flask`, the Lite build allowlist or any
 application `get_store()` mode. Do not call its successful unit tests a GCS run.
 
+Google's `HTTPIterator.pages` is a stateful, single-use property. Acquire it
+exactly once; `hasattr(iterator, 'pages')` followed by `iterator.pages` already
+starts it twice. Tests cover the real Storage SDK's two-page query/generation
+conversion, second-page failure, and all scenarios with the real Google lazy
+iterator and fake object I/O. None uses cloud credentials or substitutes for
+live GCS acceptance. A failed attempt that has written a claim or media makes
+these buckets nonempty: the original first-run CLI must continue to reject reuse.
+
 References: [GCS preconditions](https://docs.cloud.google.com/storage/docs/request-preconditions),
 [soft-delete retention](https://docs.cloud.google.com/storage/docs/soft-delete),
 [uniform bucket-level access](https://docs.cloud.google.com/storage/docs/uniform-bucket-level-access),

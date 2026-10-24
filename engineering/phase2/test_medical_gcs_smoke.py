@@ -191,6 +191,68 @@ class SDKTests(unittest.TestCase):
                 raise PermissionError('synthetic next-page denied')
         with patch.object(self.raw,'list_blobs',return_value=Lazy()),self.assertRaises(PermissionError):
             list(self.clients[0].list_blobs(MEDIA,prefix=PREFIX+'/images/'))
+    def test_real_sdk_pagination_is_acquired_once_and_counts_pages(self):
+        from google.cloud import storage
+        from google.auth.credentials import AnonymousCredentials
+        real=storage.Client(project=PROJECT,credentials=AnonymousCredentials())
+        def page(**request):
+            self.assertEqual(request['method'],'GET')
+            self.assertEqual(request['path'],'/b/'+MEDIA+'/o')
+            params=request['query_params']
+            self.assertEqual(params['prefix'],PREFIX+'/images/')
+            self.assertTrue(params['versions'])
+            self.assertEqual(params['maxResults'],100) # min(page_size, remaining)
+            self.assertNotIn('pageSize',params) # Python SDK option, not REST field
+            number=2 if params.get('pageToken') else 1
+            result={'items':[{'name':PREFIX+'/images/'+str(number)+'.jpg',
+                              'generation':str(number),'size':'3'}]}
+            if number==1:result['nextPageToken']='second-page'
+            else:self.assertEqual(params['pageToken'],'second-page')
+            return result
+        with patch.object(real._connection,'api_request',side_effect=page) as api:
+            client=ScopedClient(real,self.budget)
+            rows=list(client.list_blobs(MEDIA,prefix=PREFIX+'/images/',versions=True))
+        self.assertEqual([r.generation for r in rows],[1,2])
+        self.assertEqual(api.call_count,2)
+        self.assertEqual(self.budget.calls,4) # setup, two pages, exhaustion check
+        self.assertEqual(len(self.budget.observed),2)
+        self.assertFalse(self.budget.writes)
+    def test_real_sdk_second_page_failure_is_not_empty_success(self):
+        from google.cloud import storage
+        from google.auth.credentials import AnonymousCredentials
+        from google.api_core.exceptions import Forbidden
+        real=storage.Client(project=PROJECT,credentials=AnonymousCredentials())
+        with patch.object(real._connection,'api_request',side_effect=[
+                {'items':[],'nextPageToken':'next'},Forbidden('offline page denied')]) as api:
+            with self.assertRaises(Forbidden):
+                list(ScopedClient(real,self.budget).list_blobs(MEDIA,prefix=PREFIX+'/images/'))
+        self.assertEqual(api.call_count,2)
+        self.assertFalse(self.budget.writes)
+    def test_all_scenarios_with_real_google_single_use_page_iterator(self):
+        # Exercise the complete fixture with Google's real lazy page iterator,
+        # not a list or a permissive .pages generator. Object I/O remains fake.
+        from google.api_core.page_iterator import HTTPIterator
+        original=self.raw.list_blobs
+        page_calls=[]
+        def paginated(name,**kw):
+            rows=original(name,**kw)
+            def fetch(**request):
+                page_calls.append(request)
+                start=int(request['query_params'].get('pageToken','0'))
+                body={'items':rows[start:start+2]}
+                if start+2<len(rows):body['nextPageToken']=str(start+2)
+                return body
+            return HTTPIterator(client=self.raw,api_request=fetch,path='/offline',
+                item_to_value=lambda iterator,row:row,items_key='items',max_results=kw.get('max_results'))
+        with patch.object(self.raw,'list_blobs',side_effect=paginated):
+            preflight(self.clients);results=[]
+            scenarios(self.stores,run_manifest(),results.append)
+            rows=evidence_inventory(self.clients[1])
+        self.assertTrue(all(r.get('passed',True) for r in results))
+        self.assertEqual(results[-1]['status'],'pending')
+        self.assertGreater(len(rows),2)
+        self.assertTrue(any('pageToken' in r['query_params'] for r in page_calls))
+        self.assertTrue(all(b==MEDIA for (b,_,_),pin in self.raw.deletes))
     def test_exact_runner_scenarios_offline(self):
         preflight(self.clients);results=[]
         scenarios(self.stores,run_manifest(),results.append)

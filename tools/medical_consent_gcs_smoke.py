@@ -95,7 +95,11 @@ class ScopedClient:
         self.budget.take()
         raw = self.raw.list_blobs(name, prefix=prefix, **kw, **_options())
         # Page iteration is lazy in the real SDK. Budget before fetching pages.
-        pages = iter(raw.pages) if hasattr(raw, 'pages') else iter([raw])
+        # Google HTTPIterator.pages marks the iterator started on access.
+        # hasattr(raw, 'pages') would acquire it once and the next access fails
+        # before any page request. Read this stateful property exactly once.
+        page_iterator = getattr(raw, 'pages', None)
+        pages = iter(page_iterator) if page_iterator is not None else iter([raw])
         count = 0
         while True:
             self.budget.take()
