@@ -20,7 +20,13 @@ BASE_PERMISSIONS = frozenset({'storage.buckets.get', 'storage.buckets.getIamPoli
     'storage.objects.get', 'storage.objects.list', 'storage.objects.create'})
 FORBIDDEN_PERMISSIONS = frozenset({'storage.buckets.update', 'storage.buckets.delete',
     'storage.buckets.setIamPolicy', 'storage.objects.update', 'storage.objects.setIamPolicy'})
-PROBE_PERMISSIONS = BASE_PERMISSIONS | FORBIDDEN_PERMISSIONS | {'storage.objects.delete'}
+# GCS rejects the entire testIamPermissions request when either object-ACL
+# permission is included on a uniform-access bucket. Keep ACL mutation forbidden;
+# its inapplicability is established by the mandatory UBLA metadata check instead.
+UBLA_UNSUPPORTED_PROBES = frozenset({'storage.objects.getIamPolicy',
+                                   'storage.objects.setIamPolicy'})
+PROBE_PERMISSIONS = (BASE_PERMISSIONS | FORBIDDEN_PERMISSIONS |
+                     {'storage.objects.delete'}) - UBLA_UNSUPPORTED_PROBES
 LIMITS = dict(max_seconds=1200, max_writes=1000, max_upload_bytes=16*1024*1024,
               max_sdk_calls=20000, max_listed_per_call=1000, request_timeout=10)
 

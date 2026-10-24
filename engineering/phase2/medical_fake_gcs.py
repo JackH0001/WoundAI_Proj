@@ -7,7 +7,7 @@ metadata alone is not a complete emulation of the server's capability rules.
 """
 import threading
 from types import SimpleNamespace
-from google.api_core.exceptions import NotFound, PreconditionFailed, Forbidden
+from google.api_core.exceptions import NotFound, PreconditionFailed, Forbidden, BadRequest
 from store import GcsStore, AUDIT_RETENTION_SECONDS
 
 
@@ -45,7 +45,13 @@ class Bucket:
         self._properties = {}
     def reload(self, **kw): pass
     def get_iam_policy(self, **kw): return SimpleNamespace(bindings=self.bindings)
-    def test_iam_permissions(self, permissions, **kw): return set(permissions) & self.permissions
+    def test_iam_permissions(self, permissions, **kw):
+        # Reproduce the real GCS API boundary, not just set intersection: the
+        # whole probe fails on UBLA even when the caller has no ACL permissions.
+        if (self._properties.get('iamConfiguration', {}).get('uniformBucketLevelAccess', {}).get('enabled')
+                and set(permissions) & {'storage.objects.getIamPolicy', 'storage.objects.setIamPolicy'}):
+            raise BadRequest('Cannot test storage.objects.getIamPolicy or storage.objects.setIamPolicy on buckets with uniform bucket-level access enabled')
+        return set(permissions) & self.permissions
     def blob(self, name, generation=None): return Blob(self, name, generation)
 
 

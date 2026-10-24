@@ -26,6 +26,13 @@ its scope. Preparing a manifest does not authorize executing it.
   `storage.objects.delete`. No bucket update/delete/IAM or object update rights.
   Preflight also probes effective permissions to catch inherited grants for the
   listed operations. This is not an inventory of every project permission.
+  With required uniform bucket-level access, GCS rejects an entire
+  `testIamPermissions` request containing `storage.objects.getIamPolicy` or
+  `storage.objects.setIamPolicy`. These two ACL operations are disabled by UBLA;
+  they are recorded as **not tested**, not as tested-and-denied. Every preflight
+  and mutation still requires UBLA, exact bucket IAM, and all remaining effective
+  permission checks. Object ACL mutation remains forbidden; UBLA is never turned
+  off or probed around, and unrelated API errors are not ignored.
 - No irreversible audit lock: receipts are application-immutable and the run
   identity cannot delete them, but an administrator still can. **Not WORM.**
 
@@ -117,4 +124,6 @@ application `get_store()` mode. Do not call its successful unit tests a GCS run.
 
 References: [GCS preconditions](https://docs.cloud.google.com/storage/docs/request-preconditions),
 [soft-delete retention](https://docs.cloud.google.com/storage/docs/soft-delete),
+[uniform bucket-level access](https://docs.cloud.google.com/storage/docs/uniform-bucket-level-access),
+[bucket permission probes](https://docs.cloud.google.com/storage/docs/json_api/v1/buckets/testIamPermissions),
 [Cloud Run Job scheduling with OAuth](https://docs.cloud.google.com/run/docs/execute/jobs-on-schedule).

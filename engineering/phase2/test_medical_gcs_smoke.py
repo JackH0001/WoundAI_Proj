@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'tools'))
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'Backend/Flask'))
 from medical_consent_smoke_scope import *
@@ -70,6 +70,71 @@ class SDKTests(unittest.TestCase):
     def test_empty_policy_preflight_is_read_only(self):
         evidence=preflight(self.clients);self.assertEqual(len(evidence),4)
         self.assertFalse(self.raw.rows);self.assertFalse(self.raw.uploads);self.assertFalse(self.raw.deletes)
+        for row in evidence:
+            self.assertEqual(row['permission_probe']['requested'],sorted(PROBE_PERMISSIONS))
+            self.assertEqual(row['permission_probe']['not_tested'],sorted(UBLA_UNSUPPORTED_PROBES))
+    def test_original_acl_probe_reproduces_real_ubla_400(self):
+        from google.api_core.exceptions import BadRequest
+        for permission in ('storage.objects.getIamPolicy','storage.objects.setIamPolicy'):
+            with self.subTest(permission=permission),self.assertRaisesRegex(BadRequest,'uniform bucket-level access'):
+                self.raw.bucket(MEDIA).test_iam_permissions([*PROBE_PERMISSIONS,permission])
+        self.assertFalse(self.raw.uploads);self.assertFalse(self.raw.deletes)
+    def test_supported_negative_probes_remain_enforced(self):
+        self.assertIn('storage.objects.setIamPolicy',FORBIDDEN_PERMISSIONS)
+        self.assertFalse(PROBE_PERMISSIONS & UBLA_UNSUPPORTED_PROBES)
+        for permission in ('storage.buckets.update','storage.buckets.delete',
+                           'storage.buckets.setIamPolicy','storage.objects.update'):
+            with self.subTest(permission=permission):
+                raw=configure(Client());raw.bucket(MEDIA).permissions|={permission}
+                with self.assertRaises(PermissionError):preflight([ScopedClient(raw,Budget())])
+                self.assertFalse(raw.uploads);self.assertFalse(raw.deletes)
+    def test_ubla_is_required_not_a_reason_to_ignore_all_permission_errors(self):
+        from google.api_core.exceptions import BadRequest
+        for config in ({}, {'uniformBucketLevelAccess':{'enabled':False}}):
+            raw=configure(Client());raw.bucket(MEDIA)._properties['iamConfiguration']=config
+            with self.assertRaises(PermissionError):preflight([ScopedClient(raw,Budget())])
+            self.assertFalse(raw.uploads)
+        with patch.object(self.raw.bucket(MEDIA),'test_iam_permissions',side_effect=BadRequest('different API error')):
+            with self.assertRaises(BadRequest):preflight(self.clients)
+        self.assertFalse(self.raw.uploads)
+    def test_real_storage_sdk_serializes_only_supported_probes(self):
+        # Real SDK / HTTP serialization, synthetic HTTP responses only. Literal
+        # server rule below is independent of the runner's probe constants.
+        from urllib.parse import urlparse,parse_qs
+        from google.cloud import storage
+        from google.auth.credentials import AnonymousCredentials
+        from google.api_core.exceptions import BadRequest
+        from requests import Response, Request
+        calls=[]
+        def respond(method,url,**kwargs):
+            self.assertEqual(method,'GET');parts=urlparse(url);query=parse_qs(parts.query)
+            path=parts.path.removeprefix('/storage/v1/b/');name,_,suffix=path.partition('/')
+            self.assertIn(name,BUCKETS);calls.append((suffix,query))
+            raw=self.raw.bucket(name);status=200
+            if suffix=='iam/testPermissions':
+                requested=query.get('permissions',[])
+                if set(requested)&{'storage.objects.getIamPolicy','storage.objects.setIamPolicy'}:
+                    status=400;body={'error':{'code':400,'message':'Cannot test object ACL permissions on buckets with uniform bucket-level access enabled'}}
+                else:body={'permissions':sorted(set(requested)&raw.permissions)}
+            elif suffix=='iam':body={'version':1,'etag':'synthetic','bindings':raw.bindings}
+            elif suffix=='o':body={'items':[]}
+            else:self.assertEqual(suffix,'');body=raw._properties
+            response=Response();response.status_code=status;response.url=url
+            response.request=Request(method,url).prepare()
+            response.headers['content-type']='application/json';response._content=json.dumps(body).encode()
+            return response
+        http=Mock();http.request.side_effect=respond
+        real=storage.Client(project=PROJECT,credentials=AnonymousCredentials(),_http=http)
+        # First prove the original query really raises at the SDK boundary.
+        with self.assertRaises(BadRequest):
+            real.bucket(MEDIA).test_iam_permissions(['storage.objects.setIamPolicy'],retry=None)
+        calls.clear()
+        rows=preflight([ScopedClient(real,self.budget)])
+        self.assertEqual(len(rows),2)
+        probes=[q['permissions'] for suffix,q in calls if suffix=='iam/testPermissions']
+        self.assertEqual(probes,[sorted(PROBE_PERMISSIONS)]*2)
+        self.assertEqual(sum(suffix=='o' for suffix,_ in calls),4)
+        self.assertFalse(self.raw.uploads);self.assertFalse(self.raw.deletes)
     def test_metadata_drift_blocks_before_fixture_write(self):
         for key,val in [('projectNumber','wrong'),('location','US'),('retentionPolicy',{'retentionPeriod':'1'}),
                         ('defaultEventBasedHold',True),('lifecycle',{'rule':[{}]}),

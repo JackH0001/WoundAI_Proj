@@ -19,7 +19,8 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'Backend/Flask'))
 from medical_consent_smoke_scope import (PROJECT, EXECUTOR, MEDIA, AUDIT, PREFIX,
-    BUCKETS, LIMITS, PROBE_PERMISSIONS, canonical, sha, manifest, validate_manifest,
+    BUCKETS, LIMITS, PROBE_PERMISSIONS, UBLA_UNSUPPORTED_PROBES,
+    canonical, sha, manifest, validate_manifest,
     validate_environment, validate_bucket)
 from store import GcsStore, _refuse_cloud_in_test_process
 from medical_consent_order import ConsentOrder, ConsentOrderError
@@ -125,7 +126,10 @@ class ScopedBucket:
         granted = self.raw.test_iam_permissions(sorted(PROBE_PERMISSIONS), **_options())
         validate_bucket(self.name, self._properties, list(policy.bindings), granted)
         return dict(metadata=dict(self._properties), bindings=[dict(b, members=sorted(b['members'])) for b in policy.bindings],
-                    granted_permissions=sorted(granted))
+                    granted_permissions=sorted(granted),
+                    permission_probe=dict(requested=sorted(PROBE_PERMISSIONS),
+                        not_tested=sorted(UBLA_UNSUPPORTED_PROBES),
+                        reason='Object ACL operations are disabled by required uniform bucket-level access; GCS rejects these probes.'))
 
 
 class ScopedBlob:
