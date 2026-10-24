@@ -1,0 +1,29 @@
+name: Lite review portal
+on:
+  pull_request:
+    paths:
+      - 'Backend/LiteReview/**'
+      - 'tools/plan_lite_review_rollout.py'
+      - 'tools/build_lite_review_catalogue.py'
+      - 'engineering/phase2/test_lite_review_portal.py'
+      - '.github/workflows/lite-review.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  isolated-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Build isolated review image
+        run: docker build -f Backend/LiteReview/Dockerfile -t lite-review:test .
+      - name: Verify both factories and absence of medical bootstrap
+        run: >-
+          docker run --rm --entrypoint python lite-review:test -B -c
+          "from Backend.LiteReview.runtime import portal, reader;
+          import importlib.util;
+          assert importlib.util.find_spec('Backend.Flask') is None;
+          print('independent review factories import; medical runtime absent')"

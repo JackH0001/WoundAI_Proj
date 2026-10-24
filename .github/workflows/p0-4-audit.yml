@@ -6,6 +6,10 @@ on:
     paths:
       - 'Backend/Flask/**'
       - 'Backend/AccessManager/**'
+      - 'Backend/LiteReview/**'
+      - 'engineering/phase2/test_lite_review_portal.py'
+      - 'tools/plan_lite_review_rollout.py'
+      - 'tools/build_lite_review_catalogue.py'
       - 'engineering/phase2/test_audit_chain.py'
       - 'engineering/phase2/test_audit_chain_concurrency.py'
       - 'engineering/phase2/test_mmh_unlocked_audit.py'
@@ -169,6 +173,10 @@ on:
     paths:
       - 'Backend/Flask/**'
       - 'Backend/AccessManager/**'
+      - 'Backend/LiteReview/**'
+      - 'engineering/phase2/test_lite_review_portal.py'
+      - 'tools/plan_lite_review_rollout.py'
+      - 'tools/build_lite_review_catalogue.py'
       - 'engineering/phase2/test_audit_chain.py'
       - 'engineering/phase2/test_audit_chain_concurrency.py'
       - 'engineering/phase2/test_mmh_unlocked_audit.py'
@@ -421,6 +429,7 @@ jobs:
           python -B engineering/phase2/test_lite_fenced_manifest.py
           python -B engineering/phase2/test_lite_fenced_http.py
           python -B engineering/phase2/test_lite_reconsent.py
+          python -B engineering/phase2/test_lite_review_portal.py
           python -B tools/test_lite_rgbd_preflight.py
           python -B tools/test_provision_mmh_foundation.py
           python -B tools/test_restrict_mmh_bucket_iam.py

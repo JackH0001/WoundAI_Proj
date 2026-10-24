@@ -1,5 +1,20 @@
 # Medical consent operations acceptance v1 — review only, 2026-10-23
 
+**2026-10-24 status:** the preserving synthetic continuation at `28c350e` passed
+12 bounded live GCS assertions, retaining the original two objects and all audit.
+Three recoverable soft versions remain pending natural seven-day expiry. This
+does not complete formal migration, live failure-injection, or scheduler rollout.
+The original first-run proposal below is historical, not a fresh instruction to
+create/reuse those buckets or repeat its one-time execution.
+
+`tools/plan_lite_review_rollout.py` now binds the independent portal and formal
+rollout review to a clean commit. Medical reverse-index backfill and purge jobs
+apply only to individually approved medical stores. **Never target Lite epoch
+storage with that worker.** Lite withdrawal uses its existing generation fences;
+permanent zero-byte markers and consent audits must not enter a deletion schedule.
+The Lite portal catalogue is a separate read-only discovery snapshot, not a
+medical consent migration or a new source of permission.
+
 This is a deployment plan, **not permission to execute**. It extends
 `medical-consent-operations-v1.md` and `medical-consent/2`. No existing cloud
 object, IAM binding, service, schedule, retention policy or App release is

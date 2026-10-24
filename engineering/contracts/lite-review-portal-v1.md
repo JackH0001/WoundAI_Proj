@@ -1,6 +1,7 @@
 # Independent WoundAILite review portal — design v1, 2026-10-23
 
-Status: design and acceptance contract only. No portal is deployed; no new
+Status (2026-10-24): standalone read-only candidate implemented in
+`Backend/LiteReview`; local synthetic acceptance, still no portal deployed. No new
 service, bucket, IAM grant, OAuth client or background task has been created.
 This does not authorize cloud costs, changing existing services, deleting media
 or releasing an App. The existing Lite candidate App Attest perimeter remains.
@@ -12,7 +13,7 @@ internal reviewers. Initial proposed access is the project owner only, pending
 verification of the Google subject during installation. MMH/Demo roles, JWTs,
 sessions, account lists, URLs and cookies confer no portal access.
 
-The first release is read-only with three views:
+The intended first release is read-only with three views. The bounded candidate below implements a subset; it does not yet provide a complete live catalogue or deletion-history console:
 
 1. **收件與同步**: paginated captures, synthetic/real source, immutable capture ID,
    research epoch, latest confirmed annotation revision, timestamp, image/depth
@@ -43,7 +44,7 @@ Use two private components so the browser-facing portal has no storage rights:
 | Component | Proposed identity/access | Allowed data access |
 |---|---|---|
 | `woundai-lite-review` UI/BFF | `woundai-lite-review@…`, Cloud Run direct IAP | Only invoke the dedicated reader; no GCS role |
-| `woundai-lite-review-reader` | `woundai-lite-review-reader@…`, Cloud Run IAM; only portal SA invokes | Lite media read/list, named Lite security-state gets, review-audit create |
+| `woundai-lite-review-reader` | `woundai-lite-review-reader@…`, Cloud Run IAM; only portal SA invokes | Lite media GET, derived Lite security-state GET, review-audit create |
 | Existing Lite upload service | Existing `woundai-lite-runtime@…` | Existing App Attest routes unchanged |
 | MMH / synthetic review | Existing distinct identities | No new Lite grants or routes |
 
@@ -63,9 +64,7 @@ and application subject allowlist. The intended audience is
 A Google login alone does not grant a portal role.
 
 The reader independently verifies the Google-issued service identity token for
-its exact audience and expected portal SA. The portal carries its verified human
-principal, purpose and request ID to the reader through that authenticated hop;
-the browser cannot choose/override them. Do not treat arbitrary forwarded headers
+its exact audience and expected portal SA. The portal forwards the original signed human IAP assertion through that authenticated hop. The reader verifies it again and generates its own request ID and fixed purpose; the browser cannot choose/override those values. Do not treat arbitrary forwarded headers
 as authentication. No browser-direct signed GCS URLs, bucket credentials or state
 records. Any future mutation must add CSRF and origin defenses as well as RBAC.
 
@@ -91,7 +90,7 @@ The old `/api/v1/lite/records` global-ledger reader and `lite_research_archive.p
 legacy archive are not sufficient for current owner/epoch-scoped fenced data.
 Do not expose those endpoints by weakening the public Lite service perimeter.
 
-Reader IAM: media `storage.objects.get/list` only; security `storage.objects.get`
+Reader IAM: media `storage.objects.get` only; security `storage.objects.get`
 only (no LIST); review audit `storage.objects.create` only. No writes/deletes on
 source buckets, no bucket administration, no MMH/Demo read permissions or keys.
 Application adapters expose only read methods and only derived state keys.
@@ -149,7 +148,36 @@ store with a migration plan; never grant the browser-facing SA access instead.
 This is distinct from the medical `consent-smoke` cleanup acceptance plan. Both
 preserve original evidence; neither authorizes production deletion or publication.
 
-References checked 2026-10-23:
+## Implemented bounded first version (2026-10-24)
+
+The initial reader consumes a protected, digest-pinned catalogue (max 2,000
+records), expires it after 24 hours, and displays its snapshot boundary. It does
+not have media LIST in HTTP or claim newer revisions are already indexed. A
+separately reviewed bounded inventory supplies the catalogue;
+`tools/build_lite_review_catalogue.py` validates exact pins locally without GCS
+calls. A future continuous catalogue job is not introduced here. Separate
+catalogue operator LIST/GET permission is not granted to the reader.
+
+Runtime validates its exact project/service/metadata SA. Both hops verify the
+same signed IAP assertion; the reader also verifies the portal service token's
+audience, numeric subject and email. Account email alone grants no access.
+Media reads use a fresh unversioned SDK Blob plus a generation precondition:
+reusing a reloaded Blob would select its historical generation.
+
+The view supports original AI and individually selectable in-snapshot user polygon overlays,
+revision summaries, separate surface/projected areas and storage pins. RGB-D
+receipt/hash binding is storage evidence only; raw depth geometry accuracy is not
+re-certified by a dashboard request. Source `synthetic` is an operator assertion
+in the reviewed catalogue, otherwise `unverified`; neither means training-ready.
+
+See `Backend/LiteReview/README.md`, `tools/plan_lite_review_rollout.py` and the
+synthetic two-hop/JWT/fence tests. Live IAP/IAM, verified owner subject, OAuth
+client scope (must not mutate MMH project settings), access audit and catalogue
+inventory require a separate fixed-image deployment/acceptance review.
+
+References checked 2026-10-24:
 [direct Cloud Run IAP](https://docs.cloud.google.com/run/docs/securing/identity-aware-proxy-cloud-run),
 [IAP signed JWT validation](https://docs.cloud.google.com/iap/docs/signed-headers-howto),
 [GCS object listing permissions](https://docs.cloud.google.com/storage/docs/json_api/v1/objects/list).
+
+The outbound hop uses `X-Serverless-Authorization` for Cloud Run IAM plus the full signed token in `Authorization` for reader verification; the platform may strip the consumed header signature. [Google service-to-service guidance](https://docs.cloud.google.com/run/docs/authenticating/service-to-service). This is unit-tested; real two-hop ingress remains a deployment acceptance gate.
