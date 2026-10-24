@@ -231,6 +231,21 @@ class Authentication(unittest.TestCase):
         self.claims=dict(iss='https://cloud.google.com/iap',aud=IAP_AUDIENCE,sub=SUB,iat=int(time.time())-1,exp=int(time.time())+599)
     def token(self,**changes):return jwt.encode(dict(self.claims,**changes),self.key,algorithm='ES256',headers={'kid':'synthetic-key'})
     def test_valid_signature_and_subject(self):self.assertEqual(self.verify(self.token()).subject,SUB)
+    def test_closed_bootstrap_denies_valid_human_at_both_hops_without_data_access(self):
+        verify=IapVerifier(self.http,{})
+        backend=Mock(side_effect=AssertionError('closed portal must not call reader'))
+        client=portal_app(verify,backend).test_client()
+        self.assertEqual(client.get('/',headers={'X-Goog-IAP-JWT-Assertion':self.token()}).status_code,401)
+        backend.assert_not_called()
+        reader=Mock()
+        # Service authentication succeeds, but the valid human assertion is still denied.
+        client=reader_app(reader,verify,lambda token:require(token=='Bearer service')).test_client()
+        self.assertEqual(client.get('/v1/records',headers={'Authorization':'Bearer service',
+            'X-Lite-Review-IAP':self.token()}).status_code,401)
+        self.assertEqual(reader.mock_calls,[])
+    def test_absent_or_malformed_roles_never_become_bootstrap_or_default_access(self):
+        for roles in (None,[],False,{SUB:[]},{SUB:['admin']},{'user@example.test':list(CAPS)}):
+            with self.subTest(roles=roles),self.assertRaises(ReviewError):IapVerifier(self.http,roles)
     def test_invalid_signature_algorithm_audience_issuer_subject_and_time(self):
         tokens=[None,'MMH-JWT',jwt.encode(self.claims,'synthetic'*8,algorithm='HS256',headers={'kid':'synthetic-key'}),
             jwt.encode(self.claims,ec.generate_private_key(ec.SECP256R1()),algorithm='ES256',headers={'kid':'synthetic-key'})]

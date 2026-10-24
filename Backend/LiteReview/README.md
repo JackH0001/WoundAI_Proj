@@ -10,6 +10,10 @@ exact Cloud Run service/project/runtime identity. Reader independently verifies
 the original signed human IAP JWT and the portal SA's Google ID token; forwarded
 email/subject headers and MMH/Demo tokens are not accepted. Each service uses the
 same explicitly reviewed subject/capability map; no default owner or role exists.
+An explicit empty `roles: {}` is a closed bootstrap/containment mode: even a
+valid signed IAP token is denied at both hops, before source reads or audit writes.
+Missing/malformed roles are still configuration errors. Empty roles do not enable
+a development bypass or public health endpoint.
 The portal identity has no GCS access. Reader source access is GET-only;
 separate access audit is create-only. Actual IAM/inheritance remains a live gate.
 

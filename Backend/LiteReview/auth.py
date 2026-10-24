@@ -5,7 +5,10 @@ from .contracts import CAPS, IAP_AUDIENCE, PORTAL_SA, Viewer, ReviewError, requi
 
 class IapVerifier:
     def __init__(self, public_http, roles):
-        require(type(roles) is dict and bool(roles), 'review_roles_not_configured')
+        # An explicitly empty map is a closed bootstrap/containment configuration.
+        # A valid Google signature never grants access without a listed subject.
+        # Missing or malformed configuration still prevents startup.
+        require(type(roles) is dict, 'review_roles_not_configured')
         require(all(type(k) is str and k.startswith('accounts.google.com:') and
                     type(v) is list and set(v)<=CAPS and 'lite.review.metadata' in v for k,v in roles.items()))
         self.http, self.roles = public_http, roles
