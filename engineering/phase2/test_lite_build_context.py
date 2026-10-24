@@ -37,7 +37,7 @@ class ContextTests(unittest.TestCase):
         for name,item in manifest['files'].items():self.assertEqual(hashlib.sha256((self.output/name).read_bytes()).hexdigest(),item['sha256'])
     def test_real_runtime_imports_are_closed_over_the_allowlist(self):
         stager.validate_runtime_imports(ROOT)
-        for missing in ('annotation_masks.py', 'tissue_mask_contract.py', 'medical_depth_geometry.py', 'review_service_profile.py'):
+        for missing in ('annotation_masks.py', 'tissue_mask_contract.py', 'medical_depth_geometry.py', 'review_service_profile.py', 'lite_reconsent.py'):
             with self.subTest(missing=missing), patch.object(stager, 'FLASK_FILES', tuple(n for n in stager.FLASK_FILES if n != missing)):
                 with self.assertRaisesRegex(ValueError, 'missing from build allowlist'):
                     stager.validate_runtime_imports(ROOT)

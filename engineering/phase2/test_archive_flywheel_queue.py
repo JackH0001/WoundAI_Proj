@@ -54,6 +54,13 @@ class ArchiveToolTests(unittest.TestCase):
             importlib.reload(fw)
             return self.tool.main()
 
+    def test_ordered_consent_prevents_legacy_archive(self):
+        directory=self.root/'receipts'/'medical_consent';directory.mkdir(parents=True)
+        (directory/'synthetic.json').write_text('{}')
+        before={str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        self.assertEqual(2,self.invoke('--label','synthetic','--operator','maintenance','--authorization-ref','synthetic approval'))
+        self.assertEqual(before,{str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+
     def test_unsafe_label_is_rejected_before_any_state_change(self):
         before = sorted(str(p.relative_to(self.root)) for p in self.root.rglob("*"))
         self.assertEqual(2, self.invoke("--label", "..", "--operator", "maintenance",

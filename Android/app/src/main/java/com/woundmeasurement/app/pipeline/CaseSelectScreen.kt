@@ -41,6 +41,9 @@ fun CaseSelectScreen(
     // 個案摘要(上次面積/變化%/天數):醫護真正要的決策資訊,只有部位＋代碼看不出傷口在不在癒合
     var summaries by remember { mutableStateOf<Map<Long, CaseRepository.CaseSummary>>(emptyMap()) }
     var signing by remember { mutableStateOf(false) }
+    var preparingConsent by remember { mutableStateOf(false) }
+    var observedConsentRevisions by remember { mutableStateOf<Map<String,String>>(emptyMap()) }
+    var cloudConsentReady by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf<String?>(null) }
     /**
      * 目前選取的個案傷口。
@@ -106,8 +109,10 @@ fun CaseSelectScreen(
     if (signing && selected != null) {
         ConsentSignatureScreen(
             patientLabel = "${selected!!.name}（${PhiCrypto.maskMrn(selected!!.medicalRecordNumber)}）",
+            cloudConsentReady = cloudConsentReady,
             onCancel = { signing = false },
             onSigned = { care, train, png ->
+                val revisions=observedConsentRevisions
                 scope.launch {
                     // signConsent → PhiCrypto.encryptBytes 會主動拋(刻意的:不默默存明文簽名)
                     try {
@@ -126,13 +131,13 @@ fun CaseSelectScreen(
                         msg = if (!train) base else {
                             val codes = cases.mapNotNull { it.wdCode }
                             if (codes.isEmpty()) base else {
-                                val r = ConsentWithdrawal.restoreOnBackend(ctx, codes, runtime = runtime)
+                                val r = ConsentWithdrawal.restoreOnBackend(ctx, codes, runtime = runtime, observedRevisions = revisions)
                                 if (r.allOk)
                                     "$base\n雲端已解除撤回封鎖：${r.done.joinToString("、")}"
                                 else
                                     "$base\n⚠ 但雲端尚未解除封鎖：${r.pending.joinToString("、")}\n" +
                                     "這些代碼在雲端仍被標記為已撤回，**補送訓練標註會被擋下**。" +
-                                    "已記錄待重試，下次連上後端時會自動再試。"
+                                    "若核對未完成或狀態已變動，請重新開啟同意書確認；不會自動解除新的撤回。"
                             }
                         }
                         pendingWd = ConsentWithdrawal.pendingBanner(ctx, runtime = runtime)
@@ -253,8 +258,19 @@ fun CaseSelectScreen(
             color = if (care) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
             style = MaterialTheme.typography.bodySmall
         )
-        OutlinedButton({ signing = true }, Modifier.fillMaxWidth()) {
-            Text(if (consent == null) "簽署同意書" else "重新簽署 / 更新同意")
+        OutlinedButton({
+            preparingConsent=true;observedConsentRevisions=emptyMap();cloudConsentReady=false
+            val codes=cases.mapNotNull { it.wdCode }
+            scope.launch {
+                try {
+                    observedConsentRevisions=ConsentWithdrawal.prepareRestore(codes,runtime)
+                    cloudConsentReady=true
+                } catch(_:Exception) { /* Save local consent without an unobserved restore. */ }
+                finally { preparingConsent=false }
+                if(selected?.id==p.id) signing=true
+            }
+        }, Modifier.fillMaxWidth(), enabled=!preparingConsent) {
+            Text(if(preparingConsent) "正在核對同意狀態…" else if (consent == null) "簽署同意書" else "重新簽署 / 更新同意")
         }
         if (consent != null && train) {
             OutlinedButton(
@@ -273,7 +289,7 @@ fun CaseSelectScreen(
                         val r = ConsentWithdrawal.pushToBackend(ctx, codes, runtime = runtime)
                         msg = if (r.allOk)
                             "✅ 已撤回訓練同意，雲端也已排除：${r.done.joinToString("、")}\n" +
-                            "這些代碼的影像已移入隔離區，不再進入任何訓練集。"
+                            "這些代碼已停止雲端存取與後續訓練；媒體清理另依核定期限辦理，尚未代表已銷毀。"
                         else
                             // 3) 失敗**不可以**顯示成功。誠實地說「本機已撤回、雲端尚未完成」，
                             //    至少有人會去處理；顯示「已撤回」則沒有人會再看它一眼。

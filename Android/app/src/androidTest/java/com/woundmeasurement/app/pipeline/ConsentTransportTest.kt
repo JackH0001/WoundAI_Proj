@@ -19,17 +19,24 @@ class ConsentTransportTest {
             """{"status":"withdrawn","code":"other"}""")) assertFalse(client(200,body).withdrawConsent("synthetic"))
         assertFalse(client(202,"""{"status":"withdrawn","code":"synthetic"}""").withdrawConsent("synthetic"))
     }
+    private val intent="synthetic-intent-0001"
+    private val revision="a".repeat(64)
     @Test fun restoreRequiresMatchingRestoredReceipt() {
-        assertTrue(client(200,"""{"status":"restored","code":"synthetic"}""").restoreConsent("synthetic"))
+        assertTrue(client(200,"""{"status":"restored","code":"synthetic","protocol":"medical-consent/2","intent_id":"$intent","revision":"$revision"}""").restoreConsent("synthetic",intent,revision))
+        assertFalse(client(200,"""{"status":"restored","code":"synthetic"}""").restoreConsent("synthetic",intent,revision))
         assertFalse(client(200,"""{"status":"withdrawn","code":"synthetic"}""").restoreConsent("synthetic"))
     }
     @Test fun busyResponsePreservesDeadlineForBothDirections() {
         for(status in listOf(429,503)) for(restore in listOf(false,true)) {
             val before=System.currentTimeMillis()
             try {
-                val c=client(status,"{}");if(restore)c.restoreConsent("synthetic") else c.withdrawConsent("synthetic")
+                val c=client(status,"{}");if(restore)c.restoreConsent("synthetic",intent,revision) else c.withdrawConsent("synthetic")
                 fail("Busy response cannot acknowledge consent")
             } catch(wait:ResearchCapacityException) {assertTrue(wait.notBefore>=before+300_000)}
         }
+    }    @Test fun missingObservedRevisionNeverSendsRestore() {
+        val http=OkHttpClient.Builder().addInterceptor {error("must not send legacy restore")}.build()
+        assertFalse(BackendClient("https://synthetic.invalid","",http).restoreConsent("synthetic"))
     }
+
 }

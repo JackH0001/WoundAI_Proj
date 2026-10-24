@@ -189,7 +189,7 @@ def main():
     check("撤回後 SVG 也拒絕歷史標註", cli.get(
         "/api/v1/flywheel/record/%s/preview.svg" % iid, headers=H["physician"]).status_code == 410)
     restored = cli.post("/api/v1/consent/restore", headers=H["physician"],
-                        json={"code": "WD-SCOPE1", "consent_train": True, "deidentified": True})
+                        json={"code": "WD-SCOPE1", "protocol": "medical-consent/2", "intent_id": "restore-scope-test-001", "consent_revision": rw.get_json()["revision"]})
     check("前置：重新同意後測試疊圖", restored.status_code == 200, restored.get_json())
     print("\n── 5c 疊圖模式：viewBox 必須恰好等於影像 ──")
     # 疊圖時 SVG 與影像等比縮放後要逐點對齊。原本底部留 48px 給文字，

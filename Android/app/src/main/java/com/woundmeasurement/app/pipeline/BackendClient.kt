@@ -1,5 +1,6 @@
 package com.woundmeasurement.app.pipeline
 
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -598,31 +599,40 @@ class BackendClient internal constructor(
      *     /api/v1/consent/restore」
      * 那不是給臨床人員看的東西，而且他也沒有辦法自己呼叫它。
      */
-    fun restoreConsent(code: String): Boolean {
-        val body = JSONObject(mapOf("code" to code)).toString()
-            .toRequestBody("application/json".toMediaType())
-        val req = Request.Builder().url("$baseUrl/api/v1/consent/restore")
-            .header("Authorization", "Bearer $jwt").post(body).build()
+    fun consentRevision(code:String):String {
+        val url=("$baseUrl/api/v1/consent/state").toHttpUrl().newBuilder().addQueryParameter("code",code).build()
+        val req=Request.Builder().url(url).header("Authorization","Bearer $jwt").get().build()
         http.newCall(req).execute().use {
             val response=it.body?.string().orEmpty()
-            if(it.code in setOf(429,503)) throw ResearchCapacityException(ResearchCapacityWait.deadline(
-                it.header("Retry-After"),it.header("Date"),response,System.currentTimeMillis()))
-            val receipt=runCatching{JSONObject(response)}.getOrNull()
-            return it.code==200 && receipt?.optString("status")=="restored" && receipt.optString("code")==code
+            if(it.code in setOf(429,503)) throw ResearchCapacityException(ResearchCapacityWait.deadline(it.header("Retry-After"),it.header("Date"),response,System.currentTimeMillis()))
+            val obj=JSONObject(response);val revision=obj.optString("revision")
+            check(it.code==200 && obj.optString("protocol")=="medical-consent/2" && obj.optString("code")==code && revision.matches(Regex("[0-9a-f]{64}"))) {"同意版次尚未核對，請重新確認同意"}
+            return revision
+        }
+    }
+    fun restoreConsent(code:String,intentID:String?=null,revision:String?=null):Boolean {
+        if(intentID==null || revision==null) return false
+        return consentCall(code,"restore",intentID,revision)
+    }
+    fun withdrawConsent(code:String,intentID:String?=null):Boolean = consentCall(code,"withdraw",intentID,null)
+    private fun consentCall(code:String,action:String,intentID:String?,revision:String?):Boolean {
+        val obj=JSONObject().put("code",code).put("protocol","medical-consent/2")
+        if(intentID!=null)obj.put("intent_id",intentID)
+        if(revision!=null)obj.put("consent_revision",revision)
+        val url = when(action) {
+            "withdraw" -> "$baseUrl/api/v1/consent/withdraw"
+            "restore" -> "$baseUrl/api/v1/consent/restore"
+            else -> return false
+        }
+        val req=Request.Builder().url(url).header("Authorization","Bearer $jwt")
+            .post(obj.toString().toRequestBody("application/json".toMediaType())).build()
+        http.newCall(req).execute().use {
+            val response=it.body?.string().orEmpty()
+            if(it.code in setOf(429,503))throw ResearchCapacityException(ResearchCapacityWait.deadline(it.header("Retry-After"),it.header("Date"),response,System.currentTimeMillis()))
+            val receipt=runCatching{JSONObject(response)}.getOrNull() ?: return false
+            if(intentID!=null && (receipt.optString("protocol")!="medical-consent/2" || receipt.optString("intent_id")!=intentID || !receipt.optString("revision").matches(Regex("[0-9a-f]{64}"))))return false
+            return it.code==200 && receipt.optString("status")==(if(action=="withdraw") "withdrawn" else "restored") && receipt.optString("code")==code
         }
     }
 
-    fun withdrawConsent(code: String): Boolean {
-        val body = JSONObject(mapOf("code" to code)).toString()
-            .toRequestBody("application/json".toMediaType())
-        val req = Request.Builder().url("$baseUrl/api/v1/consent/withdraw")
-            .header("Authorization", "Bearer $jwt").post(body).build()
-        http.newCall(req).execute().use {
-            val response=it.body?.string().orEmpty()
-            if(it.code in setOf(429,503)) throw ResearchCapacityException(ResearchCapacityWait.deadline(
-                it.header("Retry-After"),it.header("Date"),response,System.currentTimeMillis()))
-            val receipt=runCatching{JSONObject(response)}.getOrNull()
-            return it.code==200 && receipt?.optString("status")=="withdrawn" && receipt.optString("code")==code
-        }
-    }
 }

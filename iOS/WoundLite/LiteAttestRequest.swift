@@ -24,9 +24,11 @@ enum LiteAttestRequest {
               contentType.utf8.allSatisfy({ (32...126).contains($0) }),
               keyID.count == 32, challenge.count == 32, body.count <= maxBodyBytes
         else { throw Failure.invalidBinding }
-        let postPaths = ["/api/v1/lite/segment", "/api/v1/lite/annotation", "/api/v1/lite/annotation/revision"]
+        let postPaths = ["/api/v1/lite/segment", "/api/v1/lite/annotation", "/api/v1/lite/annotation/revision", "/api/v1/lite/research/rejoin"]
+        let epochDelete = path.hasPrefix("/api/v1/lite/data/" + installation + "/") &&
+            matches(String(path.dropFirst(("/api/v1/lite/data/" + installation + "/").count)), "[0-9a-f]{32}")
         guard (method == "POST" && postPaths.contains(path)) ||
-              (method == "DELETE" && path == "/api/v1/lite/data/" + installation && body.isEmpty)
+              (method == "DELETE" && (path == "/api/v1/lite/data/" + installation || epochDelete) && body.isEmpty)
         else { throw Failure.invalidBinding }
         let fields = [Data(audience.utf8), Data(installation.utf8), keyID, challenge,
                       Data(requestID.utf8), Data(method.utf8), Data(path.utf8),

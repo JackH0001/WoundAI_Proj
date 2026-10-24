@@ -87,17 +87,20 @@ Req `image` → Resp `{ mask_png_b64, model, model_version, route:"cloud" }`；�
 - `200 {status:"duplicate_skipped", ...}` — 同影像同遮罩已在佇列，自動略過
 - `400 {error, issues:[...]}` — 守門未過（缺欄位／格式不合／三同意不全／座標超界／影像不存在／該影像已撤回同意）
 
-## POST /api/v1/consent/restore（**新增**）
-`{code}` → 受試者重新取得同意時解除排除、把影像從 `quarantine/` 搬回。
-沒有這條，撤回就是死局（影像被隔離、code 被封，日後再同意也補不回來）。
+## POST /api/v1/consent/restore（條件式恢復）
+先在開啟同意畫面前取得 `/api/v1/consent/state?code=...` 的 revision，確認後送出
+`{code, protocol:"medical-consent/2", intent_id, consent_revision}`。舊版只送 code 回428；
+狀態已改變回409，不可自動改用新 revision。已進入銷毀處置的舊影像不會復活。
 
-## POST /api/v1/consent/withdraw（**已實作**）
-**Req**：`{code}`（選配 `image_id`）。
-**Resp 200**：`{status:"withdrawn", code, image_ids, quarantined, effect}`
-
-撤回涵蓋**整張影像**：由 code 回查其 `image_id`，該影像的所有標註（含被取代的舊版）一律排除於
-訓練集與統計，影像檔移入 `flywheel/quarantine/`。佇列 jsonl 維持 append-only（稽核軌跡不竄改），
-排除發生在消費端；實體銷毀另走資料刪除程序並留紀錄。
+## POST /api/v1/consent/withdraw
+**Req**：`{code, intent_id}`（舊版可省 intent_id；選配合法 `image_id`）。
+**Resp 200**：包含 `status:"withdrawn"`、revision、sequence、image_ids、
+`quarantine_mode:"logical"`、`media_cleanup:"pending_policy_worker"`。
+立即封鎖存取／訓練；不表示已搬移或銷毀。舊佇列中非法影像參照不阻擋代碼撤回，
+只在稽核保留其雜湊與數量，不能把非法參照當作物件路徑。
+所有標註／回執仍保留；核定清理工作另對 RGB、遮罩及深度處置並留結果。
+完整契約見 `engineering/contracts/medical-consent-order-v2.md` 與
+`engineering/contracts/medical-consent-operations-v1.md`。
 
 ## GET /api/v1/flywheel/stats（**新增**）
 **Resp 200**：

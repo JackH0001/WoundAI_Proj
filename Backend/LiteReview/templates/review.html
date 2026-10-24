@@ -1,0 +1,20 @@
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>WoundAILite 檢視管理</title><link rel="stylesheet" href="{{ url_for('static',filename='review.css') }}"></head><body>
+<header><span class="eyebrow">WOUNDAILITE · 內部覆核</span><h1>檢視管理</h1><p>唯讀核對收件與修訂；不會重新辨識、上傳或改動原紀錄。</p></header>
+<nav><a href="/">收件與同步</a><span>影像與標註核對</span><span>同意與處理狀態</span></nav>
+{% set statuses={'active':'目前可核對','withdrawn':'已撤回・停止檢視','epoch_retired':'舊同意批次・停止檢視','writes_pending':'仍有寫入待確認','state_unverified':'同意狀態待查核'} %}
+<main>{% if page %}
+<section class="notice"><b>有限範圍的覆核快照</b><p>快照時間：{{ page.captured_at|taipei_time }}。後續新收件與修訂須更新快照；每次檢視仍即時查核同意狀態。這不是全研究人數或訓練可用數量。</p></section>
+<form method="get"><label>資料來源 <select name="source"><option value="all">全部</option><option value="synthetic" {% if source=='synthetic' %}selected{% endif %}>已標記合成驗收</option><option value="unverified" {% if source=='unverified' %}selected{% endif %}>來源尚待核實</option></select></label><button>套用</button></form>
+<div class="table"><table><thead><tr><th>影像識別碼</th><th>來源</th><th>同意批次</th><th>核對狀態</th><th></th></tr></thead><tbody>{% for r in page.records %}<tr><td><code>{{ r.image_id }}</code></td><td>{{ '合成驗收' if r.source=='synthetic' else '尚待核實' }}</td><td><code>{{ r.epoch }}</code></td><td>{{ statuses.get(r.status,'待查核') }}</td><td><a href="/records/{{ r.record_id }}">檢視</a></td></tr>{% else %}<tr><td colspan="5">此快照沒有符合條件的收件。</td></tr>{% endfor %}</tbody></table></div>
+{% if page.next_cursor %}<a class="button" href="/?source={{ source }}&amp;cursor={{ page.next_cursor|urlencode }}">下一頁</a>{% endif %}
+{% else %}
+<a href="/">← 返回收件</a><h2>{{ statuses.get(detail.status,'待查核') }}</h2>
+{% if detail.status!='active' %}<section class="notice"><b>本批次不提供影像、遮罩或面積。</b><p>撤回不等於歷史版本、備份與模型已全部永久刪除；重新同意也不恢復舊批次資料。</p></section>
+{% else %}
+<p>影像 <code>{{ detail.image_id }}</code> · 同意批次 <code>{{ detail.epoch }}</code></p>
+<section class="notice">快照時間：{{ detail.captured_at|taipei_time }}。只列出快照內已確認的修訂；沒有判定可用於訓練。LiDAR 表面積與相機方向投影面積分開呈現，均不是貼紙校正面積。</section>
+<div class="table"><table><tr><th>快照版次</th><th>標註來源</th><th>LiDAR 表面積估算</th><th>相機方向投影估算</th></tr>{% for r in detail.revisions %}<tr><td>{{ r.revision }}</td><td>{{ '使用者修訂・未經醫師確認' if r.source=='manual' else 'AI・未經確認' }}</td><td>{{ r.surface_cm2 }} cm²</td><td>{{ r.projected_cm2 }} cm²</td></tr>{% else %}<tr><td colspan="4">尚未在快照找到修訂，並非面積為零。</td></tr>{% endfor %}</table></div>
+{% if detail.media_allowed %}<h2>原始影像與遮罩</h2><p>藍色為原 AI 邊界；橘色為選定修訂的邊界。兩者獨立保留。</p><form method="get"><label>比較版次 <select name="revision"><option value="0" {% if not selected_revision %}selected{% endif %}>僅原 AI 邊界</option>{% for r in detail.revisions %}<option value="{{ r.revision }}" {% if selected_revision and selected_revision.revision==r.revision %}selected{% endif %}>第 {{ r.revision }} 版 · {{ r.surface_cm2 }} cm²（表面積）</option>{% endfor %}</select></label><button>切換預覽</button></form><svg class="preview" viewBox="0 0 {{ detail.image_w }} {{ detail.image_h }}" role="img" aria-label="影像與兩種邊界"><image href="/records/{{ detail.record_id }}/image" width="{{ detail.image_w }}" height="{{ detail.image_h }}"/>{% for p in detail.ai_polygons %}<polygon class="ai" points="{% for q in p %}{{ q[0] }},{{ q[1] }} {% endfor %}"/>{% endfor %}{% if selected_revision %}{% for p in selected_revision.polygons %}<polygon class="lay" points="{% for q in p %}{{ q[0] }},{{ q[1] }} {% endfor %}"/>{% endfor %}{% endif %}</svg>{% else %}<p class="notice">此帳號僅有中繼資料權限，未開放影像與遮罩預覽。</p>{% endif %}
+<h2>深度與完整性</h2><p>RGB-D：<code>{{ detail.depth_status }}</code>。收據與物件版本相符不代表幾何精確度已通過；不提供原始深度下載或體積判定。</p>
+<details><summary>版本、大小與雜湊參照</summary><div class="table"><table><tr><th>內容</th><th>GCS 版本</th><th>bytes</th><th>SHA-256</th></tr>{% for o in detail.objects %}<tr><td>{{ o.kind }}</td><td>{{ o.generation }}</td><td>{{ o.bytes }}</td><td><code>{{ o.sha256 }}</code></td></tr>{% endfor %}</table></div></details>
+{% endif %}{% endif %}</main><footer>WoundAILite 獨立入口 · MMH 與合成示範的登入權限不適用 · 檢視存取留有稽核</footer></body></html>

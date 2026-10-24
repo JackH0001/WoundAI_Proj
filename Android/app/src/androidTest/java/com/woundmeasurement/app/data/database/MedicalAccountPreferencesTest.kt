@@ -71,7 +71,21 @@ class MedicalAccountPreferencesTest {
             assertEquals("", MedicalAccountPreferences(ctx, MedicalDataScope.SYNTHETIC_REVIEW).user())
         } finally { ctx.clear() }
     }
-    @Test fun sameConsentCodeRemainsInOtherScopeAndQueue() {
+    @Test fun observedRevisionIsPinnedOnceAndCannotAttachToNewIntent() {
+        val ctx=context()
+        try {
+            val a=MedicalAccountPreferences(ctx)
+            a.add(listOf("synthetic"),MedicalAccountPreferences.ConsentQueue.RESTORE)
+            val token=requireNotNull(a.token("synthetic",MedicalAccountPreferences.ConsentQueue.RESTORE))
+            assertTrue(a.pinConsentRevision("a".repeat(64),"synthetic",token))
+            assertFalse(a.pinConsentRevision("b".repeat(64),"synthetic",token))
+            assertEquals("a".repeat(64),MedicalAccountPreferences(ctx).consentRevision("synthetic",token))
+            a.add(listOf("synthetic"),MedicalAccountPreferences.ConsentQueue.WITHDRAWAL)
+            assertNull(a.consentRevision("synthetic",token))
+            assertFalse(a.pinConsentRevision("b".repeat(64),"synthetic",token))
+        } finally {ctx.clear()}
+    }
+    @Test fun latestIntentSupersedesOppositeInItsOwnScope() {
         val ctx = context()
         try {
             val a = MedicalAccountPreferences(ctx)
@@ -80,9 +94,33 @@ class MedicalAccountPreferencesTest {
             a.remove("same-code", ConsentQueue.WITHDRAWAL)
             assertTrue(a.pending(ConsentQueue.WITHDRAWAL).isEmpty())
             assertEquals(setOf("same-code"), a.pending(ConsentQueue.RESTORE))
-            assertEquals(setOf("same-code"), b.pending(ConsentQueue.WITHDRAWAL))
+            assertTrue(b.pending(ConsentQueue.WITHDRAWAL).isEmpty())
             assertEquals(setOf("same-code"), b.pending(ConsentQueue.RESTORE))
         } finally { ctx.clear() }
+    }
+    @Test fun oldAcknowledgementCannotClearNewIntent() {
+        val ctx=context()
+        try {
+            val a=MedicalAccountPreferences(ctx)
+            a.add(listOf("code"),ConsentQueue.RESTORE);val old=a.token("code",ConsentQueue.RESTORE)!!
+            a.add(listOf("code"),ConsentQueue.WITHDRAWAL);a.add(listOf("code"),ConsentQueue.RESTORE)
+            a.remove("code",ConsentQueue.RESTORE,old)
+            assertEquals(setOf("code"),a.pending(ConsentQueue.RESTORE))
+            assertNotEquals(old,a.token("code",ConsentQueue.RESTORE))
+            assertEquals(a.token("code",ConsentQueue.RESTORE),MedicalAccountPreferences(ctx).token("code",ConsentQueue.RESTORE))
+        } finally {ctx.clear()}
+    }
+    @Test fun ambiguousLegacyPairKeepsWithdrawalWithoutResurrectingRestore() {
+        val ctx=context()
+        try {
+            ctx.getSharedPreferences(MedicalDataScope.MMH.settingsName,Context.MODE_PRIVATE).edit()
+                .putStringSet("pending_withdrawals",setOf("legacy")).putStringSet("pending_restores",setOf("legacy")).commit()
+            val a=MedicalAccountPreferences(ctx)
+            assertEquals(setOf("legacy"),a.pending(ConsentQueue.WITHDRAWAL))
+            assertTrue(a.pending(ConsentQueue.RESTORE).isEmpty())
+            a.remove("legacy",ConsentQueue.WITHDRAWAL)
+            assertTrue(MedicalAccountPreferences(ctx).pending(ConsentQueue.RESTORE).isEmpty())
+        } finally {ctx.clear()}
     }
     @Test fun concurrentWritersDoNotLoseConsentCodes() {
         val ctx = context(); val pool = Executors.newFixedThreadPool(4)

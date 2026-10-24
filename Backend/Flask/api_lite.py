@@ -64,7 +64,7 @@ lite_bp = Blueprint("lite", __name__)
 def _fenced_privacy():
     if not has_request_context(): return None
     from lite_fenced_store import FencedPrivacy
-    privacy = current_app.extensions.get('lite_attest_http', {}).get('privacy')
+    privacy = getattr(g, 'lite_privacy', current_app.extensions.get('lite_attest_http', {}).get('privacy'))
     return privacy if isinstance(privacy, FencedPrivacy) else None
 
 
@@ -329,7 +329,7 @@ def _lite_segment_impl():
             return jsonify(error="raw_capture_requires_consent"), 403
         try:
             from lite_raw_depth_contract import validate, MAX_PIXELS
-            allowed = {"anon_id", "client", "research_consent", "consent_version", "raw_depth_metadata"}
+            allowed = {"anon_id", "client", "research_consent", "consent_version", "consent_epoch", "raw_depth_metadata"}
             if (set(request.form) - allowed or set(request.files) != {"image", "raw_depth"}
                     or any(len(request.form.getlist(k)) != 1 for k in request.form)
                     or any(len(request.files.getlist(k)) != 1 for k in request.files)):
@@ -664,7 +664,7 @@ def _lite_privacy_coordinator():
         return None  # Standalone local test harness; app.py always installs the gate.
     from lite_privacy_state import PrivacyState
     from lite_fenced_store import FencedPrivacy
-    coordinator = configuration.get('privacy')
+    coordinator = getattr(g, 'lite_privacy', configuration.get('privacy'))
     if not isinstance(coordinator, (PrivacyState, FencedPrivacy)):
         raise RuntimeError('Lite privacy state unavailable')
     return coordinator
@@ -840,7 +840,8 @@ def lite_annotation_revision():
 
 
 @lite_bp.route("/api/v1/lite/data/<anon_id>", methods=["DELETE"])
-def lite_delete(anon_id):
+@lite_bp.route("/api/v1/lite/data/<anon_id>/<consent_epoch>", methods=["DELETE"])
+def lite_delete(anon_id, consent_epoch=None):
     """撤回：刪掉這個裝置匿名代碼底下的全部資料。
 
     app.py 的前置閘門驗證裝置簽章、永久封鎖該owner的新寫入，

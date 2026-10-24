@@ -4,6 +4,24 @@ import SwiftUI
 
 final class LiteRevisionSyncTests: XCTestCase {
     @MainActor
+    func testRetiredEpochPreservesPendingRevisionAndNeverEnqueuesOrSends() async throws {
+        let (store, dir) = try setup(); defer { try? FileManager.default.removeItem(at: dir) }
+        for hasPending in [false, true] {
+            var r = store.records[0]
+            if hasPending {
+                let json = try XCTUnwrap(r.revisionJSON())
+                r.cloudSync?.pending = LitePendingRevision(revision: 6, payloadJSON: json)
+                r.cloudSync?.automaticRetryAt = .distantPast
+            }
+            XCTAssertTrue(store.update(r))
+            let before = try Data(contentsOf: dir.appendingPathComponent("records.json"))
+            await store.syncRevision(recordID: r.id, consent: { true }, bindingAllowed: { _ in false }) { _, _ in
+                XCTFail("Retired bindings must never upload even with renewed global consent")
+            }
+            XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("records.json")), before)
+        }
+    }
+    @MainActor
     func testCaptureClearsOnlyAfterSavedRecordAndDoesNotDeletePendingWork() async throws {
         let (store, dir) = try setup(); defer { try? FileManager.default.removeItem(at: dir) }
         let vm = LiteMeasureVM()

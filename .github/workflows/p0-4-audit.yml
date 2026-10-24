@@ -6,11 +6,16 @@ on:
     paths:
       - 'Backend/Flask/**'
       - 'Backend/AccessManager/**'
+      - 'Backend/LiteReview/**'
+      - 'engineering/phase2/test_lite_review_portal.py'
+      - 'tools/plan_lite_review_rollout.py'
+      - 'tools/build_lite_review_catalogue.py'
       - 'engineering/phase2/test_audit_chain.py'
       - 'engineering/phase2/test_audit_chain_concurrency.py'
       - 'engineering/phase2/test_mmh_unlocked_audit.py'
       - 'engineering/phase2/test_audit_chain_versioning.py'
       - 'engineering/phase2/test_admin_console.py'
+      - 'engineering/phase2/test_console_capabilities.py'
       - 'engineering/phase2/test_deployment_scripts_static.py'
       - 'engineering/phase2/check_locked_epoch_gate.py'
       - 'engineering/phase2/test_check_locked_epoch_gate.py'
@@ -96,6 +101,21 @@ on:
       - 'engineering/phase2/test_medical_revision_assets.py'
       - 'engineering/phase2/test_research_format_guards.py'
       - 'engineering/phase2/test_native_wound_mask.py'
+      - 'engineering/phase2/test_medical_consent_order.py'
+      - 'engineering/phase2/test_medical_consent_rollout.py'
+      - 'engineering/phase2/test_medical_consent_operations.py'
+      - 'engineering/phase2/medical_fake_gcs.py'
+      - 'engineering/phase2/test_medical_operations_plan.py'
+      - 'engineering/phase2/test_medical_gcs_smoke.py'
+      - 'engineering/phase2/test_medical_gcs_continue.py'
+      - 'engineering/phase2/medical_gcs_sdk_fixture.py'
+      - 'engineering/phase2/fixtures/consent_smoke_preserved_manifest_7df6037.json'
+      - 'tools/medical_consent_gcs_continue.py'
+      - 'tools/medical_consent_gcs_smoke.py'
+      - 'tools/medical_consent_smoke_scope.py'
+      - 'tools/plan_medical_consent_operations.py'
+      - 'tools/run_medical_consent_maintenance.py'
+      - 'engineering/contracts/medical-consent-operations-acceptance-v1.md'
       - 'engineering/phase2/test_medical_wound_profile.py'
       - 'engineering/contracts/**'
       - 'tools/generate_medical_wound_catalog.py'
@@ -153,11 +173,16 @@ on:
     paths:
       - 'Backend/Flask/**'
       - 'Backend/AccessManager/**'
+      - 'Backend/LiteReview/**'
+      - 'engineering/phase2/test_lite_review_portal.py'
+      - 'tools/plan_lite_review_rollout.py'
+      - 'tools/build_lite_review_catalogue.py'
       - 'engineering/phase2/test_audit_chain.py'
       - 'engineering/phase2/test_audit_chain_concurrency.py'
       - 'engineering/phase2/test_mmh_unlocked_audit.py'
       - 'engineering/phase2/test_audit_chain_versioning.py'
       - 'engineering/phase2/test_admin_console.py'
+      - 'engineering/phase2/test_console_capabilities.py'
       - 'engineering/phase2/test_deployment_scripts_static.py'
       - 'engineering/phase2/check_locked_epoch_gate.py'
       - 'engineering/phase2/test_check_locked_epoch_gate.py'
@@ -243,6 +268,21 @@ on:
       - 'engineering/phase2/test_medical_revision_assets.py'
       - 'engineering/phase2/test_research_format_guards.py'
       - 'engineering/phase2/test_native_wound_mask.py'
+      - 'engineering/phase2/test_medical_consent_order.py'
+      - 'engineering/phase2/test_medical_consent_rollout.py'
+      - 'engineering/phase2/test_medical_consent_operations.py'
+      - 'engineering/phase2/medical_fake_gcs.py'
+      - 'engineering/phase2/test_medical_operations_plan.py'
+      - 'engineering/phase2/test_medical_gcs_smoke.py'
+      - 'engineering/phase2/test_medical_gcs_continue.py'
+      - 'engineering/phase2/medical_gcs_sdk_fixture.py'
+      - 'engineering/phase2/fixtures/consent_smoke_preserved_manifest_7df6037.json'
+      - 'tools/medical_consent_gcs_continue.py'
+      - 'tools/medical_consent_gcs_smoke.py'
+      - 'tools/medical_consent_smoke_scope.py'
+      - 'tools/plan_medical_consent_operations.py'
+      - 'tools/run_medical_consent_maintenance.py'
+      - 'engineering/contracts/medical-consent-operations-acceptance-v1.md'
       - 'engineering/phase2/test_medical_wound_profile.py'
       - 'engineering/contracts/**'
       - 'tools/generate_medical_wound_catalog.py'
@@ -332,6 +372,7 @@ jobs:
           python -B engineering/phase2/test_audit_chain_concurrency.py
           python -B engineering/phase2/test_mmh_unlocked_audit.py
           python -B engineering/phase2/test_admin_console.py
+          python -B -m unittest discover -s engineering/phase2 -p test_console_capabilities.py
           python -B engineering/phase2/test_deployment_scripts_static.py
           python -B engineering/phase2/test_deployment_input_gate.py
           python -B engineering/phase2/test_check_locked_epoch_gate.py
@@ -387,6 +428,8 @@ jobs:
           python -B engineering/phase2/test_lite_fenced_objects.py
           python -B engineering/phase2/test_lite_fenced_manifest.py
           python -B engineering/phase2/test_lite_fenced_http.py
+          python -B engineering/phase2/test_lite_reconsent.py
+          python -B engineering/phase2/test_lite_review_portal.py
           python -B tools/test_lite_rgbd_preflight.py
           python -B tools/test_provision_mmh_foundation.py
           python -B tools/test_restrict_mmh_bucket_iam.py
@@ -414,6 +457,12 @@ jobs:
           python -B engineering/phase2/test_medical_revision_assets.py
           python -B engineering/phase2/test_research_format_guards.py
           python -B engineering/phase2/test_native_wound_mask.py
+          python -B -m unittest discover -s engineering/phase2 -p test_medical_consent_order.py
+          python -B -m unittest discover -s engineering/phase2 -p test_medical_consent_rollout.py
+          python -B -m unittest discover -s engineering/phase2 -p test_medical_consent_operations.py
+          python -B -m unittest discover -s engineering/phase2 -p test_medical_operations_plan.py
+          python -B -m unittest discover -s engineering/phase2 -p test_medical_gcs_smoke.py
+          python -B -m unittest discover -s engineering/phase2 -p test_medical_gcs_continue.py
           python -B engineering/phase2/test_medical_wound_profile.py
           python -B engineering/phase2/test_review_service_profile.py
           python -B engineering/phase2/test_medical_depth_geometry.py

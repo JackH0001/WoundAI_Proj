@@ -71,6 +71,8 @@ final class LiteMeasureVM: ObservableObject {
     /// 拍照回來：正規化（背景）→ 依同意分流輪廓來源。
     /// - Returns: true＝已有輪廓；false＝需要開手動圈選。
     func ingest(_ raw: UIImage, depth d: DepthCapture?) async -> Bool {
+        let researchScope = try? LiteCaptureResearchScope.capture(server: AppSettings.backendURL(),
+            consent: LitePrefs.researchConsent == true)
         gen += 1
         busy = true
         busyHint = "影像處理中…"
@@ -125,9 +127,9 @@ final class LiteMeasureVM: ObservableObject {
                 }
             }
         }
-        if LitePrefs.researchConsent == true {
+        if let researchScope, researchScope.permits(server: AppSettings.backendURL(), consent: LitePrefs.researchConsent == true) {
             busyHint = "雲端辨識中…（約數秒）"
-            switch await liteCloudSegment(work, depth: dd) {
+            switch await liteCloudSegment(work, depth: dd, researchScope: researchScope) {
             case .ok(let cloud, let stored, let route, let raw, let receipt):
                 cloudHadPolys = !cloud.isEmpty
                 // Debug 組建把路由與輪廓數直接掛在畫面上：route 說出後端走哪條路、
@@ -249,7 +251,7 @@ final class LiteMeasureVM: ObservableObject {
      必要資訊時保留舊 PNG 路徑，但不宣稱原始深度或感測器信心值已保存。
      編碼是 MB 級工作，照例移出主執行緒。
      */
-    private func liteCloudSegment(_ work: UIImage, depth d: DepthCapture?) async -> LiteCloudOutcome {
+    private func liteCloudSegment(_ work: UIImage, depth d: DepthCapture?, researchScope: LiteCaptureResearchScope) async -> LiteCloudOutcome {
         guard let jpeg = captureJPEG else { return .hardFail }
         let payload: (jpeg: Data, dep: String?, conf: String?, k: [String: Double]?, raw: LiteRawDepthPacket?)? =
             await Task.detached(priority: .userInitiated) {
@@ -265,16 +267,23 @@ final class LiteMeasureVM: ObservableObject {
                         DepthAreaEstimator.intrinsicsForUpload(d), nil)
             }.value
         guard let payload else { return .hardFail }
-        let server = AppSettings.backendURL()
-        let c = BackendClient(baseUrl: server)
+        let server = researchScope.origin
+        let c = BackendClient(baseUrl: server, liteTransport: LiteSignedCloudTransport(baseURL: server, scopeGuard: {
+            await MainActor.run {
+                researchScope.permits(server: AppSettings.backendURL(), consent: LitePrefs.researchConsent == true)
+            }
+        }))
         do {
             let anonId = try await c.liteInstallation()
+            let researchEpoch = try LiteWithdrawalJournal.standard.epoch(server: server, owner: anonId)
+            guard researchEpoch == researchScope.epoch else { return .softFail("研究同意已變更，此張保留在手機，請手動圈選。") }
             let r = try await c.liteSegment(jpeg: payload.jpeg,
                                             anonId: anonId,
                                             consentVersion: LitePrefs.consentVersion,
                                             depthMapPngBase64: payload.dep,
                                             depthConfPngBase64: payload.conf,
-                                            cameraIntrinsics: payload.k, rawCapture: payload.raw)
+                                            cameraIntrinsics: payload.k, rawCapture: payload.raw,
+                                            researchEpoch: researchEpoch)
             LiteUsageState.shared.record(r.quota, server: server, anonId: anonId)
             if let m = r.userMessage { return .softFail(m) }
             guard acceptsCloudGeometry(r) else {
@@ -284,7 +293,8 @@ final class LiteMeasureVM: ObservableObject {
             if r.stored, let imageID = r.imageId, !imageID.isEmpty,
                r.imageW == work.cgImage?.width, r.imageH == work.cgImage?.height {
                 cloudBinding = LiteCloudBinding(server: server, anonID: anonId, imageID: imageID,
-                    imageW: r.imageW > 0 ? r.imageW : imageW, imageH: r.imageH > 0 ? r.imageH : imageH, storageReceipt: r.storageReceipt)
+                    imageW: r.imageW > 0 ? r.imageW : imageW, imageH: r.imageH > 0 ? r.imageH : imageH,
+                    storageReceipt: r.storageReceipt, researchEpoch: researchEpoch)
             }
             // Keep the original JPEG/depth coordinate binding unchanged.
             return .ok(r.polygons, stored: r.stored, route: r.route, raw: r.rawPolyCount, receipt: r.storageReceipt)
