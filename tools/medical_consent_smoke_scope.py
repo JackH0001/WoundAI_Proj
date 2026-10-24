@@ -14,6 +14,7 @@ REGION = 'ASIA-EAST1'
 MEDIA = 'woundai-consent-smoke-20261023-media-' + PROJECT_NUMBER
 AUDIT = 'woundai-consent-smoke-20261023-audit-' + PROJECT_NUMBER
 PREFIX = 'consent-ops-synthetic/20261023'
+CONTINUATION_PREFIX = 'consent-ops-synthetic/20261024-r2'
 EXECUTOR = 'woundai-consent-smoke@' + PROJECT + '.iam.gserviceaccount.com'
 BUCKETS = (MEDIA, AUDIT)
 BASE_PERMISSIONS = frozenset({'storage.buckets.get', 'storage.buckets.getIamPolicy',

@@ -14,7 +14,11 @@ FILES = (
     'engineering/phase2/test_medical_consent_operations.py', 'engineering/phase2/medical_fake_gcs.py',
     'tools/plan_medical_consent_operations.py',
     'tools/medical_consent_gcs_smoke.py', 'tools/medical_consent_smoke_scope.py',
+    'tools/medical_consent_gcs_continue.py',
     'engineering/phase2/test_medical_gcs_smoke.py',
+    'engineering/phase2/test_medical_gcs_continue.py',
+    'engineering/phase2/medical_gcs_sdk_fixture.py',
+    'engineering/phase2/fixtures/consent_smoke_preserved_manifest_7df6037.json',
     'engineering/contracts/medical-consent-operations-acceptance-v1.md',
     'engineering/contracts/medical-consent-gcs-smoke-v1.md',
 )

@@ -135,3 +135,33 @@ References: [GCS preconditions](https://docs.cloud.google.com/storage/docs/reque
 [uniform bucket-level access](https://docs.cloud.google.com/storage/docs/uniform-bucket-level-access),
 [bucket permission probes](https://docs.cloud.google.com/storage/docs/json_api/v1/buckets/testIamPermissions),
 [Cloud Run Job scheduling with OAuth](https://docs.cloud.google.com/run/docs/execute/jobs-on-schedule).
+
+
+## Preserving continuation (2026-10-24; separate authorization required)
+
+The original first-run command still requires empty buckets. The separate
+`tools/medical_consent_gcs_continue.py` entry point reuses the two dedicated
+synthetic buckets. It inventories live/noncurrent and soft versions, requires
+exactly the stopped run's 2 expected objects (old manifest claim and 21-byte
+synthetic image), pins their current generations and verifies size/SHA-256 with
+two clients before any write. Unknown/missing/extra/changed objects stop the run.
+The expected old manifest is a checked-in synthetic fixture, not patient data.
+Cloud generations have NOT yet been read back after the stopped run.
+
+All new writes and generation-pinned media deletes use the distinct fixed prefix
+`consent-ops-synthetic/20261024-r2/`. The writable adapter cannot address the old
+prefix; no audit deletion is admitted. A create-only claim protects the new
+namespace against competing runs. The original bytes/generations are checked
+again after success or failure when budgets/credentials permit. Any failed final
+readback is reported as unverified, never preservation success.
+
+Limits remain 20 minutes, 1,000 attempted mutations including deletes, 16 MiB
+attempted upload bytes, 20,000 SDK calls/pages. These counters are not billing
+HTTP counts. Existing 7-day soft deletion remains unchanged and does not imply
+permanent erasure. No resource creation, bucket IAM/policy change, scheduler,
+production service or store update is part of the runner.
+
+Tests use real google-cloud-storage clients with an in-memory HTTP transport
+(GET metadata/IAM/list/download, multipart create-only upload, pinned delete),
+including real page iteration, checksums and exception translation. This tests
+SDK integration offline; it does not establish live GCS behavior.

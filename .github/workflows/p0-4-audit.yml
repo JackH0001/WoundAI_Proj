@@ -103,6 +103,10 @@ on:
       - 'engineering/phase2/medical_fake_gcs.py'
       - 'engineering/phase2/test_medical_operations_plan.py'
       - 'engineering/phase2/test_medical_gcs_smoke.py'
+      - 'engineering/phase2/test_medical_gcs_continue.py'
+      - 'engineering/phase2/medical_gcs_sdk_fixture.py'
+      - 'engineering/phase2/fixtures/consent_smoke_preserved_manifest_7df6037.json'
+      - 'tools/medical_consent_gcs_continue.py'
       - 'tools/medical_consent_gcs_smoke.py'
       - 'tools/medical_consent_smoke_scope.py'
       - 'tools/plan_medical_consent_operations.py'
@@ -262,6 +266,10 @@ on:
       - 'engineering/phase2/medical_fake_gcs.py'
       - 'engineering/phase2/test_medical_operations_plan.py'
       - 'engineering/phase2/test_medical_gcs_smoke.py'
+      - 'engineering/phase2/test_medical_gcs_continue.py'
+      - 'engineering/phase2/medical_gcs_sdk_fixture.py'
+      - 'engineering/phase2/fixtures/consent_smoke_preserved_manifest_7df6037.json'
+      - 'tools/medical_consent_gcs_continue.py'
       - 'tools/medical_consent_gcs_smoke.py'
       - 'tools/medical_consent_smoke_scope.py'
       - 'tools/plan_medical_consent_operations.py'
@@ -445,6 +453,7 @@ jobs:
           python -B -m unittest discover -s engineering/phase2 -p test_medical_consent_operations.py
           python -B -m unittest discover -s engineering/phase2 -p test_medical_operations_plan.py
           python -B -m unittest discover -s engineering/phase2 -p test_medical_gcs_smoke.py
+          python -B -m unittest discover -s engineering/phase2 -p test_medical_gcs_continue.py
           python -B engineering/phase2/test_medical_wound_profile.py
           python -B engineering/phase2/test_review_service_profile.py
           python -B engineering/phase2/test_medical_depth_geometry.py

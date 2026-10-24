@@ -73,8 +73,18 @@ class Blob:
         with self.bucket.client.lock:
             try: self._key(); return True
             except NotFound: return False
+    def reload(self, if_generation_match=None, **kw):
+        with self.bucket.client.lock:
+            key = self._key()
+            if if_generation_match is not None and key[2] != if_generation_match:
+                raise PreconditionFailed('offline read generation changed')
+            self.generation = key[2]
     def download_as_bytes(self, **kw):
-        with self.bucket.client.lock: return self.bucket.client.rows[self._key()]['data']
+        with self.bucket.client.lock:
+            key = self._key()
+            if kw.get('if_generation_match') is not None and key[2] != kw['if_generation_match']:
+                raise PreconditionFailed('offline download generation changed')
+            return self.bucket.client.rows[key]['data']
     def upload_from_string(self, data, content_type=None, if_generation_match=None, **kw):
         c = self.bucket.client
         if c.before_upload: c.before_upload(self, data, if_generation_match)
