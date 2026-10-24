@@ -302,6 +302,31 @@ class Authentication(unittest.TestCase):
         self.assertEqual(client.get('/?source=all&source=synthetic',headers=headers).status_code,400)
 
 class RuntimeBoundary(unittest.TestCase):
+    def runtime_config(self,url,roles):
+        import tempfile
+        from Backend.LiteReview.runtime import config
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'config.json'
+            path.write_text(json.dumps(dict(roles=roles,reader_url=url,portal_subject='123',
+                catalogue_path='/private/catalogue',catalogue_sha256='a'*64,cursor_key_path='/private/cursor')))
+            response=Mock(status_code=200,text=PORTAL_SA)
+            with patch.dict('os.environ',{'K_SERVICE':'woundai-lite-review','GOOGLE_CLOUD_PROJECT':'woundai-jackh001',
+                    'LITE_REVIEW_CONFIG':str(path)},clear=True),patch('Backend.LiteReview.runtime.requests.Session') as session:
+                session.return_value.get.return_value=response
+                return config('portal')[0]
+    def test_real_project_legacy_and_number_region_reader_urls_are_accepted(self):
+        for url in READER_URLS:
+            with self.subTest(url=url):self.assertEqual(self.runtime_config(url,{SUB:list(CAPS)})['reader_url'],url)
+    def test_bootstrap_url_requires_empty_roles(self):
+        self.assertEqual(self.runtime_config(BOOTSTRAP_READER_URL,{})['roles'],{})
+        with self.assertRaises(ReviewError):self.runtime_config(BOOTSTRAP_READER_URL,{SUB:list(CAPS)})
+    def test_foreign_project_region_service_and_lookalike_urls_rejected(self):
+        for url in ('https://woundai-lite-review-reader-999.asia-east1.run.app',
+            'https://woundai-lite-review-reader-421209514056.us-central1.run.app',
+            'https://woundai-lite-review-reader-z4kgfkob4a-de.a.run.app.evil.test',
+            'https://woundai-mmh-review-demo-z4kgfkob4a-de.a.run.app',
+            'http://woundai-lite-review-reader-z4kgfkob4a-de.a.run.app'):
+            with self.subTest(url=url),self.assertRaises(ReviewError):self.runtime_config(url,{})
     def test_portal_preserves_signed_token_separate_from_platform_header(self):
         from Backend.LiteReview.runtime import Backend
         from unittest.mock import MagicMock

@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 import requests
 from .auth import IapVerifier,ReaderIdentity
-from .contracts import MEDIA,STATE,AUDIT,PORTAL_SA,Catalogue,ReviewError,require,decode
+from .contracts import MEDIA,STATE,AUDIT,PORTAL_SA,READER_URLS,BOOTSTRAP_READER_URL,Catalogue,ReviewError,require,decode
 from .web import portal_app,reader_app
 
 def config(role):
@@ -21,7 +21,8 @@ def config(role):
     require(path.stat().st_size<=65536)
     value=decode(path.read_bytes())
     require(set(value)=={'roles','reader_url','portal_subject','catalogue_path','catalogue_sha256','cursor_key_path'})
-    require(re.fullmatch(r'https://woundai-lite-review-reader-[a-z0-9-]+\.run\.app',value['reader_url']) is not None)
+    require(value['reader_url'] in READER_URLS or
+        (value['reader_url']==BOOTSTRAP_READER_URL and value['roles']=={}), 'review_reader_url_unverified')
     return value,http
 
 class Backend:

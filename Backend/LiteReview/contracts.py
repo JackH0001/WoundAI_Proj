@@ -9,6 +9,13 @@ STATE = 'woundai-lite-security-421209514056'
 AUDIT = 'woundai-lite-review-audit-421209514056'
 IAP_AUDIENCE = '/projects/421209514056/locations/asia-east1/services/woundai-lite-review'
 PORTAL_SA = 'woundai-lite-review@woundai-jackh001.iam.gserviceaccount.com'
+# This runtime is deliberately bound to one project and region. The final
+# deployment must still compare its status.url with the mounted configuration.
+READER_URLS = frozenset({
+    'https://woundai-lite-review-reader-z4kgfkob4a-de.a.run.app',
+    'https://woundai-lite-review-reader-421209514056.asia-east1.run.app',
+})
+BOOTSTRAP_READER_URL = 'https://woundai-lite-review-reader-bootstrap.run.app'
 CAPS = frozenset({'lite.review.metadata', 'lite.review.media'})
 
 class ReviewError(Exception):

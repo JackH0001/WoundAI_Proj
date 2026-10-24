@@ -14,6 +14,14 @@ role definitions remain startup errors. Both portal and reader independently
 reject access before reader calls, source reads or access audit. Two new tests
 exercise a valid ES256 assertion at both hops and malformed configuration.
 
+Deployment preparation also caught a runtime URL mismatch: the old regex rejected
+the project’s observed `-z4kgfkob4a-de.a.run.app` form. Runtime now accepts only
+the dedicated reader’s exact project legacy URL and project-number/asia-east1
+URL. A reserved bootstrap URL is accepted only with an empty role map. Three
+additional tests cover both real formats, closed bootstrap and rejection of
+foreign project/region/service/lookalike URLs. Final URL still requires Cloud Run
+status readback; a URL string alone is not provenance.
+
 The application source and the separately hashed deployment packet must both be
 pinned. Cloud Build may not substitute a branch head. Its source tar contains
 only committed `Backend/LiteReview` files; no medical app, model, credentials,
@@ -132,7 +140,7 @@ that result as acceptance of the new portal or formal deletion jobs.
 
 ## Claude replay and official references
 
-Run `python -B engineering/phase2/test_lite_review_portal.py` (37 tests).
+Run `python -B engineering/phase2/test_lite_review_portal.py` (40 tests).
 The deployment packet contains a fixed source manifest, baseline summary,
 permission matrix, executable-free approval plan, local checks, CI links and
 checksums. No bearer tokens, real catalogue, research media, key files or OAuth
