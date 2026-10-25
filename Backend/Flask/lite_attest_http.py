@@ -64,7 +64,7 @@ def _json(raw):
         raise AdmissionRejected('invalid JSON') from exc
 
 
-def install_lite_attest(app, *, service=None, budget=None, privacy=None):
+def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerce=None):
     if 'lite_attest_http' in app.extensions:
         raise ValueError('Lite security gate already installed')
     if service is not None and not isinstance(service, RegistrationService):
@@ -73,7 +73,12 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
         raise ValueError('durable request budget required')
     if privacy is not None and not isinstance(privacy, (PrivacyState, FencedPrivacy)):
         raise ValueError('durable privacy coordinator required')
-    app.extensions['lite_attest_http'] = dict(service=service, budget=budget, privacy=privacy)
+    from lite_service_operations import ServiceOperations
+    from lite_service_http import SERVICE_PATHS, blueprint as commerce_blueprint
+    if commerce is not None and not isinstance(commerce, ServiceOperations):
+        raise ValueError('trusted service operations required')
+    app.extensions['lite_attest_http'] = dict(service=service, budget=budget, privacy=privacy, commerce=commerce)
+    if commerce is not None:app.register_blueprint(commerce_blueprint(commerce))
     bp = Blueprint('lite_attest_http', __name__)
 
     @app.before_request
@@ -99,7 +104,9 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
                     request.headers.get('Content-Encoding', 'identity') != 'identity'):
                 raise AdmissionRejected('noncanonical request target or encoding')
             control = request.path in (CHALLENGE_PATH, REGISTER_PATH)
-            if not ((request.method == 'POST' and (control or request.path in POST_PATHS)) or
+            service_only = (request.path in SERVICE_PATHS and configuration['commerce'] is not None
+                            and request.endpoint in {'lite_service_http.prepare','lite_service_http.run','lite_service_http.status'})
+            if not ((request.method == 'POST' and (control or request.path in POST_PATHS or service_only)) or
                     (request.method == 'DELETE' and re.fullmatch(PREFIX+r'data/[A-Za-z0-9_-]{1,128}(?:/[0-9a-f]{32})?', request.path))):
                 return jsonify(error='lite_route_not_supported'), 404
             # A bounded 4 KiB challenge body selects the privacy lane. Media
@@ -115,7 +122,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
                 g.lite_attest_control = data
                 return None
             budget.reserve(scope='withdraw' if request.method == 'DELETE' else 'general')
-            limit = 0 if request.method == 'DELETE' else 4096 if request.path == REJOIN_PATH else 96*1024 if request.path == REGISTER_PATH else MAX_BODY
+            limit = 0 if request.method == 'DELETE' else 4096 if request.path == REJOIN_PATH or (service_only and not request.path.endswith('/run')) else 96*1024 if request.path == REGISTER_PATH else MAX_BODY
             raw = _body(limit)
             if control:
                 g.lite_attest_control = _json(raw)
@@ -129,7 +136,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
                 # client_data also binds the DELETE path to this installation.
                 parts = request.path.removeprefix(PREFIX+'data/').split('/')
                 owner, requested_epoch = parts[0], parts[1] if len(parts) == 2 else 'legacy'
-            elif request.path == PREFIX+'segment':
+            elif request.path == PREFIX+'segment' or (service_only and request.path.endswith('/run')):
                 if request.mimetype != 'multipart/form-data':
                     raise AdmissionRejected('multipart required')
                 owners = request.form.getlist('anon_id')
@@ -146,6 +153,11 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
             if owner != admitted.installation:
                 return jsonify(error='lite_owner_mismatch'), 403
             g.lite_admission = admitted
+            if service_only:
+                # Explicitly registered, authenticated service work has no research
+                # writer ticket and cannot reach research media through this route.
+                # The service account/usage coordinator separately authorizes work.
+                return None
             if request.path == REJOIN_PATH:
                 if not isinstance(privacy, FencedPrivacy): raise ReconsentRejected('renewal unavailable')
                 return jsonify(Reconsent(privacy).resume(owner, data))

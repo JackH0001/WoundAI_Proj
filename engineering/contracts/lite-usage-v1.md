@@ -1,6 +1,8 @@
 # Lite usage reservation and subscription verification v1
 
-Status: isolated backend core, **not connected to public HTTP or deployed**.
+Status at 2026-10-26: core connected to opt-in signed service-only HTTP via
+`install_lite_attest(commerce=...)`, **not enabled by application startup or deployed**.
+See `lite-service-operations-v1.md` for the new coordinator and current limits.
 The existing `api_lite` JSONL check/append implementation and its default five
 successful recognitions have not been replaced. The parallel race in that route
 remains a rollout blocker. No real payment, ad delivery or Apple Sandbox purchase
@@ -47,8 +49,9 @@ has been tested by this change.
 
 Transport retries may require fresh App Attest challenges and counters. Those
 fresh security tokens must not create a new logical operation or resend raw RGB-D
-when already retained by the service. This client/server protocol is specified,
-not yet wired to the existing app or endpoints.
+when already retained by the service. The coordinator/HTTP path is implemented
+and tested locally; native clients and the existing segment endpoint have not
+switched to this protocol.
 
 ## State and failure behavior
 

@@ -36,6 +36,10 @@ jobs:
         run: |
           python -m unittest -v test_lite_usage_ledger test_lite_subscription_authority test_lite_usage_probe > evidence/commerce-core-tests.log 2>&1
           python tools/lite_usage_probe.py --output evidence/atomic-usage-probe.json
+      - name: Opt-in authenticated service-only coordinator and real loopback
+        run: |
+          python -m unittest -v test_lite_service_http test_lite_service_loopback > evidence/service-flow-tests.log 2>&1
+          python tools/lite_service_flow_probe.py --output evidence/service-flow-probe.json
       - name: Review entry, isolation, migration and containment rehearsal
         run: >-
           python -m unittest -v test_lite_review_portal test_lite_review_human
@@ -60,7 +64,8 @@ jobs:
               f.write('Production parallel quota gate: ' + str(r['parallel_quota_gate']) + '\n\n')
               f.write('Passing characterization tests do NOT authorize launch, billing or deployment. ')
               f.write('The current check/append HTTP quota race is an expected, recorded launch blocker. ')
-              f.write('A new isolated CAS ledger and Apple status adapter are tested here, but are not wired into HTTP. ')
+              f.write('The CAS ledger now has opt-in authenticated service-only HTTP tests. ')
+              f.write('Application startup does not enable these routes; cloud/native cutover is still pending. ')
               f.write('No IAP login, cloud load, live GCS cleanup, real payment or ads were tested.\n')
           PY
       - uses: actions/upload-artifact@v4
