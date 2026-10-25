@@ -197,7 +197,7 @@ class ServiceHTTPTests(unittest.TestCase):
         self.assertEqual(self.run_request(raw=b'other').status_code,409);self.assertEqual(self.model_calls,0)
 
     def test_unknown_operation_and_missing_baseline_never_create_zero_balance(self):
-        self.assertEqual(self.json_request('status').status_code,409)
+        self.assertEqual(self.json_request('status').status_code,404)
         self.e.now=(self.e.now//86400+1)*86400+1
         self.assertEqual(self.json_request('prepare').status_code,503)
         self.assertIsNone(self.ops.load(self.subject,f'{1:032x}'))

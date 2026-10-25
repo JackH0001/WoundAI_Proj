@@ -4,6 +4,9 @@ Status 2026-10-26: opt-in backend implementation, synthetic signed HTTP and
 localhost tests only. Application startup does **not** pass `commerce`, so these
 routes remain absent in the shipped configuration. No deployment, native client
 cutover, real Apple purchase, ads, identity migration or cleanup occurred.
+An opt-in native journal/client is now implemented and tested in the iOS target;
+the shipping measurement UI still does not instantiate or call it. See
+`lite-native-service-v1.md` for native retry and data-preservation rules.
 
 ## Purpose and trusted boundary
 
@@ -46,12 +49,18 @@ dimensions, bounded polygons, route and the existing model result convention;
 the field named `confidence` preserves the existing mask-occupancy convention,
 not a calibrated probability or an accuracy claim. It is not a clinical quality
 gate. No surface/volume accuracy is inferred from service completion.
+Completed replies also carry `result_json`, the exact canonical UTF-8 JSON text
+whose SHA-256 is the receipt's result hash. The client checks those original
+bytes and equality to the decoded `result`; it does not reserialize floating
+point coordinates to try to reproduce a Python digest.
 
 - Pending returns 202 / Retry-After 5. Unknown persistence or execution returns
   503 with `retry_action=status`; do not silently make another operation.
 - Quota/capacity returns 429. Quota reservations count toward free 2 or Plus
   total 10 daily successes; attempts retain their separate 30/day bound.
 - Invalid/ambiguous input or changed image/model returns 409; no replacement.
+- Unknown operation returns 404 / `lite_operation_unknown`. A native client may
+  repeat prepare with the same ID/hash only if it has no pinned request receipt.
 - Rejected preflight image returns 422; no model, unstarted success reservation
   cancelled, attempt and cancellation receipt retained.
 - Expired result read window returns 410 and `keep_local=true`; do not rerun.

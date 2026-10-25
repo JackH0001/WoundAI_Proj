@@ -38,7 +38,7 @@ jobs:
           python tools/lite_usage_probe.py --output evidence/atomic-usage-probe.json
       - name: Opt-in authenticated service-only coordinator and real loopback
         run: |
-          python -m unittest -v test_lite_service_http test_lite_service_loopback > evidence/service-flow-tests.log 2>&1
+          python -m unittest -v test_lite_service_http test_lite_service_loopback test_lite_native_service_contract > evidence/service-flow-tests.log 2>&1
           python tools/lite_service_flow_probe.py --output evidence/service-flow-probe.json
       - name: Review entry, isolation, migration and containment rehearsal
         run: >-

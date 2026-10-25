@@ -6,6 +6,7 @@ registration, migration/reset, cloud client, or cleanup is provided here.
 """
 import hashlib
 import io
+import json
 import math
 import secrets
 import time
@@ -18,6 +19,7 @@ RESULT_TTL=86400
 
 
 class OperationExpired(UsageConflict): pass
+class OperationUnknown(UsageConflict): pass
 class ImageRejected(UsageConflict): pass
 
 
@@ -166,7 +168,7 @@ class ServiceOperations:
 
     def _require(self,subject,operation):
         row=self.load(subject,operation)
-        if row is None:raise UsageConflict('unknown operation')
+        if row is None:raise OperationUnknown('unknown operation')
         if self.now()>=row[1]['expires']:raise OperationExpired('result read window expired; do not silently rerun')
         return row
 
@@ -203,6 +205,7 @@ class ServiceOperations:
             raise StateUnavailable('result receipt mismatch')
         state={'reserved':'ready','running':'pending','succeeded':'completed','empty':'completed','cancelled':'cancelled'}[receipt['outcome']]
         return dict(state=state,operation=operation,day=v['day'],receipt=receipt,result=v['result'],
+                    result_json=None if v['result'] is None else json.dumps(v['result'],sort_keys=True,separators=(',', ':'),allow_nan=False),
                     retry_action='run' if state=='ready' else 'status' if state=='pending' else 'none',
                     research_stored=False,service_result_stored=v['result'] is not None,result_expires=v['expires'])
 
