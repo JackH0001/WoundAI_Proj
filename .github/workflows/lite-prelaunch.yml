@@ -1,0 +1,64 @@
+name: Lite prelaunch simulation (manual, no deployment)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: tools:engineering/phase2:Backend/Flask:.
+      WOUNDAI_STORE: local
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies (no model runtime or credentials)
+        run: >-
+          python -m pip install Flask==3.1.3 numpy==2.4.6 Pillow==12.3.0
+          opencv-contrib-python-headless==5.0.0.93 google-cloud-storage==3.13.1
+          PyJWT==2.14.0 cryptography==50.0.1 cbor2==6.1.5 asn1crypto==1.5.1
+          requests==2.34.2 flask-jwt-extended==4.7.4
+      - name: Cost arithmetic and inner-route concurrency characterization
+        run: |
+          mkdir evidence
+          python -m pip freeze > evidence/python-packages.txt
+          python -m unittest -v test_lite_prelaunch_economics test_lite_prelaunch_quota_probe > evidence/new-tests.log 2>&1
+          python tools/lite_prelaunch_economics.py --output evidence/economics.json
+          python tools/lite_prelaunch_quota_probe.py --output evidence/quota-probe.json
+      - name: Review entry, isolation, migration and containment rehearsal
+        run: >-
+          python -m unittest -v test_lite_review_portal test_lite_review_human
+          test_lite_review_executor test_plan_lite_review_human test_medical_consent_operations
+          > evidence/review-operations-tests.log 2>&1
+      - name: Synthetic verified uploads, revision, reconsent and loopback
+        run: >-
+          python -m unittest -v test_lite_quota test_lite_reconsent
+          test_lite_attest_registration test_lite_attest_receipt test_lite_attest_state
+          test_lite_attest_request test_lite_attest_assertion test_lite_attest_enrollment
+          test_lite_attest_http test_lite_fenced_manifest test_lite_fenced_objects
+          test_lite_fenced_http test_lite_raw_depth_contract test_lite_raw_depth_store
+          test_lite_raw_depth_http test_lite_revision test_lite_http_lifecycle
+          > evidence/app-backend-tests.log 2>&1
+      - name: Publish readiness separately from test correctness
+        run: |
+          python - <<'PY'
+          import json, os
+          r = json.load(open('evidence/quota-probe.json'))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('## Offline evidence only\n\n')
+              f.write('Production parallel quota gate: ' + str(r['parallel_quota_gate']) + '\n\n')
+              f.write('Passing characterization tests do NOT authorize launch, billing or deployment. ')
+              f.write('The current check/append quota race is an expected, recorded launch blocker. ')
+              f.write('No IAP login, cloud load, live GCS cleanup, real payment or ads were tested.\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lite-prelaunch-offline-evidence
+          path: evidence/
