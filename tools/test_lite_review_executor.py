@@ -37,9 +37,16 @@ class Fake:
     def close(self, step):
         self.calls.append(('close', step))
         if step == self.close_fail: raise TimeoutError()
+        reversal={'revoke_owner':'owner_grant','restore_portal_traffic':'portal_revision',
+            'restore_reader_traffic':'reader_revision','revoke_iap_agent':'iap_agent',
+            'restore_iap_settings':'oauth_binding','restore_iap_enabled':'iap_enable',
+            'revoke_audit_writer':'audit_writer','revoke_audit_readback':'audit_readback'}
+        self.applied.discard(reversal[step])
         return 'confirmed'
     def verify_closed(self):
-        self.calls.append(('verify_closed', None)); return self.closed_ok
+        self.calls.append(('verify_closed', None))
+        return self.closed_ok and not (self.applied & {'owner_grant','portal_revision','reader_revision',
+            'iap_agent','oauth_binding','iap_enable','audit_writer','audit_readback'})
     def verify_owner(self):
         self.calls.append(('owner', None)); return self.owner_ok
 
@@ -75,6 +82,10 @@ class Rehearsal(unittest.TestCase):
                         self.assertEqual([s for c,s in f.calls if c=='apply'].count(step),1)
                         self.assertEqual([s for c,s in f.calls if c=='close'],list(CLOSE))
                         self.assertEqual(r.journal.events[-1]['event'],'closed')
+                        self.assertTrue(f.verify_closed())
+                        expected_created=set(STEPS[:STEPS.index(step)+(1 if lost else 0)])
+                        expected_created={x for x in expected_created if 'version' in x or x.startswith('create_')}
+                        self.assertEqual(f.retained,expected_created)
                         self.assertNotIn('SECRET',r.journal.path.read_text())
                         self.assertEqual(r.journal.path.stat().st_mode&0o777,0o600)
                     finally:os.close(r.journal.lock)
