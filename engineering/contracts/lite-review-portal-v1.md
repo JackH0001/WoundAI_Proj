@@ -1,10 +1,12 @@
 # Independent WoundAILite review portal — design v1, 2026-10-23
 
-Status (2026-10-24): standalone read-only candidate implemented in
-`Backend/LiteReview`; local synthetic acceptance, still no portal deployed. No new
-service, bucket, IAM grant, OAuth client or background task has been created.
-This does not authorize cloud costs, changing existing services, deleting media
-or releasing an App. The existing Lite candidate App Attest perimeter remains.
+Status (2026-10-25): the two standalone services in `Backend/LiteReview` completed
+phase A closed negative-access acceptance. Roles/catalogue remain empty and both
+identities have no source-storage access. Human IAP login and positive cloud data
+review are not yet accepted. See `docs/claude_lite_review_human_20261025.md` for the
+A7 evidence and planned B1 empty-login/B2 synthetic-data split. This document
+does not authorize further cloud mutations, deleting media or releasing an App.
+The existing Lite candidate App Attest perimeter remains unchanged.
 
 ## First release and visible workflow
 
@@ -94,12 +96,13 @@ Reader IAM: media `storage.objects.get` only; security `storage.objects.get`
 only (no LIST); review audit `storage.objects.create` only. No writes/deletes on
 source buckets, no bucket administration, no MMH/Demo read permissions or keys.
 Application adapters expose only read methods and only derived state keys.
-Because security objects share hashed names in one namespace, IAM cannot encode
-which hash represents a fence versus App Attest state. The reader's GCS GET
-privilege is broader than its API capability. This residual boundary must be
-reviewed and negative-tested; do not claim state-kind isolation at the IAM layer.
-If that scope is unacceptable, separate consent read-state into a purpose-specific
-store with a migration plan; never grant the browser-facing SA access instead.
+Because security objects share hashed names in one namespace, do not grant GET
+over that whole prefix. The proposed B2 grant must enumerate only the reviewed
+fixture's exact derived fence/pointer/audit object names; runtime still validates
+each object's content. An exact-name grant does not certify the contents or
+permit discovery of other owners. Catalogue changes that require additional keys
+need another scoped review; never broaden to App Attest state or grant the
+browser-facing SA storage access. Phase A and proposed B1 grant no source GET.
 
 ## Correctness and withdrawal before rendering
 

@@ -1,8 +1,14 @@
 # WoundAILite 檢視管理 — independent read-only candidate
 
-Implemented locally; **not deployed**. No new cloud identities, OAuth settings,
-buckets, IAM grants, migrations, cleanup jobs or store releases are performed.
-The upload service's App Attest perimeter and MMH/Demo runtimes are unchanged.
+Status 2026-10-25: **closed phase A deployed and negative-access acceptance passed**
+on application source `065c328`, image `sha256:23a38262ac509da954bc3b313ab8ffb34fade9fb39770d6c2ad7dc91b7f80d07`.
+The two IAM-required services have empty roles/catalogue and no source-storage
+permissions. Actual probes: 11 HTTP denials, 16 bucket permission checks and 86
+final control-plane assertions passed. This is **not a working human review
+entry**: owner IAP login, a separate access-audit bucket and positive media reads
+remain unverified. The upload service's App Attest perimeter and MMH/Demo runtimes
+are unchanged. No migration, cleanup schedule or store release was performed.
+See `docs/claude_lite_review_human_20261025.md` for evidence and staged B1/B2 gates.
 
 Two factories: `Backend.LiteReview.runtime:portal()` (IAP-protected HTML/BFF)
 and `Backend.LiteReview.runtime:reader()` (private IAM service). Both require an
@@ -85,3 +91,11 @@ latency or physical erasure. Synthetic GCS consent evidence from 28c350e remains
 separate and preserved; natural seven-day expiry is still pending.
 
 The portal sends `X-Serverless-Authorization` for platform IAM and preserves the signed `Authorization` token for reader verification. Only a live synthetic acceptance can confirm the deployed header path. Role-map changes require a new protected configuration/revision; IAP revocation is bounded by token validity, not instantaneous.
+
+`tools/plan_lite_review_human.py` prepares only the B1 owner-login/empty-catalogue
+review. It binds completed A7 and fresh read-only identity evidence, preserves
+the retained runtime image, and does not execute cloud commands. B1 proposes a
+metadata-only owner role and separate create-only access audit; **zero** source
+bucket grants. A later B2 manifest must separately pin synthetic objects and
+state keys. Run `engineering/phase2/test_lite_review_human.py` for positive empty
+two-hop behavior, audit failure and source-access tripwires.

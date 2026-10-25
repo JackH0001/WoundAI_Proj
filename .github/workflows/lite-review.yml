@@ -4,6 +4,9 @@ on:
     paths:
       - 'Backend/LiteReview/**'
       - 'tools/plan_lite_review_rollout.py'
+      - 'tools/plan_lite_review_human.py'
+      - 'tools/test_plan_lite_review_human.py'
+      - 'engineering/phase2/test_lite_review_human.py'
       - 'tools/build_lite_review_catalogue.py'
       - 'tools/probe_lite_review_container.py'
       - 'tools/test_probe_lite_review_container.py'
@@ -20,6 +23,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+      - name: Verify offline human-entry plan boundaries
+        run: python3 -B tools/test_plan_lite_review_human.py
       - name: Build isolated review image
         run: docker build -f Backend/LiteReview/Dockerfile -t lite-review:test .
       - name: Verify external probe with deployment sandbox restrictions

@@ -9,6 +9,9 @@ on:
       - 'Backend/LiteReview/**'
       - 'engineering/phase2/test_lite_review_portal.py'
       - 'tools/plan_lite_review_rollout.py'
+      - 'tools/plan_lite_review_human.py'
+      - 'tools/test_plan_lite_review_human.py'
+      - 'engineering/phase2/test_lite_review_human.py'
       - 'tools/build_lite_review_catalogue.py'
       - 'engineering/phase2/test_audit_chain.py'
       - 'engineering/phase2/test_audit_chain_concurrency.py'
@@ -176,6 +179,9 @@ on:
       - 'Backend/LiteReview/**'
       - 'engineering/phase2/test_lite_review_portal.py'
       - 'tools/plan_lite_review_rollout.py'
+      - 'tools/plan_lite_review_human.py'
+      - 'tools/test_plan_lite_review_human.py'
+      - 'engineering/phase2/test_lite_review_human.py'
       - 'tools/build_lite_review_catalogue.py'
       - 'engineering/phase2/test_audit_chain.py'
       - 'engineering/phase2/test_audit_chain_concurrency.py'
@@ -430,6 +436,8 @@ jobs:
           python -B engineering/phase2/test_lite_fenced_http.py
           python -B engineering/phase2/test_lite_reconsent.py
           python -B engineering/phase2/test_lite_review_portal.py
+          python -B engineering/phase2/test_lite_review_human.py
+          python -B tools/test_plan_lite_review_human.py
           python -B tools/test_lite_rgbd_preflight.py
           python -B tools/test_provision_mmh_foundation.py
           python -B tools/test_restrict_mmh_bucket_iam.py
