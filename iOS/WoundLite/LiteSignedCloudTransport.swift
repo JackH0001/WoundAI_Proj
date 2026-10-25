@@ -6,7 +6,7 @@ struct LiteSignedCloudTransport: LiteAuthenticatedTransport {
     let resolve: @Sendable () async throws -> LiteAttestClient
     private let consent: @Sendable () async -> Bool
 
-    init(baseURL: String) {
+    init(baseURL: String, scopeGuard: @escaping @Sendable () async -> Bool = { true }) {
         resolve = {
             guard let origin = URL(string: baseURL),
                   let audience = Bundle.main.object(forInfoDictionaryKey: "LiteAttestAudience") as? String,
@@ -15,7 +15,10 @@ struct LiteSignedCloudTransport: LiteAuthenticatedTransport {
             }
             return try await LiteAttestClients.shared.client(origin: origin, audience: audience)
         }
-        consent = { await MainActor.run { LitePrefs.researchConsent == true } }
+        consent = {
+            guard await scopeGuard() else { return false }
+            return await MainActor.run { LitePrefs.researchConsent == true }
+        }
     }
 
     /// Dependency injection exercises the real signing flow without a real Apple key.

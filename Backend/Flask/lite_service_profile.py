@@ -11,6 +11,7 @@ from flask import jsonify, request
 POST_ROUTES = frozenset({
     '/api/v1/lite/attest/challenge', '/api/v1/lite/attest/register',
     '/api/v1/lite/segment', '/api/v1/lite/annotation', '/api/v1/lite/annotation/revision',
+    '/api/v1/lite/research/rejoin',
 })
 
 
@@ -66,7 +67,8 @@ def install_lite_perimeter(app):
                      and '%' not in path and '\\' not in path)
         allowed = ((path == '/api/health' and method in ('GET', 'HEAD')) or
                    (path in POST_ROUTES and method == 'POST') or
-                   (method == 'DELETE' and re.fullmatch(r'/api/v1/lite/data/[0-9a-f]{32}', path)))
+                   (method == 'DELETE' and re.fullmatch(
+                       r'/api/v1/lite/data/[0-9a-f]{32}(?:/[0-9a-f]{32})?', path)))
         if not canonical or not allowed:
             return jsonify(error='lite_route_not_supported'), 404
 

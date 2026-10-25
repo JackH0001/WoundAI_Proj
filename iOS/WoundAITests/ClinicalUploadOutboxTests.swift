@@ -42,6 +42,20 @@ final class ClinicalUploadOutboxTests: XCTestCase {
             sendDepth: { job in XCTAssertEqual(job.depthRaw, Data([1,2,3,4])); XCTAssertEqual(job.annotationRevisionID,"0123456789abcdef") }, acknowledgeRecord: { _ in })
         XCTAssertEqual(reopened.jobs.first?.completed, true)
     }
+    func testLegacyResearchDeadlineIsBoundedOnceWithoutChangingPayload() async throws {
+        var clock=Date();let box=ClinicalUploadOutbox(directory:directory,now:{clock})
+        let id=try enqueue(box)
+        try await box.process(id:id,allowed:{true},annotate:{_ in throw ResearchCapacityWait(notBefore:clock.addingTimeInterval(86400*365))},sendDepth:{_ in XCTFail()},acknowledgeRecord:{_ in XCTFail()})
+        let before=try XCTUnwrap(box.jobs.first)
+        let loaded=ClinicalUploadOutbox(directory:directory,now:{clock})
+        let job=try XCTUnwrap(loaded.jobs.first)
+        XCTAssertEqual(job.capacityNotBefore,clock.addingTimeInterval(3600))
+        XCTAssertEqual(job.annotationPayload,before.annotationPayload);XCTAssertEqual(job.depthRaw,before.depthRaw)
+        clock=clock.addingTimeInterval(300)
+        let again=ClinicalUploadOutbox(directory:directory,now:{clock})
+        XCTAssertEqual(again.jobs.first?.capacityNotBefore,job.capacityNotBefore)
+        XCTAssertEqual(again.jobs.first?.nextAttemptAt,job.nextAttemptAt)
+    }
     func testRetryAfterContractUsesLargestHintAndServerClock() throws {
         let now = Date(timeIntervalSince1970: 1000)
         func delay(_ header: String?, _ body: String, _ date: String? = nil) -> Double {
@@ -51,7 +65,9 @@ final class ClinicalUploadOutboxTests: XCTestCase {
         XCTAssertEqual(delay("Sat, 17 Oct 2026 03:05:00 GMT", "{}", "Sat, 17 Oct 2026 03:00:00 GMT"), 300)
         XCTAssertEqual(delay("-10", "{\"retry_after\":true}"), 60)
         XCTAssertEqual(delay("NaN", "{\"retry_after\":-1}"), 60)
-        XCTAssertEqual(delay("90000", "{}"), 90000)
+        XCTAssertEqual(delay("90000", "{}"), 3600)
+        XCTAssertEqual(delay("1e300", "{}"), 3600)
+        XCTAssertEqual(ResearchCapacityWait.privacyDeadline(.distantFuture, now: now).timeIntervalSince(now), 300)
     }
     func testEncryptedSnapshotSurvivesReopenWithoutCredentials() throws {
         let box = ClinicalUploadOutbox(directory: directory)

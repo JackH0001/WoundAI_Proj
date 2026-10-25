@@ -58,6 +58,8 @@ internal class ClinicalResearchController(context: Context, private val runtime:
         if(!identity.can("gt.verify") || !identity.can("annotation.submit")) return ClinicalAnnotationOutbox.Permission.WAIT
         val latest=runtime.database.measurementDao().getById(row.id) ?: return ClinicalAnnotationOutbox.Permission.REVOKED
         if(latest.patientId!=row.patientId || latest.caseId!=row.caseId || latest.imageId!=row.imageId || latest.wdCode!=row.wdCode) return ClinicalAnnotationOutbox.Permission.REVOKED
+        if(latest.imagePath.isBlank() && row.imagePath.isNotBlank()) return ClinicalAnnotationOutbox.Permission.MEDIA_UNAVAILABLE
+        if(latest.copy(annotationSubmitted=false)!=row.copy(annotationSubmitted=false)) return ClinicalAnnotationOutbox.Permission.SUPERSEDED
         if(row.wdCode in runtime.accounts.pending(MedicalAccountPreferences.ConsentQueue.WITHDRAWAL)) return ClinicalAnnotationOutbox.Permission.REVOKED
         if(row.wdCode in runtime.accounts.pending(MedicalAccountPreferences.ConsentQueue.RESTORE)) return ClinicalAnnotationOutbox.Permission.WAIT
         if(row.caseId==null) return if(row.patientId==null && ReviewTrainingConsent.isUnlinkedQuickMeasurement(row.source,row.caseId)) ClinicalAnnotationOutbox.Permission.ALLOW else ClinicalAnnotationOutbox.Permission.WAIT
@@ -94,13 +96,18 @@ internal class ClinicalResearchController(context: Context, private val runtime:
         if(!drainLock.tryLock()) return
         val attemptOrigin=runtime.backendUrl();val attemptUser=runtime.backendUser()
         try {
+            outbox.retireSuperseded(attemptOrigin,attemptUser) { runtime.database.measurementDao().getById(it.id) }
             val jobs=outbox.jobs();refresh(jobs)
             val pending=jobs.filter {it.state !in setOf(ClinicalAnnotationOutbox.State.COMPLETE,ClinicalAnnotationOutbox.State.CANCELLED)}
             if(pending.isEmpty() || !runtime.isOpen()) return
             // Do not repeatedly authenticate an unrelated account or upload an old environment's work.
             val eligible=pending.filter {it.binding.origin==runtime.backendUrl() && it.binding.configuredUser==runtime.backendUser()}
             if(eligible.isEmpty()) {mutable.value=mutable.value.copy(issue="有待傳工作需要原送件帳號登入。");return}
-            if(eligible.any { it.capacityNotBefore>System.currentTimeMillis() }) return
+            // Retiring an old revision must not bypass its service-wide capacity wait.
+            if(jobs.any { it.binding.origin==attemptOrigin && it.binding.configuredUser==attemptUser &&
+                it.state!=ClinicalAnnotationOutbox.State.COMPLETE &&
+                (it.state!=ClinicalAnnotationOutbox.State.CANCELLED || it.issue in setOf("superseded_revision","media_unavailable")) &&
+                it.capacityNotBefore>System.currentTimeMillis() }) return
             // Keep active retries ordered. A permanently paused snapshot remains for review,
             // but cannot starve a newer, separately confirmed revision forever.
             val sendable=eligible.filter { it.state!=ClinicalAnnotationOutbox.State.PAUSED ||
@@ -150,7 +157,7 @@ internal class ClinicalResearchController(context: Context, private val runtime:
                 ClinicalAnnotationOutbox.State.PAUSED -> if(job.issue=="authorization_required") "需確認登入／同意" else "保存回覆未通過，請核對後重試"
                 ClinicalAnnotationOutbox.State.RECEIPT_SAVED -> "雲端標註已保存，本機狀態待同步"
                 ClinicalAnnotationOutbox.State.COMPLETE -> if(job.localAcknowledged) "研究標註已確認保存（本筆無深度）" else "舊修訂已保存；較新修訂未標記"
-                ClinicalAnnotationOutbox.State.CANCELLED -> "已停止：紀錄或同意不再有效"
+                ClinicalAnnotationOutbox.State.CANCELLED -> if(job.issue=="media_unavailable") "本機影像已不可用；已停止補送，原待傳內容與回執保留" else if(job.issue=="superseded_revision") "已由較新修訂取代；舊版停止補送，原待傳內容與回執保留" else "已停止：紀錄或同意不再有效"
             }
             Item(job.measurement().id,job.state,text,job.measurement(),job.capacityNotBefore)
         })

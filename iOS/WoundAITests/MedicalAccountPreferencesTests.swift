@@ -68,15 +68,29 @@ final class MedicalAccountPreferencesTests: XCTestCase {
         XCTAssertEqual(d.string(forKey: "backend_pass_enc"), "old-ciphertext")
         XCTAssertEqual(invalidations, 0)
     }
-    func testSameConsentCodeRemainsInOtherScopeAndOtherQueue() {
+    func testLatestConsentIntentSupersedesOppositeOnlyInItsOwnScope() {
         let a = MedicalAccountPreferences(scope: .mmh, defaults: defaults(.mmh))
         let b = MedicalAccountPreferences(scope: .syntheticReview, defaults: defaults(.syntheticReview))
         for s in [a,b] { s.add(["same-code"], to: .withdrawal); s.add(["same-code"], to: .restore) }
         a.remove("same-code", from: .withdrawal)
         XCTAssertTrue(a.pending(.withdrawal).isEmpty)
         XCTAssertEqual(a.pending(.restore), ["same-code"])
-        XCTAssertEqual(b.pending(.withdrawal), ["same-code"])
+        XCTAssertTrue(b.pending(.withdrawal).isEmpty)
         XCTAssertEqual(b.pending(.restore), ["same-code"])
+    }
+    func testOldAcknowledgementCannotRemoveNewIntentIncludingSameDirection() throws {
+        let d=defaults(.mmh), a=MedicalAccountPreferences(scope:.mmh,defaults:defaults(.mmh))
+        a.add(["code"],to:.restore); let old=try XCTUnwrap(a.token("code",in:.restore))
+        a.add(["code"],to:.withdrawal);a.add(["code"],to:.restore)
+        a.remove("code",from:.restore,expectedToken:old)
+        XCTAssertEqual(a.pending(.restore),["code"])
+        XCTAssertNotEqual(a.token("code",in:.restore),old)
+        d.set(["legacy"],forKey:"pending_withdrawals");d.set(["legacy"],forKey:"pending_restores")
+        let migrated=MedicalAccountPreferences(scope:.mmh,defaults:d)
+        XCTAssertEqual(migrated.pending(.withdrawal),["legacy"])
+        XCTAssertTrue(migrated.pending(.restore).isEmpty)
+        migrated.remove("legacy",from:.withdrawal)
+        XCTAssertTrue(MedicalAccountPreferences(scope:.mmh,defaults:d).pending(.restore).isEmpty)
     }
     func testConcurrentWritersDoNotLoseConsentCodes() {
         let d = defaults(.syntheticReview)

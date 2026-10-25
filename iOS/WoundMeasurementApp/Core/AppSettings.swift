@@ -104,10 +104,8 @@ enum AppSettings {
 
     // MARK: - 待重試佇列
     //
-    // ⚠ **撤回與重新取得必須是兩個獨立佇列。**
-    //
-    // 合成一個的話，「先撤回後重簽」與「先重簽後撤回」會得到同樣的待辦清單，
-    // 而那兩者的正確結果剛好相反——重播時無從得知病患最後的意思是什麼。
+    // 每個代碼保存最新方向與 generation；重試不建立新意向。
+    // 兩種待辦可分開顯示，但同一代碼不可同時等待恢復與撤回。
 
     static func pendingWithdrawals() -> Set<String> { accounts.pending(.withdrawal) }
     static func pendingRestores() -> Set<String> { accounts.pending(.restore) }
@@ -118,7 +116,7 @@ enum AppSettings {
 
     /// 測試用。
     static func resetAllForTesting() {
-        for k in [K.baseUrl, K.user, K.passEnc, K.pendingWithdraw, K.pendingRestore] {
+        for k in [K.baseUrl, K.user, K.passEnc, K.pendingWithdraw, K.pendingRestore, "consent_intents_v1"] {
             d.removeObject(forKey: k)
         }
     }

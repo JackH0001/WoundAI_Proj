@@ -192,7 +192,7 @@ def exercise(context, runtime, checks):
             check('withdrawal removes training eligibility', request('GET', '/api/v1/flywheel/stats', headers=dr).json().get('trainable') == 0)
             check('withdrawn annotation rejected', annotate(annotation).status_code == 400)
             check('withdrawn raw depth rejected', depth().status_code == 400)
-            check('withdrawn image quarantined', not (store / 'images' / (iid + '.jpg')).exists())
+            check('withdrawn image retained but unavailable', (store / 'images' / (iid + '.jpg')).exists() and request('GET', '/api/v1/flywheel/record/' + iid + '/image.jpg', headers=dr).status_code == 410)
             # Exercise the live institution-token revocation check, not just JWT expiry.
             check('disable physician account', post('/api/v1/users', headers=admin,
                 json={'user': 'dr_probe', 'role': 'physician', 'disabled': True}).status_code == 200)

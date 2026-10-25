@@ -38,6 +38,7 @@ import java.io.ByteArrayOutputStream
 @Composable
 fun ConsentSignatureScreen(
     patientLabel: String,
+    cloudConsentReady: Boolean = true,
     onCancel: () -> Unit,
     onSigned: (care: Boolean, train: Boolean, signaturePng: ByteArray?) -> Unit
 ) {
@@ -53,6 +54,7 @@ fun ConsentSignatureScreen(
         Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
+        if(!cloudConsentReady) Text("雲端同意狀態尚未核對；本次簽署只先保存本機。請連線後重新開啟同意書確認，才可恢復雲端研究上傳。", color=MaterialTheme.colorScheme.error)
         Text("知情同意書", style = MaterialTheme.typography.titleLarge)
         Text("受試者：$patientLabel", style = MaterialTheme.typography.bodyMedium)
 

@@ -11,6 +11,10 @@ import kotlin.random.Random
 internal class ResearchCapacityException(val notBefore:Long):java.io.IOException("後端容量暫滿或服務暫不可用；請依待傳狀態稍候再試")
 
 internal object ResearchCapacityWait {
+    const val MAXIMUM_DELAY_MS = 3_600_000L
+    const val PRIVACY_MAXIMUM_DELAY_MS = 300_000L
+    fun privacyDeadline(deadline:Long, now:Long=System.currentTimeMillis()):Long =
+        minOf(deadline, now + PRIVACY_MAXIMUM_DELAY_MS)
     fun deadline(retryAfter:String?, serverDate:String?, body:String, now:Long,
                  minimumMs:Long=60_000, jitterMs:Long=Random.nextLong(0,5_001)):Long {
         fun seconds(text:String?):Double? = text?.trim()?.toDoubleOrNull()?.takeIf { it.isFinite() && it>=0 }
@@ -28,7 +32,7 @@ internal object ResearchCapacityWait {
                 seconds(n.asString)?.let { delay=max(delay,it*1000) }
             }
         } catch(_:Exception) { }
-        val total=now.toDouble()+delay+jitterMs.coerceAtLeast(0)
+        val total=now.toDouble()+minOf(MAXIMUM_DELAY_MS.toDouble(),delay+jitterMs.coerceIn(0,5_000))
         return if(!total.isFinite() || total>=Long.MAX_VALUE.toDouble()) Long.MAX_VALUE else total.toLong()
     }
 }

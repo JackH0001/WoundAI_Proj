@@ -55,6 +55,7 @@ class PinnedWrite:
     bucket: str
     ref: ObjectRef
     generation: int
+    epoch: str = 'legacy'
 
 
 @dataclass(frozen=True)
@@ -67,10 +68,15 @@ class ObjectSnapshot:
 
 class FencedObjects:
     """Injected trusted bucket only. A conflict never refreshes a writer's pin."""
-    def __init__(self, bucket):
+    def __init__(self, bucket, *, epoch='legacy'):
         if type(bucket.name) is not str or re.fullmatch(r'[a-z0-9][a-z0-9-]{1,61}[a-z0-9]', bucket.name) is None:
             raise ValueError('explicit trusted bucket identity required')
-        self.bucket = bucket
+        if epoch != 'legacy' and (type(epoch) is not str or re.fullmatch(r'[0-9a-f]{32}', epoch) is None):
+            raise ValueError('invalid research epoch')
+        self.bucket, self.epoch = bucket, epoch
+
+    def name(self, ref):
+        return ref.name if self.epoch == 'legacy' else 'lite_epochs/v1/' + self.epoch + '/' + ref.name
 
     def _write_blob(self, name):
         blob = self.bucket.blob(name)
@@ -82,7 +88,7 @@ class FencedObjects:
                 'sha256': hashlib.sha256(data).hexdigest()}
 
     def _snapshot(self, ref):
-        name = ref.name
+        name = self.name(ref)
         blob = self.bucket.blob(name)
         try:
             blob.reload(timeout=10, retry=None)
@@ -103,7 +109,7 @@ class FencedObjects:
         return ObjectSnapshot(blob.generation, blob.size, metadata['state'], metadata['sha256'])
 
     def list_refs(self, owner, kind=None):
-        prefix = ObjectRef(owner, 'image', '0' * 32).name.rsplit('/', 2)[0] + '/'
+        prefix = self.name(ObjectRef(owner, 'image', '0' * 32)).rsplit('/', 2)[0] + '/'
         if kind is not None:
             if kind not in KINDS: raise ValueError('invalid object kind')
             prefix += kind + '/'
@@ -114,10 +120,11 @@ class FencedObjects:
                 name = blob.name
                 if type(name) is not str or not name.startswith(prefix):
                     raise ValueError('inventory escaped scope')
-                parts = name.split('/')
+                logical = name if self.epoch == 'legacy' else name.removeprefix('lite_epochs/v1/' + self.epoch + '/')
+                parts = logical.split('/')
                 if len(parts) != 5: raise ValueError('invalid fenced path')
                 ref = ObjectRef(parts[2], parts[3], parts[4])
-                if ref.owner != owner or ref.name != name: raise ValueError('invalid object reference')
+                if ref.owner != owner or self.name(ref) != name: raise ValueError('invalid object reference')
                 refs.append(ref)
             if len(refs) != len(set(refs)): raise ValueError('duplicate inventory entries')
             return refs
@@ -129,11 +136,11 @@ class FencedObjects:
         snapshot = self._snapshot(ref)
         if snapshot is not None and snapshot.state == 'sealed':
             raise ObjectSealed('object permanently sealed')
-        return PinnedWrite(self.bucket.name, ref, 0 if snapshot is None else snapshot.generation)
+        return PinnedWrite(self.bucket.name, ref, 0 if snapshot is None else snapshot.generation, self.epoch)
 
     def _read(self, ref, snapshot):
         try:
-            data = self.bucket.blob(ref.name).download_as_bytes(
+            data = self.bucket.blob(self.name(ref)).download_as_bytes(
                 if_generation_match=snapshot.generation, checksum='crc32c', timeout=10, retry=None)
         except Exception as exc:
             # In particular, a 404 after metadata is not an empty/missing object.
@@ -152,11 +159,11 @@ class FencedObjects:
 
     def write(self, pin, data):
         """One attempt at the ORIGINAL generation. Unknown outcome keeps its journal plan."""
-        if (not isinstance(pin, PinnedWrite) or pin.bucket != self.bucket.name or
+        if (not isinstance(pin, PinnedWrite) or pin.bucket != self.bucket.name or pin.epoch != self.epoch or
                 type(pin.generation) is not int or pin.generation < 0 or
                 type(data) is not bytes or not 0 < len(data) <= MAX_BYTES):
             raise ValueError('invalid pinned write')
-        blob = self._write_blob(pin.ref.name)
+        blob = self._write_blob(self.name(pin.ref))
         blob.metadata = self._metadata(pin.ref, 'live', data)
         try:
             blob.upload_from_string(data, content_type='application/octet-stream',
@@ -189,7 +196,7 @@ class FencedObjects:
                     raise StateUnavailable('seal contains data')
                 return snapshot.generation
             expected = 0 if snapshot is None else snapshot.generation
-            blob = self._write_blob(ref.name)
+            blob = self._write_blob(self.name(ref))
             blob.metadata = self._metadata(ref, 'sealed', b'')
             try:
                 blob.upload_from_string(b'', content_type='application/octet-stream',

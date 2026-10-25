@@ -94,6 +94,11 @@ def main():
         print("找不到 flywheel 目錄：%s" % root)
         return 2
 
+    ordered = os.path.join(root, "receipts", "medical_consent")
+    if os.path.isdir(ordered) and os.listdir(ordered):
+        print("ordered_consent_present: archive requires a version-aware migration; original files unchanged")
+        return 2
+
     staging = os.path.join(root, "staging")
     pending = sorted(os.path.relpath(os.path.join(base, name), root)
                      for base, _, names in os.walk(staging) for name in names)

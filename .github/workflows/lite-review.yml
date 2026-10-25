@@ -1,0 +1,42 @@
+name: Lite review portal
+on:
+  pull_request:
+    paths:
+      - 'Backend/LiteReview/**'
+      - 'tools/plan_lite_review_rollout.py'
+      - 'tools/plan_lite_review_human.py'
+      - 'tools/test_plan_lite_review_human.py'
+      - 'tools/lite_review_executor.py'
+      - 'tools/test_lite_review_executor.py'
+      - 'engineering/phase2/test_lite_review_human.py'
+      - 'tools/build_lite_review_catalogue.py'
+      - 'tools/probe_lite_review_container.py'
+      - 'tools/test_probe_lite_review_container.py'
+      - 'engineering/phase2/test_lite_review_portal.py'
+      - '.github/workflows/lite-review.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  isolated-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify offline human-entry plan boundaries
+        run: python3 -B tools/test_plan_lite_review_human.py
+      - name: Rehearse bounded B1 partial failures without cloud credentials
+        run: python3 -B tools/test_lite_review_executor.py
+      - name: Build isolated review image
+        run: docker build -f Backend/LiteReview/Dockerfile -t lite-review:test .
+      - name: Verify external probe with deployment sandbox restrictions
+        run: >-
+          docker run --rm --network=none --read-only
+          --tmpfs /tmp:rw,nosuid,nodev,size=32m --cap-drop=ALL
+          --security-opt=no-new-privileges --memory=512m --cpus=1
+          --workdir /tmp
+          -v "$PWD/tools/probe_lite_review_container.py:/verification/probe.py:ro"
+          --entrypoint python lite-review:test -I -B /verification/probe.py
+          --application-root /app

@@ -201,8 +201,23 @@ class ClinicalResearchControllerTest {
         assertTrue(r.database.measurementDao().getById(row.id)!!.annotationSubmitted)
         val jobs=ClinicalAnnotationOutbox(ctx,r.scope).jobs()
         assertEquals(2,jobs.size)
-        assertTrue(jobs.any{it.measurement().exudate==1 && it.state==ClinicalAnnotationOutbox.State.PAUSED})
+        assertTrue(jobs.any{it.measurement().exudate==1 && it.state==ClinicalAnnotationOutbox.State.CANCELLED})
         assertTrue(jobs.any{it.measurement().exudate==2 && it.state==ClinicalAnnotationOutbox.State.COMPLETE})
+    }
+    @Test fun delayedOldRetryCannotReplaceAcknowledgedNewRevision()=fixture{r,row->
+        r.research.enqueue(row);serverStatus=500;r.research.drainOnce()
+        val old=ClinicalAnnotationOutbox(ctx,r.scope).jobs().single()
+        val newer=row.copy(exudate=2)
+        assertTrue(r.database.measurementDao().updateIfUnchanged(row,newer))
+        serverStatus=200;r.research.enqueue(newer);r.research.drainOnce(true)
+        assertEquals(2,sent.size);assertEquals(2,sent.last().getInt("exudate"))
+        r.research.drainOnce(true)
+        assertEquals(2,sent.size)
+        val retired=ClinicalAnnotationOutbox(ctx,r.scope).jobs().first {it.id==old.id}
+        assertEquals(ClinicalAnnotationOutbox.State.CANCELLED,retired.state)
+        assertEquals("superseded_revision",retired.issue)
+        assertEquals(old.rowJson,retired.rowJson);assertEquals(old.rasterSHA,retired.rasterSHA)
+        assertTrue(r.database.measurementDao().getById(row.id)!!.annotationSubmitted)
     }
     @Test fun serverFailureKeepsJobAndExplicitRetryReusesSameMask()=fixture{r,row->
         r.research.enqueue(row);serverStatus=500;r.research.drainOnce()
@@ -211,6 +226,17 @@ class ClinicalResearchControllerTest {
         assertEquals(first.getString("wound_mask_png"),sent.last().getString("wound_mask_png"))
         assertEquals(first.getString("tissue_mask_png"),sent.last().getString("tissue_mask_png"))
         assertTrue(r.database.measurementDao().getById(row.id)!!.annotationSubmitted)
+    }
+    @Test fun retiringOldRevisionDoesNotBypassServiceCapacityDeadline()=fixture{r,row->
+        r.research.enqueue(row);serverStatus=503;r.research.drainOnce()
+        val newer=row.copy(exudate=2)
+        assertTrue(r.database.measurementDao().updateIfUnchanged(row,newer))
+        serverStatus=200;r.research.enqueue(newer);r.research.drainOnce(true)
+        val jobs=ClinicalAnnotationOutbox(ctx,r.scope).jobs()
+        assertEquals(1,sent.size)
+        assertTrue(jobs.any {it.measurement().exudate==1 && it.state==ClinicalAnnotationOutbox.State.CANCELLED})
+        assertTrue(jobs.any {it.measurement().exudate==2 && it.state==ClinicalAnnotationOutbox.State.PENDING})
+        assertFalse(r.database.measurementDao().getById(row.id)!!.annotationSubmitted)
     }
     @Test fun capacityWaitRejectsRepeatedSendWithoutLosingConfirmedSnapshot()=fixture{r,row->
         r.research.enqueue(row);serverStatus=503;r.research.drainOnce()
@@ -224,8 +250,8 @@ class ClinicalResearchControllerTest {
     @Test fun savedNewRevisionIsNotAcknowledgedByOldQueuedJob()=fixture{r,row->
         r.research.enqueue(row);val newer=row.copy(exudate=3)
         assertTrue(r.database.measurementDao().updateIfUnchanged(row,newer));r.research.drainOnce()
-        assertEquals(1,sent.single().getInt("exudate"));assertEquals(newer,r.database.measurementDao().getById(row.id))
-        assertTrue(r.research.status.value.items.single().text.contains("較新修訂未標記"))
+        assertTrue(sent.isEmpty());assertEquals(newer,r.database.measurementDao().getById(row.id))
+        assertTrue(r.research.status.value.items.single().text.contains("較新修訂取代"))
     }
     @Test fun missingPhysicianPermissionCannotEnqueue()=fixture{r,row->
         allowed=false

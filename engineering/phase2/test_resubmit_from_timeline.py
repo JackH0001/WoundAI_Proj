@@ -154,12 +154,11 @@ def main():
     check("8  consent_train=false 被擋", s == 400)
 
     # 9 撤回同意 → 整組失效 + 影像隔離
-    s, _ = post("/api/v1/consent/withdraw", {"code": CODE, "image_ids": [image_id], "reason": "病患撤回"})
+    s, withdrawal = post("/api/v1/consent/withdraw", {"code": CODE, "image_ids": [image_id], "reason": "病患撤回"})
     _, st = stats()
     check("9  撤回後可訓練歸零", st["trainable"] == 0 and st["withdrawn"] == 2, st["trainable"])
-    check("9b 影像已移入 quarantine",
-          os.path.exists(os.path.join(tmp, "quarantine", image_id + ".jpg"))
-          and not os.path.exists(os.path.join(tmp, "images", image_id + ".jpg")))
+    check("9b 原始影像保留且同意邊界已隔離",
+          os.path.exists(os.path.join(tmp, "images", image_id + ".jpg")) and fw.is_consent_blocked(image_id))
 
     # 10 撤回後補送被擋，且**理由要正確**
     s, r = post("/api/v1/annotation", anno(poly2))
@@ -171,7 +170,7 @@ def main():
     check("10c audit.jsonl 也記到撤回理由", any("撤回訓練同意" in x for x in reasons))
 
     # 11 重新簽署後恢復
-    s, r = post("/api/v1/consent/restore", {"code": CODE, "image_ids": [image_id], "reason": "重新簽署"})
+    s, r = post("/api/v1/consent/restore", {"code": CODE, "protocol": "medical-consent/2", "intent_id": "restore-timeline-001", "consent_revision": withdrawal["revision"]})
     check("11 restore 成功", s == 200 and r.get("status") == "restored")
     s, _ = post("/api/v1/annotation", anno(poly2, iou=0.93))
     _, st = stats()

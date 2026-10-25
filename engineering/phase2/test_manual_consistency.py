@@ -185,7 +185,14 @@ def main():
           "backend.withdrawConsent" in allkt or ".withdrawConsent(" in allkt)
     cw = kt.get("ConsentWithdrawal.kt", "")
     check("有撤回重試機制（離線時不能就這樣算了）", "retryPending" in cw)
-    check("失敗的撤回會被持久化", "addPendingWithdrawals" in cw)
+    # The latest-intent queue persists before suspension; a failed old request
+    # must NOT re-add itself after a newer withdrawal/restore replaced it.
+    # MedicalRuntimeTest exercises the network race; this remains a wiring guard.
+    save_at = cw.find("if(newIntent) runtime.accounts.add(list,queue)")
+    suspend_at = cw.find("return withContext(Dispatchers.IO)")
+    account_prefs = kt.get("MedicalAccountPreferences.kt", "")
+    check("撤回意向在網路前持久化，失敗不遺失", 0 <= save_at < suspend_at and
+          'putString("consent_intents_v1",next.toString()).commit()' in account_prefs)
     csel = kt.get("CaseSelectScreen.kt", "")
     check("撤回流程有接上 ConsentWithdrawal", "ConsentWithdrawal.pushToBackend" in csel)
     check("進入個案頁會補做未完成的撤回", "ConsentWithdrawal.retryPending" in csel)

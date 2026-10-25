@@ -115,7 +115,7 @@ final class ClinicalUploadOutbox: ObservableObject {
                 try HealthDataFiles.excludeExistingFile(path)
                 let encrypted = try Data(contentsOf: path)
                 guard let raw = PhiCrypto.decryptBytes(encrypted) else { throw BackendError.badResponse("outbox decrypt") }
-                let job = try JSONDecoder().decode(ClinicalUploadJob.self, from: raw)
+                var job = try JSONDecoder().decode(ClinicalUploadJob.self, from: raw)
                 guard path.lastPathComponent == job.id + ".enc", UUID(uuidString: job.id) != nil else {
                     throw BackendError.badResponse("outbox identity")
                 }
@@ -124,6 +124,16 @@ final class ClinicalUploadOutbox: ObservableObject {
                 if job.supersededBy != nil && now().timeIntervalSince(job.measurement.timestamp) > 90 * 86400 {
                     try FileManager.default.removeItem(at: path)
                     continue
+                }
+                let limit = now().addingTimeInterval(ResearchCapacityWait.maximumDelay)
+                let oldNext = job.nextAttemptAt; let oldCapacity = job.capacityNotBefore
+                job.nextAttemptAt = job.nextAttemptAt.map { min($0, limit) }
+                job.capacityNotBefore = job.capacityNotBefore.map { min($0, limit) }
+                if job.nextAttemptAt != oldNext || job.capacityNotBefore != oldCapacity {
+                    // Persist once. Reopening must not slide the shortened deadline.
+                    let bytes = try JSONEncoder().encode(job)
+                    guard let encrypted = try PhiCrypto.encryptBytes(bytes) else { throw BackendError.badResponse("outbox encrypt") }
+                    try HealthDataFiles.write(encrypted, to: path)
                 }
                 loaded.append(job)
             }

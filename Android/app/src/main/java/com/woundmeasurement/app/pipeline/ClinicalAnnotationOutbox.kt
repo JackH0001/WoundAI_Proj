@@ -26,7 +26,7 @@ internal class ClinicalAnnotationOutbox(context: Context, private val scope: Med
     private val mutex = locks.getOrPut(directory.canonicalPath) { Mutex() }
     private val processor = processors.getOrPut(directory.canonicalPath) { Mutex() }
     enum class State { PENDING, RETRY, PAUSED, RECEIPT_SAVED, COMPLETE, CANCELLED }
-    enum class Permission { ALLOW, WAIT, REVOKED }
+    enum class Permission { ALLOW, WAIT, REVOKED, SUPERSEDED, MEDIA_UNAVAILABLE }
     data class Binding(val origin: String, val configuredUser: String, val actor: String)
     data class Response(val httpCode: Int, val body: String, val retryAfter: String? = null, val serverDate: String? = null)
     data class Job(
@@ -86,6 +86,22 @@ internal class ClinicalAnnotationOutbox(context: Context, private val scope: Med
 
     suspend fun jobs(): List<Job> = withContext(Dispatchers.IO) { mutex.withLock { loadAll() } }
 
+    /** Retire locally superseded snapshots before retry ordering can select an old job.
+     * No payload or receipt is deleted. This never grants permission to upload.
+     */
+    suspend fun retireSuperseded(origin:String,user:String,current:suspend (MeasurementEntity)->MeasurementEntity?) =
+        withContext(Dispatchers.IO) { processor.withLock { mutex.withLock {
+            loadAll().filter { it.binding.origin==origin && it.binding.configuredUser==user &&
+                it.state !in setOf(State.COMPLETE,State.CANCELLED) }.forEach { job ->
+                val row=job.measurement()
+                val latest=current(row)
+                if(latest!=null && latest.imagePath.isBlank() && row.imagePath.isNotBlank())
+                    persist(job.copy(state=State.CANCELLED,issue="media_unavailable"))
+                else if(latest!=null && latest.copy(annotationSubmitted=false)!=row.copy(annotationSubmitted=false))
+                    persist(job.copy(state=State.CANCELLED,issue="superseded_revision"))
+            }
+        } } }
+
     /** Authentication/service waits are durable too, without changing the frozen payload. */
     suspend fun deferAttempts(origin:String,user:String,until:Long,capacity:Boolean) = withContext(Dispatchers.IO) { mutex.withLock {
         loadAll().filter { it.binding.origin==origin && it.binding.configuredUser==user &&
@@ -107,8 +123,17 @@ internal class ClinicalAnnotationOutbox(context: Context, private val scope: Med
         var job = mutex.withLock { loadAll().first { it.id == id } }
         if (job.state in setOf(State.COMPLETE,State.CANCELLED)) return@process job
         if (job.binding != binding) return@process job // Do not overwrite another account's status.
+        // Superseded jobs are retired even while their old retry deadline is in
+        // the future. Keep the immutable payload/receipt for audit, never send it.
+        val initialPermission=permitted(job)
+        if(initialPermission in setOf(Permission.SUPERSEDED,Permission.MEDIA_UNAVAILABLE)) {
+            val retired=job.copy(state=State.CANCELLED,issue=if(initialPermission==Permission.MEDIA_UNAVAILABLE) "media_unavailable" else "superseded_revision")
+            mutex.withLock {persist(retired)}
+            return@process retired
+        }
         val capacityBlocked = mutex.withLock { loadAll().any { it.binding == binding &&
-            it.state !in setOf(State.COMPLETE,State.CANCELLED) && it.capacityNotBefore > now() } }
+            it.state != State.COMPLETE && (it.state != State.CANCELLED || it.issue in setOf("superseded_revision","media_unavailable")) &&
+            it.capacityNotBefore > now() } }
         if (capacityBlocked) return@process job
         if (job.nextAttemptAt > now() && !retryPaused) return@process job
         if (job.state == State.PAUSED && !retryPaused) return@process job
@@ -116,6 +141,8 @@ internal class ClinicalAnnotationOutbox(context: Context, private val scope: Med
         when(permitted(job)) {
             Permission.WAIT -> return@process update(job.copy(state=State.PAUSED,issue="authorization_required"))
             Permission.REVOKED -> return@process update(job.copy(state=State.CANCELLED,issue="permission_revoked"))
+            Permission.SUPERSEDED -> return@process update(job.copy(state=State.CANCELLED,issue="superseded_revision"))
+            Permission.MEDIA_UNAVAILABLE -> return@process update(job.copy(state=State.CANCELLED,issue="media_unavailable"))
             Permission.ALLOW -> Unit
         }
         if (job.receiptID == null) {
@@ -146,6 +173,8 @@ internal class ClinicalAnnotationOutbox(context: Context, private val scope: Med
         when(permitted(job)) {
             Permission.WAIT -> return@process update(job.copy(state=State.PAUSED,issue="authorization_required"))
             Permission.REVOKED -> return@process update(job.copy(state=State.CANCELLED,issue="permission_revoked"))
+            Permission.SUPERSEDED -> return@process update(job.copy(state=State.CANCELLED,issue="superseded_revision"))
+            Permission.MEDIA_UNAVAILABLE -> return@process update(job.copy(state=State.CANCELLED,issue="media_unavailable"))
             Permission.ALLOW -> Unit
         }
         val marked=try { acknowledge(job.measurement()) }
@@ -174,7 +203,10 @@ internal class ClinicalAnnotationOutbox(context: Context, private val scope: Med
                 require(JsonParser.parseString(job.receiptBody).asJsonObject.get("annotation_receipt_id").asString==job.receiptID)
             }
             require(job.state!=State.COMPLETE || job.receiptID!=null)
-            job
+            val limit=now().let {if(it>Long.MAX_VALUE-3_600_000L) Long.MAX_VALUE else it+3_600_000L}
+            val bounded=job.copy(nextAttemptAt=minOf(job.nextAttemptAt,limit),capacityNotBefore=minOf(job.capacityNotBefore,limit))
+            if(bounded!=job) persist(bounded)
+            bounded
         }.sortedBy { it.createdAt }
     }
     private fun persist(job: Job) {

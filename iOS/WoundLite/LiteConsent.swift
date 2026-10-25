@@ -10,6 +10,7 @@ import SwiftUI
 struct LiteConsentView: View {
     let onChoose: (Bool) -> Void
     var renewingUnsentWithdrawal = false
+    var renewingCompletedWithdrawal = false
 
     var body: some View {
         NavigationStack {
@@ -19,6 +20,12 @@ struct LiteConsentView: View {
                     if renewingUnsentWithdrawal {
                         Text("您正在重新同意研究上傳。僅在確認撤回尚未送出、此服務沒有已登記身分或綁定紀錄後，才會取消這次未送出的撤回。原撤回與本次選擇會保留；舊服務紀錄不會移轉或重傳。")
                             .font(.subheadline)
+                    }
+                    if renewingCompletedWithdrawal {
+                        Text("先前撤回已完成，已清除的雲端影像與深度不會恢復。這次只重新同意之後新拍攝的資料上傳；舊紀錄、舊待傳及未上傳的本機照片都不會自動補送。沿用原裝置身分，並保留撤回與本次同意的稽核紀錄。")
+                            .font(.subheadline)
+                        Text("必須取得雲端重新加入的確認，才會開啟研究上傳；中斷時保留同一次要求供核對。")
+                            .font(.footnote)
                     }
 
                     box(title: "🔬 同意研究上傳（啟用自動辨識）", tint: .blue, lines: [
@@ -33,7 +40,7 @@ struct LiteConsentView: View {
                     box(title: "📴 不同意（完全離線）", tint: .green, lines: [
                         "照片與深度資料全部只留在您的手機（加密儲存）。",
                         "傷口輪廓改由您手動圈選，量測計算全在裝置上完成。",
-                        "之後改變心意，隨時可在「設定」開啟研究上傳。",
+                        "之後可在設定重新選擇；若已撤回並清除雲端資料，須另行閱讀並完成重新同意。",
                     ])
 
                     Text("兩種方式的量測數學完全相同；差別只在輪廓怎麼來、資料去不去雲端。")
@@ -42,7 +49,7 @@ struct LiteConsentView: View {
                     Button {
                         onChoose(true)
                     } label: {
-                        Text(renewingUnsentWithdrawal ? "重新同意並取消尚未送出的撤回" : "同意研究上傳，使用自動辨識")
+                        Text(renewingCompletedWithdrawal ? "重新同意：只啟用之後的新上傳" : renewingUnsentWithdrawal ? "重新同意並取消尚未送出的撤回" : "同意研究上傳，使用自動辨識")
                             .frame(maxWidth: .infinity).padding(.vertical, 6)
                     }
                     .buttonStyle(.borderedProminent)
@@ -50,7 +57,7 @@ struct LiteConsentView: View {
                     Button {
                         onChoose(false)
                     } label: {
-                        Text(renewingUnsentWithdrawal ? "保留撤回，繼續離線使用" : "不同意，完全離線手動圈選")
+                        Text(renewingCompletedWithdrawal ? "暫不開啟上傳，繼續離線使用" : renewingUnsentWithdrawal ? "保留撤回，繼續離線使用" : "不同意，完全離線手動圈選")
                             .frame(maxWidth: .infinity).padding(.vertical, 6)
                     }
                     .buttonStyle(.bordered)
@@ -211,8 +218,14 @@ struct LiteSettingsView: View {
                         Button("閱讀說明並重新同意研究上傳") { reviewRenewedConsent = true }
                             .disabled(withdrawal.busy)
                     }
-                    Button(withdrawal.busy ? "撤回處理中…" : (withdrawal.record == nil || withdrawal.cancelledBeforeSubmission ? "撤回研究並要求清除雲端媒體" : "重試／查核撤回"), role: .destructive) {
-                        if withdrawal.record == nil || withdrawal.cancelledBeforeSubmission { confirmWithdrawal = true }
+                    if withdrawal.mayReviewCompletedRenewal {
+                        Button("閱讀說明並重新加入研究") { reviewRenewedConsent = true }
+                            .disabled(withdrawal.busy)
+                        Text("重新加入只適用於之後的新拍攝，不會恢復已清除資料或補送舊紀錄。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                    Button(withdrawal.busy ? "處理中…" : (withdrawal.record == nil || withdrawal.cancelledBeforeSubmission || withdrawal.renewed ? "撤回研究並要求清除雲端媒體" : "重試／查核撤回"), role: .destructive) {
+                        if withdrawal.record == nil || withdrawal.cancelledBeforeSubmission || withdrawal.renewed { confirmWithdrawal = true }
                         else { Task { await withdrawal.request(server: AppSettings.backendURL()) } }
                     }
                     .disabled(withdrawal.busy || withdrawal.finished)
@@ -236,7 +249,11 @@ struct LiteSettingsView: View {
                     guard choice else { return }
                     let server = AppSettings.backendURL()
                     Task {
-                        let restored = await withdrawal.reconsentUnsentWithdrawal(server: server,
+                        let restored: Bool
+                        if withdrawal.mayReviewCompletedRenewal {
+                            restored = await withdrawal.reconsentCompletedWithdrawal(server: server)
+                        } else {
+                        restored = await withdrawal.reconsentUnsentWithdrawal(server: server,
                             consentVersion: LitePrefs.consentVersion, hasBoundRecords: {
                                 // Reload on both sides of the asynchronous identity check.
                                 // An unreadable index must never be treated as an empty one.
@@ -245,12 +262,14 @@ struct LiteSettingsView: View {
                                       AppSettings.backendURL() == server else { throw LiteWithdrawalFailure.invalidState }
                                 return try LiteWithdrawalModel.hasBoundRecords(store.records, server: server)
                             })
+                        }
                         if restored {
                             LitePrefs.researchConsent = true
                             consent = LitePrefs.researchConsent == true
                         }
                     }
-                }, renewingUnsentWithdrawal: true)
+                }, renewingUnsentWithdrawal: withdrawal.mayReviewUnsentCancellation,
+                    renewingCompletedWithdrawal: withdrawal.mayReviewCompletedRenewal)
             }
         }
     }

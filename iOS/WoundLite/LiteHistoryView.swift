@@ -295,11 +295,12 @@ struct LiteRecordDetailView: View {
                         status: LiteRevisionPresentation.make(record: r,
                             syncing: store.syncingRecordIDs.contains(recordId),
                             consent: LitePrefs.researchConsent == true,
-                            withdrawalBlocked: withdrawal.blocksUploads),
+                            withdrawalBlocked: withdrawal.blocksUploads,
+                            retiredResearch: r.cloudSync.map { !withdrawal.blocksUploads && !LiteWithdrawalJournal.standard.permits($0.binding) } ?? false),
                         calculating: busy, change: changeSummary,
                         note: note, noteIsInformational: noteIsInformational,
                         canEdit: r.depthName != nil && image != nil,
-                        syncAllowed: r.cloudSync != nil && LitePrefs.researchConsent == true && !withdrawal.blocksUploads,
+                        syncAllowed: r.cloudSync.map { LiteWithdrawalJournal.standard.permits($0.binding) } == true && LitePrefs.researchConsent == true,
                         onEdit: {
                             note = nil; noteIsInformational = false; changeSummary = nil
                             editFlow.begin(record: r, fallback: polys)

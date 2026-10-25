@@ -9,6 +9,7 @@ struct LiteCloudBinding: Codable, Equatable {
     var imageW: Int
     var imageH: Int
     var storageReceipt: LiteStorageReceipt? = nil
+    var researchEpoch: String? = nil
 }
 
 struct LiteRevisionPayload: Codable, Equatable {
@@ -56,10 +57,14 @@ struct LiteRevisionPresentation: Equatable {
     var retryTitle: String? = nil
 
     static func make(record: LiteRecord, syncing: Bool, consent: Bool,
-                     withdrawalBlocked: Bool, now: Date = Date()) -> Self {
+                     withdrawalBlocked: Bool, retiredResearch: Bool = false, now: Date = Date()) -> Self {
         guard let sync = record.cloudSync else {
             return Self(phase: .unavailable, title: "僅存於此手機",
                         detail: "此筆未取得雲端影像保存確認，無法直接同步修改。原紀錄保留。")
+        }
+        if retiredResearch {
+            return Self(phase: .localOnly, title: "此筆研究資料已撤回",
+                        detail: "本機紀錄與修改保留；重新加入後也不會重傳這筆舊資料。")
         }
         if withdrawalBlocked {
             return Self(phase: .localOnly, title: "研究上傳已暫停",
@@ -152,13 +157,15 @@ extension LiteStore {
     /// v2 has no fallback to the old append-only endpoint; an old server leaves this pending.
     func syncRevision(recordID: String, consent: () -> Bool = { LitePrefs.researchConsent == true },
                       identity: (() -> String)? = nil,
+                      bindingAllowed: (LiteCloudBinding) -> Bool = { LiteWithdrawalJournal.standard.permits($0) },
                       send: (LiteCloudBinding, LitePendingRevision) async throws -> Void = { binding, pending in
                           guard LiteBackendConfiguration.sameService(binding.server, AppSettings.backendURL()) else {
                               throw LiteAttestFailure.serviceChanged
                           }
+                          guard LiteWithdrawalJournal.standard.permits(binding) else { throw LiteWithdrawalFailure.invalidState }
                           try await BackendClient(baseUrl: binding.server).liteRevision(bindingAnonID: binding.anonID,
                               imageID: binding.imageID, revision: pending.revision,
-                              payloadJSON: pending.payloadJSON, digest: pending.digest)
+                              payloadJSON: pending.payloadJSON, digest: pending.digest, researchEpoch: binding.researchEpoch)
                       }) async {
         guard !syncingRecordIDs.contains(recordID) else { return }
         syncingRecordIDs.insert(recordID)
@@ -167,6 +174,9 @@ extension LiteStore {
         while true {
             guard consent(), var record = records.first(where: { $0.id == recordID }),
                   var sync = record.cloudSync, (identity == nil || identity?() == sync.binding.anonID) else { return }
+            // Old queued revisions retain their bytes and numbers for audit;
+            // renewed consent must never enqueue/send them in a new epoch.
+            guard bindingAllowed(sync.binding) else { return }
             guard !(sync.capacityNotBefore.map { $0 > Date() } ?? false) else { return }
             do {
                 if sync.pending == nil {

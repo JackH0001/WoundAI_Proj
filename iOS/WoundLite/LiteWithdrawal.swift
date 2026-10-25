@@ -6,7 +6,7 @@ import CryptoKit
 enum LiteWithdrawalOutcome: Equatable { case pending, pendingUntil(Date), liveMediaRemoved }
 
 enum LiteWithdrawalFailure: LocalizedError {
-    case noIdentity, invalidReceipt, unavailable, invalidState, cancellationRequiresServer
+    case noIdentity, invalidReceipt, unavailable, invalidState, cancellationRequiresServer, renewalUnconfirmed
     var errorDescription: String? {
         switch self {
         case .noIdentity: return "找不到可驗證的原安裝身分，尚未送出雲端撤回。舊版資料或遺失身分的資料需聯絡支援處理。"
@@ -14,12 +14,13 @@ enum LiteWithdrawalFailure: LocalizedError {
         case .unavailable: return "雲端尚未確認撤回，請檢查網路後重試。"
         case .invalidState: return "無法讀取或保存撤回狀態；研究上傳已停用，請聯絡支援。"
         case .cancellationRequiresServer: return "此服務已有上傳身分或綁定紀錄，不能在手機直接取消撤回；需先取得伺服器的重新同意確認。原紀錄與撤回要求保留。"
+        case .renewalUnconfirmed: return "尚未取得重新加入的雲端確認，研究上傳保持關閉。原紀錄與這次同意要求已保留；請稍後核對同一次要求，不必重拍或重新登記裝置。"
         }
     }
 }
 
 struct LiteWithdrawalRecord: Codable, Equatable {
-    enum Phase: String, Codable { case pending, liveMediaRemoved, cancelledBeforeSubmission }
+    enum Phase: String, Codable { case pending, liveMediaRemoved, cancelledBeforeSubmission, reconsented }
     var server: String
     var owner: String?
     var phase: Phase = .pending
@@ -27,6 +28,8 @@ struct LiteWithdrawalRecord: Codable, Equatable {
     var cancellationAudit: String? = nil
     // Older journals have no timestamp; never invent one during decoding.
     var requestedAt: Date? = Date()
+    var researchEpoch: String? = nil
+    var reconsentAudit: String? = nil
 }
 
 private struct LiteUnsentWithdrawalCancellation: Codable {
@@ -59,6 +62,10 @@ struct LiteWithdrawalJournal: Sendable {
         do {
             guard let record = try load(), record.owner == binding.anonID,
                   try Self.origin(record.server) == Self.origin(binding.server) else { return nil }
+            if record.researchEpoch != binding.researchEpoch {
+                return "此筆屬先前已撤回的研究批次，雲端媒體不會恢復。本機紀錄與修訂保留，不會自動重傳。"
+            }
+            if record.phase == .reconsented { return nil }
             return record.phase == .liveMediaRemoved
                 ? "此安裝已撤回；雲端確認目前可見媒體已清除。本機紀錄保留，歷史版本與研究衍生資料的刪除尚未確認。"
                 : "此安裝已要求撤回，已停止同步；雲端清除尚待確認，可到設定重試查核。"
@@ -76,7 +83,20 @@ struct LiteWithdrawalJournal: Sendable {
               origin.user == nil, origin.password == nil, origin.query == nil, origin.fragment == nil,
               origin.path.isEmpty || origin.path == "/",
               value.owner == nil || LiteAttestClient.matches(value.owner!, "[0-9a-f]{32}"),
-              value.phase != .liveMediaRemoved || value.owner != nil else { throw LiteWithdrawalFailure.invalidState }
+              (value.phase != .liveMediaRemoved && value.phase != .reconsented) || value.owner != nil,
+              value.researchEpoch == nil || LiteAttestClient.matches(value.researchEpoch!, "[0-9a-f]{32}") else { throw LiteWithdrawalFailure.invalidState }
+        if value.phase == .reconsented {
+            guard let name = value.reconsentAudit, UUID(uuidString: name) != nil,
+                  let bytes = try? Data(contentsOf: url.deletingLastPathComponent().appendingPathComponent("history/" + name + ".json")),
+                  let audit = try? JSONDecoder().decode(LiteReconsentAudit.self, from: bytes),
+                  audit.receipt.validates(audit.intent.request), audit.intent.request.research_consent,
+                  audit.receipt.anon_id == value.owner, audit.receipt.consent_epoch == value.researchEpoch,
+                  try Self.origin(audit.intent.server) == Self.origin(value.server),
+                  let old = try? JSONDecoder().decode(LiteWithdrawalRecord.self, from: audit.intent.previousWithdrawal),
+                  old.phase == .liveMediaRemoved, old.owner == value.owner,
+                  old.server == value.server, (old.researchEpoch ?? "legacy") == audit.receipt.previous_epoch
+            else { throw LiteWithdrawalFailure.invalidState }
+        } else if value.reconsentAudit != nil { throw LiteWithdrawalFailure.invalidState }
         if value.phase == .cancelledBeforeSubmission {
             guard value.owner == nil, value.retryAt == nil, let name = value.cancellationAudit,
                   UUID(uuidString: name) != nil else { throw LiteWithdrawalFailure.invalidState }
@@ -84,8 +104,9 @@ struct LiteWithdrawalJournal: Sendable {
             guard let data = try? Data(contentsOf: auditURL),
                   let audit = try? JSONDecoder().decode(LiteUnsentWithdrawalCancellation.self, from: data),
                   audit.action == "cancel_unsent_withdrawal_and_reconsent",
-                  audit.at.timeIntervalSince1970.isFinite, !audit.consentVersion.isEmpty,
-                  audit.renewalDisclosureVersion == Self.renewalDisclosureVersion,
+                  audit.at.timeIntervalSince1970.isFinite,
+                  LiteReconsentRequest.validVersion(audit.consentVersion),
+                  LiteReconsentRequest.validVersion(audit.renewalDisclosureVersion),
                   audit.noRegisteredOwner, audit.noBoundRecordsForService,
                   SHA256.hash(data: audit.previousRequest).map({ String(format: "%02x", $0) }).joined() == audit.previousSHA256,
                   let prior = try? JSONDecoder().decode(LiteWithdrawalRecord.self, from: audit.previousRequest),
@@ -105,7 +126,7 @@ struct LiteWithdrawalJournal: Sendable {
         } catch { throw LiteWithdrawalFailure.invalidState }
     }
     var blocksUploads: Bool {
-        do { return try load().map { $0.phase != .cancelledBeforeSubmission } ?? false } catch { return true }
+        do { return try load().map { $0.phase != .cancelledBeforeSubmission && $0.phase != .reconsented } ?? false } catch { return true }
     }
 
     /// Called only after explicit renewed consent and read-only identity/record checks.
@@ -136,13 +157,14 @@ extension LiteSignedCloudTransport {
         let client = try await resolve()
         return try await client.existingInstallation()
     }
-    func withdraw(server: String, owner: String) async throws -> LiteWithdrawalOutcome {
+    func withdraw(server: String, owner: String, epoch: String? = nil) async throws -> LiteWithdrawalOutcome {
         guard LiteAttestClient.matches(owner, "[0-9a-f]{32}"), let origin = URL(string: try LiteWithdrawalJournal.origin(server)) else {
             throw LiteWithdrawalFailure.noIdentity
         }
         let client = try await resolve()
         guard try await client.existingInstallation() == owner else { throw LiteWithdrawalFailure.noIdentity }
-        var request = URLRequest(url: origin.appendingPathComponent("api/v1/lite/data/" + owner))
+        guard epoch == nil || LiteAttestClient.matches(epoch!, "[0-9a-f]{32}") else { throw LiteWithdrawalFailure.invalidState }
+        var request = URLRequest(url: origin.appendingPathComponent("api/v1/lite/data/" + owner + (epoch.map { "/" + $0 } ?? "")))
         request.httpMethod = "DELETE"
         let (data, response) = try await client.send(request, installation: owner, requestID: UUID(), allowSending: { true })
         try ResearchCapacityWait.check(response, data: data)
@@ -156,11 +178,13 @@ extension LiteSignedCloudTransport {
             var live_payloads_remaining: Int?
             var retained_markers: Int?
             var research_ledger_cleanup: String?
+            var consent_epoch: String?
         }
         guard response.statusCode == 200 || response.statusCode == 202 else { throw LiteWithdrawalFailure.unavailable }
         guard let receipt = try? JSONDecoder().decode(Receipt.self, from: data), receipt.anon_id == owner else {
             throw LiteWithdrawalFailure.invalidReceipt
         }
+        guard epoch.map({ receipt.consent_epoch == $0 }) ?? (receipt.consent_epoch == nil || receipt.consent_epoch == "legacy") else { throw LiteWithdrawalFailure.invalidReceipt }
         if response.statusCode == 202, receipt.status == "withdrawal_pending", receipt.reason == "writers_in_flight" {
             return .pendingUntil(ResearchCapacityWait.deadline(retryAfter: response.value(forHTTPHeaderField: "Retry-After"),
                 serverDate: response.value(forHTTPHeaderField: "Date"), data: data, now: Date()))
@@ -191,19 +215,34 @@ final class LiteWithdrawalModel: ObservableObject {
     private let stopUploads: () -> Void
     private let owner: (String) async throws -> String?
     private let send: (String, String) async throws -> LiteWithdrawalOutcome
+    private let sendScoped: (String, String, String) async throws -> LiteWithdrawalOutcome
     init(journal: LiteWithdrawalJournal = .standard,
          stopUploads: @escaping () -> Void = { LitePrefs.researchConsent = false },
          owner: @escaping (String) async throws -> String? = { try await LiteSignedCloudTransport(baseURL: $0).withdrawalOwner() },
          send: @escaping (String, String) async throws -> LiteWithdrawalOutcome = {
              try await LiteSignedCloudTransport(baseURL: $0).withdraw(server: $0, owner: $1)
+         },
+         sendScoped: @escaping (String, String, String) async throws -> LiteWithdrawalOutcome = {
+             try await LiteSignedCloudTransport(baseURL: $0).withdraw(server: $0, owner: $1, epoch: $2)
          }) {
         self.journal = journal; self.stopUploads = stopUploads; self.owner = owner; self.send = send
+        self.sendScoped = sendScoped
         do {
             record = try journal.load()
+            // Normalize a legacy excessive wait once and persist it; reopening
+            // must not keep moving the privacy deadline into the future.
+            if var value = record, value.phase == .pending, let raw = value.retryAt {
+                let bounded = ResearchCapacityWait.privacyDeadline(raw)
+                if bounded != raw { value.retryAt = bounded; try journal.save(value); record = value }
+            }
             if record?.phase == .pending, record?.owner == nil {
                 message = "尚未確認此服務的原上傳身分，未取得雲端撤回收據；本機紀錄保留，不能視為雲端資料已刪除。"
             } else if record?.phase == .cancelledBeforeSubmission {
                 message = "已保留原撤回與重新同意紀錄。舊服務資料未轉移，也未因本次操作刪除。"
+            } else if record?.phase == .liveMediaRemoved {
+                message = "撤回已完成；目前可見雲端媒體已清除。若希望再次參加，請閱讀下方說明並重新同意；已清除的資料不會恢復。"
+            } else if record?.phase == .reconsented {
+                message = "已確認重新加入。僅新的拍攝可研究上傳，先前撤回與手機紀錄保留，舊資料不會自動重傳。"
             }
         } catch { message = error.localizedDescription }
     }
@@ -211,6 +250,8 @@ final class LiteWithdrawalModel: ObservableObject {
     var finished: Bool { record?.phase == .liveMediaRemoved }
     var cancelledBeforeSubmission: Bool { record?.phase == .cancelledBeforeSubmission }
     var mayReviewUnsentCancellation: Bool { record?.phase == .pending && record?.owner == nil }
+    var renewed: Bool { record?.phase == .reconsented }
+    var mayReviewCompletedRenewal: Bool { finished && record?.owner != nil }
     static func hasBoundRecords(_ records: [LiteRecord], server: String) throws -> Bool {
         let target = try LiteWithdrawalJournal.origin(server)
         return try records.contains { record in
@@ -220,9 +261,30 @@ final class LiteWithdrawalModel: ObservableObject {
     }
     var statusTitle: String {
         if finished { return "已確認清除目前可見媒體" }
+        if renewed { return "已重新同意：僅啟用新的研究上傳" }
         if cancelledBeforeSubmission { return "已取消尚未送出的撤回要求" }
         if record?.owner == nil { return "撤回對象尚未確認" }
         return "撤回尚待完成確認"
+    }
+    func reconsentCompletedWithdrawal(server: String,
+        sendRenewal: (LiteReconsentIntent) async throws -> LiteReconsentReceipt = {
+            try await LiteSignedCloudTransport(baseURL: $0.server).rejoin($0)
+        }) async -> Bool {
+        guard !busy else { return false }
+        busy = true; defer { busy = false }
+        do {
+            guard let previous = try journal.load(), previous.phase == .liveMediaRemoved,
+                  try LiteWithdrawalJournal.origin(server) == LiteWithdrawalJournal.origin(previous.server),
+                  try await owner(previous.server) == previous.owner else { throw LiteWithdrawalFailure.noIdentity }
+            let intent = try journal.prepareRenewal(previous)
+            let receipt = try await sendRenewal(intent)
+            record = try journal.finishRenewal(intent, receipt: receipt)
+            message = "已確認重新加入。僅新的拍攝可研究上傳；先前撤回、舊待傳版本與手機紀錄保留，不會自動重傳。"
+            return true
+        } catch {
+            message = (error as? LiteWithdrawalFailure)?.localizedDescription ?? LiteWithdrawalFailure.renewalUnconfirmed.localizedDescription
+            return false
+        }
     }
     /// This does not undo a server withdrawal, enroll a replacement identity,
     /// migrate old records, or claim that old media was deleted.
@@ -254,10 +316,14 @@ final class LiteWithdrawalModel: ObservableObject {
             // A newly confirmed withdrawal after reconsent is a new request.
             // The cancelled request and consent event remain in the history file.
             var value: LiteWithdrawalRecord
-            if let previous, previous.phase != .cancelledBeforeSubmission {
+            if let previous, previous.phase != .cancelledBeforeSubmission && previous.phase != .reconsented {
                 value = previous
             } else {
                 value = LiteWithdrawalRecord(server: try LiteWithdrawalJournal.origin(server))
+                if let previous, previous.phase == .reconsented {
+                    guard try LiteWithdrawalJournal.origin(server) == previous.server else { throw LiteWithdrawalFailure.invalidState }
+                    value.owner = previous.owner; value.researchEpoch = previous.researchEpoch
+                }
             }
             value.retryAt = Date().addingTimeInterval(60)
             try journal.save(value); record = value
@@ -268,16 +334,18 @@ final class LiteWithdrawalModel: ObservableObject {
             }
             value.retryAt = Date().addingTimeInterval(60)
             try journal.save(value); record = value
-            let result = try await send(value.server, value.owner!)
+            let result: LiteWithdrawalOutcome
+            if let epoch = value.researchEpoch { result = try await sendScoped(value.server, value.owner!, epoch) }
+            else { result = try await send(value.server, value.owner!) }
             if result == .liveMediaRemoved { value.phase = .liveMediaRemoved; value.retryAt = nil }
-            if case .pendingUntil(let deadline) = result { value.retryAt = deadline }
+            if case .pendingUntil(let deadline) = result { value.retryAt = ResearchCapacityWait.privacyDeadline(deadline) }
             try journal.save(value); record = value
             message = result == .liveMediaRemoved
                 ? "雲端確認目前可見的影像與深度媒體已清除，該安裝的研究索引已停用。"
                 : "雲端已受理撤回，正在等待先前的上傳結束。本機已保留撤回要求，App 開啟時會自動接續查核。"
         } catch let wait as ResearchCapacityWait {
             if var value = record {
-                value.retryAt = wait.notBefore
+                value.retryAt = ResearchCapacityWait.privacyDeadline(wait.notBefore)
                 do { try journal.save(value); record = value } catch { message = LiteWithdrawalFailure.invalidState.localizedDescription; return }
             }
             message = "後端忙碌；撤回要求已保留，等待後自動查核。研究上傳保持停用。"

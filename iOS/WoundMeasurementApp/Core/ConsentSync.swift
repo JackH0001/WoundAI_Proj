@@ -65,11 +65,24 @@ enum ConsentSync {
     }
 
     /// 重新取得同意 → 解除雲端的撤回封鎖。沒有這一步，撤回就是死局。
-    static func restoreOnBackend(codes: [String], context: Context? = nil) async -> Result {
-        return await sync(codes, .restore, context ?? .legacy)
+    static func prepareRestore(codes: [String], context: Context? = nil) async throws -> [String:String] {
+        if codes.isEmpty { return [:] }
+        let context = context ?? .legacy
+        let backend = try await context.acquire()
+        var revisions: [String:String] = [:]
+        for code in Set(codes) {
+            guard context.active(), !Task.isCancelled else { throw CancellationError() }
+            revisions[code] = try await backend.consentRevision(code: code)
+        }
+        guard context.active(), !Task.isCancelled else { throw CancellationError() }
+        return revisions
     }
 
-    private static func sync(_ codes: [String], _ dir: Dir, _ context: Context) async -> Result {
+    static func restoreOnBackend(codes: [String], context: Context? = nil, observedRevisions: [String:String] = [:]) async -> Result {
+        return await sync(codes, .restore, context ?? .legacy, observedRevisions: observedRevisions)
+    }
+
+    private static func sync(_ codes: [String], _ dir: Dir, _ context: Context, newIntent: Bool = true, observedRevisions: [String:String] = [:]) async -> Result {
         var seen = Set<String>()
         let list = codes
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -77,11 +90,19 @@ enum ConsentSync {
         if list.isEmpty { return .empty }
 
         let queue: MedicalAccountPreferences.ConsentQueue = dir == .withdraw ? .withdrawal : .restore
-        func remember(_ codes: [String]) { context.accounts.add(codes, to: queue) }
-        func forget(_ code: String) { context.accounts.remove(code, from: queue) }
         // Persist before awaiting: switching environments or terminating during
         // a request must not lose the requested consent change.
-        remember(list)
+        if newIntent { context.accounts.add(list, to: queue) }
+        let tokens = Dictionary(uniqueKeysWithValues: list.compactMap { code in
+            context.accounts.token(code, in: queue).map { (code, $0) }
+        })
+        if newIntent && dir == .restore {
+            for (code, token) in tokens {
+                if let revision = observedRevisions[code] {
+                    _ = context.accounts.pinConsentRevision(revision, code: code, token: token)
+                }
+            }
+        }
         guard !running, !(context.accounts.retryAfter(queue).map { $0 > Date() } ?? false) else { return Result(done: [], pending: list) }
         running = true; defer { running = false }
         context.accounts.deferRetry(queue, until: Date().addingTimeInterval(60))
@@ -97,13 +118,20 @@ enum ConsentSync {
         for c in list {
             // 逐筆處理而非整批：一個代碼失敗不該讓其他的也留在佇列裡，
             // 而重試時只重試真正沒完成的那些。
+            guard let token = tokens[c], context.accounts.token(c, in: queue) == token else { continue }
             guard context.active(), !Task.isCancelled, !capacityWaiting else { fail.append(c); continue }
+            // The form observed its revision before the user confirmed. Neither
+            // delayed login nor a retry may acquire a newer revision afterwards.
+            guard context.active(), !Task.isCancelled, context.accounts.token(c, in: queue) == token else { continue }
             let ok = dir == .withdraw
-                ? await backend.withdrawConsent(code: c, onCapacity: { capacityWaiting = true; context.accounts.deferRetry(queue, until: $0.notBefore) })
-                : await backend.restoreConsent(code: c, onCapacity: { capacityWaiting = true; context.accounts.deferRetry(queue, until: $0.notBefore) })
-            if ok && context.active() && !Task.isCancelled { done.append(c); forget(c) } else { fail.append(c) }
+                ? await backend.withdrawConsent(code: c, intentID: token, onCapacity: { capacityWaiting = true; context.accounts.deferRetry(queue, until: $0.notBefore) })
+                : await backend.restoreConsent(code: c, intentID: token, revision: context.accounts.consentRevision(c, token: token), onCapacity: { capacityWaiting = true; context.accounts.deferRetry(queue, until: $0.notBefore) })
+            guard context.accounts.token(c, in: queue) == token else { continue }
+            if ok && context.active() && !Task.isCancelled {
+                done.append(c); context.accounts.remove(c, from: queue, expectedToken: token)
+            } else { fail.append(c) }
         }
-        if !fail.isEmpty { remember(fail) } else { context.accounts.deferRetry(queue, until: .distantPast) }
+        if fail.isEmpty { context.accounts.deferRetry(queue, until: .distantPast) }
         return Result(done: done, pending: fail)
     }
 
@@ -117,10 +145,9 @@ enum ConsentSync {
         let context = context ?? .legacy
         // 兩個方向都要補做。只補撤回的話，重新簽署的病患會永遠卡在「雲端說已撤回」。
         let wd = Array(context.accounts.pending(.withdrawal))
+        let a = wd.isEmpty ? Result.empty : await sync(wd, .withdraw, context, newIntent: false)
         let rs = Array(context.accounts.pending(.restore))
-        if wd.isEmpty && rs.isEmpty { return .empty }
-        let a = wd.isEmpty ? Result.empty : await sync(wd, .withdraw, context)
-        let b = rs.isEmpty ? Result.empty : await sync(rs, .restore, context)
+        let b = rs.isEmpty ? Result.empty : await sync(rs, .restore, context, newIntent: false)
         return Result(done: a.done + b.done, pending: a.pending + b.pending)
     }
 
@@ -138,13 +165,13 @@ enum ConsentSync {
         if !wd.isEmpty {
             parts.append("""
             ⚠ 有 \(wd.count) 筆撤回尚未同步到雲端：\(wd.joined(separator: "、"))
-            這些代碼的資料目前仍在雲端訓練佇列中。
+            尚未取得雲端停止使用的確認，請優先完成撤回核對。
             """)
         }
         if !rs.isEmpty {
             parts.append("""
             ⚠ 有 \(rs.count) 筆重新簽署尚未同步到雲端：\(rs.joined(separator: "、"))
-            這些代碼在雲端仍被標記為已撤回，補送訓練標註會被擋下。
+            雲端尚未確認恢復。若同意版次已變動或先前離線，請重新開啟同意表單核對並確認；重試不會自動解除新的撤回。
             """)
         }
         parts.append("請確認網路與後端帳密後重試；若持續失敗，請由管理者到主控台處理。")
