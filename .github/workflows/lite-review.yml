@@ -5,6 +5,8 @@ on:
       - 'Backend/LiteReview/**'
       - 'tools/plan_lite_review_rollout.py'
       - 'tools/build_lite_review_catalogue.py'
+      - 'tools/probe_lite_review_container.py'
+      - 'tools/test_probe_lite_review_container.py'
       - 'engineering/phase2/test_lite_review_portal.py'
       - '.github/workflows/lite-review.yml'
   workflow_dispatch:
@@ -20,10 +22,12 @@ jobs:
           persist-credentials: false
       - name: Build isolated review image
         run: docker build -f Backend/LiteReview/Dockerfile -t lite-review:test .
-      - name: Verify both factories and absence of medical bootstrap
+      - name: Verify external probe with deployment sandbox restrictions
         run: >-
-          docker run --rm --entrypoint python lite-review:test -B -c
-          "from Backend.LiteReview.runtime import portal, reader;
-          import importlib.util;
-          assert importlib.util.find_spec('Backend.Flask') is None;
-          print('independent review factories import; medical runtime absent')"
+          docker run --rm --network=none --read-only
+          --tmpfs /tmp:rw,nosuid,nodev,size=32m --cap-drop=ALL
+          --security-opt=no-new-privileges --memory=512m --cpus=1
+          --workdir /tmp
+          -v "$PWD/tools/probe_lite_review_container.py:/verification/probe.py:ro"
+          --entrypoint python lite-review:test -I -B /verification/probe.py
+          --application-root /app
