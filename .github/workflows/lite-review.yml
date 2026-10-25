@@ -6,6 +6,8 @@ on:
       - 'tools/plan_lite_review_rollout.py'
       - 'tools/plan_lite_review_human.py'
       - 'tools/test_plan_lite_review_human.py'
+      - 'tools/lite_review_executor.py'
+      - 'tools/test_lite_review_executor.py'
       - 'engineering/phase2/test_lite_review_human.py'
       - 'tools/build_lite_review_catalogue.py'
       - 'tools/probe_lite_review_container.py'
@@ -25,6 +27,8 @@ jobs:
           persist-credentials: false
       - name: Verify offline human-entry plan boundaries
         run: python3 -B tools/test_plan_lite_review_human.py
+      - name: Rehearse bounded B1 partial failures without cloud credentials
+        run: python3 -B tools/test_lite_review_executor.py
       - name: Build isolated review image
         run: docker build -f Backend/LiteReview/Dockerfile -t lite-review:test .
       - name: Verify external probe with deployment sandbox restrictions
