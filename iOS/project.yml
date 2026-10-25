@@ -155,6 +155,8 @@ targets:
     platform: iOS
     sources:
       - path: WoundLiteTests
+      - path: WoundLiteCommerce.storekit
+        buildPhase: resources
     dependencies:
       - target: WoundLite
     settings:
@@ -192,6 +194,25 @@ targets:
 ## 自動產生 scheme（除非在 target 下寫 `scheme:`），少了這一段，BUILD_RELEASE.md 的
 ## 指令會以 "scheme not found" 直接失敗——而那看起來像環境問題，不像設定漏了。
 schemes:
+  # Local simulator only. The commerce code is absent from device and Release builds.
+  WoundLiteCommerceLab:
+    build:
+      targets:
+        WoundLite: all
+        WoundLiteTests: [test]
+    run:
+      config: Debug
+      storeKitConfiguration: WoundLiteCommerce.storekit
+      commandLineArguments:
+        "-lite-commerce-lab": true
+    test:
+      config: Debug
+      testPlans:
+        - path: WoundLiteCommerce.xctestplan
+          defaultPlan: true
+    archive:
+      config: Release
+
   WoundMeasurementApp:
     build:
       targets:

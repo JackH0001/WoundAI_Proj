@@ -1,0 +1,38 @@
+{
+  "identifier": "B7B096C8-7474-42AD-BF97-4021458A2B53",
+  "nonRenewingSubscriptions": [],
+  "products": [],
+  "settings": {
+    "_failTransactionsEnabled": false,
+    "_locale": "en_US",
+    "_storefront": "USA",
+    "_storeKitErrors": [],
+    "_timeRate": 0
+  },
+  "subscriptionGroups": [{
+    "id": "lite-plus-local",
+    "localizations": [],
+    "name": "WoundAILite Plus LOCAL TEST ONLY",
+    "subscriptions": [{
+      "adHocOffers": [],
+      "codeOffers": [],
+      "displayPrice": "1.99",
+      "familyShareable": false,
+      "groupNumber": 1,
+      "internalID": "1234567890",
+      "introductoryOffer": null,
+      "localizations": [{
+        "description": "Local synthetic test only. No cloud quota or research consent change.",
+        "displayName": "WoundAILite Plus (Local Test)",
+        "locale": "en_US"
+      }],
+      "productID": "com.woundai.lite.plus.monthly",
+      "recurringSubscriptionPeriod": "P1M",
+      "referenceName": "Plus Monthly Local Test",
+      "subscriptionGroupID": "lite-plus-local",
+      "type": "RecurringSubscription",
+      "winBackOffers": []
+    }]
+  }],
+  "version": { "major": 3, "minor": 0 }
+}

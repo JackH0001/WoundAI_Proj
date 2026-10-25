@@ -1,0 +1,26 @@
+{
+  "configurations": [{
+    "id": "D1C7D186-DA0E-416D-ADE9-EBE341BD4AD1",
+    "name": "Local StoreKit",
+    "options": {}
+  }],
+  "defaultOptions": {
+    "storeKitConfigurationFileReference": {"identifier": "container:WoundLiteCommerce.storekit"},
+    "testTimeoutsEnabled": true,
+    "maximumTestExecutionTimeAllowance": 60,
+    "targetForVariableExpansion": {
+      "containerPath": "container:WoundMeasurementApp.xcodeproj",
+      "identifier": "A0DD2913D762F137E4A6D827",
+      "name": "WoundLite"
+    }
+  },
+  "testTargets": [{
+    "parallelizable": false,
+    "target": {
+      "containerPath": "container:WoundMeasurementApp.xcodeproj",
+      "identifier": "CCD2C80579869F6DDE66692F",
+      "name": "WoundLiteTests"
+    }
+  }],
+  "version": 1
+}

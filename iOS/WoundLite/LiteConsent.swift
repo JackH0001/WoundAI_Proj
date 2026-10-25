@@ -144,6 +144,13 @@ struct LiteSettingsView: View {
                     LabeledContent("版本（建置號）", value: installedVersion)
                         .textSelection(.enabled)
                 }
+                #if DEBUG && targetEnvironment(simulator)
+                if ProcessInfo.processInfo.arguments.contains("-lite-commerce-lab") {
+                    Section("內部驗證") {
+                        NavigationLink("訂閱、廣告與固定收案（合成）") { LiteCommerceLab() }
+                    }
+                }
+                #endif
                 Section("研究上傳") {
                     Toggle("上傳去識別資料供研究（啟用自動辨識）", isOn: $consent)
                         .onChange(of: consent) { _, v in LitePrefs.researchConsent = v }
