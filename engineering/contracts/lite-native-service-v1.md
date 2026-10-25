@@ -85,14 +85,22 @@ No retention deletion is performed in this stage.
 4. Backend result-cache lifecycle and unknown-work reconciliation below; real
    Apple Sandbox, bounded cloud acceptance and TestFlight workflow acceptance.
 
-## Proposed lifecycle, not executed or approved cleanup
+## Lifecycle progress, no cloud cleanup executed or approved
+
+The explicit single-operation compactor is implemented with synthetic tests in
+`lite_service_retention.py`; see `lite-service-result-lifecycle-v1.md`. It now
+covers terminal payload removal, known-result settlement and unstarted
+cancellation with exact generation/hash plans and intent/completion evidence.
+The table below continues to define the broader rollout requirements; no
+cloud scheduler, generation purge or unknown-worker resolution is enabled.
 
 The current 24-hour read window is NOT physical deletion. Do not delete the
 whole operation mapping: that can let an old ID become a new operation/day.
-Before activation, version the store to support a compact terminal tombstone
+The reader now supports a v2 compact terminal tombstone
 with original operation/day/input/result hashes and audited outcome, separate
 from payload availability. Retention duration and user disclosure remain to be
-approved alongside the lifecycle implementation.
+approved before activation. Existing v1 results remain readable; only an
+explicit authorized compactor invocation writes v2.
 
 | State at expiry | Required decision and race test |
 | --- | --- |

@@ -40,6 +40,10 @@ jobs:
         run: |
           python -m unittest -v test_lite_service_http test_lite_service_loopback test_lite_native_service_contract > evidence/service-flow-tests.log 2>&1
           python tools/lite_service_flow_probe.py --output evidence/service-flow-probe.json
+      - name: Explicit service-result compaction and race rehearsal (synthetic only)
+        run: |
+          python -m unittest -v test_lite_service_retention test_lite_service_retention_probe > evidence/result-lifecycle-tests.log 2>&1
+          python tools/lite_service_retention_probe.py --output evidence/result-lifecycle-probe.json
       - name: Review entry, isolation, migration and containment rehearsal
         run: >-
           python -m unittest -v test_lite_review_portal test_lite_review_human

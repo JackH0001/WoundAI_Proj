@@ -23,6 +23,30 @@ class OperationUnknown(UsageConflict): pass
 class ImageRejected(UsageConflict): pass
 
 
+def validate_retained_receipt(v,now):
+    """v2 stores a terminal identity/receipt, never a still-readable payload.
+
+    No implicit migration. Only the separately invoked retention executor writes
+    this shape after expiry and verified ledger settlement/cancellation.
+    """
+    t=v['retention']
+    if (v['result'] is not None or type(t) is not dict
+            or set(t)!={'plan_sha256','compacted_at','receipt'}
+            or type(t['compacted_at']) is not int or not v['expires']<=t['compacted_at']<=now):
+        raise ValueError('invalid retention terminal')
+    _hex(t['plan_sha256']);r=t['receipt']
+    if (type(r) is not dict or set(r)!={'day','operation','request_digest','outcome','result_sha256','grant_sha256','admitted_limit'}
+            or type(r['day']) is not int or r['day']!=v['day'] or r['operation']!=v['operation']
+            or r['request_digest']!=v['digest'] or r['outcome'] not in ('succeeded','empty','cancelled')
+            or type(r['admitted_limit']) is not int or r['admitted_limit'] not in (2,10)):
+        raise ValueError('invalid terminal receipt')
+    _hex(r['result_sha256']);_hex(r['grant_sha256'])
+    if r['outcome']=='cancelled':
+        if v['result_sha256'] is not None:raise ValueError('cancelled operation has inference result')
+    elif _hex(v['result_sha256'])!=r['result_sha256']:
+        raise ValueError('result hash differs from terminal receipt')
+
+
 class ServiceAccounts:
     """Create-only trusted provisioning, never exposed as a user API.
 
@@ -149,14 +173,18 @@ class ServiceOperations:
         if row is None:return None
         revision,v=row
         try:
-            if (type(v) is not dict or set(v)!={'v','subject_hash','operation','day','created','expires','image_sha256','model','digest','worker','result','result_sha256'}
-                    or type(v['v']) is not int or v['v']!=1 or v['subject_hash']!=digest(subject) or v['operation']!=operation
+            fields={'v','subject_hash','operation','day','created','expires','image_sha256','model','digest','worker','result','result_sha256'}
+            if (type(v) is not dict or type(v.get('v')) is not int or v['v'] not in (1,2)
+                    or set(v)!=(fields if v['v']==1 else fields|{'retention'})
+                    or v['subject_hash']!=digest(subject) or v['operation']!=operation
                     or any(type(v[k]) is not int or v[k]<0 for k in ('day','created','expires'))
                     or v['day']!=v['created']//86400 or v['expires']!=v['created']+RESULT_TTL
                     or v['created']>self.now()):raise ValueError()
             _hex(v['image_sha256']);_hex(v['model']);_hex(v['digest']);_hex(v['worker'],32)
             if v['digest']!=digest(['service-only/v1',v['image_sha256'],v['model']]):raise ValueError()
-            if v['result'] is None:
+            if v['v']==2:
+                validate_retained_receipt(v,self.now())
+            elif v['result'] is None:
                 if v['result_sha256'] is not None:raise ValueError()
             elif digest(validate_result(v['result']))!=_hex(v['result_sha256']):raise ValueError()
             _encode(v)
@@ -169,7 +197,7 @@ class ServiceOperations:
     def _require(self,subject,operation):
         row=self.load(subject,operation)
         if row is None:raise OperationUnknown('unknown operation')
-        if self.now()>=row[1]['expires']:raise OperationExpired('result read window expired; do not silently rerun')
+        if row[1]['v']==2 or self.now()>=row[1]['expires']:raise OperationExpired('result read window expired; do not silently rerun')
         return row
 
     def prepare(self,installation,operation,image_sha256):

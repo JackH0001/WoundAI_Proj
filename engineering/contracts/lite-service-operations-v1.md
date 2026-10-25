@@ -80,13 +80,14 @@ ephemeral Cloud Run disk. A raw JPEG is processed in memory by this component;
 no raw depth is accepted. Result polygons and operation hashes **are persisted**.
 They are service-result state, not long-term research enrollment.
 
-`RESULT_TTL=86400` currently limits result **reads**, not physical retention.
-No purge implementation or data-lifecycle approval is supplied in this change.
-Deployment must wait for explicit service-cache disclosure, bounded result and
-provisional-operation cleanup, race tests, and sufficient durable tombstones to
-prevent an old operation ID being reused after payload purge. Deleting the entire
-mapping is not a safe TTL implementation. Research withdrawal currently concerns
-research data; service-cache erasure and audit retention need their own contract.
+`RESULT_TTL=86400` limits result **reads**, not physical retention. The opt-in
+`lite_service_retention` module can now compact one expired terminal result or
+cancel one unstarted reservation with CAS and append-only intent/completion
+evidence. It retains a v2 terminal identity and never deletes the whole mapping.
+It is not installed in startup/HTTP and does NOT delete GCS historical generations
+or soft-deleted copies. See `lite-service-result-lifecycle-v1.md` for exact states,
+race tests and remaining rollout gates. Service-cache disclosure, retention and
+generation-erasure authorization remain separate from research withdrawal.
 
 Persist-result then settle permits response-loss recovery by status, including
 after a process restart. Reusing run still uploads the HTTP body although it
@@ -117,7 +118,9 @@ provisional mappings that never received quota; cleanup must distinguish them.
    `/segment` default five/count-append race remains; do not enable both and
    accidentally grant old five plus new two. Failure must close new admission,
    retain receipts and reconcile, not revert to an empty legacy balance.
-5. Implement cache cleanup/tombstones and unknown-job reconciliation above.
+5. Finish lifecycle deployment bounds, generation retention/erasure policy,
+   provisional mapping fencing and unknown-job reconciliation. The local
+   single-operation compactor is implemented; no scheduler/purge is enabled.
 6. Verify real Apple Sandbox purchase/renewal/refund/restore and signed renewal
    grace policy. Current tests use Apple's real verifier on synthetic chains and
    mocked Server API status, not an Apple-hosted transaction.
