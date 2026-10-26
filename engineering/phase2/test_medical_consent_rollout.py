@@ -36,8 +36,11 @@ class Disposal(unittest.TestCase):
         self.assertTrue(all(self.st.exists(k) for k in self.files));self.assertEqual(self.order.state(self.code,'default')['sequence'],1)
     def test_windows_inventory_uses_portable_keys_without_false_absence(self):
         expected=inventory(self.st,self.iid)
+        # Python <=3.11 Path.__new__ consults the module's Path global. Keep
+        # the concrete host class before patching that factory below.
+        host_path_type=type(Path(self.st.root))
         def windows_base(path):
-            base=Path(path);wrapped=Mock();wrapped.exists.return_value=base.exists()
+            base=host_path_type(path);wrapped=Mock();wrapped.exists.return_value=base.exists()
             entries=[]
             for p in base.rglob('*'):
                 entry=Mock()
