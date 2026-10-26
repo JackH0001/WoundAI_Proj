@@ -85,7 +85,7 @@ CAS across midnight; late worker claim; two concurrent successor requests;
 successor response lost; native crash before/after journal save; expired result
 and successful old receipt must never become a second paid operation.
 
-## G4 — signed grace implemented locally; migration still pending
+## G4 — signed grace and explicit policy transition implemented locally
 
 Implemented now: reuse a verified grant within one prepare request while still
 valid. Requery after expiry; existing ticket/receipt lookup needs no Apple call.
@@ -101,12 +101,15 @@ Implemented locally in the signed-grace continuation:
   See `lite-subscription-grace-v1.md` for 34 synthetic regressions and limitations.
   Real Apple Sandbox, configuration and online verification remain untested.
 
-Still blocked:
+Implemented locally after `137c884`: stable account identity and an approved,
+per-account policy transition. Old associations/registration remain immutable.
+Unknown policies never silently grant free service. Fresh target Apple proof,
+generation-CAS, lost-ack recovery and reader rollback have synthetic tests. No
+cross-account/original-transaction transfer. See `lite-subscription-policy-migration-v1.md`.
 
-- Policy/product change: introduce a stable account-link identity plus an
-  explicit supported-policy migration. An old link that cannot be interpreted
-  must raise a migration condition, not silently resolve as unbound/free. Keep
-  immutable originals and an audited mapping; no cross-account transfer.
+Still blocked: complete live legacy-policy inventory, real control authentication
+and writer-fence provider, Apple Sandbox/product transition, shipping purchase
+and account recovery. Synthetic callback success is not live authorization.
 
 Acceptance: active, grace with valid/expired/missing renewal proof, billing retry,
 refund, Apple unavailable, supported legacy product, unknown policy, lost
@@ -137,7 +140,7 @@ No current authorization is used here to initialize production quotas, change
 IAM, migrate storage, enable cleanup, purchase ads or publish a store build.
 Local unit tests and characterization are not a substitute for cloud/real-device
 acceptance. Remote publication requires approval of the new exact source; latest
-approval covered only `07f4fab`. No merge or deployment is implied.
+approval covered only `137c884`. No merge or deployment is implied.
 
 # Prior implementation checkpoint (38aa206; superseded for G3 below)
 
@@ -194,7 +197,8 @@ finish once on the original ledger. Runtime admission cannot promise cancellatio
 of already authorized in-flight work.
 
 The trusted **live cloud provider remains unimplemented**, as do the public
-capture/history integration, verified account enrollment/recovery, Apple grace
-and policy migration. This stage is not permission to perform deployment,
+capture/history integration and verified account enrollment/recovery. Signed
+grace/policy migration have separate local tests; real Apple acceptance remains
+open. This stage is not permission to perform deployment,
 production migration or cleanup. See `lite-cross-day-recovery-v1.md` for the
 protocol, failure matrix and exact remaining acceptance boundary.

@@ -66,7 +66,8 @@ revocation: the authority's short verification window remains applicable.
   mint a new allowance in this core. Human/device enrollment is still a gate.
 - Refund/expiry keeps the subject, mapping, original operation IDs and receipts.
   If already used more than two, free remaining is zero, not a negative number
-  or a reset. Billing-grace behavior remains blocked pending a signed renewal policy.
+  or a reset. Signed billing grace has its own local validation contract;
+  see `lite-subscription-grace-v1.md`.
 - Research withdrawal before or during service use remains withdrawn. No
   subscription method has a research write or withdrawal-cancellation interface.
 - Missing/corrupt mapping, token mismatch, unavailable state or invalid audit
@@ -91,6 +92,10 @@ The existing opt-in service-only routes still need native/history integration,
 legacy quota freeze and verified baseline migration. Do not enable old/new quota
 writers in parallel. Do not roll out active purchases while incomplete links lack
 a bounded user-visible recovery workflow. No startup enablement was added here.
+
+The later stable-reader transition is in `lite-subscription-policy-migration-v1.md`.
+The v1 key/schema is unchanged; once its account guard exists this reader refuses
+new association/admission. Rollback must retain the stable reader and guards.
 
 ## Reproduction
 

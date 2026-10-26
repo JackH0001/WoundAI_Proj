@@ -78,6 +78,11 @@ jobs:
         run: |
           python -m unittest -v test_lite_subscription_grace test_lite_subscription_grace_probe > evidence/subscription-grace-tests.log 2>&1
           python tools/lite_subscription_grace_probe.py --output evidence/subscription-grace-probe.json
+      # Subscription policy transitions remain explicit, local and default-off.
+      - name: Stable subscription policy migration and reader rollback (synthetic only)
+        run: |
+          python -m unittest -v test_lite_subscription_migration test_lite_subscription_migration_probe > evidence/subscription-migration-tests.log 2>&1
+          python tools/lite_subscription_migration_probe.py --output evidence/subscription-migration-probe.json
       - name: Review entry, isolation, migration and containment rehearsal
         run: >-
           python -m unittest -v test_lite_review_portal test_lite_review_human

@@ -30,8 +30,15 @@ class ApplePolicy:
     product: str
     environment: str
 
-    def validate(self):
-        if (self.bundle != 'com.woundai.lite' or self.product != 'com.woundai.lite.plus.monthly'
+    def validate(self, allowed_products=None):
+        # Only trusted startup may extend the explicit catalog. Default behavior
+        # still accepts the one existing product; no client field selects it.
+        products=('com.woundai.lite.plus.monthly',) if allowed_products is None else allowed_products
+        if (type(products) is not tuple or not 1<=len(products)<=8
+                or any(type(p) is not str or re.fullmatch(r'com\.woundai\.lite\.[a-zA-Z0-9_.]{1,100}',p) is None for p in products)
+                or len(set(products))!=len(products)):
+            raise ValueError('bounded explicit server product catalog required')
+        if (self.bundle != 'com.woundai.lite' or self.product not in products
                 or type(self.app_id) is not int or self.app_id <= 0
                 or self.environment not in ('Sandbox', 'Production')):
             raise ValueError('explicit Lite Apple policy required; Xcode/local verification forbidden')
@@ -60,14 +67,14 @@ class ServiceBinding:
             raise SubscriptionRejected('invalid transaction binding')
 
 
-def apple_verifier(policy, root_certificates):
+def apple_verifier(policy, root_certificates, *, allowed_products=None):
     """Deployment factory: official library with chain/online revocation checks.
 
     Roots must be provisioned from Apple PKI and pinned by deployment review.
     This function does not download roots, find keys or configure any service.
     Tests instantiate the SAME official verifier with synthetic roots/offline OCSP.
     """
-    policy.validate()
+    policy.validate(allowed_products)
     if (type(root_certificates) is not list or not root_certificates
             or any(type(v) is not bytes or not v for v in root_certificates)):
         raise ValueError('pinned Apple root certificates required')
@@ -77,8 +84,9 @@ def apple_verifier(policy, root_certificates):
 
 
 class AppleSubscriptionAuthority:
-    def __init__(self, *, policy, verifier, client, proof_store, clock=time.time):
-        policy.validate()
+    def __init__(self, *, policy, verifier, client, proof_store, clock=time.time, allowed_products=None):
+        policy.validate(allowed_products)
+        self.allowed_products=allowed_products
         self.policy, self.verifier, self.client, self.proofs, self.clock = policy, verifier, client, proof_store, clock
 
     def _now(self):
