@@ -86,6 +86,36 @@ class ServiceHTTPTests(unittest.TestCase):
             prepared=self.json_request('prepare');self.assertEqual(prepared.json,first.json)
         self.assertEqual(self.model_calls,1);self.assertEqual(self.quota()['attempts'],1)
 
+    def test_prepare_reuses_one_current_grant_for_preflight_and_reservation(self):
+        with patch.object(self.accounts,'grant',wraps=self.accounts.grant) as grant:
+            self.assertEqual(self.json_request('prepare').status_code,200)
+        self.assertEqual(grant.call_count,1)
+        self.assertEqual(self.quota()['pending'],1)
+
+    def test_slow_prepare_refreshes_expired_grant_before_reservation(self):
+        original=self.ops.store.compare_exchange
+        def slow(*args):
+            result=original(*args);self.e.now+=31;return result
+        with patch.object(self.ops.store,'compare_exchange',side_effect=slow), \
+                patch.object(self.accounts,'grant',wraps=self.accounts.grant) as grant:
+            self.assertEqual(self.json_request('prepare').status_code,200)
+        self.assertEqual(grant.call_count,2)
+        self.assertEqual(self.quota()['pending'],1)
+
+    def test_failed_reservation_retry_fetches_fresh_grant_without_reset(self):
+        with patch.object(self.ledger,'reserve',side_effect=StateUnavailable('write uncertain')):
+            self.assertEqual(self.json_request('prepare').status_code,503)
+        with patch.object(self.accounts,'grant',wraps=self.accounts.grant) as grant:
+            self.assertEqual(self.json_request('prepare').status_code,200)
+        self.assertEqual(grant.call_count,1)
+        self.assertEqual(self.quota()['attempts'],1)
+
+    def test_invalid_commerce_injection_is_rejected_before_registration(self):
+        app=Flask('invalid-commerce')
+        with self.assertRaisesRegex(ValueError,'trusted service operations'):
+            install_lite_attest(app,commerce=object())
+        self.assertNotIn('lite_attest_http',app.extensions)
+
     def test_repeated_run_does_not_execute_or_change_receipt(self):
         first=self.complete();second=self.run_request()
         self.assertEqual(first.json,second.json);self.assertEqual(self.model_calls,1)

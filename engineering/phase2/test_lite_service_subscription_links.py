@@ -291,6 +291,34 @@ class SignedFlowTests(unittest.TestCase):
         result=self.h.complete();self.assertFalse(result.json['research_stored'])
         self.assertEqual(self.h.privacy._load(self.h.owner),before)
 
+    def test_paid_prepare_queries_apple_once_and_completed_retry_zero(self):
+        self.links.attach(self.h.accounts,self.h.owner,apple.BINDING.original_transaction,authentication_proof_sha256='b'*64)
+        with patch.object(self.a.client,'get_all_subscription_statuses',wraps=self.a.fetch) as query:
+            result=self.h.complete()
+            self.assertEqual(query.call_count,1)
+            self.assertEqual(result.json['receipt']['admitted_limit'],10)
+            self.assertEqual(self.h.json_request('prepare').json,result.json)
+            self.assertEqual(self.h.json_request('status').json,result.json)
+            self.assertEqual(query.call_count,1)
+        self.assertEqual(self.h.model_calls,1)
+
+    def test_expired_preflight_refresh_observes_refund_before_admission(self):
+        self.h.complete(1);self.h.complete(2)
+        self.links.attach(self.h.accounts,self.h.owner,apple.BINDING.original_transaction,authentication_proof_sha256='b'*64)
+        original=self.h.ops.store.compare_exchange
+        def delayed_refund(*args):
+            result=original(*args)
+            self.h.e.now+=31;self.a.now+=31;self.a.status=5
+            return result
+        with patch.object(self.h.ops.store,'compare_exchange',side_effect=delayed_refund), \
+                patch.object(self.a.client,'get_all_subscription_statuses',wraps=self.a.fetch) as query:
+            response=self.h.json_request('prepare',3)
+        self.assertEqual(query.call_count,2)
+        self.assertEqual(response.status_code,429,response.json)
+        self.assertEqual(self.h.quota()['used'],2)
+        self.assertEqual(self.h.quota()['pending'],0)
+        self.assertEqual(self.h.model_calls,2)
+
     def test_signed_http_cannot_select_account_or_tier(self):
         for field,value in [('paid',True),('original_transaction',apple.BINDING.original_transaction),
                             ('appAccountToken',apple.TOKEN),('subject','other')]:

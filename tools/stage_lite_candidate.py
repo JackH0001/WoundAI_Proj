@@ -60,14 +60,43 @@ def checked_source(base, relative):
     return path
 
 
+def optional_commerce_imports(name, tree):
+    """Only two reviewed imports behind the explicit, default-off injection.
+
+    Not a generic conditional-import exemption: ordinary handler imports,
+    unrelated branches and every other missing dependency still fail packaging.
+    The staged-subprocess test separately exercises the actual absent modules.
+    """
+    if name != 'lite_attest_http.py':
+        return set()
+    guard = ast.dump(ast.parse('commerce is not None', mode='eval').body)
+    result = set()
+    for function in tree.body:
+        if not isinstance(function, ast.FunctionDef) or function.name != 'install_lite_attest':
+            continue
+        defaults = dict(zip((arg.arg for arg in function.args.kwonlyargs), function.args.kw_defaults))
+        default = defaults.get('commerce')
+        if not isinstance(default, ast.Constant) or default.value is not None:
+            continue
+        for branch in function.body:
+            if not isinstance(branch, ast.If) or ast.dump(branch.test) != guard:
+                continue
+            for node in branch.body:
+                if (isinstance(node, ast.ImportFrom) and node.level == 0
+                        and node.module in {'lite_service_operations', 'lite_service_http'}):
+                    result.add(node)
+    return result
+
+
 def validate_runtime_imports(root):
     """Reject local Python dependencies missing from the explicit allowlist.
 
     Never auto-discover/copy files: expanding the manifest still needs review.
     This covers ordinary imports, including imports inside request handlers;
+    The two default-off commerce imports are explicitly checked separately;
     dynamic imports and runtime model behavior need separate image acceptance.
     """
-    flask = Path(root) / 'Backend/Flask'
+    flask = Path(root).resolve() / 'Backend/Flask'
     allowed = set(FLASK_FILES)
     for name in FLASK_FILES:
         if not name.endswith('.py'):
@@ -77,12 +106,13 @@ def validate_runtime_imports(root):
             tree = ast.parse(source.read_text(encoding='utf-8-sig'), filename=name)
         except (SyntaxError, UnicodeError) as exc:
             raise ValueError('invalid Python build source: ' + name) from exc
+        optional = optional_commerce_imports(name, tree)
         for node in ast.walk(tree):
             modules = ([alias.name.split('.')[0] for alias in node.names] if isinstance(node, ast.Import)
                        else [node.module.split('.')[0]] if isinstance(node, ast.ImportFrom) and node.module else [])
             for module in modules:
                 dependency = module + '.py'
-                if (flask / dependency).is_file() and dependency not in allowed:
+                if (flask / dependency).is_file() and dependency not in allowed and node not in optional:
                     raise ValueError('runtime import missing from build allowlist: ' + name + ' -> ' + dependency)
 
 

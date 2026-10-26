@@ -219,6 +219,7 @@ class ServiceOperations:
 
     def prepare(self,installation,operation,image_sha256):
         _hex(image_sha256);account=self.accounts.resolve(installation);subject=account['subject']
+        grant=None
         row=self.load(subject,operation)
         if row is None:
             now=self.now();grant=self.accounts.grant(account,now)
@@ -235,7 +236,13 @@ class ServiceOperations:
         ticket=self.ticket(subject,v)
         try:self.ledger.receipt(ticket)
         except UsageConflict:
-            self.ledger.reserve(subject,v['day'],operation,v['digest'],self.accounts.grant(account,self.now()))
+            # Reuse only this request's still-valid verified snapshot. A slow
+            # preflight must refresh it; a retry must never reuse a stored grant.
+            if grant is not None:
+                try:grant.validate(subject,self.now())
+                except UsageConflict:grant=None
+            if grant is None:grant=self.accounts.grant(account,self.now())
+            self.ledger.reserve(subject,v['day'],operation,v['digest'],grant)
         return self.status(installation,operation)
 
     def status(self,installation,operation):

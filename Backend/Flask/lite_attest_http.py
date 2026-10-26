@@ -73,10 +73,15 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
         raise ValueError('durable request budget required')
     if privacy is not None and not isinstance(privacy, (PrivacyState, FencedPrivacy)):
         raise ValueError('durable privacy coordinator required')
-    from lite_service_operations import ServiceOperations
-    from lite_service_http import SERVICE_PATHS, blueprint as commerce_blueprint
-    if commerce is not None and not isinstance(commerce, ServiceOperations):
-        raise ValueError('trusted service operations required')
+    service_paths = frozenset()
+    # The deployed legacy image deliberately excludes commerce and its Apple
+    # subscription dependencies. Only explicit trusted injection may load them.
+    if commerce is not None:
+        from lite_service_operations import ServiceOperations
+        from lite_service_http import SERVICE_PATHS, blueprint as commerce_blueprint
+        if not isinstance(commerce, ServiceOperations):
+            raise ValueError('trusted service operations required')
+        service_paths = frozenset(SERVICE_PATHS)
     app.extensions['lite_attest_http'] = dict(service=service, budget=budget, privacy=privacy, commerce=commerce)
     if commerce is not None:app.register_blueprint(commerce_blueprint(commerce))
     bp = Blueprint('lite_attest_http', __name__)
@@ -104,7 +109,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
                     request.headers.get('Content-Encoding', 'identity') != 'identity'):
                 raise AdmissionRejected('noncanonical request target or encoding')
             control = request.path in (CHALLENGE_PATH, REGISTER_PATH)
-            service_only = (request.path in SERVICE_PATHS and configuration['commerce'] is not None
+            service_only = (request.path in service_paths and configuration['commerce'] is not None
                             and request.endpoint in {'lite_service_http.prepare','lite_service_http.run','lite_service_http.status'})
             if not ((request.method == 'POST' and (control or request.path in POST_PATHS or service_only)) or
                     (request.method == 'DELETE' and re.fullmatch(PREFIX+r'data/[A-Za-z0-9_-]{1,128}(?:/[0-9a-f]{32})?', request.path))):

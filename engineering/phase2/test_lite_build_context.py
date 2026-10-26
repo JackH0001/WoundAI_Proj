@@ -3,7 +3,9 @@ import importlib.util
 from pathlib import Path
 import hashlib
 import json
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -47,6 +49,65 @@ class ContextTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'missing from build allowlist'):
             self.run_stage()
         self.assertFalse(self.output.exists())
+    def test_optional_commerce_guard_does_not_hide_other_imports(self):
+        valid = ('def install_lite_attest(app, *, commerce=None):\n'
+                 '    if commerce is not None:\n'
+                 '        from lite_service_operations import ServiceOperations\n')
+        module = self.repo/'Backend/Flask/lite_attest_http.py'
+        self.write(self.repo/'Backend/Flask/lite_service_operations.py', b'# optional\n')
+        module.write_text(valid)
+        stager.validate_runtime_imports(self.repo)
+        variants = [valid.replace('        from', '    from'),
+                    valid.replace('is not None', 'is None'),
+                    valid.replace('commerce=None', 'commerce=True'),
+                    valid.replace('install_lite_attest', 'some_handler'),
+                    valid + '    else:\n        from lite_service_operations import ServiceOperations\n']
+        # The unguarded variant must remain syntactically valid.
+        variants[0] = valid.replace('    if commerce is not None:\n', '').replace('        from', '    from')
+        for source in variants:
+            with self.subTest(source=source):
+                module.write_text(source)
+                with self.assertRaisesRegex(ValueError, 'missing from build allowlist'):
+                    stager.validate_runtime_imports(self.repo)
+        self.write(self.repo/'Backend/Flask/unreviewed.py', b'value = 1\n')
+        module.write_text(valid + '        from unreviewed import value\n')
+        with self.assertRaisesRegex(ValueError, 'missing from build allowlist'):
+            stager.validate_runtime_imports(self.repo)
+
+    def test_packaged_gate_starts_without_any_commerce_modules(self):
+        staged = self.base/'isolated-runtime';staged.mkdir()
+        for name in stager.FLASK_FILES:
+            target = staged/name;target.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copyfile(ROOT/'Backend/Flask'/name,target)
+        script = '''
+import importlib.util, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from flask import Flask
+from lite_attest_http import install_lite_attest
+optional = ('lite_service_operations', 'lite_service_http', 'lite_usage_ledger',
+            'lite_subscription_authority', 'lite_service_subscription_links')
+assert all(importlib.util.find_spec(name) is None for name in optional)
+app = Flask('staged-legacy')
+install_lite_attest(app)
+assert 'lite_attest_http' in app.extensions
+assert not any(rule.rule.startswith('/api/v1/lite/service/') for rule in app.url_map.iter_rules())
+assert app.test_client().post('/api/v1/lite/attest/challenge', json={}).status_code == 503
+assert not any(name in sys.modules for name in optional)
+# An incomplete opt-in image must fail startup, never silently fall back.
+broken = Flask('invalid-opt-in')
+try:
+    install_lite_attest(broken, commerce=object())
+except ModuleNotFoundError:
+    assert 'lite_attest_http' not in broken.extensions
+else:
+    raise AssertionError('missing commerce dependencies accepted')
+print('staged legacy gate started; optional modules absent; opt-in fails closed')
+'''
+        run = subprocess.run([sys.executable, '-I', '-c', script, str(staged)],
+                             cwd=staged,capture_output=True,text=True,timeout=30)
+        self.assertEqual(run.returncode,0,run.stdout+run.stderr)
+        self.assertIn('staged legacy gate started',run.stdout)
     def test_invalid_python_source_stops_before_output(self):
         self.write(self.repo/'Backend/Flask/app.py', b'def invalid syntax!\n')
         with self.assertRaisesRegex(ValueError, 'invalid Python build source'):

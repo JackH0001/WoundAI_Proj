@@ -1,6 +1,13 @@
-name: Lite prelaunch simulation (manual, no deployment)
+name: Lite prelaunch simulation (no deployment)
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - 'Backend/Flask/**'
+      - 'engineering/phase2/test_lite*.py'
+      - 'engineering/phase2/requirements-commerce-test.txt'
+      - 'tools/*lite*.py'
+      - '.github/workflows/lite-prelaunch.yml'
 permissions:
   contents: read
 jobs:
@@ -32,6 +39,12 @@ jobs:
           python -m unittest -v test_lite_prelaunch_economics test_lite_prelaunch_quota_probe > evidence/new-tests.log 2>&1
           python tools/lite_prelaunch_economics.py --output evidence/economics.json
           python tools/lite_prelaunch_quota_probe.py --output evidence/quota-probe.json
+      - name: Legacy image dependency closure and isolated startup
+        run: python -m unittest -v test_lite_build_context > evidence/build-context-tests.log 2>&1
+      - name: Reproduce unresolved rollout gaps separately from fixed regressions
+        run: |
+          python -m unittest -v test_lite_commerce_review_probe > evidence/review-gap-tests.log 2>&1
+          python tools/lite_commerce_review_probe.py --output evidence/review-gaps.json
       - name: Durable quota and official Apple verifier with synthetic chains
         run: |
           python -m unittest -v test_lite_usage_ledger test_lite_subscription_authority test_lite_usage_probe > evidence/commerce-core-tests.log 2>&1
@@ -75,6 +88,7 @@ jobs:
               f.write('The CAS ledger now has opt-in authenticated service-only HTTP tests. ')
               f.write('Application startup does not enable these routes; cloud/native cutover is still pending. ')
               f.write('No IAP login, cloud load, live GCS cleanup, real payment or ads were tested.\n')
+              f.write('Review-gap tests intentionally reproduce G1/G2/G3; passing them does not resolve those blockers.\n')
           PY
       - uses: actions/upload-artifact@v4
         if: always()
