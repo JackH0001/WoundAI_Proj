@@ -49,6 +49,10 @@ jobs:
         run: |
           python -m unittest -v test_lite_usage_ledger test_lite_subscription_authority test_lite_usage_probe > evidence/commerce-core-tests.log 2>&1
           python tools/lite_usage_probe.py --output evidence/atomic-usage-probe.json
+      - name: Opt-in cutover, unstarted leases and cross-day exclusion primitive
+        run: |
+          python -m unittest -v test_lite_usage_recovery test_lite_usage_recovery_http > evidence/usage-recovery-tests.log 2>&1
+          python tools/lite_usage_recovery_probe.py --output evidence/usage-recovery-probe.json
       - name: Opt-in authenticated service-only coordinator and real loopback
         run: |
           python -m unittest -v test_lite_service_http test_lite_service_loopback test_lite_native_service_contract > evidence/service-flow-tests.log 2>&1
@@ -89,6 +93,8 @@ jobs:
               f.write('Application startup does not enable these routes; cloud/native cutover is still pending. ')
               f.write('No IAP login, cloud load, live GCS cleanup, real payment or ads were tested.\n')
               f.write('Review-gap tests intentionally reproduce G1/G2/G3; passing them does not resolve those blockers.\n')
+              f.write('Separate opt-in recovery tests cover daily cutover, reservation expiry and the old-day fence only. ')
+              f.write('Live writer-fence adapter and G3 native successor persistence are not implemented; release remains blocked.\n')
           PY
       - uses: actions/upload-artifact@v4
         if: always()

@@ -135,3 +135,34 @@ Local unit tests and characterization are not a substitute for cloud/real-device
 acceptance. A stack PR should target `codex/lite-reconsent-20261021` (#35); the
 previous push approval fixed only `d642235`, so a new exact push/PR scope must be
 confirmed before publishing this stage.
+# Local implementation checkpoint (2026-10-26, after PR36 4fb1cf3)
+
+The rules below remain deployment gates. `lite_usage_cutover.py` and the optional
+`UsageLedger(cutover=...)` now implement the G1/G2 engine for **new v2 days only**.
+The pinned cutover receipt records namespace, UTC day, frozen legacy-writer and
+baseline hashes, account-map hash, policy and a 900-second unclaimed lease.
+New verified-account days strictly after that receipt may be initialized by
+create-only CAS. The cutover day still requires its verified legacy baseline.
+Existing, corrupt or legacy rows are never reset/upgraded. Live writer-fence
+checks must approve new admission/claim; existing receipts and settlement do not
+require that live check. A missing/corrupt pinned control receipt still fails
+closed. No production adapter or activation is provided.
+
+Only `reserved` v2 entries can expire. Expiry and claim use the same daily-row
+CAS. Cancelled entries, attempts and receipt hashes remain; `running` is never
+timed out, re-executed or refunded by this mechanism. Readback of an old v1 row
+does not give it a lease. A released slot permits another operation, not an
+implicit rerun of the expired photograph.
+
+`fence_missing(ticket)` implements **only the old-day exclusion primitive** for
+G3. A matching existing reservation returns no successor authority. An absent
+operation in an existing v2 day can be fenced on the same CAS row, so a paused
+old reservation loses its precondition. Fences count toward the bounded 30-entry
+history and retain the original input digest. Missing/v1 days are blocked.
+There is no HTTP successor endpoint, authorization mapping, new native journal
+generation or automatic retry identity change. G3 remains open end to end.
+
+Acceptance uses real SQLite and the actual GCS generation-CAS adapter over a
+fake SDK transport, plus signed synthetic App Attest HTTP requests. The existing
+default-off gap probe is deliberately unchanged; its failures still describe
+the non-cutover path. Do not interpret test success as production activation.

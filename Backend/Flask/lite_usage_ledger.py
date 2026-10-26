@@ -5,7 +5,8 @@ semantic operation id/digest. Neither App Attest transport counters nor research
 epochs are billing identities. Inject a dedicated CAS store; no clients, IAM,
 credentials, deletion or automatic legacy migration are created here.
 
-Reserved/running slots consume success capacity until explicitly settled. An
+Reserved/running slots consume success capacity. Only explicitly opted-in v2
+days expire unclaimed reservations; legacy histories are not reinterpreted. An
 unknown write outcome NEVER authorizes inference. A claimed job never expires or
 re-executes automatically. This trades availability for bounded paid work.
 """
@@ -89,10 +90,14 @@ class UsageLedger:
     ATTEMPT_LIMIT = 30
     TERMINAL = {'succeeded', 'empty', 'failed', 'cancelled'}
 
-    def __init__(self, store, *, namespace, clock=time.time):
+    def __init__(self, store, *, namespace, clock=time.time, cutover=None):
         if type(namespace) is not str or re.fullmatch(r'[a-z0-9_-]{1,64}', namespace) is None:
             raise ValueError('dedicated usage namespace required')
         self.store, self.namespace, self.clock = store, namespace, clock
+        if cutover is not None:
+            from lite_usage_cutover import CutoverPolicy
+            if not isinstance(cutover, CutoverPolicy): raise ValueError('trusted cutover policy required')
+        self.cutover = cutover
 
     def now(self):
         n = self.clock()
@@ -110,8 +115,10 @@ class UsageLedger:
             raise StateUnavailable('day not initialized: verified legacy baseline required')
         revision, value = row; _revision(revision)
         try:
-            if (type(value) is not dict or set(value) != {'v', 'subject_hash', 'day', 'baseline', 'entries', 'updated'}
-                    or type(value['v']) is not int or value['v'] != 1
+            fields = {'v', 'subject_hash', 'day', 'baseline', 'entries', 'updated'}
+            if type(value) is dict and value.get('v') == 2: fields |= {'policy', 'fences'}
+            if (type(value) is not dict or set(value) != fields
+                    or type(value['v']) is not int or value['v'] not in (1, 2)
                     or value['subject_hash'] != digest(subject) or value['day'] != day
                     or type(value['day']) is not int):
                 raise ValueError('identity/schema')
@@ -122,8 +129,27 @@ class UsageLedger:
             if _integer(b['attempts']) < _integer(b['successes']):
                 raise ValueError('baseline counters')
             _hex(b['manifest'])
+            if value['v'] == 2:
+                if self.cutover is None: raise ValueError('v2 requires pinned cutover')
+                policy = self.cutover.read(self.namespace, self.now())
+                if (value['policy'] != self._policy_fields(policy) or day <= policy['day']
+                        or b != self._zero_baseline(subject, day, policy)):
+                    raise ValueError('day policy/baseline mismatch')
+                fences = value['fences']
+                if type(fences) is not dict: raise ValueError('fences')
+                for op, fence in fences.items():
+                    _hex(op, 32)
+                    if type(fence) is not dict or set(fence) != {'digest', 'at', 'proof'}:
+                        raise ValueError('fence schema')
+                    _hex(fence['digest'])
+                    if not (day+1)*86400 <= _integer(fence['at']) <= value['updated']:
+                        raise ValueError('fence time')
+                    if fence['proof'] != self._fence_proof(Ticket(subject, day, op, fence['digest'])):
+                        raise ValueError('fence proof')
             entries = value['entries']
-            if type(entries) is not dict or len(entries) > self.ATTEMPT_LIMIT:
+            fences = value.get('fences', {})
+            if (type(entries) is not dict or len(entries) + len(fences) > self.ATTEMPT_LIMIT
+                    or entries.keys() & fences.keys()):
                 raise ValueError('entry bound')
             for op, e in entries.items():
                 _hex(op, 32)
@@ -164,6 +190,79 @@ class UsageLedger:
             raise StateUnavailable('server clock moved backwards')
         return revision, copy.deepcopy(value)
 
+    @staticmethod
+    def _policy_fields(policy):
+        return dict(sha256=digest(policy), reservation_seconds=policy['reservation_seconds'])
+
+    @staticmethod
+    def _zero_baseline(subject, day, policy):
+        return dict(successes=0, attempts=0, manifest=digest(['verified-post-cutover-day/1',
+                    digest(policy), subject, day]))
+
+    def _ensure_current_day(self, subject, day):
+        """Called only after trusted service-account/grant resolution, never by HTTP input."""
+        if self.cutover is None or self.store.load(self.key(subject, day)) is not None: return
+        now = self.now(); policy = self.cutover.read(self.namespace, now, admission=True)
+        if day != now//86400 or day <= policy['day']:
+            raise StateUnavailable('verified cutover-day baseline required')
+        value = dict(v=2, subject_hash=digest(subject), day=day,
+            baseline=self._zero_baseline(subject, day, policy), entries={}, updated=now,
+            policy=self._policy_fields(policy), fences={})
+        self.store.compare_exchange(self.key(subject, day), 0, value)
+        self._load(subject, day)  # uncertain write/readback never authorizes work
+
+    def _active(self, subject, day):
+        """Expire only unclaimed v2 reservations, on the same row as claim CAS."""
+        for _ in range(CAS_ATTEMPTS):
+            rev, state = self._load(subject, day)
+            if state['v'] == 1: return rev, state
+            now = self.now(); changed = False
+            for op, e in state['entries'].items():
+                deadline = e['history'][0][0] + state['policy']['reservation_seconds']
+                if e['history'][-1][1] == 'reserved' and now >= deadline:
+                    proof = digest(['unstarted-lease-expiry/1', self.namespace, subject, day,
+                                    op, e['digest'], deadline, state['policy']['sha256']])
+                    e['history'].append([now, 'cancelled', proof]); changed = True
+            if not changed: return rev, state
+            state['updated'] = now
+            if self.store.compare_exchange(self.key(subject, day), rev, state):
+                continue  # return actual persisted revision; do not fabricate one
+        raise StateUnavailable('lease contention; no inferred release')
+
+    def _admission(self):
+        if self.cutover is not None: self.cutover.read(self.namespace, self.now(), admission=True)
+
+    def _fence_proof(self, ticket):
+        return digest(['missing-reservation-fence/1', self.namespace, ticket.subject,
+                       ticket.day, ticket.operation, ticket.request_digest])
+
+    def fence_missing(self, ticket):
+        """Backend recovery primitive; NOT an API or permission to create a successor.
+
+        The caller must separately pin the durable operation/image and persist a
+        unique successor mapping before exposing any retry. A competing old
+        reservation either wins first (return None; recover it) or loses this CAS.
+        v1 histories/missing daily rows are never silently upgraded or fabricated.
+        """
+        _subject(ticket.subject); _integer(ticket.day); _hex(ticket.operation, 32); _hex(ticket.request_digest)
+        if ticket.day >= self.now()//86400: raise UsageConflict('only retired day may be fenced')
+        for _ in range(CAS_ATTEMPTS):
+            rev, state = self._load(ticket.subject, ticket.day)
+            if ticket.operation in state['entries']:
+                self._entry(state, ticket); return None
+            if state['v'] != 2: raise StateUnavailable('legacy day requires explicit reconciliation')
+            old = state['fences'].get(ticket.operation)
+            if old is not None:
+                if old['digest'] != ticket.request_digest: raise UsageConflict('fenced input changed')
+                return old['proof']
+            if len(state['entries']) + len(state['fences']) >= self.ATTEMPT_LIMIT:
+                raise StateUnavailable('bounded fence capacity exhausted; manual reconciliation required')
+            now = self.now(); proof = self._fence_proof(ticket)
+            state['fences'][ticket.operation] = dict(digest=ticket.request_digest, at=now, proof=proof)
+            state['updated'] = now
+            if self.store.compare_exchange(self.key(ticket.subject, ticket.day), rev, state): return proof
+        raise StateUnavailable('fence contention; do not authorize a successor')
+
     def initialize_day(self, subject, day, *, baseline_successes, baseline_attempts, manifest_sha256):
         """Trusted cutover/control operation, never an end-user reset endpoint.
 
@@ -186,11 +285,12 @@ class UsageLedger:
         entries = value['entries'].values()
         success = value['baseline']['successes'] + sum(e['history'][-1][1] == 'succeeded' for e in entries)
         pending = sum(e['history'][-1][1] in ('reserved', 'running') for e in entries)
-        return success, pending, value['baseline']['attempts'] + len(value['entries'])
+        return success, pending, value['baseline']['attempts'] + len(value['entries']) + len(value.get('fences', {}))
 
     def snapshot(self, subject, day, grant):
         grant.validate(subject, self.now())
-        _, value = self._load(subject, day)
+        self._ensure_current_day(subject, day)
+        _, value = self._active(subject, day)
         used, pending, attempts = self._counts(value)
         return dict(day=day, used=used, pending=pending, attempts=attempts, limit=grant.limit,
                     remaining=max(0, grant.limit-used-pending), attempt_limit=self.ATTEMPT_LIMIT)
@@ -199,15 +299,23 @@ class UsageLedger:
         _hex(operation, 32); _hex(request_digest)
         ticket = Ticket(_subject(subject), _integer(day), operation, request_digest)
         for _ in range(CAS_ATTEMPTS):
-            rev, state = self._load(subject, day)
+            rev, state = self._active(subject, day)
             if operation in state['entries']:
                 self._entry(state, ticket)  # same id with changed input is a conflict
                 return ticket  # terminal/pending readback is allowed after expiry/downgrade
+            if operation in state.get('fences', {}): raise UsageConflict('retired operation fenced')
             now = self.now()
             if day != now // 86400:
                 raise UsageConflict('new work requires current server-issued UTC day')
             if not isinstance(grant, DailyGrant):
                 raise UsageConflict('trusted server grant required')
+            grant.validate(subject, now)
+            self._admission()
+            # The trusted fence read can take time. Recheck the day/grant before
+            # proposing the write; a later concurrent fence still wins via CAS.
+            now = self.now()
+            if day != now//86400 or now < state['updated']:
+                raise UsageConflict('day/clock changed during admission')
             grant.validate(subject, now)
             used, pending, attempts = self._counts(state)
             retry = max(1, (day+1)*86400-now)
@@ -238,9 +346,14 @@ class UsageLedger:
         """
         _hex(worker, 32)
         for _ in range(CAS_ATTEMPTS):
-            rev, state = self._load(ticket.subject, ticket.day); e = self._entry(state, ticket)
+            rev, state = self._active(ticket.subject, ticket.day); e = self._entry(state, ticket)
             if e['history'][-1][1] != 'reserved': return False
-            now = self.now(); e['worker'] = worker; e['history'].append([now, 'running'])
+            self._admission()
+            now = self.now()
+            if now < state['updated']: raise StateUnavailable('server clock moved backwards')
+            if state['v'] == 2 and now >= e['history'][0][0] + state['policy']['reservation_seconds']:
+                continue
+            e['worker'] = worker; e['history'].append([now, 'running'])
             state['updated'] = now
             if self.store.compare_exchange(self.key(ticket.subject, ticket.day), rev, state): return True
         raise StateUnavailable('claim contention')
