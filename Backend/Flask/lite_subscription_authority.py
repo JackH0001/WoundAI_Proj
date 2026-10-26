@@ -87,6 +87,54 @@ class AppleSubscriptionAuthority:
             raise StateUnavailable('invalid subscription clock')
         return int(n)
 
+    def _grace(self, row, binding, expires, began, revoked):
+        """Bind Apple's signed renewal to the verified transaction/status query.
+
+        Renewal JWS verification checks its chain and environment, not our
+        account/product binding. No configured number of grace days substitutes
+        for the signed expiry. Auto-renew-off describes the NEXT renewal, not
+        withdrawal of an already granted grace period.
+        """
+        signed=getattr(row,'signedRenewalInfo',None)
+        if signed is None:
+            raise StateUnavailable('billing grace renewal proof unavailable; refresh')
+        if type(signed) is not str or not 1<=len(signed)<=12000:
+            raise SubscriptionRejected('bounded signed renewal required')
+        try:
+            renewal=self.verifier.verify_and_decode_renewal_info(signed)
+            encoded=signed.split('.')[1]
+            raw=loads_json_object_strict(base64.b64decode(encoded+'='*(-len(encoded)%4),
+                altchars=b'-_',validate=True).decode('utf-8'))
+            if (any(type(raw.get(k)) is not str for k in ('originalTransactionId','productId','environment'))
+                    or any(type(raw.get(k)) is not int for k in ('gracePeriodExpiresDate','signedDate'))
+                    or any(k in raw and type(raw[k]) is not str for k in ('appAccountToken','autoRenewProductId'))
+                    or ('isInBillingRetryPeriod' in raw and type(raw['isInBillingRetryPeriod']) is not bool)
+                    or ('autoRenewStatus' in raw and (type(raw['autoRenewStatus']) is not int or raw['autoRenewStatus'] not in (0,1)))):
+                raise ValueError('strict signed renewal claim types')
+        except Exception as exc:
+            raise SubscriptionRejected('Apple renewal verification failed') from exc
+        ended=self._now()
+        if not began<=ended<=began+30:
+            raise StateUnavailable('renewal verification deadline')
+        if (getattr(renewal,'originalTransactionId',None)!=binding.original_transaction
+                or getattr(renewal,'productId',None)!=self.policy.product
+                or enum_value(getattr(renewal,'environment',None))!=self.policy.environment
+                or ('appAccountToken' in raw and raw['appAccountToken']!=binding.app_account_token)):
+            raise SubscriptionRejected('renewal product/owner/environment mismatch')
+        # The token is optional in renewal info; the transaction token is always
+        # required and verified above. A future autoRenewProductId is not the
+        # current entitlement and cannot authorize a different product here.
+        grace=raw['gracePeriodExpiresDate'];signed_at=raw['signedDate']
+        if not (0<=expires<=signed_at<2**53 and signed_at<=(ended+60)*1000
+                and expires<grace<2**53):
+            raise SubscriptionRejected('renewal timestamps')
+        if (revoked is not None or expires>ended*1000 or grace<=ended*1000
+                or raw.get('isInBillingRetryPeriod') is False):
+            raise StateUnavailable('contradictory grace status; refresh instead of downgrade')
+        until=min(grace//1000,ended+30)
+        if until<=ended:raise StateUnavailable('grace expiry boundary; refresh')
+        return signed,grace,ended,until
+
     def grant(self, binding):
         if not isinstance(binding, ServiceBinding):
             raise SubscriptionRejected('server binding required')
@@ -164,10 +212,9 @@ class AppleSubscriptionAuthority:
         if revoked is not None and (type(revoked) is not int or revoked<0 or revoked>(ended+60)*1000):
             raise SubscriptionRejected('invalid revocation')
         if status==4:
-            # No store grace-period setting/renewal verification has been approved.
-            # Do not silently deprive a valid grace subscriber by treating them free.
-            raise StateUnavailable('billing grace requires signed renewal policy before rollout')
-        if status==1:
+            renewal,grace,ended,until=self._grace(row,binding,expires,began,revoked)
+            limit=10
+        elif status==1:
             if revoked is not None or expires<=ended*1000:
                 raise StateUnavailable('contradictory active status; refresh instead of grant')
             limit=10; until=min(expires//1000,ended+30)
@@ -181,6 +228,9 @@ class AppleSubscriptionAuthority:
             bundle=p.bundle,app_id=p.app_id,environment=p.environment,product=p.product,
             query_started=began,verified_at=ended,status=status,signed_transaction=signed,
             admitted_limit=limit,valid_until=until)
+        if status==4:
+            evidence.update(v=2,entitlement_basis='billing-grace',signed_renewal=renewal,
+                            grace_expires_ms=grace)
         proof=digest(evidence)
         # One verified original subscription maps to exactly one service subject.
         # Restoring on another device must resolve to that SAME account, not

@@ -74,6 +74,10 @@ jobs:
         run: |
           python -m unittest -v test_lite_service_subscription_links test_lite_service_binding_probe > evidence/account-binding-tests.log 2>&1
           python tools/lite_service_binding_probe.py --output evidence/account-binding-probe.json
+      - name: Signed Apple billing grace and quota preservation (synthetic only)
+        run: |
+          python -m unittest -v test_lite_subscription_grace test_lite_subscription_grace_probe > evidence/subscription-grace-tests.log 2>&1
+          python tools/lite_subscription_grace_probe.py --output evidence/subscription-grace-probe.json
       - name: Review entry, isolation, migration and containment rehearsal
         run: >-
           python -m unittest -v test_lite_review_portal test_lite_review_human

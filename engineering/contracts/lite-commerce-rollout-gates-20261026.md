@@ -85,20 +85,24 @@ CAS across midnight; late worker claim; two concurrent successor requests;
 successor response lost; native crash before/after journal save; expired result
 and successful old receipt must never become a second paid operation.
 
-## G4 — remaining policy work
+## G4 — signed grace implemented locally; migration still pending
 
 Implemented now: reuse a verified grant within one prepare request while still
 valid. Requery after expiry; existing ticket/receipt lookup needs no Apple call.
 This reduces normal new paid-operation status queries from two to one, not to
 zero, and does not claim real Apple latency or monetary savings measured.
 
+Implemented locally in the signed-grace continuation:
+
+- Billing-grace status 4 now verifies signed renewal information and grace expiry
+  before issuing the existing short-lived Plus grant. Missing/expired or
+  contradictory grace evidence and Apple outages do not invent free status.
+  Existing usage, owner/account keys, receipts and research state are preserved.
+  See `lite-subscription-grace-v1.md` for 34 synthetic regressions and limitations.
+  Real Apple Sandbox, configuration and online verification remain untested.
+
 Still blocked:
 
-- Billing-grace status 4: verify signed renewal information and its grace expiry
-  before enabling Plus during grace. Do not treat an Apple timeout as proof of
-  expiry/free status. A free-floor fallback is a policy candidate only; it must
-  preserve already used/pending counts and owner checks, and must not silently
-  deprive a valid grace subscriber of the purchased entitlement.
 - Policy/product change: introduce a stable account-link identity plus an
   explicit supported-policy migration. An old link that cannot be interpreted
   must raise a migration condition, not silently resolve as unbound/free. Keep
@@ -132,8 +136,8 @@ N1/N2/N4/L1/L2 must be resolved before affected patient-research rollout.
 No current authorization is used here to initialize production quotas, change
 IAM, migrate storage, enable cleanup, purchase ads or publish a store build.
 Local unit tests and characterization are not a substitute for cloud/real-device
-acceptance. Remote publication requires approval of the new exact source; prior
-approval covered only `38aa206`. No merge or deployment is implied.
+acceptance. Remote publication requires approval of the new exact source; latest
+approval covered only `07f4fab`. No merge or deployment is implied.
 
 # Prior implementation checkpoint (38aa206; superseded for G3 below)
 
