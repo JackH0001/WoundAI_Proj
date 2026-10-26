@@ -6,7 +6,7 @@ from lite_usage_ledger import UsageConflict,UsageLimit
 from lite_attest_state import StateUnavailable
 
 PREFIX='/api/v1/lite/service/'
-SERVICE_PATHS={PREFIX+'prepare',PREFIX+'status',PREFIX+'run'}
+SERVICE_PATHS={PREFIX+'prepare',PREFIX+'status',PREFIX+'run',PREFIX+'recover'}
 
 
 def blueprint(operations):
@@ -26,10 +26,13 @@ def blueprint(operations):
             else:
                 if request.mimetype!='application/json':raise UsageConflict('JSON required')
                 body=loads_json_object_strict(request.get_data().decode('utf-8'))
-                expected={'anon_id','operation'}|({'image_sha256'} if kind=='prepare' else set())
+                expected={'anon_id','operation'}|({'image_sha256'} if kind in ('prepare','recover') else set())
                 if set(body)!=expected:raise UsageConflict('exact service fields required')
             if body['anon_id']!=admission.installation:return jsonify(error='lite_owner_mismatch'),403
             if kind=='prepare':result=operations.prepare(admission.installation,body['operation'],body['image_sha256'])
+            elif kind=='recover':
+                if operations.recovery is None:return jsonify(error='lite_recovery_disabled',keep_local=True),409
+                result=operations.recovery.recover(admission.installation,body['operation'],body['image_sha256'])
             elif kind=='status':result=operations.status(admission.installation,body['operation'])
             else:result=operations.run(admission.installation,body['operation'],raw)
             response=jsonify(result)
@@ -48,7 +51,7 @@ def blueprint(operations):
             response=jsonify(error='lite_operation_unconfirmed',retry_action='status',keep_local=True)
             response.headers['Retry-After']='5';return response,503
 
-    for kind in ('prepare','run','status'):
+    for kind in ('prepare','run','status','recover'):
         bp.add_url_rule(PREFIX+kind,kind,lambda kind=kind:action(kind),methods=['POST'])
     @bp.after_request
     def no_cache(response):

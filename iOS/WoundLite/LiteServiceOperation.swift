@@ -51,14 +51,49 @@ struct LiteServiceReceipt: Codable, Equatable, Sendable {
     let admitted_limit: Int
 }
 
+struct LiteServiceRecoveryAuthorization: Codable, Equatable, Sendable {
+    let version: Int, parent_operation: String, parent_day: Int, parent_request_digest: String
+    let image_sha256: String, fence_sha256: String, successor_operation: String, successor_day: Int
+    let authorization_sha256: String
+    func validate(parent: String, image: String, day: Int?) throws {
+        guard version == 1, parent_operation == parent, image_sha256 == image,
+              LiteServiceBytes.hex(parent,32), LiteServiceBytes.hex(successor_operation,32),
+              successor_operation != parent, (0..<100_000_000).contains(parent_day),
+              successor_day > parent_day, successor_day < 100_000_000,
+              day == nil || day == parent_day,
+              [parent_request_digest,image_sha256,fence_sha256,authorization_sha256].allSatisfy({LiteServiceBytes.hex($0)}) else {
+            throw LiteServiceFailure.invalidResponse
+        }
+    }
+}
+
+struct LiteServiceRecoveryCheckpoint: Codable, Equatable, Sendable {
+    let authorization: LiteServiceRecoveryAuthorization
+    let priorRevision: Int, priorNote: String, priorDay: Int?
+    let priorNext: String, priorRetryAt: Double, priorRequestDigest: String?
+    let priorReply: LiteServiceReply?
+}
+
 struct LiteServiceReply: Codable, Equatable, Sendable {
     let state: String, operation: String, day: Int, retry_action: String, research_stored: Bool
     let receipt: LiteServiceReceipt?, result: LiteServiceResult?, result_json: String?
     let service_result_stored: Bool?, result_expires: Int?
+    var recovery: LiteServiceRecoveryAuthorization? = nil
 
     func validate(for record: LiteServiceRecord) throws {
         guard operation == record.operation, (0..<100_000_000).contains(day), !research_stored,
               record.day == nil || record.day == day else { throw LiteServiceFailure.invalidResponse }
+        if state == "recovery_available" || state == "new_operation_required" {
+            guard record.requestDigest == nil, record.reply?.receipt == nil,
+                  receipt == nil, result == nil, result_json == nil,
+                  service_result_stored != true, retry_action == "recover" else { throw LiteServiceFailure.invalidResponse }
+            if state == "new_operation_required" {
+                guard let recovery else { throw LiteServiceFailure.invalidResponse }
+                try recovery.validate(parent:record.operation,image:record.imageSHA256,day:day)
+            } else if recovery != nil { throw LiteServiceFailure.invalidResponse }
+            return
+        }
+        guard recovery == nil else { throw LiteServiceFailure.invalidResponse }
         if state == "awaiting_reservation" {
             guard record.requestDigest == nil, receipt == nil, result == nil, result_json == nil,
                   retry_action == "prepare" else { throw LiteServiceFailure.invalidResponse }
@@ -96,7 +131,9 @@ struct LiteServiceReply: Codable, Equatable, Sendable {
 
 struct LiteServiceRecord: Codable, Equatable, Sendable {
     var version = 1
-    let captureID: String, operation: String, origin: String, installation: String, imageSHA256: String
+    let captureID: String
+    var operation: String
+    let origin: String, installation: String, imageSHA256: String
     let width: Int, height: Int
     var revision = 1
     var next = "prepare"
@@ -105,16 +142,37 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
     var day: Int?
     var requestDigest: String?
     var reply: LiteServiceReply?
+    var recoveryHistory: [LiteServiceRecoveryCheckpoint]? = nil
 
     func validate() throws {
-        guard version == 1, LiteServiceBytes.hex(captureID,32), operation == captureID,
+        guard [1,2].contains(version), LiteServiceBytes.hex(captureID,32), LiteServiceBytes.hex(operation,32),
               LiteServiceBytes.hex(imageSHA256), revision > 0,
               LiteAttestClient.matches(installation,"[A-Za-z0-9_-]{1,128}"),
               (1...8192).contains(width), (1...8192).contains(height), width*height <= 16_000_000,
-              ["prepare","run","status","none"].contains(next),
-              ["local","checking","ready","pending","confirmed","quota","capacity","unavailable","review","expired","rejected","missingImage"].contains(note),
+              ["prepare","run","status","recover","none"].contains(next),
+              ["local","checking","ready","pending","confirmed","quota","capacity","unavailable","review","expired","rejected","missingImage","recovering"].contains(note),
               retryAt.isFinite, retryAt >= 0, day == nil || day! >= 0,
               requestDigest == nil || LiteServiceBytes.hex(requestDigest!) else { throw LiteServiceFailure.invalidState }
+        let history=recoveryHistory ?? []
+        if version == 1 {
+            guard history.isEmpty, operation == captureID else { throw LiteServiceFailure.invalidState }
+        } else {
+            guard (1...8).contains(history.count) else { throw LiteServiceFailure.invalidState }
+            var previous=captureID, seen=Set([captureID]), priorRevision=0, priorDay: Int? = nil
+            for item in history {
+                let auth=item.authorization
+                try auth.validate(parent:previous,image:imageSHA256,day:item.priorDay)
+                guard item.priorRevision > priorRevision, item.priorRevision < revision,
+                      item.priorReply?.receipt == nil, item.priorRequestDigest == nil,
+                      item.priorRetryAt.isFinite, item.priorRetryAt >= 0,
+                      ["prepare","run","status","recover","none"].contains(item.priorNext),
+                      item.priorReply == nil || (item.priorReply?.operation == previous && item.priorReply?.day == auth.parent_day),
+                      priorDay == nil || auth.parent_day == priorDay,
+                      seen.insert(auth.successor_operation).inserted else { throw LiteServiceFailure.invalidState }
+                priorRevision=item.priorRevision;previous=auth.successor_operation;priorDay=auth.successor_day
+            }
+            guard operation == previous, day == priorDay else { throw LiteServiceFailure.invalidState }
+        }
         if let reply { try reply.validate(for:self) }
         if requestDigest != nil { guard day != nil else { throw LiteServiceFailure.invalidState } }
         if let reply { guard day == reply.day, reply.receipt == nil || requestDigest == reply.receipt?.request_digest else { throw LiteServiceFailure.invalidState } }
@@ -128,6 +186,7 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
         case "quota": return "今日辨識額度已用完或已有工作待確認；保留原照片，待額度可用後核對。"
         case "capacity": return "服務忙碌，稍後核對原工作；不需重新拍攝。"
         case "pending", "checking": return "正在核對原辨識工作；尚未確認完成，不會另建一筆重複辨識。"
+        case "recovering": return "原工作已核對並保留；正在恢復跨日辨識，不需重新拍攝。"
         case "unavailable": return "連線或裝置驗證尚未完成；下次先查原工作，不會直接重傳照片。"
         case "expired": return "雲端結果查詢期限已過；本機資料保留，需核對後再處理。"
         case "rejected": return "本次影像未通過檢查；未執行辨識，原資料保留。"
@@ -190,7 +249,7 @@ struct LiteSignedServiceTransport: LiteAuthenticatedTransport {
         guard await allowService() else { throw LiteAttestFailure.consentRequired }; return owner
     }
     func send(_ request: URLRequest, installation: String) async throws -> (Data, HTTPURLResponse) {
-        guard ["prepare","run","status"].contains(request.url?.lastPathComponent ?? ""),
+        guard ["prepare","run","status","recover"].contains(request.url?.lastPathComponent ?? ""),
               request.url?.path == "/api/v1/lite/service/"+(request.url?.lastPathComponent ?? ""),
               try await self.installation() == installation else { throw LiteAttestFailure.invalidRequest }
         return try await client.send(request,installation:installation,requestID:UUID(),allowSending:allowService)
@@ -264,7 +323,7 @@ actor LiteServiceClient {
                 request.httpBody=body;request.setValue("multipart/form-data; boundary=\(boundary)",forHTTPHeaderField:"Content-Type")
             } else {
                 var body=["anon_id":r.installation,"operation":r.operation]
-                if action == "prepare" { body["image_sha256"]=r.imageSHA256 }
+                if action == "prepare" || action == "recover" { body["image_sha256"]=r.imageSHA256 }
                 request.httpBody=try JSONSerialization.data(withJSONObject:body,options:.sortedKeys)
                 request.setValue("application/json",forHTTPHeaderField:"Content-Type")
             }
@@ -285,12 +344,22 @@ actor LiteServiceClient {
                     let reply=try JSONDecoder().decode(LiteServiceReply.self,from:data)
                     try reply.validate(for:r)
                     guard (http.statusCode == 202) == (reply.state == "pending") else { throw LiteServiceFailure.invalidResponse }
+                    if reply.state == "new_operation_required" {
+                        guard let auth=reply.recovery, (r.recoveryHistory?.count ?? 0) < 8 else { throw LiteServiceFailure.invalidResponse }
+                        let checkpoint=LiteServiceRecoveryCheckpoint(authorization:auth,priorRevision:r.revision,
+                            priorNote:r.note,priorDay:r.day,priorNext:r.next,priorRetryAt:r.retryAt,
+                            priorRequestDigest:r.requestDigest,priorReply:r.reply)
+                        r.recoveryHistory=(r.recoveryHistory ?? [])+[checkpoint]
+                        r.version=2;r.operation=auth.successor_operation;r.day=auth.successor_day
+                        r.requestDigest=nil;r.reply=nil;r.next="prepare";r.note="recovering";r.retryAt=0
+                    } else {
                     r.day=reply.day;r.requestDigest=reply.receipt?.request_digest ?? r.requestDigest;r.reply=reply
                     r.next=reply.retry_action;r.retryAt=reply.state == "pending" ? now().timeIntervalSince1970+5 : 0
-                    r.note=reply.state == "completed" ? "confirmed" : reply.state == "cancelled" ? "rejected" : reply.state == "pending" ? "pending" : "ready"
+                    r.note=reply.state == "completed" ? "confirmed" : reply.state == "cancelled" ? "rejected" : reply.state == "pending" ? "pending" : reply.state == "recovery_available" ? "recovering" : "ready"
+                    }
                 } catch { r.next="none";r.note="review" }
                 try await save(&r,previous:&previous)
-                if r.next == "prepare" || r.next == "run" { continue }; return r
+                if r.next == "prepare" || r.next == "run" || r.next == "recover" { continue }; return r
             }
             let error=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any]
             if http.statusCode == 404, error?["error"] as? String == "lite_operation_unknown", r.requestDigest == nil {

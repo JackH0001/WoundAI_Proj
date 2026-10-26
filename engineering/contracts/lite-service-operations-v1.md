@@ -37,6 +37,7 @@ that guard's contract. Never include media or purchase tokens in error text.
 | `prepare` | JSON `anon_id`, `operation` (32 lower hex), `image_sha256` (64 lower hex) | Validated service account; current grant; durable original-day mapping; reserve before sending image |
 | `run` | multipart text `anon_id`, `operation`; sole file `image` | Verify original JPEG hash; decode/privacy check; claim once; run injected model; persist bounded result then settle |
 | `status` | JSON `anon_id`, `operation` | Read the same receipt/result, or reconcile a durable result whose settlement response was lost; never run model |
+| `recover` | JSON `anon_id`, `operation`, `image_sha256` | Opt-in only: fence a missing prior-day reservation and persist one successor authorization; never run model or consume a success |
 
 Control bodies are at most 4 KiB. The run's upstream signed body is bounded by
 the existing 32 MiB cap; its JPEG is separately bounded to 8 MiB, 16 million
@@ -145,3 +146,14 @@ The probe uses the actual GCS adapter with fake transport: prepare+run causes
 5 conditional write attempts/37 reads, completed status 0 writes/10 reads.
 App Attest, budgets, Apple/OCSP and retention costs are excluded from these counts.
 The inherited financial sensitivity assumptions are not a new tariff quote.
+
+## G3 extension, default off
+
+With an explicitly injected recovery store and pinned cutover policy, missing
+prior-day reservations return `recovery_available` (HTTP 200, action `recover`).
+Recovery returns either the original existing state or `new_operation_required`
+with a single durable parent/successor authorization. Requests cannot supply a
+successor ID, date, paid flag or research enrollment. The successor must use the
+same normalized JPEG/model, fresh ordinary quota checks and a unique execution
+claim. Old reservations, running jobs, results, cancellation receipts and expired
+operations are never reclassified as missing. See `lite-cross-day-recovery-v1.md`.

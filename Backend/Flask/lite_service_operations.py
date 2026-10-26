@@ -170,11 +170,15 @@ class RasterInference:
 
 
 class ServiceOperations:
-    def __init__(self,*,ledger,accounts,store,inference,model_version,clock=time.time):
+    def __init__(self,*,ledger,accounts,store,inference,model_version,clock=time.time,recovery_store=None):
         if not isinstance(ledger,UsageLedger) or not isinstance(accounts,ServiceAccounts) or not isinstance(inference,RasterInference):
             raise ValueError('trusted service components required')
         _hex(model_version)
         self.ledger,self.accounts,self.store,self.inference,self.model_version,self.clock=ledger,accounts,store,inference,model_version,clock
+        self.recovery=None
+        if recovery_store is not None:
+            from lite_service_recovery import ServiceRecovery
+            self.recovery=ServiceRecovery(self,recovery_store)
 
     def now(self):
         n=self.clock()
@@ -233,9 +237,15 @@ class ServiceOperations:
             self.store.compare_exchange(self.key(subject,operation),0,value)
         _,v=self._require(subject,operation)
         if v['image_sha256']!=image_sha256:raise UsageConflict('operation input changed')
+        # Recovery can durably create the operation before its new-day ledger.
+        # Initialization still requires the verified account and pinned cutover;
+        # existing/corrupt/legacy rows cannot be reset by this retry.
+        if v['day']==self.now()//86400:self.ledger._ensure_current_day(subject,v['day'])
         ticket=self.ticket(subject,v)
         try:self.ledger.receipt(ticket)
         except UsageConflict:
+            if self.recovery is not None and v['day'] < self.now()//86400:
+                return self.status(installation,operation)
             # Reuse only this request's still-valid verified snapshot. A slow
             # preflight must refresh it; a retry must never reuse a stored grant.
             if grant is not None:
@@ -249,7 +259,10 @@ class ServiceOperations:
         account=self.accounts.resolve(installation);subject=account['subject'];_,v=self._require(subject,operation)
         ticket=self.ticket(subject,v)
         try:receipt=self.ledger.receipt(ticket)
-        except UsageConflict:return dict(state='awaiting_reservation',operation=operation,day=v['day'],retry_action='prepare',research_stored=False)
+        except UsageConflict:
+            if self.recovery is not None and v['day'] < self.now()//86400:
+                return self.recovery.offer(subject,v)
+            return dict(state='awaiting_reservation',operation=operation,day=v['day'],retry_action='prepare',research_stored=False)
         if v['result'] is not None:
             outcome='succeeded' if v['result']['wound_polygons'] else 'empty'
             receipt=self.ledger.settle(ticket,v['worker'],outcome,v['result_sha256'])
@@ -266,7 +279,11 @@ class ServiceOperations:
         if type(raw) is not bytes or hashlib.sha256(raw).hexdigest()!=v['image_sha256']:raise UsageConflict('image hash mismatch')
         ticket=self.ticket(subject,v)
         if v['result'] is not None:return self.status(installation,operation)
-        receipt=self.ledger.receipt(ticket)
+        try:receipt=self.ledger.receipt(ticket)
+        except UsageConflict:
+            if self.recovery is not None and v['day'] < self.now()//86400:
+                return self.status(installation,operation)
+            raise
         if receipt['outcome']!='reserved':return self.status(installation,operation)
         if v['model']!=self.model_version:raise UsageConflict('prepared model changed; explicit reconciliation required')
         try:rgb=self.inference.decode(raw)

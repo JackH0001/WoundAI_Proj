@@ -2,6 +2,129 @@ import XCTest
 import CryptoKit
 @testable import WoundLite
 
+private struct ServiceRecoveryFixture: Decodable {
+    let installation: String, capture_id: String, jpeg: String, image_sha256: String
+    let available: LiteServiceReply, authorization: LiteServiceReply, prepare: LiteServiceReply, completed: LiteServiceReply
+    let signature_binding: [String:String]
+    static func load() throws -> Self {
+        let u=try XCTUnwrap(Bundle(for:LiteServiceOperationTests.self).url(forResource:"lite_service_recovery",withExtension:"json"))
+        return try JSONDecoder().decode(Self.self,from:Data(contentsOf:u))
+    }
+    var image: Data { Data(base64Encoded:jpeg)! }
+    func bytes(_ reply:LiteServiceReply) throws -> Data { try JSONEncoder().encode(reply) }
+}
+
+extension LiteServiceOperationTests {
+    private func recoverySetup() async throws -> (ServiceRecoveryFixture,ServiceWire,ServiceMemory,LiteServiceClient) {
+        let f=try ServiceRecoveryFixture.load(),w=ServiceWire(owner:f.installation),m=ServiceMemory(),c=try client(w,m)
+        _=try await c.enqueue(captureID:f.capture_id,jpeg:f.image)
+        return (f,w,m,c)
+    }
+    private func recoveryStart(_ f:ServiceRecoveryFixture) throws -> [ServiceStep] {
+        [ServiceStep(action:"prepare",data:try f.bytes(f.available)),
+         ServiceStep(action:"recover",data:try f.bytes(f.authorization))]
+    }
+    private func recoveryFinish(_ f:ServiceRecoveryFixture) throws -> [ServiceStep] {
+        [ServiceStep(action:"prepare",data:try f.bytes(f.prepare)),
+         ServiceStep(action:"run",data:try f.bytes(f.completed))]
+    }
+    func testCrossDayGoldenAdoptsOneGenerationBeforeSendingSameImage() async throws {
+        let (f,w,m,c)=try await recoverySetup(),image=f.image
+        try await w.plan(recoveryStart(f)+recoveryFinish(f))
+        let ready=try await c.resume(f.capture_id) { _ in image }
+        XCTAssertEqual(ready.operation,f.prepare.operation);XCTAssertEqual(ready.next,"run")
+        XCTAssertEqual(ready.recoveryHistory?.count,1);XCTAssertEqual(ready.version,2)
+        let done=try await client(w,m).resume(f.capture_id) { id in
+            XCTAssertEqual(id,f.capture_id);return image
+        }
+        XCTAssertEqual(done.note,"confirmed");XCTAssertEqual(done.reply,f.completed)
+        let sent=await w.requests();XCTAssertEqual(sent.map{$0.url!.lastPathComponent},["prepare","recover","prepare","run"])
+        XCTAssertEqual(sent.filter{$0.url!.lastPathComponent=="run"}.count,1)
+        XCTAssertNotNil(sent.last!.httpBody!.range(of:image))
+        XCTAssertEqual(done.recoveryHistory?.first?.authorization.parent_operation,f.capture_id)
+        _=try await client(w,m).resume(f.capture_id) { _ in XCTFail();return nil }
+        let again=await w.requests();XCTAssertEqual(again.count,4)
+    }
+    func testLostRecoveryResponseAfterRestartReadsAuthorizationInsteadOfNewPhoto() async throws {
+        let (f,w,m,c)=try await recoverySetup(),image=f.image
+        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.available)),ServiceStep(action:"recover",data:Data(),fail:true)])
+        let waiting=try await c.resume(f.capture_id) { _ in XCTFail();return nil }
+        XCTAssertEqual(waiting.operation,f.capture_id);XCTAssertNil(waiting.recoveryHistory)
+        try await w.plan([ServiceStep(action:"status",data:f.bytes(f.authorization))]+recoveryFinish(f))
+        let done=try await client(w,m,1006).resume(f.capture_id) { _ in image }
+        XCTAssertEqual(done.note,"confirmed");XCTAssertEqual(done.recoveryHistory?.count,1)
+        let sent=await w.requests();XCTAssertEqual(sent.filter{$0.url!.lastPathComponent=="run"}.count,1)
+    }
+    func testJournalFailureBeforeAdoptionCannotDispatchSuccessor() async throws {
+        let (f,w,m,c)=try await recoverySetup(),image=f.image
+        try await w.plan(recoveryStart(f));await m.fail(5)
+        do { _=try await c.resume(f.capture_id) { _ in XCTFail();return nil };XCTFail() } catch { }
+        let stored=try await client(w,m).stored(f.capture_id)
+        XCTAssertEqual(stored.operation,f.capture_id);XCTAssertNil(stored.recoveryHistory)
+        let before=await w.requests();XCTAssertEqual(before.count,2)
+        try await w.plan([ServiceStep(action:"status",data:f.bytes(f.authorization))]+recoveryFinish(f))
+        let done=try await client(w,m).resume(f.capture_id) { _ in image }
+        XCTAssertEqual(done.note,"confirmed");XCTAssertEqual(done.recoveryHistory?.count,1)
+    }
+    func testJournalFailureAfterAdoptionResumesSameSuccessor() async throws {
+        let (f,w,m,c)=try await recoverySetup(),image=f.image
+        try await w.plan(recoveryStart(f));await m.fail(6)
+        do { _=try await c.resume(f.capture_id) { _ in nil };XCTFail() } catch { }
+        let stored=try await client(w,m).stored(f.capture_id)
+        XCTAssertEqual(stored.operation,f.prepare.operation);XCTAssertEqual(stored.recoveryHistory?.count,1)
+        try await w.plan(recoveryFinish(f))
+        let done=try await client(w,m).resume(f.capture_id) { _ in image }
+        XCTAssertEqual(done.note,"confirmed");XCTAssertEqual(done.recoveryHistory,stored.recoveryHistory)
+    }
+    func testChangedRecoveryBindingStopsWithoutAdopting() async throws {
+        for field in ["parent_operation","image_sha256","successor_operation","parent_day","successor_day"] {
+            let (f,w,_,c)=try await recoverySetup()
+            var response=try JSONSerialization.jsonObject(with:f.bytes(f.authorization)) as! [String:Any]
+            var auth=response["recovery"] as! [String:Any]
+            switch field {
+            case "parent_day","successor_day":auth[field] = -1
+            case "successor_operation":auth[field]=f.capture_id
+            default:auth[field]=String(repeating:"b",count:field=="parent_operation" ? 32:64)
+            }
+            response["recovery"]=auth
+            await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.available)),ServiceStep(action:"recover",data:try JSONSerialization.data(withJSONObject:response))])
+            let r=try await c.resume(f.capture_id) { _ in XCTFail();return nil }
+            XCTAssertEqual(r.note,"review");XCTAssertEqual(r.operation,f.capture_id);XCTAssertNil(r.recoveryHistory)
+        }
+    }
+    func testExistingPinnedReceiptCannotBecomeSuccessor() async throws {
+        let (f,w,m,c)=try await setup(),image=f.image
+        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.prepare)),ServiceStep(action:"run",data:Data(),fail:true)])
+        _=try await c.resume(f.capture_id) { _ in image }
+        let recovery=try ServiceRecoveryFixture.load()
+        await w.plan([ServiceStep(action:"status",data:try recovery.bytes(recovery.authorization))])
+        let r=try await client(w,m,1006).resume(f.capture_id) { _ in XCTFail();return nil }
+        XCTAssertEqual(r.note,"review");XCTAssertEqual(r.operation,f.capture_id);XCTAssertNil(r.recoveryHistory)
+    }
+    func testFileJournalRestartKeepsRetiredParentAndCurrentGeneration() async throws {
+        let f=try ServiceRecoveryFixture.load(),w=ServiceWire(owner:f.installation),image=f.image
+        let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at:dir) }
+        let c=try client(w,LiteServiceFileJournal(directory:dir))
+        _=try await c.enqueue(captureID:f.capture_id,jpeg:image)
+        try await w.plan(recoveryStart(f)+recoveryFinish(f))
+        let before=try await c.resume(f.capture_id) { _ in image }
+        let restarted=try client(w,LiteServiceFileJournal(directory:dir))
+        let saved=try await restarted.stored(f.capture_id);XCTAssertEqual(saved,before)
+        let done=try await restarted.resume(f.capture_id) { _ in image }
+        XCTAssertEqual(done.note,"confirmed");XCTAssertEqual(done.recoveryHistory,before.recoveryHistory)
+    }
+    func testRecoverySignatureMatchesPythonGoldenBytes() throws {
+        let row=try ServiceRecoveryFixture.load().signature_binding
+        let data=try LiteAttestRequest.clientData(audience:row["audience"]!,installation:row["installation"]!,
+            keyID:Data(base64Encoded:row["key_id"]!)!,challenge:Data(base64Encoded:row["challenge"]!)!,
+            requestID:row["request_id"]!,method:row["method"]!,path:row["path"]!,contentType:row["content_type"]!,
+            body:Data(base64Encoded:row["body"]!)!)
+        XCTAssertEqual(data.base64EncodedString(),row["expected_client_data"])
+        XCTAssertEqual(LiteServiceBytes.hash(data),row["expected_sha256"])
+    }
+}
+
 private struct ServiceFixture: Decodable {
     let installation: String, capture_id: String, jpeg: String, image_sha256: String
     let prepare: LiteServiceReply, completed: LiteServiceReply

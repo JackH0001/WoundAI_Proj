@@ -10,13 +10,13 @@ The caller must first retain its normalized JPEG in the existing encrypted image
 store and assign a stable capture ID (32 lowercase hex). `enqueue` checks JPEG
 dimensions/orientation and stores only the hash, dimensions and identity binding;
 it does not claim to have saved the photograph or a clinical/history record.
-The capture ID is the service operation ID. Reusing it with different image bytes
+The capture ID is the first-generation service operation ID. Reusing it with different image bytes
 or installation is a conflict, not a new attempt. Existing research IDs/epochs
 and existing history storage are not migrated, cleared or repurposed.
 
 `LiteServiceClient` explicitly receives the origin, signed transport and journal.
 `LiteSignedServiceTransport` uses only an existing App Attest identity, explicit
-service permission and the three exact service paths; it never enrolls another
+service permission and the four exact service paths; it never enrolls another
 identity on failure. Research transport still requires research consent. The
 production caller must provide real service permission/account scope; passing a
 test permission closure is not production consent/account implementation.
@@ -35,18 +35,21 @@ than presenting success or sending another operation.
 | Status unknown; no pinned receipt | prepare same ID/hash, never generate ID |
 | Status unknown; pinned receipt exists | stop for reconciliation |
 | Pending | status only, no automatic model retry |
+| Prior-day mapping has no reservation | status → recover; only a validated immutable server authorization permits a successor |
+| Recovery reply lost / local write failed | query the retained parent/successor from the durable journal; never invent another ID |
 | 429 | preserve work, distinguish quota/capacity, honor bounded wait |
 | 401/403/503 | preserve work, query later, no new enrollment/anonymous fallback |
 | 409/410/invalid result | stop, retain local work, explain reconciliation/expiry |
 | Missing/mismatched original image | stop before run; retain journal |
 
-One resume performs at most three calls (status → prepare → run). No background
+One resume performs at most three calls (e.g. status → prepare → run, or status → recover → prepare). No background
 poller or automatic launch call is added. Waits are clamped to 1–3600 seconds;
 old excessive saved deadlines are shortened on resume. Concurrent calls to the
 same client return busy; the shared signing actor continues to serialize actual
 assertion counters. Journal CAS plus a nonblocking OS file lock prevents two
-journal instances from replacing each other's state. The same capture ID is
-also used server-side, so it is not converted into a second billed operation.
+journal instances from replacing each other's state. The stable capture ID remains the local key. Server operation identity changes
+only for the fenced, unreserved cross-day case; an existing running/completed
+operation can never authorize another billed operation.
 
 ## Result and presentation contract
 
@@ -122,7 +125,7 @@ the present client intentionally makes no false completion or refund promise.
 
 Python generator uses actual signed Flask fixture replies. Only its random
 installation identifier is replaced with a fixed synthetic native owner; reply
-fields and result hashes are unchanged. Separate byte fixtures cover the three
+fields and result hashes are unchanged. Separate byte fixtures cover the four
 App Attest paths. iOS uses those checked-in fixtures; Python verifies them against
 the current backend. Native network is simulated; Python has real localhost HTTP
 coverage. This is not a phone → Apple → deployed-cloud end-to-end test.
@@ -130,3 +133,20 @@ coverage. This is not a phone → Apple → deployed-cloud end-to-end test.
 Run `test_lite_native_service_contract` with the Linux workflow dependencies.
 Run `WoundLiteTests/LiteServiceOperationTests` on iOS simulator in both Debug and
 Release; manual CI also includes the existing signer/research business tests.
+
+## Version 2 journal: explicit cross-day recovery
+
+The server generates and durably binds one successor to the original account,
+operation, day, input/model digest and exclusion proof. The client validates the
+returned parent/day/image/ID fields, preserves a checkpoint of the old state and
+then atomically saves the new operation before `prepare` or `run`. V1 journals
+remain readable; no mass migration or replacement of old history is performed.
+There are at most eight locally retained successor generations before manual
+reconciliation. Each resume still has at most three requests.
+
+The authorization SHA-256 is an opaque server receipt reference, not a signature
+or a client-verifiable proof of the whole server ledger; authenticated transport,
+server owner checks and server-side CAS provide the authority. Requests retain
+App Attest signing. Native tests use replayed synthetic transport, not a physical
+App Attest session. Neither raw depth nor old measurement/history records are
+written by the service journal. The shipping UI still does not instantiate it.

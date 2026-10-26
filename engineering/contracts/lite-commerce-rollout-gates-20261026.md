@@ -1,6 +1,6 @@
 # Lite commerce rollout gaps: implementation order and acceptance
 
-Status: design for the next local stage, **not enabled or deployed**. This is
+Status: local opt-in implementation and simulation, **not enabled or deployed**. This is
 separate from the B1 packaging fix and G4 per-request grant reuse. Free2/day,
 Plus10/day total, and research consent independence remain unchanged. No daily
 balance is reset, no original image/depth/audit is removed by this change.
@@ -55,7 +55,7 @@ expiry scans produce no extra terminal event; running past lease never reruns;
 
 ## G3 — explicit successor after a cross-day provisional failure
 
-Current gap is reproducible: operation mapping exists, reservation does not,
+The default-off baseline gap is reproducible: operation mapping exists, reservation does not,
 then midnight makes the original-day admission invalid. Returning generic 409
 with `prepare` as the next action is not a usable recovery contract.
 
@@ -65,7 +65,7 @@ successor, the old daily ledger needs a durable terminal fence even for an
 operation with no reservation. This requires a versioned ledger transition;
 changing only the HTTP error code is insufficient.
 
-Proposed order:
+Implemented opt-in order (see `lite-cross-day-recovery-v1.md`):
 
 1. Inspect the original ledger. If a reservation/result exists, recover that
    original ticket; do not create a successor and do not charge the new day.
@@ -132,10 +132,10 @@ N1/N2/N4/L1/L2 must be resolved before affected patient-research rollout.
 No current authorization is used here to initialize production quotas, change
 IAM, migrate storage, enable cleanup, purchase ads or publish a store build.
 Local unit tests and characterization are not a substitute for cloud/real-device
-acceptance. A stack PR should target `codex/lite-reconsent-20261021` (#35); the
-previous push approval fixed only `d642235`, so a new exact push/PR scope must be
-confirmed before publishing this stage.
-# Local implementation checkpoint (2026-10-26, after PR36 4fb1cf3)
+acceptance. Remote publication requires approval of the new exact source; prior
+approval covered only `38aa206`. No merge or deployment is implied.
+
+# Prior implementation checkpoint (38aa206; superseded for G3 below)
 
 The rules below remain deployment gates. `lite_usage_cutover.py` and the optional
 `UsageLedger(cutover=...)` now implement the G1/G2 engine for **new v2 days only**.
@@ -166,3 +166,26 @@ Acceptance uses real SQLite and the actual GCS generation-CAS adapter over a
 fake SDK transport, plus signed synthetic App Attest HTTP requests. The existing
 default-off gap probe is deliberately unchanged; its failures still describe
 the non-cutover path. Do not interpret test success as production activation.
+
+## Current G3/cutover simulation checkpoint
+
+`lite_service_recovery.py` adds signed HTTP recovery and create-only successor
+authorizations. The iOS service journal persists the authorization and original
+checkpoint before sending anything under the successor ID. Generic failure,
+old completed/pending work, cancellation and expired results never rotate IDs.
+Only explicit server authorization for a fenced missing prior-day reservation
+permits this change. The default-off baseline probe remains unchanged.
+
+`lite_usage_rollout.py` now executes a bounded manifest with injected provider
+observations, durable phase transitions and append-only intent/completion audit.
+Synthetic tests cover successful activation, lost replies, partial baseline,
+corrupt control, failed provider closure and failed durable pause. Rollback is
+terminal pause with legacy writers kept off and counts preserved. A claim already
+admitted before pause may still finish once on the original ledger. Runtime
+admission cannot promise cancellation of already authorized in-flight work.
+
+The trusted **live cloud provider remains unimplemented**, as do the public
+capture/history integration, verified account enrollment/recovery, Apple grace
+and policy migration. This stage is not permission to perform deployment,
+production migration or cleanup. See `lite-cross-day-recovery-v1.md` for the
+protocol, failure matrix and exact remaining acceptance boundary.

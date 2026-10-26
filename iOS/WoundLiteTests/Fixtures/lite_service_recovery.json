@@ -1,0 +1,112 @@
+{
+  "authorization": {
+    "day": 20731,
+    "operation": "00000000000000000000000000000001",
+    "recovery": {
+      "authorization_sha256": "63b127aeb72855afbf3986a81ffacef2fd326d13c00bf2640a657b512e612bde",
+      "fence_sha256": "5272332322172c984b517d7d735963477119dba482cdf6ea876f2d78ff029cf9",
+      "image_sha256": "ffa497df34d973fa2b30e1cf77d691291f9baa7c219c65fed798a0ccdd893676",
+      "parent_day": 20731,
+      "parent_operation": "00000000000000000000000000000001",
+      "parent_request_digest": "0fd8c0f574db7be2859eb2a896ca9c1b1a94e383076d04827112ca0b52021100",
+      "successor_day": 20732,
+      "successor_operation": "22222222222222222222222222222222",
+      "version": 1
+    },
+    "research_stored": false,
+    "retry_action": "recover",
+    "state": "new_operation_required"
+  },
+  "available": {
+    "day": 20731,
+    "operation": "00000000000000000000000000000001",
+    "research_stored": false,
+    "retry_action": "recover",
+    "state": "recovery_available"
+  },
+  "capture_id": "00000000000000000000000000000001",
+  "completed": {
+    "day": 20732,
+    "operation": "22222222222222222222222222222222",
+    "receipt": {
+      "admitted_limit": 2,
+      "day": 20732,
+      "grant_sha256": "c8b3b02021f4cbf3c0ef4decc3e50d73a066bfbff6e740b49fb0f1e94698c061",
+      "operation": "22222222222222222222222222222222",
+      "outcome": "succeeded",
+      "request_digest": "0fd8c0f574db7be2859eb2a896ca9c1b1a94e383076d04827112ca0b52021100",
+      "result_sha256": "18058838476e58324740924603133b972597ef6d70c969d3371983d5c9127b75"
+    },
+    "research_stored": false,
+    "result": {
+      "confidence": 0.2197265625,
+      "image_h": 64,
+      "image_w": 64,
+      "route": "student",
+      "wound_polygons": [
+        [
+          [
+            10,
+            10
+          ],
+          [
+            10,
+            39
+          ],
+          [
+            39,
+            39
+          ],
+          [
+            39,
+            10
+          ]
+        ]
+      ]
+    },
+    "result_expires": 1791331201,
+    "result_json": "{\"confidence\":0.2197265625,\"image_h\":64,\"image_w\":64,\"route\":\"student\",\"wound_polygons\":[[[10,10],[10,39],[39,39],[39,10]]]}",
+    "retry_action": "none",
+    "service_result_stored": true,
+    "state": "completed"
+  },
+  "image_sha256": "ffa497df34d973fa2b30e1cf77d691291f9baa7c219c65fed798a0ccdd893676",
+  "installation": "synthetic-native-service",
+  "jpeg": "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCABAAEADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD3+iiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigD//2Q==",
+  "prepare": {
+    "day": 20732,
+    "operation": "22222222222222222222222222222222",
+    "receipt": {
+      "admitted_limit": 2,
+      "day": 20732,
+      "grant_sha256": "c8b3b02021f4cbf3c0ef4decc3e50d73a066bfbff6e740b49fb0f1e94698c061",
+      "operation": "22222222222222222222222222222222",
+      "outcome": "reserved",
+      "request_digest": "0fd8c0f574db7be2859eb2a896ca9c1b1a94e383076d04827112ca0b52021100",
+      "result_sha256": null
+    },
+    "research_stored": false,
+    "result": null,
+    "result_expires": 1791331201,
+    "result_json": null,
+    "retry_action": "run",
+    "service_result_stored": false,
+    "state": "ready"
+  },
+  "schema": "lite-native-service-recovery/1",
+  "signature_binding": {
+    "audience": "woundlite-production",
+    "body": "eyJyZXZpc2lvbiI6MX0=",
+    "challenge": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+    "content_type": "application/json",
+    "expected_client_data": "d291bmRsaXRlLmFwcGF0dGVzdC5yZXF1ZXN0LzEAAAAAFHdvdW5kbGl0ZS1wcm9kdWN0aW9uAAAAEXN5bnRoZXRpYy1pbnN0YWxsAAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fAAAAICAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs8PT4/AAAAJDAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMQAAAARQT1NUAAAAHC9hcGkvdjEvbGl0ZS9zZXJ2aWNlL3JlY292ZXIAAAAQYXBwbGljYXRpb24vanNvbgAAACDYVgt2WMeSvd7WmDewVeLtVHCL5hI7e7TMn63yYeoJHw==",
+    "expected_sha256": "e4bbaeefde0c86406e3ea5c03cabd3ae513553c14d31f63d557b5651d5ffa103",
+    "installation": "synthetic-install",
+    "key_id": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "method": "POST",
+    "path": "/api/v1/lite/service/recover",
+    "request_id": "00000000-0000-0000-0000-000000000001"
+  },
+  "verified_model_calls": 1,
+  "verified_success_charges": 1
+}

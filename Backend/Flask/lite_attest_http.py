@@ -110,7 +110,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
                 raise AdmissionRejected('noncanonical request target or encoding')
             control = request.path in (CHALLENGE_PATH, REGISTER_PATH)
             service_only = (request.path in service_paths and configuration['commerce'] is not None
-                            and request.endpoint in {'lite_service_http.prepare','lite_service_http.run','lite_service_http.status'})
+                            and request.endpoint in {'lite_service_http.prepare','lite_service_http.run','lite_service_http.status','lite_service_http.recover'})
             if not ((request.method == 'POST' and (control or request.path in POST_PATHS or service_only)) or
                     (request.method == 'DELETE' and re.fullmatch(PREFIX+r'data/[A-Za-z0-9_-]{1,128}(?:/[0-9a-f]{32})?', request.path))):
                 return jsonify(error='lite_route_not_supported'), 404

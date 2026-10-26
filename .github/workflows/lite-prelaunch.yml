@@ -53,6 +53,10 @@ jobs:
         run: |
           python -m unittest -v test_lite_usage_recovery test_lite_usage_recovery_http > evidence/usage-recovery-tests.log 2>&1
           python tools/lite_usage_recovery_probe.py --output evidence/usage-recovery-probe.json
+      - name: Cross-day authorization and cutover failure containment (synthetic only)
+        run: |
+          python -m unittest -v test_lite_service_recovery test_lite_usage_rollout test_lite_cross_day_fixture > evidence/g3-cutover-tests.log 2>&1
+          python tools/lite_cross_day_fixture.py --report evidence/g3-cutover-probe.json
       - name: Opt-in authenticated service-only coordinator and real loopback
         run: |
           python -m unittest -v test_lite_service_http test_lite_service_loopback test_lite_native_service_contract > evidence/service-flow-tests.log 2>&1
@@ -92,9 +96,10 @@ jobs:
               f.write('The CAS ledger now has opt-in authenticated service-only HTTP tests. ')
               f.write('Application startup does not enable these routes; cloud/native cutover is still pending. ')
               f.write('No IAP login, cloud load, live GCS cleanup, real payment or ads were tested.\n')
-              f.write('Review-gap tests intentionally reproduce G1/G2/G3; passing them does not resolve those blockers.\n')
-              f.write('Separate opt-in recovery tests cover daily cutover, reservation expiry and the old-day fence only. ')
-              f.write('Live writer-fence adapter and G3 native successor persistence are not implemented; release remains blocked.\n')
+              f.write('Review-gap tests intentionally retain the default-off G1/G2/G3 baseline; they do not enable production.\n')
+              f.write('Separate opt-in tests cover daily cutover, leases, cross-day successor authorization and rollback. ')
+              f.write('Native successor persistence is implemented and has separate simulator tests. ')
+              f.write('The live provider adapter and public UI integration are not implemented; release remains blocked.\n')
           PY
       - uses: actions/upload-artifact@v4
         if: always()
