@@ -258,7 +258,7 @@ class ServiceOperations:
     def status(self,installation,operation):
         account=self.accounts.resolve(installation);subject=account['subject'];_,v=self._require(subject,operation)
         ticket=self.ticket(subject,v)
-        try:receipt=self.ledger.receipt(ticket)
+        try:receipt=self.ledger.active_receipt(ticket)
         except UsageConflict:
             if self.recovery is not None and v['day'] < self.now()//86400:
                 return self.recovery.offer(subject,v)
@@ -269,17 +269,22 @@ class ServiceOperations:
         elif receipt['outcome'] in ('succeeded','empty','failed'):
             raise StateUnavailable('result receipt mismatch')
         state={'reserved':'ready','running':'pending','succeeded':'completed','empty':'completed','cancelled':'cancelled'}[receipt['outcome']]
-        return dict(state=state,operation=operation,day=v['day'],receipt=receipt,result=v['result'],
+        reply = dict(state=state,operation=operation,day=v['day'],receipt=receipt,result=v['result'],
                     result_json=None if v['result'] is None else json.dumps(v['result'],sort_keys=True,separators=(',', ':'),allow_nan=False),
                     retry_action='run' if state=='ready' else 'status' if state=='pending' else 'none',
                     research_stored=False,service_result_stored=v['result'] is not None,result_expires=v['expires'])
+        if state == 'cancelled':
+            reply['cancel_reason'] = ('reservation_expired' if self.ledger.expired_reservation_proof(ticket)
+                else 'preflight_rejected' if receipt['result_sha256']==digest(['preflight_rejected',v['image_sha256']])
+                else 'cancelled_unknown')
+        return reply
 
     def run(self,installation,operation,raw):
         account=self.accounts.resolve(installation);subject=account['subject'];_,v=self._require(subject,operation)
         if type(raw) is not bytes or hashlib.sha256(raw).hexdigest()!=v['image_sha256']:raise UsageConflict('image hash mismatch')
         ticket=self.ticket(subject,v)
         if v['result'] is not None:return self.status(installation,operation)
-        try:receipt=self.ledger.receipt(ticket)
+        try:receipt=self.ledger.active_receipt(ticket)
         except UsageConflict:
             if self.recovery is not None and v['day'] < self.now()//86400:
                 return self.status(installation,operation)

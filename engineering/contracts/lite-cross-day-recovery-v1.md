@@ -64,7 +64,7 @@ entitlement. The successor's ordinary prepare/run still applies all quotas.
 | Concurrent recovery / run calls | One authorization, one successful execution claim, one charge |
 | Result saved but settlement reply lost | Settle that same hash; do not invoke model again |
 | Running/unknown execution | Pending, no takeover or invented refund |
-| Cancelled / expired original | Retain cancellation / 410; do not create a recovery attempt |
+| Cancelled / expired original | G3 `recover` retains cancellation / 410. Only verified unstarted lease expiry can use the separate explicit `resubmit` action; preflight rejection cannot. |
 | Image/model/account mismatch or successor collision | Block, preserve every old row |
 | Local write fails before adoption | Never dispatch successor; parent status recovers authorization |
 | Local write fails after adoption | Restart reads successor, status first; original checkpoint retained |
@@ -125,3 +125,11 @@ in-flight operations and must not promise they disappeared at the pause time.
 SQLite and GCS-adapter cases here exercise actual stores/CAS logic over a fake
 GCS SDK transport; they are not real bucket tests. Existing default-off G1–G3
 gap probes intentionally continue reproducing the old route for comparison.
+
+## Follow-up to the 8c7e447 review
+
+`lite-resubmit-rollout-review-v1.md` specifies the separate user-requested lease
+retry, read-only observation API and explicit paused recovery. It also records
+the same-UTC-day / 1000-account / v1-ledger limits and future live-adapter cache
+requirements. These additions do not silently retry cancelled work or activate
+the shipping UI or production provider.

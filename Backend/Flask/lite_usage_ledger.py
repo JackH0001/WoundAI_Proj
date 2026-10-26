@@ -393,3 +393,18 @@ class UsageLedger:
         return dict(day=ticket.day, operation=ticket.operation, request_digest=e['digest'],
                     outcome=last[1], result_sha256=last[2] if len(last)==3 else None,
                     grant_sha256=e['proof'], admitted_limit=e['limit'])
+
+    def active_receipt(self, ticket):
+        self._active(ticket.subject, ticket.day)
+        return self.receipt(ticket)
+
+    def expired_reservation_proof(self, ticket):
+        """Recognize the existing immutable lease receipt; never infer from age alone."""
+        _, state = self._active(ticket.subject, ticket.day)
+        e = self._entry(state, ticket)
+        if state['v'] != 2 or e['history'][-1][1] != 'cancelled': return None
+        deadline = e['history'][0][0] + state['policy']['reservation_seconds']
+        proof = digest(['unstarted-lease-expiry/1', self.namespace, ticket.subject, ticket.day,
+                        ticket.operation, e['digest'], deadline, state['policy']['sha256']])
+        if e['history'][-1][0] < deadline or e['history'][-1][2] != proof: return None
+        return proof

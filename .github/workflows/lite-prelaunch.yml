@@ -58,9 +58,14 @@ jobs:
           python -m unittest -v test_lite_service_recovery test_lite_usage_rollout test_lite_cross_day_fixture > evidence/g3-cutover-tests.log 2>&1
           python tools/lite_cross_day_fixture.py --report evidence/g3-cutover-probe.json
       - name: Opt-in authenticated service-only coordinator and real loopback
+        # New opt-in retry/rollout behavior is tested separately from legacy gaps.
         run: |
           python -m unittest -v test_lite_service_http test_lite_service_loopback test_lite_native_service_contract > evidence/service-flow-tests.log 2>&1
           python tools/lite_service_flow_probe.py --output evidence/service-flow-probe.json
+      - name: Explicit expired-reservation retry and read-only rollout observations
+        run: |
+          python -m unittest -v test_lite_service_resubmit test_lite_rollout_review test_lite_resubmit_review_fixture > evidence/resubmit-rollout-tests.log 2>&1
+          python tools/lite_resubmit_review_fixture.py --report evidence/resubmit-rollout-probe.json
       - name: Explicit service-result compaction and race rehearsal (synthetic only)
         run: |
           python -m unittest -v test_lite_service_retention test_lite_service_retention_probe > evidence/result-lifecycle-tests.log 2>&1

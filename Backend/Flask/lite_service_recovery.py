@@ -30,8 +30,10 @@ class ServiceRecovery:
         if row is None:return None
         v=row[1]
         try:
-            if (type(v) is not dict or set(v)!={'v','subject_hash','parent','fence','successor'}
-                    or type(v['v']) is not int or v['v']!=1
+            retry = v.get('v') == 2 and v.get('reason') == 'reservation_expired'
+            fields={'v','subject_hash','parent','fence','successor'}|({'reason'} if retry else set())
+            if (type(v) is not dict or set(v)!=fields
+                    or type(v['v']) is not int or v['v']!=(2 if retry else 1)
                     or v['subject_hash']!=digest(subject)
                     or v['parent']!={k:parent[k] for k in ('operation','day','digest','expires','image_sha256','model')}):
                 raise ValueError('parent mismatch')
@@ -43,13 +45,16 @@ class ServiceRecovery:
                     or new['image_sha256']!=parent['image_sha256'] or new['model']!=parent['model']
                     or new['digest']!=parent['digest'] or new['operation']==parent['operation']
                     or any(type(new[k]) is not int or new[k]<0 for k in ('day','created','expires'))
-                    or new['created']//86400!=new['day'] or new['day']<=parent['day']
+                    or new['created']//86400!=new['day'] or new['day']<parent['day']
+                    or (not retry and new['day']==parent['day'])
                     or not parent['created']<=new['created']<parent['expires']
                     or new['created']>self.ops.now() or new['expires']!=new['created']+RESULT_TTL
                     or new['result'] is not None or new['result_sha256'] is not None):
                 raise ValueError('successor mismatch')
             _hex(new['operation'],32);_hex(new['worker'],32)
-            if v['fence']!=self.ops.ledger._fence_proof(self.ops.ticket(subject,parent)):
+            proof=(self.ops.ledger.expired_reservation_proof(self.ops.ticket(subject,parent)) if retry
+                   else self.ops.ledger._fence_proof(self.ops.ticket(subject,parent)))
+            if v['fence']!=proof:
                 raise ValueError('fence mismatch')
             _encode(v)
         except (ValueError,TypeError,KeyError) as exc:
@@ -70,7 +75,9 @@ class ServiceRecovery:
     def _reply(self, subject, parent, value):
         # Read back the durable fence, including on replay. Missing/corrupt
         # ledger/control cannot authorize another inference.
-        proof=self.ops.ledger.fence_missing(self.ops.ticket(subject,parent))
+        retry=value['v']==2
+        proof=(self.ops.ledger.expired_reservation_proof(self.ops.ticket(subject,parent)) if retry
+               else self.ops.ledger.fence_missing(self.ops.ticket(subject,parent)))
         if proof is None or proof!=value['fence']:
             raise StateUnavailable('parent fence no longer confirmed')
         new=value['successor']
@@ -80,12 +87,46 @@ class ServiceRecovery:
         # Results may have progressed; immutable input/worker/time cannot change.
         if any(observed[1][k]!=new[k] for k in new if k not in ('v','result','result_sha256')):
             raise StateUnavailable('successor conflicts with retained operation')
-        auth=dict(version=1,parent_operation=parent['operation'],parent_day=parent['day'],
+        auth=dict(version=value['v'],parent_operation=parent['operation'],parent_day=parent['day'],
             parent_request_digest=parent['digest'],image_sha256=parent['image_sha256'],
             fence_sha256=proof,successor_operation=new['operation'],successor_day=new['day'],
             authorization_sha256=digest(value))
+        if retry:auth['reason']='reservation_expired'
         return dict(state='new_operation_required',operation=parent['operation'],day=parent['day'],
-                    retry_action='recover',research_stored=False,recovery=auth)
+                    retry_action='resubmit' if retry else 'recover',research_stored=False,recovery=auth)
+
+    def resubmit(self, installation, operation, image_sha256):
+        """Explicit user action only. Terminal lease proof wins against claim CAS.
+
+        Status/recover never invoke this path. The unique successor is persisted
+        before returning it; prepare rechecks current entitlement and quota.
+        """
+        _hex(image_sha256)
+        subject=self.ops.accounts.resolve(installation)['subject']
+        _,parent=self.ops._require(subject,operation)
+        if parent['image_sha256']!=image_sha256:raise UsageConflict('resubmit image changed')
+        if parent['result'] is not None:raise UsageConflict('completed work cannot be resubmitted')
+        proof=self.ops.ledger.expired_reservation_proof(self.ops.ticket(subject,parent))
+        if proof is None:raise UsageConflict('only verified unstarted lease expiry may be resubmitted')
+        value=self._read(subject,parent)
+        if value is None:
+            self.ops.ledger._admission()
+            if parent['model']!=self.ops.model_version:raise UsageConflict('model changed; reconcile first')
+            now=self.ops.now()
+            if now>=parent['expires']:
+                from lite_service_operations import OperationExpired
+                raise OperationExpired('parent read window elapsed')
+            new=dict(v=1,subject_hash=digest(subject),operation=_new_id(),day=now//86400,
+                created=now,expires=now+RESULT_TTL,image_sha256=parent['image_sha256'],model=parent['model'],
+                digest=parent['digest'],worker=_new_id(),result=None,result_sha256=None)
+            value=dict(v=2,reason='reservation_expired',subject_hash=digest(subject),
+                parent={k:parent[k] for k in ('operation','day','digest','expires','image_sha256','model')},
+                fence=proof,successor=new)
+            self.store.compare_exchange(self.key(subject,operation),0,value)
+            value=self._read(subject,parent)
+            if value is None:raise StateUnavailable('resubmit authorization unconfirmed')
+        if value['v']!=2:raise StateUnavailable('recovery kind mismatch')
+        return self._reply(subject,parent,value)
 
     def recover(self, installation, operation, image_sha256):
         _hex(image_sha256)

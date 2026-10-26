@@ -150,3 +150,21 @@ server owner checks and server-side CAS provide the authority. Requests retain
 App Attest signing. Native tests use replayed synthetic transport, not a physical
 App Attest session. Neither raw depth nor old measurement/history records are
 written by the service journal. The shipping UI still does not instantiate it.
+
+## Explicit retry after an unstarted reservation expires
+
+Cancellation now distinguishes `reservation_expired`, `preflight_rejected` and
+`cancelled_unknown`. An old response without a reason stays unknown, never
+guessed from age. Only a verified expiry offers `重新送出`. The reusable
+`LiteServiceStatusView` wires that button to `requestResubmission` and then
+`resume`; it has no on-appear retry and is not instantiated by the shipping UI.
+
+The client atomically persists the explicit choice before the signed `resubmit`
+request. Authorization version 2 must bind the retained cancellation receipt,
+input digest and parent operation. It permits a same-day successor, unlike G3
+version 1. The new identity and original checkpoint are saved before prepare;
+prepare rechecks current entitlement and quota. Lost replies reuse the same
+authorization. Double taps, missing local writes, rejected input or malformed
+authority cannot generate another inference. The eight-generation journal bound
+and at-most-three-request resume bound remain. Existing attempts are retained,
+not refunded by this flow. See `lite-resubmit-rollout-review-v1.md`.

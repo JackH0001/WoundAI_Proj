@@ -55,11 +55,15 @@ struct LiteServiceRecoveryAuthorization: Codable, Equatable, Sendable {
     let version: Int, parent_operation: String, parent_day: Int, parent_request_digest: String
     let image_sha256: String, fence_sha256: String, successor_operation: String, successor_day: Int
     let authorization_sha256: String
+    var reason: String? = nil
     func validate(parent: String, image: String, day: Int?) throws {
-        guard version == 1, parent_operation == parent, image_sha256 == image,
+        guard (version == 1 && reason == nil) || (version == 2 && reason == "reservation_expired") else {
+            throw LiteServiceFailure.invalidResponse
+        }
+        guard parent_operation == parent, image_sha256 == image,
               LiteServiceBytes.hex(parent,32), LiteServiceBytes.hex(successor_operation,32),
               successor_operation != parent, (0..<100_000_000).contains(parent_day),
-              successor_day > parent_day, successor_day < 100_000_000,
+              successor_day >= parent_day, (version == 2 || successor_day > parent_day), successor_day < 100_000_000,
               day == nil || day == parent_day,
               [parent_request_digest,image_sha256,fence_sha256,authorization_sha256].allSatisfy({LiteServiceBytes.hex($0)}) else {
             throw LiteServiceFailure.invalidResponse
@@ -79,14 +83,23 @@ struct LiteServiceReply: Codable, Equatable, Sendable {
     let receipt: LiteServiceReceipt?, result: LiteServiceResult?, result_json: String?
     let service_result_stored: Bool?, result_expires: Int?
     var recovery: LiteServiceRecoveryAuthorization? = nil
+    var cancel_reason: String? = nil
 
     func validate(for record: LiteServiceRecord) throws {
         guard operation == record.operation, (0..<100_000_000).contains(day), !research_stored,
               record.day == nil || record.day == day else { throw LiteServiceFailure.invalidResponse }
         if state == "recovery_available" || state == "new_operation_required" {
-            guard record.requestDigest == nil, record.reply?.receipt == nil,
-                  receipt == nil, result == nil, result_json == nil,
-                  service_result_stored != true, retry_action == "recover" else { throw LiteServiceFailure.invalidResponse }
+            if recovery?.version == 2 {
+                guard record.resubmitRequested == true, record.reply?.state == "cancelled",
+                      record.reply?.cancel_reason == "reservation_expired", retry_action == "resubmit",
+                      record.requestDigest == recovery?.parent_request_digest,
+                      record.reply?.receipt?.result_sha256 == recovery?.fence_sha256 else { throw LiteServiceFailure.invalidResponse }
+            } else {
+                guard record.requestDigest == nil, record.reply?.receipt == nil,
+                      retry_action == "recover" else { throw LiteServiceFailure.invalidResponse }
+            }
+            guard receipt == nil, result == nil, result_json == nil, cancel_reason == nil,
+                  service_result_stored != true else { throw LiteServiceFailure.invalidResponse }
             if state == "new_operation_required" {
                 guard let recovery else { throw LiteServiceFailure.invalidResponse }
                 try recovery.validate(parent:record.operation,image:record.imageSHA256,day:day)
@@ -94,6 +107,9 @@ struct LiteServiceReply: Codable, Equatable, Sendable {
             return
         }
         guard recovery == nil else { throw LiteServiceFailure.invalidResponse }
+        guard cancel_reason == nil || (state == "cancelled" && ["reservation_expired","preflight_rejected","cancelled_unknown"].contains(cancel_reason!)) else {
+            throw LiteServiceFailure.invalidResponse
+        }
         if state == "awaiting_reservation" {
             guard record.requestDigest == nil, receipt == nil, result == nil, result_json == nil,
                   retry_action == "prepare" else { throw LiteServiceFailure.invalidResponse }
@@ -143,14 +159,15 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
     var requestDigest: String?
     var reply: LiteServiceReply?
     var recoveryHistory: [LiteServiceRecoveryCheckpoint]? = nil
+    var resubmitRequested: Bool? = nil
 
     func validate() throws {
         guard [1,2].contains(version), LiteServiceBytes.hex(captureID,32), LiteServiceBytes.hex(operation,32),
               LiteServiceBytes.hex(imageSHA256), revision > 0,
               LiteAttestClient.matches(installation,"[A-Za-z0-9_-]{1,128}"),
               (1...8192).contains(width), (1...8192).contains(height), width*height <= 16_000_000,
-              ["prepare","run","status","recover","none"].contains(next),
-              ["local","checking","ready","pending","confirmed","quota","capacity","unavailable","review","expired","rejected","missingImage","recovering"].contains(note),
+              ["prepare","run","status","recover","resubmit","none"].contains(next),
+              ["local","checking","ready","pending","confirmed","quota","capacity","unavailable","review","expired","rejected","missingImage","recovering","reservationExpired","cancelled","resubmitting"].contains(note),
               retryAt.isFinite, retryAt >= 0, day == nil || day! >= 0,
               requestDigest == nil || LiteServiceBytes.hex(requestDigest!) else { throw LiteServiceFailure.invalidState }
         let history=recoveryHistory ?? []
@@ -163,12 +180,18 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
                 let auth=item.authorization
                 try auth.validate(parent:previous,image:imageSHA256,day:item.priorDay)
                 guard item.priorRevision > priorRevision, item.priorRevision < revision,
-                      item.priorReply?.receipt == nil, item.priorRequestDigest == nil,
                       item.priorRetryAt.isFinite, item.priorRetryAt >= 0,
-                      ["prepare","run","status","recover","none"].contains(item.priorNext),
+                      ["prepare","run","status","recover","resubmit","none"].contains(item.priorNext),
                       item.priorReply == nil || (item.priorReply?.operation == previous && item.priorReply?.day == auth.parent_day),
                       priorDay == nil || auth.parent_day == priorDay,
                       seen.insert(auth.successor_operation).inserted else { throw LiteServiceFailure.invalidState }
+                if auth.version == 2 {
+                    guard item.priorReply?.state == "cancelled", item.priorReply?.cancel_reason == "reservation_expired",
+                          item.priorRequestDigest == auth.parent_request_digest,
+                          item.priorReply?.receipt?.result_sha256 == auth.fence_sha256 else { throw LiteServiceFailure.invalidState }
+                } else {
+                    guard item.priorReply?.receipt == nil, item.priorRequestDigest == nil else { throw LiteServiceFailure.invalidState }
+                }
                 priorRevision=item.priorRevision;previous=auth.successor_operation;priorDay=auth.successor_day
             }
             guard operation == previous, day == priorDay else { throw LiteServiceFailure.invalidState }
@@ -177,6 +200,11 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
         if requestDigest != nil { guard day != nil else { throw LiteServiceFailure.invalidState } }
         if let reply { guard day == reply.day, reply.receipt == nil || requestDigest == reply.receipt?.request_digest else { throw LiteServiceFailure.invalidState } }
         if next == "run" { guard reply?.state == "ready", requestDigest != nil else { throw LiteServiceFailure.invalidState } }
+        if resubmitRequested == true || next == "resubmit" {
+            guard resubmitRequested == true, reply?.state == "cancelled", reply?.cancel_reason == "reservation_expired" else {
+                throw LiteServiceFailure.invalidState
+            }
+        }
         if note == "confirmed" { guard next == "none", reply?.state == "completed" else { throw LiteServiceFailure.invalidState } }
     }
 
@@ -190,10 +218,18 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
         case "unavailable": return "連線或裝置驗證尚未完成；下次先查原工作，不會直接重傳照片。"
         case "expired": return "雲端結果查詢期限已過；本機資料保留，需核對後再處理。"
         case "rejected": return "本次影像未通過檢查；未執行辨識，原資料保留。"
+        case "reservationExpired": return "預留已逾時，尚未執行辨識。原照片保留；按「重新送出」後將重新檢查額度。"
+        case "resubmitting": return "已記錄重新送出的選擇，正在核對原工作與可用額度。"
+        case "cancelled": return "原工作已取消，但原因尚未確認；資料保留，請先核對，不會自動重送。"
         case "missingImage": return "找不到相符的原照片，已停止傳送；請保留紀錄待核對。"
         case "review": return "服務回覆或資料不一致，已停止傳送；請保留原紀錄待核對。"
         default: return "辨識工作已保存在手機，尚未確認雲端完成。"
         }
+    }
+
+    var canResubmit: Bool {
+        note == "reservationExpired" && next == "none" && resubmitRequested != true && reply?.state == "cancelled" &&
+        reply?.cancel_reason == "reservation_expired" && (recoveryHistory?.count ?? 0) < 8
     }
 }
 
@@ -249,7 +285,7 @@ struct LiteSignedServiceTransport: LiteAuthenticatedTransport {
         guard await allowService() else { throw LiteAttestFailure.consentRequired }; return owner
     }
     func send(_ request: URLRequest, installation: String) async throws -> (Data, HTTPURLResponse) {
-        guard ["prepare","run","status","recover"].contains(request.url?.lastPathComponent ?? ""),
+        guard ["prepare","run","status","recover","resubmit"].contains(request.url?.lastPathComponent ?? ""),
               request.url?.path == "/api/v1/lite/service/"+(request.url?.lastPathComponent ?? ""),
               try await self.installation() == installation else { throw LiteAttestFailure.invalidRequest }
         return try await client.send(request,installation:installation,requestID:UUID(),allowSending:allowService)
@@ -296,6 +332,16 @@ actor LiteServiceClient {
     }
     func stored(_ id: String) async throws -> LiteServiceRecord { try await read(id).1 }
 
+    /// Wire only to an explicit user action. Persist intent before any request;
+    /// resume/restart/status alone cannot request another inference.
+    func requestResubmission(_ id: String) async throws -> LiteServiceRecord {
+        guard !busy else { throw LiteServiceFailure.busy }; busy=true; defer { busy=false }
+        var (previous,r)=try await read(id)
+        guard r.canResubmit, try await transport.installation() == r.installation else { throw LiteServiceFailure.invalidState }
+        r.resubmitRequested=true;r.next="resubmit";r.note="resubmitting";r.retryAt=0
+        try await save(&r,previous:&previous);return r
+    }
+
     func resume(_ id: String, loadJPEG: @Sendable (String) async throws -> Data?) async throws -> LiteServiceRecord {
         guard !busy else { throw LiteServiceFailure.busy }; busy=true; defer { busy=false }
         var (previous,r)=try await read(id)
@@ -323,7 +369,7 @@ actor LiteServiceClient {
                 request.httpBody=body;request.setValue("multipart/form-data; boundary=\(boundary)",forHTTPHeaderField:"Content-Type")
             } else {
                 var body=["anon_id":r.installation,"operation":r.operation]
-                if action == "prepare" || action == "recover" { body["image_sha256"]=r.imageSHA256 }
+                if action == "prepare" || action == "recover" || action == "resubmit" { body["image_sha256"]=r.imageSHA256 }
                 request.httpBody=try JSONSerialization.data(withJSONObject:body,options:.sortedKeys)
                 request.setValue("application/json",forHTTPHeaderField:"Content-Type")
             }
@@ -352,14 +398,21 @@ actor LiteServiceClient {
                         r.recoveryHistory=(r.recoveryHistory ?? [])+[checkpoint]
                         r.version=2;r.operation=auth.successor_operation;r.day=auth.successor_day
                         r.requestDigest=nil;r.reply=nil;r.next="prepare";r.note="recovering";r.retryAt=0
+                        r.resubmitRequested=nil
                     } else {
                     r.day=reply.day;r.requestDigest=reply.receipt?.request_digest ?? r.requestDigest;r.reply=reply
                     r.next=reply.retry_action;r.retryAt=reply.state == "pending" ? now().timeIntervalSince1970+5 : 0
-                    r.note=reply.state == "completed" ? "confirmed" : reply.state == "cancelled" ? "rejected" : reply.state == "pending" ? "pending" : reply.state == "recovery_available" ? "recovering" : "ready"
+                    r.note=reply.state == "completed" ? "confirmed" : reply.state == "pending" ? "pending" : reply.state == "recovery_available" ? "recovering" : "ready"
+                    if reply.state == "cancelled" {
+                        r.note=reply.cancel_reason == "reservation_expired" ? "reservationExpired" : reply.cancel_reason == "preflight_rejected" ? "rejected" : "cancelled"
+                        if r.resubmitRequested == true && reply.cancel_reason == "reservation_expired" {
+                            r.next="resubmit";r.note="resubmitting"
+                        }
+                    }
                     }
                 } catch { r.next="none";r.note="review" }
                 try await save(&r,previous:&previous)
-                if r.next == "prepare" || r.next == "run" || r.next == "recover" { continue }; return r
+                if ["prepare","run","recover","resubmit"].contains(r.next) { continue }; return r
             }
             let error=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any]
             if http.statusCode == 404, error?["error"] as? String == "lite_operation_unknown", r.requestDigest == nil {

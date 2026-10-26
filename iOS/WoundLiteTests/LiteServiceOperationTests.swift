@@ -125,6 +125,142 @@ extension LiteServiceOperationTests {
     }
 }
 
+private struct ServiceResubmitFixture: Decodable {
+    let installation: String, capture_id: String, jpeg: String
+    let cancelled: LiteServiceReply, authorization: LiteServiceReply, prepare: LiteServiceReply, completed: LiteServiceReply
+    let signature_binding: [String:String]
+    var image: Data { Data(base64Encoded:jpeg)! }
+    func bytes(_ v:LiteServiceReply) throws -> Data { try JSONEncoder().encode(v) }
+    static func load() throws -> Self {
+        let u=try XCTUnwrap(Bundle(for:LiteServiceOperationTests.self).url(forResource:"lite_service_resubmit",withExtension:"json"))
+        return try JSONDecoder().decode(Self.self,from:Data(contentsOf:u))
+    }
+}
+
+extension LiteServiceOperationTests {
+    private func expiredSetup(reason:String? = "reservation_expired") async throws -> (ServiceResubmitFixture,ServiceWire,ServiceMemory,LiteServiceClient) {
+        let f=try ServiceResubmitFixture.load(),w=ServiceWire(owner:f.installation),m=ServiceMemory(),c=try client(w,m)
+        _=try await c.enqueue(captureID:f.capture_id,jpeg:f.image)
+        var cancelled=f.cancelled;cancelled.cancel_reason=reason
+        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(cancelled))])
+        _=try await c.resume(f.capture_id) { _ in XCTFail();return nil }
+        return (f,w,m,c)
+    }
+    private func resubmitSteps(_ f:ServiceResubmitFixture) throws -> [ServiceStep] {
+        [ServiceStep(action:"resubmit",data:try f.bytes(f.authorization)),
+         ServiceStep(action:"prepare",data:try f.bytes(f.prepare)),
+         ServiceStep(action:"run",data:try f.bytes(f.completed))]
+    }
+    func testLeaseExpiryShowsExplicitResubmitWithoutAutomaticNetwork() async throws {
+        let (f,w,m,c)=try await expiredSetup()
+        let r=try await c.stored(f.capture_id)
+        XCTAssertEqual(r.note,"reservationExpired");XCTAssertTrue(r.canResubmit)
+        XCTAssertTrue(r.message.contains("預留已逾時"));XCTAssertFalse(r.message.contains("未通過"))
+        _=try await client(w,m).resume(f.capture_id) { _ in XCTFail();return nil }
+        let sent=await w.requests();XCTAssertEqual(sent.count,1)
+    }
+    func testExplicitResubmitPersistsIntentAndSuccessorBeforeSending() async throws {
+        let (f,w,m,c)=try await expiredSetup(),image=f.image
+        let intent=try await c.requestResubmission(f.capture_id)
+        XCTAssertEqual(intent.operation,f.capture_id);XCTAssertEqual(intent.next,"resubmit")
+        XCTAssertTrue(intent.resubmitRequested == true);XCTAssertFalse(intent.canResubmit)
+        let before=await w.requests();XCTAssertEqual(before.count,1)
+        try await w.plan(resubmitSteps(f))
+        let done=try await client(w,m).resume(f.capture_id) { _ in image }
+        XCTAssertEqual(done.note,"confirmed");XCTAssertEqual(done.recoveryHistory?.count,1)
+        XCTAssertEqual(done.recoveryHistory?.first?.priorReply,f.cancelled)
+        XCTAssertEqual(done.recoveryHistory?.first?.authorization.version,2)
+        XCTAssertNil(done.resubmitRequested)
+        _=try await c.resume(f.capture_id) { _ in XCTFail();return nil }
+        let sent=await w.requests();XCTAssertEqual(sent.map{$0.url!.lastPathComponent},["prepare","resubmit","prepare","run"])
+    }
+    func testPreflightRejectedAndUnknownCancelledNeverOfferResubmit() async throws {
+        for reason in ["preflight_rejected","cancelled_unknown",nil] {
+            let (f,w,_,c)=try await expiredSetup(reason:reason)
+            let r=try await c.stored(f.capture_id);XCTAssertFalse(r.canResubmit)
+            XCTAssertEqual(r.note,reason == "preflight_rejected" ? "rejected":"cancelled")
+            do { _=try await c.requestResubmission(f.capture_id);XCTFail() } catch { }
+            let sent=await w.requests();XCTAssertEqual(sent.count,1)
+        }
+    }
+    func testIntentSaveFailureCannotSendOrChangeOperation() async throws {
+        let (f,w,m,c)=try await expiredSetup();await m.fail(4)
+        do { _=try await c.requestResubmission(f.capture_id);XCTFail() } catch { }
+        let r=try await c.stored(f.capture_id);XCTAssertNil(r.resubmitRequested);XCTAssertTrue(r.canResubmit)
+        let sent=await w.requests();XCTAssertEqual(sent.count,1)
+    }
+    func testLostResubmitReplyRestartsWithSameExplicitIntent() async throws {
+        let (f,w,m,c)=try await expiredSetup(),image=f.image
+        _=try await c.requestResubmission(f.capture_id)
+        await w.plan([ServiceStep(action:"resubmit",data:Data(),fail:true)])
+        let waiting=try await c.resume(f.capture_id) { _ in XCTFail();return nil }
+        XCTAssertEqual(waiting.operation,f.capture_id);XCTAssertTrue(waiting.resubmitRequested == true)
+        try await w.plan([ServiceStep(action:"status",data:f.bytes(f.cancelled))]+resubmitSteps(f))
+        let ready=try await client(w,m,1006).resume(f.capture_id) { _ in image }
+        XCTAssertEqual(ready.next,"run")
+        let done=try await client(w,m,1006).resume(f.capture_id) { _ in image }
+        XCTAssertEqual(done.note,"confirmed");XCTAssertEqual(done.recoveryHistory?.count,1)
+        let sent=await w.requests();XCTAssertEqual(sent.filter{$0.url!.lastPathComponent=="run"}.count,1)
+    }
+    func testSuccessorSaveFailureKeepsParentAndExplicitIntent() async throws {
+        let (f,w,m,c)=try await expiredSetup(),image=f.image
+        _=try await c.requestResubmission(f.capture_id);await m.fail(6)
+        await w.plan([ServiceStep(action:"resubmit",data:try f.bytes(f.authorization))])
+        do { _=try await c.resume(f.capture_id) { _ in XCTFail();return nil };XCTFail() } catch { }
+        let r=try await c.stored(f.capture_id)
+        XCTAssertEqual(r.operation,f.capture_id);XCTAssertNil(r.recoveryHistory)
+        try await w.plan([ServiceStep(action:"status",data:f.bytes(f.cancelled))]+resubmitSteps(f))
+        _=try await c.resume(f.capture_id) { _ in image }
+        let done=try await c.resume(f.capture_id) { _ in image }
+        XCTAssertEqual(done.note,"confirmed")
+        let sent=await w.requests();XCTAssertEqual(sent.filter{$0.url!.lastPathComponent=="run"}.count,1)
+    }
+    func testResubmitRechecksQuotaWithoutNewPhotoOrMoreOperations() async throws {
+        let (f,w,_,c)=try await expiredSetup()
+        _=try await c.requestResubmission(f.capture_id)
+        await w.plan([ServiceStep(action:"resubmit",data:try f.bytes(f.authorization)),
+                      ServiceStep(action:"prepare",data:error("lite_usage_limit"),code:429,wait:"30")])
+        let r=try await c.resume(f.capture_id) { _ in XCTFail();return nil }
+        XCTAssertEqual(r.note,"quota");XCTAssertEqual(r.operation,f.prepare.operation)
+        XCTAssertEqual(r.recoveryHistory?.count,1);XCTAssertFalse(r.canResubmit)
+        let sent=await w.requests();XCTAssertEqual(sent.count,3)
+    }
+    func testResubmitBindingMismatchCannotAdopt() async throws {
+        for field in ["parent_request_digest","fence_sha256","reason"] {
+            let (f,w,_,c)=try await expiredSetup()
+            _=try await c.requestResubmission(f.capture_id)
+            var reply=try JSONSerialization.jsonObject(with:f.bytes(f.authorization)) as! [String:Any]
+            var auth=reply["recovery"] as! [String:Any];auth[field]=field == "reason" ? "preflight_rejected":String(repeating:"e",count:64);reply["recovery"]=auth
+            await w.plan([ServiceStep(action:"resubmit",data:try JSONSerialization.data(withJSONObject:reply))])
+            let r=try await c.resume(f.capture_id) { _ in XCTFail();return nil }
+            XCTAssertEqual(r.note,"review");XCTAssertEqual(r.operation,f.capture_id)
+        }
+    }
+    func testUnrequestedResubmitAuthorizationIsRejected() async throws {
+        let f=try ServiceResubmitFixture.load(),w=ServiceWire(owner:f.installation),m=ServiceMemory(),c=try client(w,m)
+        _=try await c.enqueue(captureID:f.capture_id,jpeg:f.image)
+        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.authorization))])
+        let r=try await c.resume(f.capture_id) { _ in XCTFail();return nil }
+        XCTAssertEqual(r.note,"review");XCTAssertEqual(r.operation,f.capture_id)
+    }
+    func testDoubleResubmitTapCannotPersistSecondIntent() async throws {
+        let (f,w,_,c)=try await expiredSetup()
+        let r=try await c.requestResubmission(f.capture_id)
+        do { _=try await c.requestResubmission(f.capture_id);XCTFail() } catch { }
+        let stored=try await c.stored(f.capture_id);XCTAssertEqual(stored,r)
+        let sent=await w.requests();XCTAssertEqual(sent.count,1)
+    }
+    func testResubmitSignatureMatchesPythonGoldenBytes() throws {
+        let row=try ServiceResubmitFixture.load().signature_binding
+        let data=try LiteAttestRequest.clientData(audience:row["audience"]!,installation:row["installation"]!,
+            keyID:Data(base64Encoded:row["key_id"]!)!,challenge:Data(base64Encoded:row["challenge"]!)!,
+            requestID:row["request_id"]!,method:row["method"]!,path:row["path"]!,contentType:row["content_type"]!,
+            body:Data(base64Encoded:row["body"]!)!)
+        XCTAssertEqual(data.base64EncodedString(),row["expected_client_data"])
+        XCTAssertEqual(LiteServiceBytes.hash(data),row["expected_sha256"])
+    }
+}
+
 private struct ServiceFixture: Decodable {
     let installation: String, capture_id: String, jpeg: String, image_sha256: String
     let prepare: LiteServiceReply, completed: LiteServiceReply

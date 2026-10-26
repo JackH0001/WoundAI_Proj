@@ -172,17 +172,22 @@ the non-cutover path. Do not interpret test success as production activation.
 `lite_service_recovery.py` adds signed HTTP recovery and create-only successor
 authorizations. The iOS service journal persists the authorization and original
 checkpoint before sending anything under the successor ID. Generic failure,
-old completed/pending work, cancellation and expired results never rotate IDs.
-Only explicit server authorization for a fenced missing prior-day reservation
-permits this change. The default-off baseline probe remains unchanged.
+old completed/pending work and expired results never rotate IDs. A fenced
+missing prior-day reservation uses the original G3 authorization. Separately,
+verified unstarted lease expiry now supports an explicit user-requested
+successor; preflight/unknown cancellations do not. The default-off baseline
+probe remains unchanged. See `lite-resubmit-rollout-review-v1.md`.
 
 `lite_usage_rollout.py` now executes a bounded manifest with injected provider
 observations, durable phase transitions and append-only intent/completion audit.
 Synthetic tests cover successful activation, lost replies, partial baseline,
 corrupt control, failed provider closure and failed durable pause. Rollback is
-terminal pause with legacy writers kept off and counts preserved. A claim already
-admitted before pause may still finish once on the original ledger. Runtime
-admission cannot promise cancellation of already authorized in-flight work.
+an audited pause with legacy writers kept off and counts preserved. Read-only
+active observation failures do not trigger rollback. An exact-generation,
+explicitly authorized same-day resume can leave pause without resetting usage;
+ordinary execute/retry cannot. A claim already admitted before pause may still
+finish once on the original ledger. Runtime admission cannot promise cancellation
+of already authorized in-flight work.
 
 The trusted **live cloud provider remains unimplemented**, as do the public
 capture/history integration, verified account enrollment/recovery, Apple grace
