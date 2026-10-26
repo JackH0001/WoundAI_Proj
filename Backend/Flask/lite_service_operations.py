@@ -52,9 +52,15 @@ class ServiceAccounts:
 
     Only independently verified registration/restore may supply this mapping.
     An App Attest installation is authenticated, but alone is not a human account.
-    Account recovery, paid activation and unlinking still require rollout work.
+    Optional subscription links apply across verified installations of the SAME
+    service account. Human login, recovery and unlinking still require rollout.
     """
-    def __init__(self,store,authority=None):self.store,self.authority=store,authority
+    def __init__(self,store,authority=None,subscription_links=None):
+        if subscription_links is not None:
+            if authority is not None and authority is not subscription_links.authority:
+                raise ValueError('subscription binding and quota must use the same authority')
+            authority=subscription_links.authority
+        self.store,self.authority,self.subscription_links=store,authority,subscription_links
 
     @staticmethod
     def key(installation):return hashlib.sha256(('lite/service-account/1\0'+_subject(installation)).encode()).digest()
@@ -70,7 +76,8 @@ class ServiceAccounts:
         if readback[1]!=value:
             raise UsageConflict('service account cannot be silently replaced')
 
-    def resolve(self,installation):
+    def registration(self,installation):
+        """Immutable trusted installation mapping, without a subscription overlay."""
         row=self.store.load(self.key(installation))
         if row is None:raise StateUnavailable('verified service account not provisioned')
         v=row[1]
@@ -84,6 +91,16 @@ class ServiceAccounts:
             ServiceBinding(v['subject'],v['token'],original if original is not None else '0').validate()
         except (KeyError,ValueError,TypeError) as e:raise StateUnavailable('invalid service account') from e
         return v.copy()
+
+    def resolve(self,installation):
+        account=self.registration(installation)
+        if self.subscription_links is not None:
+            original=self.subscription_links.lookup(account['subject'],account['token'])
+            if original is not None:
+                if account['original_transaction'] not in (None,original):
+                    raise UsageConflict('legacy paid binding differs; explicit reconciliation required')
+                account['original_transaction']=original
+        return account
 
     def grant(self,account,now):
         if account['original_transaction'] is None:return free_grant(account['subject'],now)
