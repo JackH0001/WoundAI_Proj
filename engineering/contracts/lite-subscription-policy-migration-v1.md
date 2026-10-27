@@ -43,6 +43,11 @@ a tier. `com.woundai.lite.synthetic.next` is a fixture, not a real store product
    without another Apple query. Completed historical plans return historical
    receipts, even after newer migrations, without restoring an old pointer.
 
+The batch layer added on 2026-10-27 is described in
+`lite-subscription-executor-v1.md`. It supplies signed control/observer checks,
+progress and pause/resume locally; cloud writer fencing and IAM remain separate
+acceptance gates.
+
 The v1 reader now checks the guard before and after I/O. This is a backstop, NOT a
 distributed fence: an old process past its last check, or a binary predating the
 guard, must be fenced externally. Tests simulate this trusted provider; actual

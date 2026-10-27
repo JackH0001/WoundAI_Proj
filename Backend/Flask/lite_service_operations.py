@@ -55,12 +55,15 @@ class ServiceAccounts:
     Optional subscription links apply across verified installations of the SAME
     service account. Human login, recovery and unlinking still require rollout.
     """
-    def __init__(self,store,authority=None,subscription_links=None):
+    def __init__(self,store,authority=None,subscription_links=None,admission_guard=None):
         if subscription_links is not None:
             if authority is not None and authority is not subscription_links.authority:
                 raise ValueError('subscription binding and quota must use the same authority')
             authority=subscription_links.authority
         self.store,self.authority,self.subscription_links=store,authority,subscription_links
+        if admission_guard is not None and not callable(admission_guard):
+            raise ValueError('trusted admission guard required')
+        self.admission_guard=admission_guard
 
     @staticmethod
     def key(installation):return hashlib.sha256(('lite/service-account/1\0'+_subject(installation)).encode()).digest()
@@ -103,6 +106,8 @@ class ServiceAccounts:
         return account
 
     def grant(self,account,now):
+        if self.admission_guard is not None and self.admission_guard(account) is not True:
+            raise StateUnavailable('subscription cutover admission paused or unconfirmed')
         if account['original_transaction'] is None:return free_grant(account['subject'],now)
         if self.authority is None:raise StateUnavailable('paid verification unavailable')
         return self.authority.grant(ServiceBinding(account['subject'],account['token'],account['original_transaction']))

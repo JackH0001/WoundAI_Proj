@@ -84,6 +84,12 @@ jobs:
           python -m unittest -v test_lite_subscription_migration test_lite_subscription_migration_probe > evidence/subscription-migration-tests.log 2>&1
           python tools/lite_subscription_migration_probe.py --output evidence/subscription-migration-probe.json
       - name: Review entry, isolation, migration and containment rehearsal
+        # The executor consumes signed external observations; no cloud activation.
+        # Keep simulated transport evidence distinct from a live provider fence.
+        run: |
+          python -m unittest -v test_lite_subscription_executor test_lite_subscription_executor_probe > evidence/subscription-executor-tests.log 2>&1
+          python tools/lite_subscription_executor_probe.py --output evidence/subscription-executor-probe.json
+      - name: Review entry, isolation, medical migration and containment rehearsal
         run: >-
           python -m unittest -v test_lite_review_portal test_lite_review_human
           test_lite_review_executor test_plan_lite_review_human test_medical_consent_operations
