@@ -69,22 +69,24 @@ def optional_commerce_imports(name, tree):
     """
     if name != 'lite_attest_http.py':
         return set()
-    guard = ast.dump(ast.parse('commerce is not None', mode='eval').body)
     result = set()
+    gates = {'commerce': {'lite_service_operations', 'lite_service_http'},
+             'purchases': {'lite_native_purchase'}}
     for function in tree.body:
         if not isinstance(function, ast.FunctionDef) or function.name != 'install_lite_attest':
             continue
         defaults = dict(zip((arg.arg for arg in function.args.kwonlyargs), function.args.kw_defaults))
-        default = defaults.get('commerce')
-        if not isinstance(default, ast.Constant) or default.value is not None:
-            continue
-        for branch in function.body:
-            if not isinstance(branch, ast.If) or ast.dump(branch.test) != guard:
+        for option, modules in gates.items():
+            default = defaults.get(option)
+            if not isinstance(default, ast.Constant) or default.value is not None:
                 continue
-            for node in branch.body:
-                if (isinstance(node, ast.ImportFrom) and node.level == 0
-                        and node.module in {'lite_service_operations', 'lite_service_http'}):
-                    result.add(node)
+            guard = ast.dump(ast.parse(option + ' is not None', mode='eval').body)
+            for branch in function.body:
+                if not isinstance(branch, ast.If) or ast.dump(branch.test) != guard:
+                    continue
+                for node in branch.body:
+                    if (isinstance(node, ast.ImportFrom) and node.level == 0 and node.module in modules):
+                        result.add(node)
     return result
 
 
@@ -93,7 +95,7 @@ def validate_runtime_imports(root):
 
     Never auto-discover/copy files: expanding the manifest still needs review.
     This covers ordinary imports, including imports inside request handlers;
-    The two default-off commerce imports are explicitly checked separately;
+    The explicit default-off commerce/purchase imports are explicitly checked separately;
     dynamic imports and runtime model behavior need separate image acceptance.
     """
     flask = Path(root).resolve() / 'Backend/Flask'

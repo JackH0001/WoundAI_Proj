@@ -37,6 +37,7 @@ class Fixture:
         self.executor=SubscriptionMigrationExecutor(manifest=self.manifest,links=self.links,registry=self.accounts,
             state_store=self.control,audit_store=self.audit,observation=self.observation,evidence=self.evidence,
             expected_source=SOURCE,expected_image=IMAGE)
+        self.links=self.executor.links  # private batch control; runtime reader is unchanged
         self.publish();self.n=0
 
     def sign(self,p,role='approval'):
@@ -91,7 +92,7 @@ class ExecutorTests(unittest.TestCase):
 
     def test_manifest_preparation_does_not_write_any_store(self):
         f=self.f;before=[rows(s) for s in (f.base.f.store,f.base.f.audit,f.accounts.store,f.control,f.audit)]
-        make_manifest(f.links,f.accounts,['first-device'],namespace='another',source=SOURCE,image=IMAGE,
+        make_manifest(f.accounts.subscription_links,f.accounts,['first-device'],namespace='another',source=SOURCE,image=IMAGE,
             inventory='b'*64,fence='f'*64,operation='1'*64)
         self.assertEqual(before,[rows(s) for s in (f.base.f.store,f.base.f.audit,f.accounts.store,f.control,f.audit)])
 
@@ -99,7 +100,7 @@ class ExecutorTests(unittest.TestCase):
         f=self.f
         for devices in ([],['first-device','second-device'],['first-device']*101):
             with self.subTest(devices=len(devices)),self.assertRaises((ValueError,UsageConflict)):
-                make_manifest(f.links,f.accounts,devices,namespace='another',source=SOURCE,image=IMAGE,
+                make_manifest(f.accounts.subscription_links,f.accounts,devices,namespace='another',source=SOURCE,image=IMAGE,
                     inventory='b'*64,fence='f'*64,operation='1'*64)
 
     def test_unsigned_or_tampered_approval_cannot_write(self):
@@ -259,7 +260,7 @@ class ExecutorTests(unittest.TestCase):
 
     def test_core_authority_hash_alone_cannot_execute(self):
         f=self.f;p=f.manifest['entries'][0]['plan']
-        with self.assertRaises(StateUnavailable):f.links.execute(p,f.accounts,'first-device',
+        with self.assertRaises(StateUnavailable):f.links.execute(p,self.e.registry,'first-device',
             authorization_sha256=self.e._account_authorization(p))
         self.assertIsNone(f.links._read(f.base.f.subject,f.base.f.token))
 

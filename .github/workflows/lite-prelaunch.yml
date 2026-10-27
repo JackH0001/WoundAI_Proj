@@ -89,6 +89,10 @@ jobs:
         run: |
           python -m unittest -v test_lite_subscription_executor test_lite_subscription_executor_probe > evidence/subscription-executor-tests.log 2>&1
           python tools/lite_subscription_executor_probe.py --output evidence/subscription-executor-probe.json
+      - name: Durable multi-batch runtime and opt-in native purchase bridge
+        run: |
+          python -m unittest -v test_lite_subscription_runtime test_lite_native_purchase > evidence/native-purchase-tests.log 2>&1
+          python tools/lite_native_purchase_probe.py --output evidence/native-purchase-probe.json
       - name: Review entry, isolation, medical migration and containment rehearsal
         run: >-
           python -m unittest -v test_lite_review_portal test_lite_review_human

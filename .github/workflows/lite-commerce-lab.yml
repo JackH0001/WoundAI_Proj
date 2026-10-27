@@ -41,6 +41,9 @@ jobs:
             -test-timeouts-enabled YES -maximum-test-execution-time-allowance 60 \
             -only-testing:WoundLiteTests/LiteCommercePolicyTests \
             -only-testing:WoundLiteTests/LiteCommerceStoreTests \
+            -only-testing:WoundLiteTests/LiteNativeStoreKitTests \
+            -only-testing:WoundLiteTests/LitePurchaseBridgeTests \
+            -only-testing:WoundLiteTests/LitePurchaseHTTPTests \
             -only-testing:WoundLiteTests/LiteServiceOperationTests \
             -only-testing:WoundLiteTests/LiteAttestRequestTests \
             -only-testing:WoundLiteTests/LiteAttestClientTests \
@@ -62,6 +65,8 @@ jobs:
             -only-testing:WoundLiteTests/LiteAttestRequestTests \
             -only-testing:WoundLiteTests/LiteAttestClientTests \
             -only-testing:WoundLiteTests/LiteSignedBusinessTests \
+            -only-testing:WoundLiteTests/LitePurchaseBridgeTests \
+            -only-testing:WoundLiteTests/LitePurchaseHTTPTests \
             -resultBundlePath ServiceReleaseTests.xcresult \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- ENABLE_TESTABILITY=YES \
             2>&1 | tee service-release-tests.log

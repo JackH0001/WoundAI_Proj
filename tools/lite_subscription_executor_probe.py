@@ -55,11 +55,11 @@ def probe():
             return signed(dict(kind='lite-migration-approval/1',manifest=digest(m),action=action,
                 expected_state=e.state_digest(),issued_at=a.now,expires_at=a.now+900,nonce=digest([action,e.state_digest()])),'approval')
         h.accounts=accounts;h.ops.accounts=accounts
-        calls_before=h.model_calls;real=stable.execute
+        calls_before=h.model_calls;real=e.links.execute
         def lost(*args,**kwargs):
             real(*args,**kwargs);raise StateUnavailable('synthetic completion response lost')
         interrupted=False
-        with patch.object(stable,'execute',side_effect=lost):
+        with patch.object(e.links,'execute',side_effect=lost):
             try:e.advance(approval('start'))
             except StateUnavailable:interrupted=True
         assert e.inspect()['phase']=='paused'

@@ -6,12 +6,14 @@
 
 ## 開始前的必要條件
 
-1. 完成原生購買與服務帳號橋接。現在 `iOS/WoundLite/LiteCommerceStore.swift`
-   仍是本機實驗介面，`purchase()` 未帶服務帳號 token，不能拿現有畫面當作
-   雲端付費額度驗收。新流程須由已驗證的服務帳號取得穩定 UUID，購買時傳
-   `appAccountToken`，後端核對簽章的同一 UUID、bundle、環境、商品及原始交易。
-   Apple 會在交易／續訂資訊回傳此帳號 UUID；它不等於 Apple ID，也不是 App
-   Attest 安裝識別。[Apple appAccountToken](https://developer.apple.com/documentation/appstoreserverapi/appaccounttoken)
+1. 原生橋接現已在 `LitePurchaseBridge.swift`、`LiteStoreKitPurchaseProvider.swift`
+   與 `lite_native_purchase.py` 完成本機實作／測試；舊 `LiteCommerceStore.swift`
+   仍僅供實驗。新組件尚未接入正式 tab 或啟動設定，不能拿現有 TestFlight
+   畫面當雲端付費驗收。須先完成可信服務帳號登入／裝置映射的正式接線，
+   購買由伺服器提供固定 UUID，後端核對相同 token、bundle、環境與商品。
+   Apple 的 appAccountToken 不等於 Apple ID 或 App Attest 安裝識別。
+   [Apple appAccountToken](https://developer.apple.com/documentation/appstoreserverapi/appaccounttoken)
+   詳見 `lite_native_purchase_bridge_20261027.md` 的逐帳號啟用與保留證據規則。
 2. 唯讀盤點既有 App Store Connect 項目、商品、訂閱群組、帳號與 Server API
    金鑰權限。不要推定目前已有正式商品。缺項須先列具體變動讓使用者核准；
    不把合成 product ID 建成正式商品，也不因測試建立重複商品。

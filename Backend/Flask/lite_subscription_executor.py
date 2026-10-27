@@ -76,7 +76,7 @@ class StoredObservation:
     def __init__(self, store, evidence, namespace):
         self.store, self.evidence, self.namespace = store, evidence, _subject(namespace)
 
-    def observe(self, manifest, *, drained=False):
+    def observe(self, manifest, *, drained=False, manifest_digest=None):
         try:
             row = self.store.load(key('observation', self.namespace))
             if row is None: raise EvidenceUnavailable('observer record absent')
@@ -88,7 +88,8 @@ class StoredObservation:
                 raise EvidenceUnavailable('malformed observer record')
         except EvidenceUnavailable: raise
         except Exception as exc: raise EvidenceUnavailable('observer read unavailable') from exc
-        expected = dict(namespace=manifest['namespace'], manifest=digest(manifest), source=manifest['source'],
+        if manifest_digest is not None:_hex(manifest_digest)
+        expected = dict(namespace=manifest['namespace'], manifest=manifest_digest or digest(manifest), source=manifest['source'],
                         image=manifest['image'], inventory=manifest['inventory'], fence=manifest['fence'])
         if (any(p[k] != v for k,v in expected.items()) or not p['legacy_disabled'] or p['legacy_inflight']
                 or not p['stable_reader'] or (drained and p['migration_inflight'])):
@@ -131,8 +132,10 @@ class SubscriptionMigrationExecutor:
             raise UsageConflict('exact bounded migration manifest required')
         _subject(m['namespace']);_hex(m['source'],40)
         for field in ('image','inventory','fence','operation'): _hex(m[field])
+        from lite_subscription_runtime import SubscriptionRuntime
+        prior=getattr(registry,'subscription_runtime',None)
         if (not isinstance(links,StableSubscriptionLinks) or registry.subscription_links is not links
-                or registry.admission_guard is not None
+                or (registry.admission_guard is not None and not isinstance(prior,SubscriptionRuntime))
                 or not isinstance(evidence,SignedEvidence) or not isinstance(observation,StoredObservation)
                 or observation.evidence is not evidence or observation.namespace != m['namespace']):
             raise ValueError('matched trusted components required')
@@ -143,15 +146,29 @@ class SubscriptionMigrationExecutor:
             if (p['subject_hash'] in subjects or p['inventory_sha256'] != m['inventory']
                     or p['writer_fence_sha256'] != m['fence']): raise UsageConflict('ambiguous account scope')
             subjects.add(p['subject_hash'])
-        self.manifest,self.links,self.registry=m,links,registry
+        runtime=prior or SubscriptionRuntime(links=links,registry=registry,state_store=state_store,
+            audit_store=audit_store,observation_store=observation.store,evidence=evidence,
+            expected_source=expected_source,expected_image=expected_image)
+        if (runtime.store is not state_store or runtime.audit is not audit_store or runtime.evidence is not evidence
+                or runtime.observations is not observation.store or runtime.source!=expected_source or runtime.image!=expected_image):
+            raise ValueError('runtime differs across batches')
+        registry.subscription_runtime=runtime
+        registry.admission_guard=runtime.allowed
+        registry.bootstrap=runtime.bootstrap
+        # Batch control callbacks are private to each executor. Runtime readers
+        # and a second batch must never replace the first executor's callbacks.
+        from lite_service_operations import ServiceAccounts
+        control_links=runtime.clone()
+        control_registry=ServiceAccounts(registry.store,subscription_links=control_links)
+        self.manifest,self.links,self.registry=m,control_links,control_registry
+        self.runtime=runtime
         self.store,self.audit,self.observation,self.evidence=state_store,audit_store,observation,evidence
         self.identity=digest(m);self.control_key=key('control',m['namespace']);self.subjects=subjects
         self._context=None
         # Bind the core's previously abstract callbacks to exact persisted command
         # state, cryptographic approval and independently signed current evidence.
-        links.authorize=self._authorize_account
-        links.writer_fence=lambda proof: self._fence(proof)
-        registry.admission_guard=self.admission_allowed
+        control_links.authorize=self._authorize_account
+        control_links.writer_fence=lambda proof: self._fence(proof)
 
     def _read(self):
         row=self.store.load(self.control_key)
@@ -224,14 +241,7 @@ class SubscriptionMigrationExecutor:
         return dict(phase=row[1]['phase'],observation=status,next=row[1]['next'])
 
     def admission_allowed(self,account):
-        try:
-            row=self._read()
-            if row is None or row[1]['phase'] != 'active' or digest(account['subject']) not in self.subjects:return False
-            confirmed=dict(v=1,manifest=self.identity,kind='state-confirmed',value=row[1])
-            audit=self.audit.load(key('audit',digest(confirmed)))
-            if audit is None or audit[1] != confirmed:return False
-            self.observation.observe(self.manifest);return True
-        except Exception:return False
+        return self.runtime.allowed(account)
 
     def _contain(self,attempt):
         row=self._read()
@@ -264,6 +274,7 @@ class SubscriptionMigrationExecutor:
         self._context=(copy.deepcopy(envelope),action,expected,attempt)
         try:
             row=self._move(old,'running',old[1]['next'] if old else 0,attempt)
+            self.runtime.claim(self.manifest)
             while row[1]['next'] < len(self.manifest['entries']):
                 i=row[1]['next'];entry=self.manifest['entries'][i]
                 authority=self._account_authorization(entry['plan'])
@@ -284,6 +295,7 @@ class SubscriptionMigrationExecutor:
             row=self._move(row,'sealed',row[1]['next'],attempt)
             self._approval(envelope,action,expected);self.observation.observe(self.manifest)
             row=self._move(row,'active',row[1]['next'],attempt)
+            self.runtime.activate_batch(self.manifest,row[1])
             return copy.deepcopy(row[1])
         except Exception:
             try:self._contain(attempt)
