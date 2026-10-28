@@ -111,7 +111,8 @@ from flask import Flask
 from lite_attest_http import install_lite_attest
 optional = ('lite_service_operations', 'lite_service_http', 'lite_usage_ledger',
             'lite_subscription_authority', 'lite_service_subscription_links', 'lite_native_purchase',
-            'lite_subscription_runtime', 'lite_subscription_executor', 'lite_account_identity')
+            'lite_subscription_runtime', 'lite_subscription_executor', 'lite_account_identity',
+            'lite_apple_identity_provider', 'lite_apple_account_events')
 assert all(importlib.util.find_spec(name) is None for name in optional)
 app = Flask('staged-legacy')
 install_lite_attest(app)

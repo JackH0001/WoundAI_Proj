@@ -25,6 +25,21 @@ ACCOUNT_PATHS = {PREFIX + p for p in ('challenge', 'confirm', 'status', 'logout'
 class IdentityRejected(ValueError): pass
 
 
+def identity_header(signed):
+    """Parse only enough untrusted data to select a key; never accepts key URLs."""
+    try:
+        if type(signed) is not str or not 1 <= len(signed) <= 16000: raise ValueError()
+        parts = signed.split('.')
+        if len(parts) != 3: raise ValueError()
+        header = loads_json_object_strict(base64.b64decode(parts[0] + '=' * (-len(parts[0]) % 4), altchars=b'-_', validate=True).decode())
+        if (set(header) - {'alg', 'kid', 'typ'} or header.get('typ', 'JWT') != 'JWT'
+                or header.get('alg') not in ('RS256', 'ES256')
+                or type(header.get('kid')) is not str or not 1 <= len(header['kid']) <= 128): raise ValueError()
+        return header
+    except Exception as exc:
+        raise IdentityRejected('bounded signed Apple token required') from exc
+
+
 class AppleIdentityVerifier:
     """Bounded trusted JWKS snapshot; never follows a JWT-provided URL/key."""
     issuer = 'https://appleid.apple.com'
@@ -39,6 +54,7 @@ class AppleIdentityVerifier:
         self.audience, self.clock = audience, clock
         self.fetched_at, self.expires_at, self.keys = fetched_at, expires_at, {}
         for item in jwks['keys']:
+            if type(item) is not dict: raise ValueError('invalid identity key')
             alg, kid = item.get('alg'), item.get('kid')
             if (alg not in ('RS256', 'ES256') or type(kid) is not str or not 1 <= len(kid) <= 128
                     or kid in self.keys or item.get('use') != 'sig'
@@ -49,24 +65,29 @@ class AppleIdentityVerifier:
             if alg == 'RS256' and k.key_size < 2048: raise ValueError('weak identity key')
             self.keys[kid] = (alg, k)
 
-    def verify(self, signed, nonce):
+    def _claims(self, signed, required):
         now = self.clock()
         if type(now) is not int or not self.fetched_at <= now < self.expires_at:
             raise StateUnavailable('fresh trusted Apple signing keys required')
         try:
-            if type(signed) is not str or not 1 <= len(signed) <= 16000: raise ValueError()
+            header = identity_header(signed)
             parts = signed.split('.')
-            if len(parts) != 3: raise ValueError()
-            def decode(part):
-                return loads_json_object_strict(base64.b64decode(part + '=' * (-len(part) % 4), altchars=b'-_', validate=True).decode())
-            header, raw = decode(parts[0]), decode(parts[1])
-            if set(header) - {'alg', 'kid', 'typ'} or header.get('typ', 'JWT') != 'JWT': raise ValueError()
+            raw = loads_json_object_strict(base64.b64decode(parts[1] + '=' * (-len(parts[1]) % 4), altchars=b'-_', validate=True).decode())
             alg, public = self.keys[header['kid']]
             if header['alg'] != alg: raise ValueError()
             claims = jwt.decode(signed, public, algorithms=[alg], audience=self.audience,
                 issuer=self.issuer, options={'verify_exp': False, 'verify_iat': False,
-                    'verify_nbf': False, 'require': ['iss', 'aud', 'sub', 'iat', 'exp', 'nonce']})
-            if (claims != raw or claims['aud'] != self.audience or claims['nonce'] != nonce
+                    'verify_nbf': False, 'require': required})
+            if claims != raw or claims['aud'] != self.audience: raise ValueError()
+            return claims
+        except Exception as exc:
+            raise IdentityRejected('Apple signature or claims rejected') from exc
+
+    def verify(self, signed, nonce):
+        claims = self._claims(signed, ['iss', 'aud', 'sub', 'iat', 'exp', 'nonce'])
+        now = self.clock()
+        try:
+            if (claims['nonce'] != nonce
                     or type(claims['sub']) is not str or not 1 <= len(claims['sub']) <= 255
                     or not claims['sub'].isascii() or not claims['sub'].isprintable()
                     or any(type(claims[x]) is not int for x in ('iat', 'exp'))
@@ -78,6 +99,32 @@ class AppleIdentityVerifier:
         except Exception as exc:
             raise IdentityRejected('Apple identity, signature or nonce rejected') from exc
 
+    def event(self, signed):
+        """Apple account notifications have no required nonce/exp. Not ID tokens.
+
+        Seven-day replay acceptance is an engineering bound, not an Apple SLA;
+        durable jti deduplication and event-time fencing are handled separately.
+        """
+        c = self._claims(signed, ['iss', 'aud', 'iat', 'jti', 'events'])
+        try:
+            e = c['events']
+            if type(e) is str: e = loads_json_object_strict(e)
+            now = self.clock()
+            if (type(c['iat']) is not int or not now-7*86400 <= c['iat'] <= now+30
+                    or type(c['jti']) is not str or not 1 <= len(c['jti']) <= 255
+                    or not c['jti'].isascii() or not c['jti'].isprintable()
+                    or type(e) is not dict or not {'type','sub','event_time'} <= set(e)
+                    or set(e) - {'type','sub','event_time','email','is_private_email'}
+                    or e['type'] not in ('email-enabled','email-disabled','consent-revoked','account-deleted')
+                    or type(e['sub']) is not str or not 1 <= len(e['sub']) <= 255
+                    or not e['sub'].isascii() or not e['sub'].isprintable()
+                    or type(e['event_time']) is not int or not 0 <= e['event_time'] <= min(c['iat']+30,now+30)
+                    or ('nbf' in c and (type(c['nbf']) is not int or c['nbf'] > now))
+                    or ('exp' in c and (type(c['exp']) is not int or c['exp'] <= now))): raise ValueError()
+            return dict(jti=c['jti'], issued=c['iat'], type=e['type'], sub=e['sub'], event_time=e['event_time'])
+        except Exception as exc:
+            raise IdentityRejected('Apple account event rejected') from exc
+
 
 class AccountIdentityBridge:
     """Immutable human/device association; CAS sessions prevent late reactivation.
@@ -85,7 +132,7 @@ class AccountIdentityBridge:
     Existing installations cannot silently switch people. A separate reviewed
     unlink/account-deletion procedure is required; logout never erases research.
     """
-    def __init__(self, *, runtime, verifier, store, audit_store, namespace, identity_key):
+    def __init__(self, *, runtime, verifier, store, audit_store, namespace, identity_key, events=None):
         if not isinstance(runtime, SubscriptionRuntime) or not isinstance(verifier, AppleIdentityVerifier):
             raise ValueError('trusted runtime and Apple verifier required')
         _subject(namespace)
@@ -95,6 +142,18 @@ class AccountIdentityBridge:
         self.config = dict(v=1, namespace=namespace, issuer=verifier.issuer, audience=verifier.audience,
             identity_key_sha256=hashlib.sha256(identity_key).hexdigest(), session_seconds=900)
         self.immutable(store, key('human-identity-config', namespace), self.config)
+        self.events = events
+        mode_key=key('human-events-required',namespace)
+        if events is not None:
+            from lite_apple_account_events import AppleAccountEvents
+            if not isinstance(events, AppleAccountEvents) or events.binding != {k:self.config[k] for k in ('namespace','issuer','audience','identity_key_sha256')}:
+                raise ValueError('matching Apple event authority required')
+            self.immutable(store,mode_key,dict(v=1,binding=events.binding))
+        elif store.load(mode_key) is not None:
+            raise StateUnavailable('Apple event protection cannot be silently disabled')
+
+    def _authorization_key(self, installation, operation):
+        return key('human-authorization', digest([self.namespace,installation,operation]))
 
     def now(self):
         n = self.verifier.clock()
@@ -167,6 +226,10 @@ class AccountIdentityBridge:
                 claims=self.verifier.verify(signed,c['nonce'])
                 if claims['issued'] < c['created_at']-30: raise IdentityRejected('token predates challenge')
                 identity=hmac.new(self.secret, (self.namespace+'\0'+self.verifier.issuer+'\0'+claims['sub']).encode(),hashlib.sha256).hexdigest()
+                if self.events is not None:
+                    self.events.require_identity(identity, claims['issued'])
+                    self.immutable(self.audit, self._authorization_key(installation,operation),
+                        dict(v=1,identity_sha256=identity,issued_at=claims['issued']))
                 k=key('human-account',identity);account=self.store.load(k)
                 if account is None:
                     a=dict(v=1,identity_sha256=identity,subject='apple-'+identity,token=str(uuid.uuid4()))
@@ -204,10 +267,19 @@ class AccountIdentityBridge:
         raise StateUnavailable('sign-in confirmation raced; keep local evidence')
 
     def require_session(self, installation):
+        if self.events is None and self.store.load(key('human-events-required',self.namespace)) is not None:
+            raise StateUnavailable('Apple account event authority required by durable policy')
         row=self._read(installation)
         if row is None or row[1]['phase']!='active' or self.now()>=row[1]['session_expires_at']:
             raise IdentityRejected('sign-in required')
         c=row[1]
+        if self.events is not None:
+            proof=self.audit.load(self._authorization_key(installation,c['operation']))
+            if proof is None: raise IdentityRejected('explicit sign-in required for account event protection')
+            p=proof[1]
+            if set(p)!={'v','identity_sha256','issued_at'} or type(p['v']) is not int or p['v']!=1 or p['identity_sha256']!=c['account']['identity_sha256']:
+                raise StateUnavailable('identity authorization proof corrupt')
+            self.events.require_identity(p['identity_sha256'],p['issued_at'])
         if self.audit.load(key('human-logout',digest([self.namespace,installation,c['operation']]))) is not None:
             raise IdentityRejected('session signed out')
         a=self.registry.registration(installation)

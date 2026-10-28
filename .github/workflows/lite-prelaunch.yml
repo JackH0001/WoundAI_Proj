@@ -94,6 +94,10 @@ jobs:
           python -m unittest -v test_lite_account_identity test_lite_subscription_runtime test_lite_native_purchase > evidence/native-purchase-tests.log 2>&1
           python tools/lite_native_purchase_probe.py --output evidence/native-purchase-probe.json
           python tools/lite_account_identity_probe.py --output evidence/account-identity-probe.json
+      - name: Apple key rotation and durable account revocation (synthetic only)
+        run: |
+          python -m unittest -v test_lite_apple_identity_provider test_lite_apple_account_events test_lite_apple_provider_probe > evidence/apple-provider-tests.log 2>&1
+          python tools/lite_apple_provider_probe.py --output evidence/apple-provider-probe.json
       - name: Review entry, isolation, medical migration and containment rehearsal
         run: >-
           python -m unittest -v test_lite_review_portal test_lite_review_human

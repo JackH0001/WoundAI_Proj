@@ -16,6 +16,14 @@ S0 必須另確認登入取消、重啟、登出與晚回、同人第二安裝�
 
 ## 開始前的必要條件
 
+2026-10-28 provider 補充：公開公鑰取得／快取與簽章帳號事件的本機候選及
+合成驗收見 [lite_apple_provider_validation_20261028.md](lite_apple_provider_validation_20261028.md)。
+尚未註冊真實 Apple 通知 URL，亦未啟用 App 的 Sign in with Apple entitlement。
+新增 S0 前置項：先核對 entitlement／profile／primary App ID 與 audience，再
+驗證公鑰過期／輪替、跨裝置撤銷、重複及晚到通知；重啟後仍須保留阻擋水位。
+這些前置設定與真實事件傳送都另需限定方案，不能拿合成事件或唯讀公鑰 GET
+當成 S0 通過。研究撤回保持獨立；Apple account-deleted 不得顯示成研究資料已刪除。
+
 1. 原生橋接現已在 `LitePurchaseBridge.swift`、`LiteStoreKitPurchaseProvider.swift`
    與 `lite_native_purchase.py` 完成本機實作／測試；舊 `LiteCommerceStore.swift`
    仍僅供實驗。新組件尚未接入正式 tab 或啟動設定，不能拿現有 TestFlight

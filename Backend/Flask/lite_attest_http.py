@@ -91,6 +91,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
         purchase_paths=frozenset(PURCHASE_PATHS)
     if identity is not None:
         from lite_account_identity import AccountIdentityBridge,ACCOUNT_PATHS,blueprint as identity_blueprint
+        from lite_apple_account_events import blueprint as apple_events_blueprint
         if not isinstance(identity,AccountIdentityBridge) or commerce is None or identity.registry is not commerce.accounts:
             raise ValueError('matching trusted human/service accounts required')
         account_paths=frozenset(ACCOUNT_PATHS)
@@ -98,6 +99,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
     if commerce is not None:app.register_blueprint(commerce_blueprint(commerce))
     if purchases is not None:app.register_blueprint(purchase_blueprint(purchases))
     if identity is not None:app.register_blueprint(identity_blueprint(identity))
+    if identity is not None and identity.events is not None:app.register_blueprint(apple_events_blueprint(identity.events))
     bp = Blueprint('lite_attest_http', __name__)
 
     @app.before_request
