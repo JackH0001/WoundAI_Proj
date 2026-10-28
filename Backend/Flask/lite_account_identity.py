@@ -3,7 +3,8 @@
 App Attest must bind every HTTP request to its installation. Apple ID-token
 verification supplies the human subject; neither email nor client account IDs do.
 Public-key snapshots and identity namespace/key are supplied by trusted startup.
-No refresh-token exchange, Apple settings, research or quota writes occur here.
+Apple grant exchange is separately injected and default-off. No Apple settings,
+research writes, quota resets or session extension occur here.
 """
 import base64
 import hashlib
@@ -132,7 +133,7 @@ class AccountIdentityBridge:
     Existing installations cannot silently switch people. A separate reviewed
     unlink/account-deletion procedure is required; logout never erases research.
     """
-    def __init__(self, *, runtime, verifier, store, audit_store, namespace, identity_key, events=None):
+    def __init__(self, *, runtime, verifier, store, audit_store, namespace, identity_key, events=None, grants=None):
         if not isinstance(runtime, SubscriptionRuntime) or not isinstance(verifier, AppleIdentityVerifier):
             raise ValueError('trusted runtime and Apple verifier required')
         _subject(namespace)
@@ -151,6 +152,16 @@ class AccountIdentityBridge:
             self.immutable(store,mode_key,dict(v=1,binding=events.binding))
         elif store.load(mode_key) is not None:
             raise StateUnavailable('Apple event protection cannot be silently disabled')
+        self.grants = grants
+        grant_key = key('human-grants-required', namespace)
+        if grants is not None:
+            from lite_apple_grants import AppleGrantAuthority
+            if (not isinstance(grants, AppleGrantAuthority) or grants.verifier is not verifier
+                    or grants.binding != {k:self.config[k] for k in ('namespace','issuer','audience','identity_key_sha256')}):
+                raise ValueError('matching Apple grant authority required')
+            self.immutable(store, grant_key, dict(v=1, binding=grants.binding))
+        elif store.load(grant_key) is not None:
+            raise StateUnavailable('Apple grant custody cannot be silently disabled')
 
     def _authorization_key(self, installation, operation):
         return key('human-authorization', digest([self.namespace,installation,operation]))
@@ -208,10 +219,12 @@ class AccountIdentityBridge:
         raise StateUnavailable('sign-in concurrent change')
 
     def _public(self,c,installation):
-        return dict(v=1,installation=installation,operation=c['operation'],nonce=c['nonce'],state=c['state'],
+        result = dict(v=1,installation=installation,operation=c['operation'],nonce=c['nonce'],state=c['state'],
                     created_at=c['created_at'],expires_at=c['expires_at'],audience=self.verifier.audience)
+        if self.grants is not None: result['authorization_code_required'] = True
+        return result
 
-    def confirm(self, installation, operation, signed, state):
+    def confirm(self, installation, operation, signed, state, authorization_code=None):
         _hex(operation,32)
         if type(signed) is not str or not 1 <= len(signed) <= 16000: raise IdentityRejected('bounded identity required')
         for _ in range(CAS_ATTEMPTS):
@@ -230,6 +243,8 @@ class AccountIdentityBridge:
                     self.events.require_identity(identity, claims['issued'])
                     self.immutable(self.audit, self._authorization_key(installation,operation),
                         dict(v=1,identity_sha256=identity,issued_at=claims['issued']))
+                if self.grants is not None:
+                    self.grants.capture(installation, operation, c['nonce'], signed, authorization_code)
                 k=key('human-account',identity);account=self.store.load(k)
                 if account is None:
                     a=dict(v=1,identity_sha256=identity,subject='apple-'+identity,token=str(uuid.uuid4()))
@@ -245,6 +260,8 @@ class AccountIdentityBridge:
                 continue
             if c['token_sha256'] != token_hash or self.now() >= c['session_expires_at']:
                 raise IdentityRejected('saved sign-in differs or expired')
+            if self.grants is not None:
+                self.grants.capture(installation, operation, c['nonce'], signed, authorization_code)
             a=c['account'];proof=digest(['apple-device-binding/1',self.namespace,installation,a])
             registration=self.registry.store.load(self.registry.key(installation))
             if registration is not None:
@@ -267,12 +284,16 @@ class AccountIdentityBridge:
         raise StateUnavailable('sign-in confirmation raced; keep local evidence')
 
     def require_session(self, installation):
+        if self.grants is None and self.store.load(key('human-grants-required',self.namespace)) is not None:
+            raise StateUnavailable('Apple grant authority required by durable policy')
         if self.events is None and self.store.load(key('human-events-required',self.namespace)) is not None:
             raise StateUnavailable('Apple account event authority required by durable policy')
         row=self._read(installation)
         if row is None or row[1]['phase']!='active' or self.now()>=row[1]['session_expires_at']:
             raise IdentityRejected('sign-in required')
         c=row[1]
+        if self.grants is not None:
+            self.grants.require(installation, c['operation'], c['account']['identity_sha256'])
         if self.events is not None:
             proof=self.audit.load(self._authorization_key(installation,c['operation']))
             if proof is None: raise IdentityRejected('explicit sign-in required for account event protection')
@@ -313,14 +334,28 @@ def blueprint(bridge):
             if admission is None:return jsonify(error='lite_attestation_required'),401
             body=loads_json_object_strict(request.get_data().decode())
             fields={'anon_id'} | ({'operation'} if kind!='status' else set()) | ({'identity_token','state'} if kind=='confirm' else set())
+            if kind == 'confirm' and bridge.grants is not None: fields.add('authorization_code')
             if request.mimetype!='application/json' or set(body)!=fields: raise IdentityRejected('exact account fields required')
             if body['anon_id']!=admission.installation:return jsonify(error='lite_owner_mismatch'),403
-            if kind=='confirm':result=bridge.confirm(admission.installation,body['operation'],body['identity_token'],body['state'])
+            if kind=='confirm':result=bridge.confirm(admission.installation,body['operation'],body['identity_token'],body['state'],body.get('authorization_code'))
             elif kind=='status':result=bridge.status(admission.installation)
             else:result=getattr(bridge,kind)(admission.installation,body['operation'])
             return jsonify(result)
-        except IdentityRejected:return jsonify(error='lite_sign_in_required',keep_local=True),401
+        except IdentityRejected as exc:
+            if bridge.grants is not None:
+                from lite_apple_oauth import GrantRejected
+                if isinstance(exc, GrantRejected):
+                    return jsonify(error='lite_apple_grant_recovery_required',keep_local=True,
+                        explicit_sign_in_required=True,retry_saved_code=False),409
+            return jsonify(error='lite_sign_in_required',keep_local=True),401
         except (ValueError,TypeError,KeyError,UsageConflict):return jsonify(error='lite_account_conflict',keep_local=True),409
+        except StateUnavailable as exc:
+            if bridge.grants is not None:
+                from lite_apple_oauth import GrantUncertain
+                if isinstance(exc, GrantUncertain):
+                    return jsonify(error='lite_apple_grant_recovery_required',keep_local=True,
+                        explicit_sign_in_required=True,retry_saved_code=False),409
+            return jsonify(error='lite_account_unconfirmed',keep_local=True),503
         except Exception:return jsonify(error='lite_account_unconfirmed',keep_local=True),503
     for kind in ('challenge','confirm','status','logout'):
         bp.add_url_rule(PREFIX+kind,kind,lambda kind=kind:action(kind),methods=['POST'])

@@ -21,7 +21,7 @@
 |---|---|---|
 | 31秒 observer 依賴 | 新增預設關閉的耐久release reader/controller，訂閱及額度共用；舊路徑保留供對照 | 本機合成回歸涵蓋觀察過期48小時、跨實例停用、失敗恢復、一次執行／扣額度。見 `lite_durable_release_followup_20261028.md`。正式provider、舊writer隔離、控制IAM／告警與實機仍未驗收，不代表已部署修復 |
 | 15分鐘登入 | `AccountIdentityBridge.require_session` 仍有限期；`lite_attest_http` 對雲端服務讀回也要求session | 本機紀錄／PDF不要求登入；雲端舊結果須持續核對帳號歸屬，加入安全續期而非取消驗證。以保護的refresh憑證、輪替／重放限制、登出／撤銷圍堵、離線與回應遺失測試處理 |
-| App內刪帳及token撤銷 | 本輪接收Apple撤銷通知，**不等於App內刪帳**；尚無授權碼交換與Apple revoke流程 | 建立明確刪帳入口、確認、先耐久保存意圖、撤銷Apple token、關閉全部服務工作階段、清理／保留範圍及稽核。失敗顯示待完成；訂閱取消引導與研究撤回分開，不能假稱取消訂閱或已完全銷毀 |
+| App內刪帳及token撤銷 | 10/29已新增預設關閉的授權碼交換、加密vault及單grant撤銷primitive，並接候選iOS登入journal；**不等於App內刪帳**，見 `lite_apple_grant_custody_20261029.md` | 仍需明確刪帳入口、全帳號grant庫存／撤銷、服務續期family、全部工作階段關閉、清理／保留範圍及稽核。失敗顯示待完成；訂閱取消引導與研究撤回分開，不能假稱取消訂閱或已完全銷毀 |
 | 身分金鑰保管 | 程式注入32bytes key並固定hash；沒有正式託管／備份／災復程序 | 分開管理HMAC身分key、Apple簽署key、事件／觀察簽署key與裝置key。最小權限Secret/KMS方案、key-id、備份可恢復性、雙人取用、稽核、輪替映射與復原演練；不能直接換salt讓舊帳號無法辨認 |
 
 本輪新增 Apple 公鑰輪替與簽章帳號事件，使撤銷可被後端持續核對；只處理上述

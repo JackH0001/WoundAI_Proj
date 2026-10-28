@@ -1,11 +1,12 @@
 import Foundation
 import AuthenticationServices
 
-enum LiteAccountFailure: Error, Equatable { case invalid, unavailable, cancelled, conflict }
+enum LiteAccountFailure: Error, Equatable { case invalid, unavailable, cancelled, conflict, grantRecoveryRequired }
 
 struct LiteAccountChallenge: Codable, Equatable {
     let v: Int, installation: String, operation: String, nonce: String, state: String
     let created_at: Int, expires_at: Int, audience: String
+    var authorization_code_required: Bool? = nil
     func validate() throws {
         guard v == 1, LiteAttestClient.matches(installation,"[A-Za-z0-9_-]{1,128}"),
               LiteServiceBytes.hex(operation,32), LiteServiceBytes.hex(nonce), LiteServiceBytes.hex(state),
@@ -27,9 +28,14 @@ struct LiteAccountSession: Codable, Equatable {
 
 struct LiteAppleIdentity: Codable, Equatable {
     let identityToken: String, state: String, user: String
-    func validate(_ c:LiteAccountChallenge) throws {
+    var authorizationCode: String? = nil
+    func validate(_ c:LiteAccountChallenge, requireAuthorizationCode:Bool = true) throws {
         guard state==c.state, (1...16000).contains(identityToken.utf8.count),
               (1...255).contains(user.utf8.count) else { throw LiteAccountFailure.invalid }
+        if let code=authorizationCode {
+            guard (1...4096).contains(code.utf8.count),code.unicodeScalars.allSatisfy({(32...126).contains($0.value)}) else {throw LiteAccountFailure.invalid}
+        }
+        if requireAuthorizationCode && c.authorization_code_required == true && authorizationCode == nil {throw LiteAccountFailure.invalid}
     }
 }
 
@@ -74,8 +80,14 @@ struct LiteSignedAccountTransport:LiteAuthenticatedTransport {
         var r=URLRequest(url:origin.appendingPathComponent("api/v1/lite/account/"+kind))
         r.httpMethod="POST";r.setValue("application/json",forHTTPHeaderField:"Content-Type");r.httpBody=try JSONEncoder().encode(body);r.timeoutInterval=30
         let(data,response)=try await transport.send(r,installation:owner)
-        guard try await installation()==owner,response.statusCode==200,data.count<=20000,
+        guard try await installation()==owner,data.count<=20000,
               response.url==r.url else {throw LiteAccountFailure.unavailable}
+        if kind=="confirm",response.statusCode==409 {
+            struct Recovery:Decodable {let error:String,keep_local:Bool,explicit_sign_in_required:Bool,retry_saved_code:Bool}
+            if let r=try? JSONDecoder().decode(Recovery.self,from:data),r.error=="lite_apple_grant_recovery_required",
+               r.keep_local,r.explicit_sign_in_required,!r.retry_saved_code {throw LiteAccountFailure.grantRecoveryRequired}
+        }
+        guard response.statusCode==200 else {throw LiteAccountFailure.unavailable}
         return data
     }
     func challenge(operation:String)async throws ->LiteAccountChallenge {
@@ -85,8 +97,10 @@ struct LiteSignedAccountTransport:LiteAuthenticatedTransport {
     }
     func confirm(_ c:LiteAccountChallenge,credential:LiteAppleIdentity)async throws ->LiteAccountSession {
         try c.validate();try credential.validate(c)
+        var body=["anon_id":c.installation,"operation":c.operation,"state":credential.state,"identity_token":credential.identityToken]
+        if c.authorization_code_required == true {body["authorization_code"]=credential.authorizationCode}
         let r=try JSONDecoder().decode(LiteAccountSession.self,from:await send("confirm",owner:c.installation,
-            body:["anon_id":c.installation,"operation":c.operation,"state":credential.state,"identity_token":credential.identityToken]))
+            body:body))
         try r.validate(c);return r
     }
     func logout(_ c:LiteAccountChallenge)async throws {
@@ -122,7 +136,9 @@ struct LiteSignedAccountTransport:LiteAuthenticatedTransport {
         do {
             guard let c=challenge,let apple=authorization.credential as? ASAuthorizationAppleIDCredential,
                   let data=apple.identityToken,let token=String(data:data,encoding:.utf8),let state=apple.state else {throw LiteAccountFailure.invalid}
-            let result=LiteAppleIdentity(identityToken:token,state:state,user:apple.user);try result.validate(c)
+            var result=LiteAppleIdentity(identityToken:token,state:state,user:apple.user)
+            if c.authorization_code_required == true,let code=apple.authorizationCode {result.authorizationCode=String(data:code,encoding:.utf8)}
+            try result.validate(c)
             finish(.success(result))
         } catch {finish(.failure(error))}
     }
@@ -147,8 +163,9 @@ struct LiteAccountCheckpoint:Codable,Equatable {
     var credential:LiteAppleIdentity?=nil,session:LiteAccountSession?=nil
     func validate()throws {
         try challenge.validate()
-        guard version==1,URL(string:origin)?.scheme=="https",["apple","confirm","active","logout","ended"].contains(phase) else {throw LiteAccountFailure.invalid}
-        if let credential{try credential.validate(challenge)}
+        guard version==1,URL(string:origin)?.scheme=="https",["apple","confirm","active","logout","ended","reauthenticate"].contains(phase) else {throw LiteAccountFailure.invalid}
+        if let credential{try credential.validate(challenge,requireAuthorizationCode:phase=="confirm")}
+        if phase=="reauthenticate" && (credential != nil || session != nil) {throw LiteAccountFailure.invalid}
         if let session{try session.validate(challenge)}
         if phase=="confirm" && credential==nil{throw LiteAccountFailure.invalid}
         if phase=="active" && (credential==nil || session==nil){throw LiteAccountFailure.invalid}
@@ -179,10 +196,21 @@ struct LiteAccountCheckpoint:Codable,Equatable {
     private func confirm(_ owner:String,_ old:Data,_ record:LiteAccountCheckpoint)async throws {
         guard let credential=record.credential,record.phase=="confirm" else{throw LiteAccountFailure.invalid}
         let started=generation
-        let session=try await service.confirm(record.challenge,credential:credential);try session.validate(record.challenge)
+        let session:LiteAccountSession
+        do {session=try await service.confirm(record.challenge,credential:credential)}
+        catch LiteAccountFailure.grantRecoveryRequired {
+            guard generation==started else{throw LiteAccountFailure.conflict}
+            var next=record;next.phase="reauthenticate";next.credential=nil;next.session=nil
+            _=try await save(owner,old,next)
+            guard generation==started else{throw LiteAccountFailure.conflict}
+            message="Apple 登入回覆無法確認，請按重新登入。不會重送舊授權碼；原紀錄與額度保留。"
+            return
+        }
+        try session.validate(record.challenge)
         guard generation==started else{throw LiteAccountFailure.conflict}
         guard session.expires_at>Int(now().timeIntervalSince1970) else{throw LiteAccountFailure.invalid}
         var next=record;next.phase="active";next.session=session
+        next.credential?.authorizationCode=nil // Single-use code is no longer needed after acknowledgment.
         _=try await save(owner,old,next) // logout racing with the response makes CAS fail
         guard generation==started else{throw LiteAccountFailure.conflict};blocked=false
         message="服務帳號已確認；原紀錄、研究同意及今日已用次數不變。"
@@ -200,7 +228,8 @@ struct LiteAccountCheckpoint:Codable,Equatable {
             var r=LiteAccountCheckpoint(version:1,origin:service.origin.absoluteString,challenge:c,phase:"apple")
             var saved=try await save(owner,old,r) // persist before displaying Apple authorization
             guard generation==started else{throw LiteAccountFailure.conflict}
-            let credential=try await provider.signIn(c);try credential.validate(c)
+            var credential=try await provider.signIn(c);try credential.validate(c)
+            if c.authorization_code_required != true {credential.authorizationCode=nil}
             guard generation==started else{throw LiteAccountFailure.conflict}
             r.credential=credential;r.phase="confirm";saved=try await save(owner,saved,r)
             try await confirm(owner,saved,r)
@@ -213,6 +242,7 @@ struct LiteAccountCheckpoint:Codable,Equatable {
             guard let old,let r else{return}
             if r.phase=="confirm"{try await confirm(owner,old,r)}
             else if r.phase=="logout"{try await finishLogout(owner,old,r)}
+            else if r.phase=="reauthenticate"{message="請按重新登入以取得新的 Apple 授權；不會重送舊授權碼。"}
             else{message="目前沒有待確認的登入操作。"}
         } catch {message="帳號核對尚未完成，請稍後重試；本機紀錄仍保留。"}
     }
