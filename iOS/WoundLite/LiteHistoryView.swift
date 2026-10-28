@@ -256,6 +256,11 @@ struct LiteRecordDetailView: View {
     @State private var assigningWound: LiteWoundGroup?
     @State private var assignmentSide = ""
     @State private var assignmentSite = ""
+    @State private var pdfShare: LitePDFShare?
+    @State private var pdfCopy: LitePDFShare?
+    @State private var pdfError: String?
+    @State private var pdfBusy = false
+    @State private var imageLoadFinished = false
 
     private var record: LiteRecord? { store.records.first { $0.id == recordId } }
 
@@ -270,6 +275,26 @@ struct LiteRecordDetailView: View {
                                         imageH: img.cgImage?.height ?? 1)
                         }
                         detailCard(r)
+                        Button {
+                            pdfError = nil; pdfBusy = true
+                            // Freeze the saved record; export never edits or syncs it.
+                            let snapshot = r, photo = image
+                            Task { @MainActor in
+                                await Task.yield()
+                                defer { pdfBusy = false }
+                                do {
+                                    let copy = try LitePDFShare(data: LitePDFReport.render(record: snapshot, image: photo))
+                                    pdfCopy = copy; pdfShare = copy
+                                } catch { pdfError = "PDF 暫時無法產生；原照片、紀錄與同步狀態未變更。" }
+                            }
+                        } label: {
+                            Label(pdfBusy ? "正在產生 PDF…" : "分享此筆 PDF 紀錄", systemImage: "square.and.arrow.up")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(busy || pdfBusy || !imageLoadFinished)
+                        Text("只在本機製作，不重新辨識或扣額度。PDF 含照片與位置，分享前請確認接收對象。")
+                            .font(.caption).foregroundStyle(.secondary)
+                        if let pdfError { Text(pdfError).font(.footnote).foregroundStyle(.orange) }
                         DisclosureGroup("影像與深度保存詳情") {
                             if let binding = r.cloudSync?.binding,
                                let status = LiteWithdrawalJournal.standard.status(for: binding) {
@@ -297,7 +322,7 @@ struct LiteRecordDetailView: View {
                             consent: LitePrefs.researchConsent == true,
                             withdrawalBlocked: withdrawal.blocksUploads,
                             retiredResearch: r.cloudSync.map { !withdrawal.blocksUploads && !LiteWithdrawalJournal.standard.permits($0.binding) } ?? false),
-                        calculating: busy, change: changeSummary,
+                        calculating: busy || pdfBusy, change: changeSummary,
                         note: note, noteIsInformational: noteIsInformational,
                         canEdit: r.depthName != nil && image != nil,
                         syncAllowed: r.cloudSync.map { LiteWithdrawalJournal.standard.permits($0.binding) } == true && LitePrefs.researchConsent == true,
@@ -317,6 +342,11 @@ struct LiteRecordDetailView: View {
             }
         }
         .task { await load() }
+        .sheet(item: $pdfShare, onDismiss: {
+            pdfCopy?.remove(); pdfCopy = nil
+        }) { item in
+            LitePDFShareSheet(item: item) { pdfShare = nil }
+        }
         .sheet(item: $assigningWound) { wound in
             NavigationStack {
                 Form {
@@ -425,6 +455,7 @@ struct LiteRecordDetailView: View {
         let loaded = await ImageLoadQueue.shared.fullImage(store: s, name: n)
         guard !Task.isCancelled else { return }
         image = loaded
+        imageLoadFinished = true
     }
 
     /// 修正圈選完成：讀回深度側檔 → 背景重算 → 品質過閘才覆寫紀錄。

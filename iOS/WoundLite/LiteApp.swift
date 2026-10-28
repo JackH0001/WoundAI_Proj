@@ -24,6 +24,8 @@ import AVFoundation
  */
 @main
 struct WoundLiteApp: App {
+    private static let preparePDFSharing: Void = { LitePDFShare.purgeAfterLaunch() }()
+    init() { _ = Self.preparePDFSharing }
     var body: some Scene {
         WindowGroup { LiteRootView() }
     }
