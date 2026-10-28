@@ -214,14 +214,23 @@ class StableSubscriptionLinks:
             raise SubscriptionLinkConflict('authorization differs from retained intent')
         # A historical completion may be read after later migrations, without
         # touching the current pointer or calling Apple again.
+        def committed_intent():
+            # A concurrent identical operation can publish its intent after our
+            # first read but before the completion/pointer reads below. Reload
+            # that immutable identity once; never infer or replace missing data.
+            current=intent if intent is not None else self._intent(identity)
+            if current is None:raise StateUnavailable('missing committed intent')
+            if current['authorization']!=authorization_sha256:
+                raise SubscriptionLinkConflict('authorization differs from retained intent')
+            return current
         done=self.audit.load(self.audit_key('complete',identity))
         if done is not None:
-            if intent is None or digest(done[1])!=digest(self.receipt(intent)):raise StateUnavailable('completion differs')
+            intent=committed_intent()
+            if digest(done[1])!=digest(self.receipt(intent)):raise StateUnavailable('completion differs')
             return done[1]
         row=self._read(s,t,complete=False)
         if row is not None and row[1]['plan']==identity:
-            if intent is None:raise StateUnavailable('missing committed intent')
-            return self._complete(intent)
+            return self._complete(committed_intent())
         if (p['policies']!=sorted(self.catalog) or p['target_policy']!=(self.active if p['original_transaction'] else None)
                 or p['expected_revision']!=(row[0] if row else 0)
                 or digest(p['before'])!=digest(row[1] if row else None)):

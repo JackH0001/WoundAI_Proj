@@ -36,13 +36,14 @@ def validate_baselines(rows, manifest):
 class UsageRollout:
     PHASES=('prepared','frozen','sealed','active','paused')
 
-    def __init__(self, *, store, audit_store, control_store, ledger, provider, manifest, baselines):
+    def __init__(self, *, store, audit_store, control_store, ledger, provider, manifest, baselines, service_release=None):
         self.manifest=validate(manifest);self.rows=validate_baselines(baselines,self.manifest)
         if ledger.namespace!=self.manifest['namespace']:raise UsageConflict('scope mismatch')
         if any(not callable(getattr(provider,n,None)) for n in ('freeze_legacy','enable_new','disable_new','observe')):
             raise ValueError('explicit trusted provider required')
         self.store,self.audit,self.control,self.ledger,self.provider=store,audit_store,control_store,ledger,provider
         self.plan_sha256=digest(self.manifest)
+        self.service_release=service_release
         self.key=hashlib.sha256(('lite/usage-rollout/1\0'+self.manifest['namespace']).encode()).digest()
 
     def _audit(self, kind, value):
@@ -114,7 +115,9 @@ class UsageRollout:
         if (any(v[k]!=self.manifest[k] for k in ('namespace','writer_fence_sha256','baseline_sha256','account_map_sha256'))
                 or not v['legacy_disabled'] or v['inflight_legacy']!=0
                 or (enabled is not None and v['new_enabled'] is not enabled)):
-            raise ObservationContradiction('observed provider state contradicts pinned plan')
+            error=ObservationContradiction('observed provider state contradicts pinned plan')
+            error.observation=copy.deepcopy(v)  # exact trusted-provider read for containment audit
+            raise error
         return v
 
     def inspect(self):
@@ -152,11 +155,25 @@ class UsageRollout:
         self._audit('resume-recorded',dict(paused_sha256=expected_pause_sha256,authorization_sha256=authorization_sha256))
         return v
 
+    def confirmed_active(self):
+        row=self._read()
+        if row is None or row[1]['phase']!='active':
+            raise StateUnavailable('quota rollout inactive')
+        payload=dict(v=1,plan_sha256=self.plan_sha256,kind='transition-complete',value=row[1])
+        k=hashlib.sha256(('lite/usage-rollout-audit/1\0'+digest(payload)).encode()).digest()
+        audit=self.audit.load(k)
+        if audit is None or audit[1]!=payload:raise StateUnavailable('quota activation audit incomplete')
+        return row[1]
+
     def admission_allowed(self, manifest):
         try:
-            row=self._read()
-            return (manifest==self.manifest and row is not None and row[1]['phase']=='active'
-                    and self._observe(enabled=True)['new_enabled'] is True)
+            from lite_service_release import marker_key
+            if manifest!=self.manifest:return False
+            self.confirmed_active()
+            if self.service_release is not None:
+                return bool(self.service_release.usage(self))
+            if self.store.load(marker_key('usage',self.manifest['namespace'])) is not None:return False
+            return self._observe(enabled=True)['new_enabled'] is True
         except Exception:return False
 
     def policy(self):

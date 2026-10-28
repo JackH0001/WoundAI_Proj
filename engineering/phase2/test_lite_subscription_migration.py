@@ -58,6 +58,35 @@ class MigrationTests(unittest.TestCase):
         self.links=self.reader(self.new_id);self.accounts=ServiceAccounts(self.f.accounts.store,subscription_links=self.links)
         self.a.payload['productId']=PRODUCT
 
+    def test_concurrent_completion_after_missing_intent_snapshot_is_reloaded(self):
+        p=self.plan();read=self.links._intent;armed=[True];expected=[]
+        def interleave(identity):
+            value=read(identity)
+            if armed[0] and value is None:
+                armed[0]=False;expected.append(self.apply(p))
+            return value
+        before=rows(self.f.ledger.store)
+        with patch.object(self.links,'_intent',side_effect=interleave):actual=self.apply(p)
+        self.assertEqual(actual,expected[0]);self.assertEqual(rows(self.f.ledger.store),before)
+
+    def test_concurrent_pointer_after_missing_completion_snapshot_is_reloaded(self):
+        p=self.plan();read=self.links._read;armed=[True];expected=[]
+        def interleave(*args,**kwargs):
+            if armed[0] and kwargs.get('complete') is False:
+                armed[0]=False;expected.append(self.apply(p))
+            return read(*args,**kwargs)
+        before=rows(self.f.ledger.store)
+        with patch.object(self.links,'_read',side_effect=interleave):actual=self.apply(p)
+        self.assertEqual(actual,expected[0]);self.assertEqual(rows(self.f.ledger.store),before)
+
+    def test_refreshed_intent_still_requires_original_authorization(self):
+        p=self.plan();self.apply(p);read=self.links._intent;armed=[True]
+        def once_missing(identity):
+            if armed[0]:armed[0]=False;return None
+            return read(identity)
+        with patch.object(self.links,'_intent',side_effect=once_missing),self.assertRaises(SubscriptionLinkConflict):
+            self.links.execute(p,self.accounts,'first-device',authorization_sha256='c'*64)
+
     def test_baseline_new_policy_reader_loses_old_link_but_stable_reader_blocks_missing_bootstrap(self):
         old_style=ServiceSubscriptionLinks(store=self.f.store,audit_store=self.f.audit,authority=self.next,clock=lambda:self.a.now)
         self.assertIsNone(old_style.lookup(self.f.subject,self.f.token))

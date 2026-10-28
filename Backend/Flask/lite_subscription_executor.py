@@ -93,7 +93,9 @@ class StoredObservation:
                         image=manifest['image'], inventory=manifest['inventory'], fence=manifest['fence'])
         if (any(p[k] != v for k,v in expected.items()) or not p['legacy_disabled'] or p['legacy_inflight']
                 or not p['stable_reader'] or (drained and p['migration_inflight'])):
-            raise EvidenceContradiction('observer state contradicts approved scope or writer drain')
+            error = EvidenceContradiction('observer state contradicts approved scope or writer drain')
+            error.observation = copy.deepcopy(row[1])  # exact verified envelope for containment audit
+            raise error
         return p
 
 

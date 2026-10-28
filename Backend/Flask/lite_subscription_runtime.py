@@ -12,13 +12,14 @@ from lite_subscription_executor import key, StoredObservation, EvidenceContradic
 
 class SubscriptionRuntime:
     def __init__(self, *, links, registry, state_store, audit_store, observation_store,
-                 evidence, expected_source, expected_image):
+                 evidence, expected_source, expected_image, service_release=None):
         if not isinstance(links, StableSubscriptionLinks) or registry.subscription_links is not links:
             raise ValueError('matching stable registry required')
         self.links,self.registry,self.store,self.audit=links,registry,state_store,audit_store
         self.observations,self.evidence=observation_store,evidence
         self.source,self.image=expected_source,expected_image
         self.scope=digest(links.scope)
+        self.service_release=service_release
         if registry.admission_guard is not None or registry.bootstrap is not None:
             raise ValueError('runtime already installed')
         registry.admission_guard=self.allowed;registry.bootstrap=self.bootstrap
@@ -71,7 +72,16 @@ class SubscriptionRuntime:
     def _policy_key(self,policy):
         return key('runtime-policy',digest([self.scope,policy,self.source,self.image]))
 
-    def _policy(self,policy):
+    def _admission_evidence(self,m):
+        # Import only inside the optional commerce module, not legacy Lite startup.
+        from lite_service_release import marker_key
+        if self.service_release is not None:
+            return self.service_release.subscription(self,m)
+        if self.store.load(marker_key('subscription',self.scope)) is not None:
+            raise StateUnavailable('durable service release reader required')
+        return self.observe(m)
+
+    def _policy(self,policy,*,verify_admission=True):
         row=self.store.load(self._policy_key(policy))
         if row is None:raise StateUnavailable('policy not activated')
         r=row[1]
@@ -81,7 +91,11 @@ class SubscriptionRuntime:
         a=self.audit.load(key('runtime-activation',r['evidence']))
         if a is None or digest(a[1])!=r['evidence'] or a[1]['record']!=dict((k,v) for k,v in r.items() if k!='evidence'):
             raise StateUnavailable('policy audit absent or changed')
-        m=self._manifest(r['manifest']);self.observe(m);return m
+        m=self._manifest(r['manifest'])
+        if verify_admission and self.service_release is not None and self.service_release.manifest['policies'].get(policy)!=m['identity']:
+            raise StateUnavailable('policy origin differs from pinned release')
+        if verify_admission:self._admission_evidence(m)
+        return m
 
     def _activate(self,m,proof):
         self.manifest(m)
@@ -96,7 +110,7 @@ class SubscriptionRuntime:
             if old is None:self.store.compare_exchange(k,0,dict(r,evidence=a_hash))
             # Another successful batch may have activated it first. Keep its
             # immutable origin; all batches use independent observer records.
-            self._policy(policy)
+            self._policy(policy,verify_admission=False)
 
     def activate_batch(self,m,state):
         if state['phase']!='active' or state['manifest']!=digest(m):raise UsageConflict('batch incomplete')
@@ -156,7 +170,7 @@ class SubscriptionRuntime:
         done=self.audit.load(key('audit',digest(confirmed)))
         claim=self.audit.load(key('runtime-claim',digest(r)))
         if done is None or done[1]!=confirmed or claim is None or claim[1]!=r:raise StateUnavailable('account audit incomplete')
-        self.observe(m)
+        self._admission_evidence(m)
 
     def ready(self,a,*,require_record=True):
         row=self.links._read(a['subject'],a['token'])
@@ -231,5 +245,5 @@ class SubscriptionRuntime:
             and digest(self.registry.registration(installation))==digest(a)
             and digest(self.registry.registration(retained_installation))==digest(retained)
             and authorized_runtime())
-        control.writer_fence=lambda proof: proof==m['fence'] and bool(self.observe(m))
+        control.writer_fence=lambda proof: proof==m['fence'] and bool(self._admission_evidence(m))
         return control.execute(p,registry,retained_installation,authorization_sha256=authority)
