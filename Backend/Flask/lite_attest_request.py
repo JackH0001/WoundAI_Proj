@@ -25,7 +25,8 @@ def client_data(*, audience, installation, key_id, challenge, request_id,
     allowed = {'POST': {'/api/v1/lite/segment', '/api/v1/lite/annotation',
                         '/api/v1/lite/annotation/revision', '/api/v1/lite/research/rejoin',
                         '/api/v1/lite/service/prepare', '/api/v1/lite/service/run', '/api/v1/lite/service/status', '/api/v1/lite/service/recover', '/api/v1/lite/service/resubmit',
-                        '/api/v1/lite/purchase/context','/api/v1/lite/purchase/confirm'},
+                        '/api/v1/lite/purchase/context','/api/v1/lite/purchase/confirm',
+                        '/api/v1/lite/account/challenge','/api/v1/lite/account/confirm','/api/v1/lite/account/status','/api/v1/lite/account/logout'},
                'DELETE': {'/api/v1/lite/data/' + installation}}
     epoch_delete = (method == 'DELETE' and isinstance(path, str) and
                     re.fullmatch(re.escape('/api/v1/lite/data/' + installation) + r'/[0-9a-f]{32}', path) is not None)

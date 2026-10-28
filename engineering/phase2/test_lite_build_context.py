@@ -86,6 +86,18 @@ class ContextTests(unittest.TestCase):
             module.write_text(source)
             with self.assertRaisesRegex(ValueError,'missing from build allowlist'):stager.validate_runtime_imports(self.repo)
 
+    def test_optional_identity_guard_does_not_hide_unguarded_or_other_imports(self):
+        module = self.repo/'Backend/Flask/lite_attest_http.py'
+        valid = ('def install_lite_attest(app, *, identity=None):\n'
+                 '    if identity is not None:\n'
+                 '        from lite_account_identity import AccountIdentityBridge\n')
+        self.write(self.repo/'Backend/Flask/lite_account_identity.py', b'# optional\n')
+        module.write_text(valid);stager.validate_runtime_imports(self.repo)
+        for source in [valid.replace('identity=None','identity=True'),valid.replace('is not None','is None'),
+                       valid.replace('    if identity is not None:\n','').replace('        from','    from')]:
+            module.write_text(source)
+            with self.assertRaisesRegex(ValueError,'missing from build allowlist'):stager.validate_runtime_imports(self.repo)
+
     def test_packaged_gate_starts_without_any_commerce_modules(self):
         staged = self.base/'isolated-runtime';staged.mkdir()
         for name in stager.FLASK_FILES:
@@ -99,7 +111,7 @@ from flask import Flask
 from lite_attest_http import install_lite_attest
 optional = ('lite_service_operations', 'lite_service_http', 'lite_usage_ledger',
             'lite_subscription_authority', 'lite_service_subscription_links', 'lite_native_purchase',
-            'lite_subscription_runtime', 'lite_subscription_executor')
+            'lite_subscription_runtime', 'lite_subscription_executor', 'lite_account_identity')
 assert all(importlib.util.find_spec(name) is None for name in optional)
 app = Flask('staged-legacy')
 install_lite_attest(app)

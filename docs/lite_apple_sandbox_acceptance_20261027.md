@@ -4,6 +4,16 @@
 購買、續訂、寬限期及帳號關聯驗證。這不是部署指令，也不表示可公開上市。
 本輪沒有建立商品、登入測試帳號、購買、修改 Apple 設定或更新 TestFlight。
 
+## 2026-10-28 接線準備補充
+
+原生 Apple 登入、安裝映射與訂閱 token 的候選橋接已完成本機合成回歸，詳見
+[lite_account_identity_bridge_20261028.md](lite_account_identity_bridge_20261028.md)。
+這仍不等於真實登入完成：正式 JWKS 更新／撤銷、長期工作階段、換人／刪帳號、
+App UI 及部署接線均待驗證。下列 S0–S9 目前仍未執行，不需使用者先購買。
+S0 必須另確認登入取消、重啟、登出與晚回、同人第二安裝、不同人不得繼承資料，
+並確認研究同意未被登入或訂閱變更。登入 Apple ID 與 StoreKit Sandbox 的測試
+交易環境是不同機制，不得把合成 Apple JWT 稱為 Sandbox 登入證據。
+
 ## 開始前的必要條件
 
 1. 原生橋接現已在 `LitePurchaseBridge.swift`、`LiteStoreKitPurchaseProvider.swift`

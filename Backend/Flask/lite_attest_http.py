@@ -64,7 +64,7 @@ def _json(raw):
         raise AdmissionRejected('invalid JSON') from exc
 
 
-def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerce=None, purchases=None):
+def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerce=None, purchases=None, identity=None):
     if 'lite_attest_http' in app.extensions:
         raise ValueError('Lite security gate already installed')
     if service is not None and not isinstance(service, RegistrationService):
@@ -75,6 +75,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
         raise ValueError('durable privacy coordinator required')
     service_paths = frozenset()
     purchase_paths = frozenset()
+    account_paths = frozenset()
     # The deployed legacy image deliberately excludes commerce and its Apple
     # subscription dependencies. Only explicit trusted injection may load them.
     if commerce is not None:
@@ -88,9 +89,15 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
         if not isinstance(purchases,NativePurchaseBridge) or commerce is None or purchases.registry is not commerce.accounts:
             raise ValueError('matching trusted purchase/service accounts required')
         purchase_paths=frozenset(PURCHASE_PATHS)
+    if identity is not None:
+        from lite_account_identity import AccountIdentityBridge,ACCOUNT_PATHS,blueprint as identity_blueprint
+        if not isinstance(identity,AccountIdentityBridge) or commerce is None or identity.registry is not commerce.accounts:
+            raise ValueError('matching trusted human/service accounts required')
+        account_paths=frozenset(ACCOUNT_PATHS)
     app.extensions['lite_attest_http'] = dict(service=service, budget=budget, privacy=privacy, commerce=commerce)
     if commerce is not None:app.register_blueprint(commerce_blueprint(commerce))
     if purchases is not None:app.register_blueprint(purchase_blueprint(purchases))
+    if identity is not None:app.register_blueprint(identity_blueprint(identity))
     bp = Blueprint('lite_attest_http', __name__)
 
     @app.before_request
@@ -119,7 +126,8 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
             service_only = (request.path in service_paths and configuration['commerce'] is not None
                             and request.endpoint in {'lite_service_http.prepare','lite_service_http.run','lite_service_http.status','lite_service_http.recover','lite_service_http.resubmit'})
             purchase_only=(request.path in purchase_paths and request.endpoint in {'lite_native_purchase.context','lite_native_purchase.confirm'})
-            service_only=service_only or purchase_only
+            account_only=(request.path in account_paths and request.endpoint in {'lite_account_identity.challenge','lite_account_identity.confirm','lite_account_identity.status','lite_account_identity.logout'})
+            service_only=service_only or purchase_only or account_only
             if not ((request.method == 'POST' and (control or request.path in POST_PATHS or service_only)) or
                     (request.method == 'DELETE' and re.fullmatch(PREFIX+r'data/[A-Za-z0-9_-]{1,128}(?:/[0-9a-f]{32})?', request.path))):
                 return jsonify(error='lite_route_not_supported'), 404
@@ -136,7 +144,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
                 g.lite_attest_control = data
                 return None
             budget.reserve(scope='withdraw' if request.method == 'DELETE' else 'general')
-            limit = (20000 if purchase_only and request.path.endswith('/confirm') else
+            limit = (20000 if (purchase_only or account_only) and request.path.endswith('/confirm') else
                 0 if request.method == 'DELETE' else 4096 if request.path == REJOIN_PATH or (service_only and not request.path.endswith('/run'))
                 else 96*1024 if request.path == REGISTER_PATH else MAX_BODY)
             raw = _body(limit)
@@ -170,6 +178,9 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
                 return jsonify(error='lite_owner_mismatch'), 403
             g.lite_admission = admitted
             if service_only:
+                if identity is not None and not account_only:
+                    try: identity.require_session(owner)
+                    except ValueError: return jsonify(error='lite_sign_in_required',keep_local=True),401
                 # Explicitly registered, authenticated service work has no research
                 # writer ticket and cannot reach research media through this route.
                 # The service account/usage coordinator separately authorizes work.

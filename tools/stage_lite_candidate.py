@@ -61,7 +61,7 @@ def checked_source(base, relative):
 
 
 def optional_commerce_imports(name, tree):
-    """Only two reviewed imports behind the explicit, default-off injection.
+    """Only exact reviewed modules behind explicit, default-off injections.
 
     Not a generic conditional-import exemption: ordinary handler imports,
     unrelated branches and every other missing dependency still fail packaging.
@@ -71,7 +71,8 @@ def optional_commerce_imports(name, tree):
         return set()
     result = set()
     gates = {'commerce': {'lite_service_operations', 'lite_service_http'},
-             'purchases': {'lite_native_purchase'}}
+             'purchases': {'lite_native_purchase'},
+             'identity': {'lite_account_identity'}}
     for function in tree.body:
         if not isinstance(function, ast.FunctionDef) or function.name != 'install_lite_attest':
             continue
