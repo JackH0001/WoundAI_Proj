@@ -33,8 +33,12 @@ Apple Sandbox S0–S9 仍未驗收。不能把這四項一律標為結案；obse
 不要把 `ba970b1`-L1／L2 只當成文案問題：既有
 `engineering/contracts/lite-commerce-rollout-gates-20261026.md` 定義 L1 為醫療
 撤回回執重播與目前狀態區分，L2 為 Lite 舊等待期限只縮短一次並持久化。
-`LiteWithdrawalModel` 已有部分截止時間處理，仍需對照原探針驗證整條路徑；
-本輪不以看到一段clamp程式就宣稱結案。醫療N1/N2/N4與這兩項維持待覆核。
+10/29重新讀取Claude原始報告§3，確認L2指的是每筆研究修訂的
+`LiteCloudSync.capacityNotBefore`，不是`LiteWithdrawalModel`的撤回期限。
+先前以撤回期限程式作為L2進度的描述不精確；本機候選現已補上紀錄載入時
+保存一次的修復，並用同一原生回歸測試完成修正前失敗／修正後通過對照。
+詳見`lite_revision_wait_repair_20261029.md`；新版實機與發布仍未完成。
+醫療N1/N2/N4/L1仍待處理，不能以Lite L2修復代替醫療驗收。
 
 ## PDF 實作邊界
 

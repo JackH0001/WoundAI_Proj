@@ -124,7 +124,7 @@ migration acknowledgment, reader rollback. Real Apple Sandbox remains required.
 | N3 | Fixed locally in this stage | Normalize local inventory keys with `as_posix()`; Windows-formatted mock paths find the same 8 synthetic files as POSIX and retain all source bytes. Native Windows execution is still not claimed. |
 | N4 | Open | Deduplicate unchanged per-image cleanup receipts using policy, state and inventory identity, while still scanning for late orphan generations. Keep bounded run summaries; do not delete locked prior receipts. |
 | L1 | Open | Previously recorded withdrawal replay acknowledges that intent plus current state; never makes a later restore disappear or turns a superseded restore into new consent. Test both clients' outbox retirement. |
-| L2 | Open | Clamp persisted Lite capacity waits once on load, write back that deadline, and preserve legitimate shorter waits. Reopening must not slide the deadline indefinitely. |
+| L2 | Local candidate verified; device/release pending | `LiteCloudSync.capacityNotBefore` is bounded and atomically persisted on record load, with original scheduling values retained locally. Nine new native regressions cover restart, exact revision reuse, receipt loss, consent/owner/epoch gates and write failure. This is the research-revision timer, not `LiteWithdrawalModel`. See `docs/lite_revision_wait_repair_20261029.md`. |
 
 These are not the older Lite consent-version N1 which was already fixed. M3/M4,
 R3/R4 and the real-device/deployment gates remain tracked in their prior reports.

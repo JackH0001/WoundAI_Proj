@@ -37,6 +37,14 @@ struct LitePendingRevision: Codable, Equatable {
     }
 }
 
+/// Local scheduling audit only; never changes the immutable research payload.
+struct LiteCapacityWaitRepair: Codable, Equatable {
+    var originalNotBefore: Date
+    var originalAutomaticRetryAt: Date?
+    var adjustedAt: Date
+    var boundedNotBefore: Date
+}
+
 struct LiteCloudSyncState: Codable {
     var binding: LiteCloudBinding
     var acknowledgedRevision = 0
@@ -45,6 +53,23 @@ struct LiteCloudSyncState: Codable {
     var lastError: String? = nil
     var capacityNotBefore: Date? = nil
     var automaticRetryAt: Date? = nil
+    var capacityWaitRepairs: [LiteCapacityWaitRepair]? = nil
+
+    /// Old builds could persist distantFuture. Persist this repair before allowing
+    /// retry, so opening the record again cannot move the deadline forward.
+    mutating func boundPersistedCapacityWait(now: Date) -> Bool {
+        guard let original = capacityNotBefore else { return false }
+        let bounded = now.addingTimeInterval(ResearchCapacityWait.maximumDelay)
+        guard original > bounded else { return false }
+        var repairs = capacityWaitRepairs ?? []
+        repairs.append(LiteCapacityWaitRepair(originalNotBefore: original,
+            originalAutomaticRetryAt: automaticRetryAt, adjustedAt: now, boundedNotBefore: bounded))
+        capacityWaitRepairs = repairs
+        capacityNotBefore = bounded
+        // Never create a new pending revision merely to repair a timer.
+        if pending != nil { automaticRetryAt = min(automaticRetryAt ?? bounded, bounded) }
+        return true
+    }
 }
 
 /// Presentation follows the CURRENT payload receipt, not a sticky message from a previous edit.
@@ -144,12 +169,21 @@ extension LiteRecord {
 }
 
 extension LiteStore {
+    /// Scheduling only. syncRevision still checks consent, original owner and epoch.
+    var duePendingRevisionIDs: [String] {
+        guard !needsReload else { return [] }
+        let now = revisionNow
+        return records.compactMap { record in
+            guard record.cloudSync?.pending != nil,
+                  let due = record.cloudSync?.automaticRetryAt, due <= now else { return nil }
+            return record.id
+        }
+    }
     func resumePendingRevisions() async {
-        guard LitePrefs.researchConsent == true else { return }
-        for record in records where record.cloudSync?.pending != nil {
-            guard let due = record.cloudSync?.automaticRetryAt, due <= Date(),
-                  LitePrefs.researchConsent == true else { continue }
-            await syncRevision(recordID: record.id)
+        guard !needsReload, LitePrefs.researchConsent == true else { return }
+        for recordID in duePendingRevisionIDs {
+            guard LitePrefs.researchConsent == true else { return }
+            await syncRevision(recordID: recordID)
         }
     }
     /// At most one sender per record in this store. The durable pending slot also protects restart/retry.
@@ -167,24 +201,24 @@ extension LiteStore {
                               imageID: binding.imageID, revision: pending.revision,
                               payloadJSON: pending.payloadJSON, digest: pending.digest, researchEpoch: binding.researchEpoch)
                       }) async {
-        guard !syncingRecordIDs.contains(recordID) else { return }
+        guard !needsReload, !syncingRecordIDs.contains(recordID) else { return }
         syncingRecordIDs.insert(recordID)
         defer { syncingRecordIDs.remove(recordID) }
         // A previous pending revision must be acknowledged before we enqueue a newer edit.
         while true {
-            guard consent(), var record = records.first(where: { $0.id == recordID }),
+            guard !needsReload, consent(), var record = records.first(where: { $0.id == recordID }),
                   var sync = record.cloudSync, (identity == nil || identity?() == sync.binding.anonID) else { return }
             // Old queued revisions retain their bytes and numbers for audit;
             // renewed consent must never enqueue/send them in a new epoch.
             guard bindingAllowed(sync.binding) else { return }
-            guard !(sync.capacityNotBefore.map { $0 > Date() } ?? false) else { return }
+            guard !(sync.capacityNotBefore.map { $0 > revisionNow } ?? false) else { return }
             do {
                 if sync.pending == nil {
                     guard let json = try record.revisionJSON(),
                           LitePendingRevision.digest(json) != sync.acknowledgedDigest else { return }
                     sync.pending = LitePendingRevision(revision: sync.acknowledgedRevision + 1, payloadJSON: json)
                 }
-                sync.lastError = nil; sync.automaticRetryAt = Date().addingTimeInterval(60)
+                sync.lastError = nil; sync.automaticRetryAt = revisionNow.addingTimeInterval(60)
                 record.cloudSync = sync
                 guard update(record), let pending = sync.pending else { return }
                 // No await between the last consent check and initiating the request.
@@ -215,7 +249,7 @@ extension LiteStore {
                         ? "本機已保存；這筆影像的原上傳身分無法由目前裝置驗證，尚未同步。舊資料不會自動轉移或重傳。"
                         : "本機已保存；雲端尚未確認此修訂（可能尚未支援同步或連線失敗）。可稍後重試，不重傳照片。"
                 }
-                if error is URLError { current.automaticRetryAt = Date().addingTimeInterval(60) }
+                if error is URLError { current.automaticRetryAt = revisionNow.addingTimeInterval(60) }
                 latest.cloudSync = current
                 _ = update(latest)
                 return

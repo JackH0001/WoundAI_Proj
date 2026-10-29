@@ -4,6 +4,248 @@ import SwiftUI
 
 final class LiteRevisionSyncTests: XCTestCase {
     @MainActor
+    func testLegacyExcessiveRevisionWaitIsBoundedOnLoad() throws {
+        let (store, dir) = try setup(); defer { try? FileManager.default.removeItem(at: dir) }
+        var r = store.records[0]
+        let pending = LitePendingRevision(revision: 1, payloadJSON: try XCTUnwrap(r.revisionJSON()))
+        r.cloudSync?.pending = pending
+        r.cloudSync?.capacityNotBefore = .distantFuture
+        r.cloudSync?.automaticRetryAt = .distantFuture
+        XCTAssertTrue(store.update(r))
+        let started = Date()
+        let reopened = LiteStore(fileURL: dir.appendingPathComponent("records.json"))
+        let sync = try XCTUnwrap(reopened.records[0].cloudSync)
+        let deadline = try XCTUnwrap(sync.capacityNotBefore)
+        XCTAssertLessThanOrEqual(deadline.timeIntervalSince(started), 3601)
+        XCTAssertGreaterThanOrEqual(deadline.timeIntervalSince(started), 3599)
+        XCTAssertEqual(sync.automaticRetryAt, deadline)
+        XCTAssertEqual(sync.pending, pending)
+        let disk = try JSONDecoder().decode([LiteRecord].self,
+            from: Data(contentsOf: dir.appendingPathComponent("records.json")))
+        XCTAssertEqual(disk[0].cloudSync?.capacityNotBefore, deadline)
+    }
+
+    @MainActor
+    private func legacyWaitFixture() throws -> (URL, LiteRecord, LitePendingRevision) {
+        let (store, dir) = try setup()
+        var row = store.records[0]
+        let pending = LitePendingRevision(revision: 4, payloadJSON: try XCTUnwrap(row.revisionJSON()))
+        row.cloudSync?.acknowledgedRevision = 3
+        row.cloudSync?.acknowledgedDigest = "previous-revision-digest"
+        row.cloudSync?.pending = pending
+        row.cloudSync?.capacityNotBefore = .distantFuture
+        row.cloudSync?.automaticRetryAt = .distantFuture
+        row.cloudSync?.lastError = "original capacity message"
+        XCTAssertTrue(store.update(row))
+        return (dir, row, pending)
+    }
+
+    @MainActor
+    func testRepairedWaitPersistsOnceAndExactRevisionSendsOnceAfterDeadline() async throws {
+        let (dir, original, pending) = try legacyWaitFixture()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("records.json")
+        let start = Date()
+        var now = start
+        let first = LiteStore(fileURL: file, now: { now })
+        let firstBytes = try Data(contentsOf: file)
+        let due = start.addingTimeInterval(3600)
+        let audit = LiteCapacityWaitRepair(originalNotBefore: .distantFuture,
+            originalAutomaticRetryAt: .distantFuture, adjustedAt: start, boundedNotBefore: due)
+        XCTAssertEqual(first.records[0].cloudSync?.capacityWaitRepairs, [audit])
+        now = start.addingTimeInterval(1800)
+        let second = LiteStore(fileURL: file, now: { now })
+        XCTAssertEqual(try Data(contentsOf: file), firstBytes, "Restart cannot rewrite or slide the wait")
+        XCTAssertTrue(second.duePendingRevisionIDs.isEmpty)
+        var sends = 0
+        await second.syncRevision(recordID: original.id, consent: { true }) { _, _ in sends += 1 }
+        XCTAssertEqual(sends, 0)
+        let waiting = LiteRevisionPresentation.make(record: second.records[0], syncing: false,
+            consent: true, withdrawalBlocked: false, now: now)
+        XCTAssertEqual(waiting.phase, .waiting); XCTAssertNil(waiting.retryTitle)
+        now = due
+        XCTAssertEqual(second.duePendingRevisionIDs, [original.id])
+        let ready = LiteRevisionPresentation.make(record: second.records[0], syncing: false,
+            consent: true, withdrawalBlocked: false, now: now)
+        XCTAssertNotEqual(ready.phase, .waiting); XCTAssertNotNil(ready.retryTitle)
+        for _ in 0..<3 {
+            await second.syncRevision(recordID: original.id, consent: { true }) { binding, value in
+                sends += 1
+                XCTAssertEqual(binding, original.cloudSync?.binding)
+                XCTAssertEqual(value, pending)
+            }
+        }
+        XCTAssertEqual(sends, 1)
+        XCTAssertTrue(second.duePendingRevisionIDs.isEmpty)
+        let saved = LiteStore(fileURL: file, now: { now }).records[0]
+        XCTAssertEqual(saved.cloudSync?.acknowledgedRevision, 4)
+        XCTAssertEqual(saved.cloudSync?.acknowledgedDigest, pending.digest)
+        XCTAssertNil(saved.cloudSync?.pending)
+        XCTAssertEqual(saved.cloudSync?.capacityWaitRepairs, [audit])
+        XCTAssertEqual(saved.imageName, original.imageName)
+        XCTAssertEqual(saved.depthName, original.depthName)
+    }
+
+    @MainActor
+    func testShortExpiredAbsentAndBoundaryRevisionWaitsRemainByteIdentical() throws {
+        let (dir, original, _) = try legacyWaitFixture()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("records.json")
+        let now = Date()
+        let waits: [Date?] = [now.addingTimeInterval(120), now.addingTimeInterval(-120), nil,
+                              now.addingTimeInterval(3600)]
+        let rows = waits.enumerated().map { i, wait -> LiteRecord in
+            var row = original; row.id = "wait-\(i)"
+            row.cloudSync?.capacityNotBefore = wait; row.cloudSync?.automaticRetryAt = wait
+            return row
+        }
+        let raw = try JSONEncoder().encode(rows); try raw.write(to: file)
+        var writes = 0
+        let store = LiteStore(fileURL: file, now: { now }, writeIndex: { _, _ in writes += 1 })
+        XCTAssertNil(store.storageError); XCTAssertEqual(writes, 0)
+        XCTAssertEqual(try Data(contentsOf: file), raw)
+        XCTAssertTrue(store.records.allSatisfy { $0.cloudSync?.capacityWaitRepairs == nil })
+        XCTAssertEqual(store.records.map { $0.cloudSync?.capacityNotBefore }, waits)
+    }
+
+    @MainActor
+    func testWaitRepairWriteFailurePreservesOriginalAndStopsSyncUntilDurableReload() async throws {
+        let (dir, original, pending) = try legacyWaitFixture()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("records.json")
+        let raw = try Data(contentsOf: file)
+        var now = Date(); var failWrites = true
+        let store = LiteStore(fileURL: file, now: { now }, writeIndex: { data, url in
+            if failWrites { throw CocoaError(.fileWriteOutOfSpace) }
+            try HealthDataFiles.write(data, to: url)
+        })
+        XCTAssertTrue(store.needsReload)
+        XCTAssertTrue(store.duePendingRevisionIDs.isEmpty)
+        XCTAssertTrue(store.storageError?.contains("等待期限修復尚未保存") == true)
+        XCTAssertEqual(try Data(contentsOf: file), raw)
+        XCTAssertEqual(store.records[0].cloudSync?.pending, pending)
+        XCTAssertNil(store.records[0].cloudSync?.capacityWaitRepairs)
+        await store.syncRevision(recordID: original.id, consent: { true }) { _, _ in XCTFail("Not durable") }
+        XCTAssertFalse(store.update(original))
+        failWrites = false
+        XCTAssertTrue(store.reload()); XCTAssertFalse(store.needsReload)
+        now = now.addingTimeInterval(3601)
+        var sends = 0
+        await store.syncRevision(recordID: original.id, consent: { true }) { _, value in
+            sends += 1; XCTAssertEqual(value, pending)
+        }
+        XCTAssertEqual(sends, 1)
+    }
+
+    @MainActor
+    func testRepairedDueWaitDoesNotBypassConsentIdentityOrRetiredEpoch() async throws {
+        let (dir, original, pending) = try legacyWaitFixture()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("records.json")
+        var now = Date()
+        let store = LiteStore(fileURL: file, now: { now })
+        now = now.addingTimeInterval(3601)
+        let raw = try Data(contentsOf: file)
+        await store.syncRevision(recordID: original.id, consent: { false }) { _, _ in XCTFail("Consent off") }
+        await store.syncRevision(recordID: original.id, consent: { true }, identity: { "other-installation" }) { _, _ in
+            XCTFail("Different identity")
+        }
+        await store.syncRevision(recordID: original.id, consent: { true }, bindingAllowed: { _ in false }) { _, _ in
+            XCTFail("Retired epoch")
+        }
+        XCTAssertEqual(try Data(contentsOf: file), raw)
+        XCTAssertEqual(store.records[0].cloudSync?.pending, pending)
+        XCTAssertEqual(store.records[0].cloudSync?.acknowledgedRevision, 3)
+    }
+
+    @MainActor
+    func testLegacyPendingWaitWithoutAutomaticDateRestoresBoundedSchedule() throws {
+        let (dir, original, pending) = try legacyWaitFixture()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("records.json")
+        var row = original; row.cloudSync?.automaticRetryAt = nil
+        try JSONEncoder().encode([row]).write(to: file)
+        let now = Date(); let store = LiteStore(fileURL: file, now: { now })
+        XCTAssertEqual(store.records[0].cloudSync?.automaticRetryAt, now.addingTimeInterval(3600))
+        XCTAssertEqual(store.records[0].cloudSync?.pending, pending)
+        XCTAssertNil(store.records[0].cloudSync?.capacityWaitRepairs?.first?.originalAutomaticRetryAt)
+    }
+
+    @MainActor
+    func testRepairDoesNotInventPendingWorkForAcknowledgedOrUnboundRecord() throws {
+        let (dir, original, _) = try legacyWaitFixture()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("records.json")
+        var row = original
+        row.cloudSync?.pending = nil; row.cloudSync?.automaticRetryAt = nil
+        let acknowledgedJSON = try XCTUnwrap(row.revisionJSON())
+        row.cloudSync?.acknowledgedDigest = LitePendingRevision.digest(acknowledgedJSON)
+        var local = row; local.id = "unbound"; local.cloudSync = nil
+        try JSONEncoder().encode([row, local]).write(to: file)
+        let store = LiteStore(fileURL: file)
+        XCTAssertNil(store.records[0].cloudSync?.pending)
+        XCTAssertNil(store.records[0].cloudSync?.automaticRetryAt)
+        XCTAssertEqual(store.records[0].cloudSync?.acknowledgedRevision, 3)
+        XCTAssertNil(store.records[1].cloudSync)
+    }
+
+    @MainActor
+    func testMultipleWaitRepairsUseOneAtomicWriteAndPreserveAttachmentBytes() throws {
+        let (dir, original, pending) = try legacyWaitFixture()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("records.json")
+        let media = LocalImageStore()
+        let image = try XCTUnwrap(media.saveRaw(Data([1, 9, 8, 4])))
+        let depth = try XCTUnwrap(media.saveRaw(Data([3, 7, 6, 2])))
+        defer { media.delete(image); media.delete(depth) }
+        let rows = (0..<3).map { i -> LiteRecord in
+            var row = original; row.id = "repair-\(i)"; row.imageName = image; row.depthName = depth
+            return row
+        }
+        try JSONEncoder().encode(rows).write(to: file)
+        var writes = 0
+        let store = LiteStore(fileURL: file, writeIndex: { data, url in
+            writes += 1; try HealthDataFiles.write(data, to: url)
+        })
+        XCTAssertEqual(writes, 1); XCTAssertEqual(store.records.count, 3)
+        XCTAssertTrue(store.records.allSatisfy { $0.cloudSync?.pending == pending })
+        XCTAssertEqual(Set(store.records.compactMap { $0.cloudSync?.capacityNotBefore }).count, 1)
+        XCTAssertEqual(media.rawBytes(image), Data([1, 9, 8, 4]))
+        XCTAssertEqual(media.rawBytes(depth), Data([3, 7, 6, 2]))
+        XCTAssertEqual(store.records.map(\.imageName), rows.map(\.imageName))
+        XCTAssertEqual(store.records.map(\.depthName), rows.map(\.depthName))
+    }
+
+    @MainActor
+    func testRepairedWaitLostReceiptReusesExactRevisionWithoutMedia() async throws {
+        let (dir, original, pending) = try legacyWaitFixture()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("records.json")
+        var now = Date(); var store = LiteStore(fileURL: file, now: { now })
+        now = now.addingTimeInterval(3601)
+        var requests: [LitePendingRevision] = []
+        var received: [Int: String] = [:]
+        let sender: (LiteCloudBinding, LitePendingRevision) async throws -> Void = { binding, value in
+            XCTAssertEqual(binding, original.cloudSync?.binding)
+            requests.append(value)
+            if let old = received[value.revision] { XCTAssertEqual(old, value.payloadJSON) }
+            received[value.revision] = value.payloadJSON
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(value.payloadJSON.utf8)) as? [String: Any])
+            for field in ["image", "depth_map", "rgbd"] { XCTAssertNil(fields[field]) }
+            if requests.count == 1 { throw URLError(.timedOut) }
+        }
+        await store.syncRevision(recordID: original.id, consent: { true }, send: sender)
+        store = LiteStore(fileURL: file, now: { now })
+        await store.syncRevision(recordID: original.id, consent: { true }, send: sender)
+        await store.syncRevision(recordID: original.id, consent: { true }, send: sender)
+        XCTAssertEqual(requests, [pending, pending])
+        XCTAssertEqual(received.count, 1)
+        XCTAssertEqual(store.records[0].cloudSync?.acknowledgedRevision, 4)
+        XCTAssertNil(store.records[0].cloudSync?.pending)
+        XCTAssertEqual(store.records[0].cloudSync?.capacityWaitRepairs?.count, 1)
+    }
+
+    @MainActor
     func testRetiredEpochPreservesPendingRevisionAndNeverEnqueuesOrSends() async throws {
         let (store, dir) = try setup(); defer { try? FileManager.default.removeItem(at: dir) }
         for hasPending in [false, true] {
