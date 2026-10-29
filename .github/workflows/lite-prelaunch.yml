@@ -39,6 +39,10 @@ jobs:
           python -m unittest -v test_lite_prelaunch_economics test_lite_prelaunch_quota_probe > evidence/new-tests.log 2>&1
           python tools/lite_prelaunch_economics.py --output evidence/economics.json
           python tools/lite_prelaunch_quota_probe.py --output evidence/quota-probe.json
+      - name: Exact service history generations and interrupted audit recovery (synthetic only)
+        run: |
+          python -m unittest -v test_lite_service_history > evidence/service-history-tests.log 2>&1
+          python tools/lite_service_history_probe.py --output evidence/service-history-probe.json
       - name: Legacy image dependency closure and isolated startup
         run: python -m unittest -v test_lite_build_context > evidence/build-context-tests.log 2>&1
       - name: Reproduce unresolved rollout gaps separately from fixed regressions
