@@ -331,6 +331,12 @@ actor LiteServiceClient {
         try r.validate(); try await journal.replace(captureID,expected:nil,with:JSONEncoder().encode(r)); return r
     }
     func stored(_ id: String) async throws -> LiteServiceRecord { try await read(id).1 }
+    /// Optional only for a missing row. Corruption is never treated as a new job.
+    func storedIfPresent(_ id: String) async throws -> LiteServiceRecord? {
+        guard LiteServiceBytes.hex(id,32) else { throw LiteServiceFailure.invalidState }
+        guard try await journal.load(id) != nil else { return nil }
+        return try await read(id).1
+    }
 
     /// Wire only to an explicit user action. Persist intent before any request;
     /// resume/restart/status alone cannot request another inference.

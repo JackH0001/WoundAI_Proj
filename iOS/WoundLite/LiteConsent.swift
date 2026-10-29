@@ -88,6 +88,7 @@ struct LiteConsentView: View {
 struct LiteSettingsView: View {
     /// Explicit candidate composition; ordinary shipping startup leaves this nil.
     var accountManagement:LiteAccountManagementView?=nil
+    var nativeSession:LiteNativeSession?=nil
     private var installedVersion: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "未知"
@@ -149,6 +150,11 @@ struct LiteSettingsView: View {
                 if let accountManagement {
                     Section("服務帳號") {
                         NavigationLink("帳號與刪除") {accountManagement}
+                    }
+                }
+                if let nativeSession {
+                    Section("候選版內部驗收") {
+                        NavigationLink("服務登入、訂閱與刪帳") { LiteNativeSessionView(session:nativeSession) }
                     }
                 }
                 #if DEBUG && targetEnvironment(simulator)

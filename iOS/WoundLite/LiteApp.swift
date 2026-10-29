@@ -88,12 +88,15 @@ struct LiteRootView: View {
     /// Hardware gates new capture only; records and privacy controls stay accessible.
     let lidarOK: Bool
     let accountManagement:LiteAccountManagementView?
+    let nativeSession:LiteNativeSession?
 
     init(lidarAvailable: Bool = AVCaptureDevice.default(.builtInLiDARDepthCamera,
                                                        for: .video, position: .back) != nil,
-         accountManagement:LiteAccountManagementView?=nil) {
+         accountManagement:LiteAccountManagementView?=nil,
+         nativeSession:LiteNativeSession?=nil) {
         lidarOK = lidarAvailable
         self.accountManagement=accountManagement
+        self.nativeSession=nativeSession
     }
 
     var body: some View {
@@ -109,10 +112,10 @@ struct LiteRootView: View {
             }
             .tag(LiteRootTab.measure)
             .tabItem { Label("量測", systemImage: "camera.metering.center.weighted") }
-            LiteHistoryView(store: store, recordToOpen: $savedRecordToOpen)
+            LiteHistoryView(store: store, recordToOpen: $savedRecordToOpen, nativeSession:nativeSession)
                 .tag(LiteRootTab.history)
                 .tabItem { Label("紀錄", systemImage: "chart.line.uptrend.xyaxis") }
-            LiteSettingsView(accountManagement:accountManagement)
+            LiteSettingsView(accountManagement:accountManagement,nativeSession:nativeSession)
                 .tag(LiteRootTab.settings)
                 .tabItem { Label("設定", systemImage: "gearshape") }
         }

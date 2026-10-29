@@ -7,14 +7,16 @@ import Charts
 struct LiteHistoryView: View {
     @ObservedObject var store: LiteStore
     @Binding var recordToOpen: String?
+    let nativeSession: LiteNativeSession?
     @State private var selected: LiteRecord?
     @State private var woundFilter = ""
     @State private var choseInitialWound = false
     private let ungrouped = "__ungrouped__"
 
-    init(store: LiteStore, recordToOpen: Binding<String?> = .constant(nil)) {
+    init(store: LiteStore, recordToOpen: Binding<String?> = .constant(nil), nativeSession: LiteNativeSession? = nil) {
         self.store = store
         self._recordToOpen = recordToOpen
+        self.nativeSession = nativeSession
     }
 
     private func openSavedRecord() {
@@ -101,7 +103,7 @@ struct LiteHistoryView: View {
                    !wounds.contains(where: { $0.id == woundFilter }) { woundFilter = "" }
             }
             .sheet(item: $selected) { r in
-                LiteRecordDetailView(recordId: r.id, store: store)
+                LiteRecordDetailView(recordId: r.id, store: store, nativeSession:nativeSession)
             }
             .confirmationDialog(
                 "確定刪除這筆紀錄？",
@@ -245,6 +247,7 @@ struct LiteRecordDetailView: View {
     @ObservedObject private var withdrawal = LiteWithdrawalModel.shared
     let recordId: String
     @ObservedObject var store: LiteStore
+    var nativeSession: LiteNativeSession? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var image: UIImage?
     @State private var polys: [[[Int]]] = []
@@ -275,6 +278,11 @@ struct LiteRecordDetailView: View {
                                         imageH: img.cgImage?.height ?? 1)
                         }
                         detailCard(r)
+                        if let nativeSession {
+                            NavigationLink("此筆服務辨識驗收（內部）") {
+                                LiteSavedServiceView(recordID:r.id,records:store,session:nativeSession)
+                            }
+                        }
                         Button {
                             pdfError = nil; pdfBusy = true
                             // Freeze the saved record; export never edits or syncs it.
