@@ -9,10 +9,11 @@ import hashlib
 import hmac
 import json
 import os
+import time
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from audit_chain_contract import loads_json_object_strict
 from lite_account_identity import AppleIdentityVerifier, IdentityRejected
-from lite_apple_oauth import AppleOAuthProvider, GrantRejected, GrantUncertain, bounded_secret
+from lite_apple_oauth import AppleOAuthProvider, GrantRejected, GrantUncertain, GrantTransportUncertain, bounded_secret
 from lite_attest_state import CAS_ATTEMPTS, StateUnavailable
 from lite_subscription_executor import key
 from lite_subscription_runtime import SubscriptionRuntime
@@ -239,11 +240,11 @@ class AppleGrantAuthority:
         return c['checked_at']+86400
 
     def validate_for_session(self, installation, operation, person, nonce):
-        """At most one refresh validation per day; immutable original iat is retained.
+        """At most one confirmed daily validation; original iat is retained.
 
-        An uncertain external exchange is not repeated automatically. Its saved
-        grant remains available to the revocation coordinator. Explicit fresh
-        sign-in is required; neither a new family nor a quota reset is invented.
+        A timeout/connection failure gets at most two retries inside the same
+        durable claim. A crashed/exhausted/ambiguous claim is not reclaimed by
+        another request. Code exchange and unclassified replies never retry.
         """
         if self.verifier.clock()<self.fresh_until(installation,operation,person): return
         identity=self._id(installation,operation);row=self._row(identity)
@@ -265,7 +266,7 @@ class AppleGrantAuthority:
             raise
         tokens=self.cipher.open(row[1]['envelope'],row[1]['context'])
         try:
-            updated=self.provider.refresh(tokens['refresh_token'])
+            updated=self._refresh_with_retry(identity, person, n, tokens['refresh_token'])
         except GrantRejected:
             self.store.compare_exchange(k,current[0],dict(claimed,phase='rejected'))
             raise
@@ -311,6 +312,29 @@ class AppleGrantAuthority:
         except StateUnavailable:pass
         if self._validation(identity)[1]!=valid: raise StateUnavailable('refresh validation unconfirmed')
         self.require(installation,operation,person)
+
+    def _refresh_with_retry(self, identity, person, checked_at, token):
+        # The outer 120s CAS claim spans the complete bounded sequence. Transport
+        # attempts have a 10s deadline; 1+2s backoff keeps this well within it.
+        # Persist intent BEFORE each dispatch, including retries. No token enters
+        # audit. Failed persistence stops the sequence without another dispatch.
+        for attempt in range(3):
+            if attempt:
+                time.sleep(attempt)
+            if self.verifier.clock() >= checked_at + 120:
+                raise GrantUncertain('Apple refresh claim expired')
+            if self._revoking(identity):
+                raise GrantUncertain('Apple refresh stopped by revocation')
+            self._active(person, identity)
+            event = dict(v=1, grant_id=identity, checked_at=checked_at, attempt=attempt+1)
+            event_id = digest([identity, checked_at, attempt+1])
+            self.immutable(self.audit, key('apple-refresh-attempt', event_id), event)
+            try:
+                return self.provider.refresh(token)
+            except GrantTransportUncertain:
+                self.immutable(self.audit, key('apple-refresh-transport-failure', event_id), event)
+                if attempt == 2:
+                    raise GrantUncertain('Apple refresh retry limit reached') from None
 
     def revoke(self, installation, operation):
         """Trusted deletion coordinator only; no public route or deletion claim.

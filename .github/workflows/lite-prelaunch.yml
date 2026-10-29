@@ -96,7 +96,7 @@ jobs:
           python tools/lite_account_identity_probe.py --output evidence/account-identity-probe.json
       - name: Durable release, observer outage and cross-instance containment (synthetic only)
         run: |
-          python -m unittest -v test_lite_service_release test_lite_service_release_probe > evidence/durable-release-tests.log 2>&1
+          python -m unittest -v test_lite_service_release test_lite_service_release_probe test_lite_release_proof_cache > evidence/durable-release-tests.log 2>&1
           python tools/lite_service_release_probe.py --output evidence/durable-release-probe.json
       - name: Apple key rotation and durable account revocation (synthetic only)
         run: |
@@ -104,7 +104,7 @@ jobs:
           python tools/lite_apple_provider_probe.py --output evidence/apple-provider-probe.json
       - name: Apple single-use code custody and revocation fences (synthetic only)
         run: |
-          python -m unittest -v test_lite_apple_oauth test_lite_apple_grants test_lite_account_sessions > evidence/apple-grant-tests.log 2>&1
+          python -m unittest -v test_lite_apple_oauth test_lite_apple_grants test_lite_account_sessions test_lite_apple_refresh_retry > evidence/apple-grant-tests.log 2>&1
           python tools/lite_apple_grant_probe.py --output evidence/apple-grant-probe.json
           python tools/lite_session_renewal_probe.py --output evidence/session-renewal-probe.json
       - name: Review entry, isolation, medical migration and containment rehearsal

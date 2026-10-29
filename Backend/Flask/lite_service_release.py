@@ -6,6 +6,8 @@ An unavailable observer does not revoke a release. A verified contradiction is
 contained by the controller; unavailable durable control ALWAYS denies new work.
 """
 import copy
+from collections import OrderedDict
+from threading import Lock
 from lite_attest_state import StateUnavailable
 from lite_usage_ledger import UsageConflict, digest, _hex, _subject
 from lite_subscription_executor import key, StoredObservation, EvidenceContradiction, EvidenceUnavailable
@@ -49,12 +51,16 @@ def _validate(m):
 
 
 class ServiceReleaseReader:
-    """No state/observer cache and no mutation methods on the admission reader."""
-    def __init__(self, *, store, audit_store, manifest):
+    """Always live control; optional process-local content-addressed audit cache."""
+    def __init__(self, *, store, audit_store, manifest, immutable_proof_cache_size=0):
+        if type(immutable_proof_cache_size) is not int or not 0 <= immutable_proof_cache_size <= 64:
+            raise ValueError('bounded immutable proof cache required')
         self.manifest = _validate(manifest)
         self.identity = digest(self.manifest)
         self.store, self.audit = store, audit_store
         self.key = key('service-release-control', self.manifest['namespace'])
+        self._proof_limit = immutable_proof_cache_size
+        self._proofs, self._proof_lock = OrderedDict(), Lock()
 
     def snapshot(self):
         row = self.store.load(self.key)
@@ -83,7 +89,20 @@ class ServiceReleaseReader:
         row = self.snapshot()
         if row is None or row[1]['phase'] != 'active' or row[1]['release'] != self.identity:
             raise StateUnavailable('service release absent or paused')
-        self.confirmed(row[1])
+        # Cache only positive evidence whose content hash is pinned by the live
+        # state. Never cache active/paused, identity, account, quota or key status.
+        # Operational transitions still call confirmed() directly (no cache).
+        identity = digest(row[1])
+        with self._proof_lock:
+            found = identity in self._proofs
+            if found: self._proofs.move_to_end(identity)
+        if not found:
+            self.confirmed(row[1])
+            if self._proof_limit:
+                with self._proof_lock:
+                    self._proofs[identity] = True
+                    self._proofs.move_to_end(identity)
+                    while len(self._proofs) > self._proof_limit: self._proofs.popitem(last=False)
         return row[1]
 
     def check_marker(self, store, component, scope):

@@ -4,6 +4,7 @@ An authorization-code POST is not retried: a lost response may have consumed it.
 This provider has no research, quota, session-extension or account-delete powers.
 """
 import re
+import socket
 import ssl
 import time
 import urllib.error
@@ -23,6 +24,15 @@ MAX_RESPONSE = 16384
 
 class GrantRejected(IdentityRejected): pass
 class GrantUncertain(StateUnavailable): pass
+class GrantTransportUncertain(GrantUncertain):
+    """Only a timeout/connection failure; not a malformed or rejected response."""
+
+
+def transient_transport(error):
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    # Certificate/TLS policy errors, HTTP errors and arbitrary OSError are not
+    # retry advice. Never inspect/log provider text (it can contain credentials).
+    return isinstance(reason, (TimeoutError, ConnectionError, socket.gaierror))
 
 
 def bounded_secret(value, maximum=4096):
@@ -90,8 +100,10 @@ def post_apple_form(url, fields):
             if time.monotonic()-started > 10 or (length is not None and len(data) != int(length)):
                 raise ValueError('response incomplete')
             return status, bytes(data)
-    except Exception:
+    except Exception as error:
         # Neither Apple's error_description nor transport exception may expose a token.
+        if transient_transport(error):
+            raise GrantTransportUncertain('Apple transport temporarily unavailable') from None
         raise GrantUncertain('Apple token response unconfirmed; keep saved intent') from None
 
 
@@ -114,7 +126,11 @@ class AppleOAuthProvider:
             return body
         except GrantRejected:
             raise GrantRejected('Apple authorization rejected') from None
-        except Exception:
+        except GrantTransportUncertain:
+            raise GrantTransportUncertain('Apple transport temporarily unavailable') from None
+        except Exception as error:
+            if transient_transport(error):
+                raise GrantTransportUncertain('Apple transport temporarily unavailable') from None
             raise GrantUncertain('Apple token response unconfirmed; keep saved intent') from None
 
     def exchange(self, code):
@@ -137,7 +153,7 @@ class AppleOAuthProvider:
         return True
 
     def refresh(self, refresh_token):
-        """Validate the retained refresh grant; never retry an uncertain POST."""
+        """One refresh attempt; the authority owns the bounded retry/claim."""
         old = bounded_secret(refresh_token, 2048)
         raw = self._post(TOKEN_URL, dict(grant_type='refresh_token', refresh_token=old))
         try:
