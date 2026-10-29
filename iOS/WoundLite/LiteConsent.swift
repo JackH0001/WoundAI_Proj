@@ -86,6 +86,8 @@ struct LiteConsentView: View {
 /// 2026-08-19 移除「進階（開發測試）」帳密區——雲端辨識已切換到匿名
 /// `lite/segment` 端點，民眾版不再有任何帳號概念（交辦清單第 5 項）。
 struct LiteSettingsView: View {
+    /// Explicit candidate composition; ordinary shipping startup leaves this nil.
+    var accountManagement:LiteAccountManagementView?=nil
     private var installedVersion: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "未知"
@@ -143,6 +145,11 @@ struct LiteSettingsView: View {
                     LabeledContent("App", value: "WoundAILite")
                     LabeledContent("版本（建置號）", value: installedVersion)
                         .textSelection(.enabled)
+                }
+                if let accountManagement {
+                    Section("服務帳號") {
+                        NavigationLink("帳號與刪除") {accountManagement}
+                    }
                 }
                 #if DEBUG && targetEnvironment(simulator)
                 if ProcessInfo.processInfo.arguments.contains("-lite-commerce-lab") {

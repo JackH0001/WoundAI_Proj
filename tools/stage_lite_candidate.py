@@ -72,7 +72,8 @@ def optional_commerce_imports(name, tree):
     result = set()
     gates = {'commerce': {'lite_service_operations', 'lite_service_http'},
              'purchases': {'lite_native_purchase'},
-             'identity': {'lite_account_identity', 'lite_apple_account_events'}}
+             'identity': {'lite_account_identity', 'lite_apple_account_events'},
+             'deletion': {'lite_account_deletion'}}
     for function in tree.body:
         if not isinstance(function, ast.FunctionDef) or function.name != 'install_lite_attest':
             continue

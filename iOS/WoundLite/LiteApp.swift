@@ -87,10 +87,13 @@ struct LiteRootView: View {
     @State private var savedRecordToOpen: String?
     /// Hardware gates new capture only; records and privacy controls stay accessible.
     let lidarOK: Bool
+    let accountManagement:LiteAccountManagementView?
 
     init(lidarAvailable: Bool = AVCaptureDevice.default(.builtInLiDARDepthCamera,
-                                                       for: .video, position: .back) != nil) {
+                                                       for: .video, position: .back) != nil,
+         accountManagement:LiteAccountManagementView?=nil) {
         lidarOK = lidarAvailable
+        self.accountManagement=accountManagement
     }
 
     var body: some View {
@@ -109,7 +112,7 @@ struct LiteRootView: View {
             LiteHistoryView(store: store, recordToOpen: $savedRecordToOpen)
                 .tag(LiteRootTab.history)
                 .tabItem { Label("紀錄", systemImage: "chart.line.uptrend.xyaxis") }
-            LiteSettingsView()
+            LiteSettingsView(accountManagement:accountManagement)
                 .tag(LiteRootTab.settings)
                 .tabItem { Label("設定", systemImage: "gearshape") }
         }

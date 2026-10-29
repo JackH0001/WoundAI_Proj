@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 @testable import WoundLite
 
 private let identityNow=1_800_000_000
@@ -65,10 +66,89 @@ private actor IdentityJournal:LiteServiceJournal {
     }
     func authorized(user:String)async throws->Bool{await onAuthorized?();return isAuthorized}
 }
+@MainActor private final class IdentityDeletionService:LiteAccountDeletionService {
+    let origin=URL(string:"https://synthetic.invalid")!
+    var requests=0
+    func installation()async throws->String{"synthetic-device"}
+    func request(operation:String,installation:String)async throws->LiteDeletionReceipt{requests+=1;throw LiteDeletionFailure.unavailable}
+    func status(operation:String,installation:String)async throws->LiteDeletionReceipt{throw LiteDeletionFailure.unavailable}
+}
 @MainActor final class LiteAccountIdentityTests:XCTestCase {
     private func setup()->(IdentityService,IdentityProvider,IdentityJournal,LiteAccountIdentityStore){
         let s=IdentityService(),p=IdentityProvider(),j=IdentityJournal()
         return(s,p,j,LiteAccountIdentityStore(service:s,provider:p,journal:j,now:{Date(timeIntervalSince1970:Double(identityNow))}))
+    }
+    private func deletionIntent(_ s:IdentityService,_ j:IdentityJournal)async throws->LiteAccountDeletionCheckpoint {
+        let c=LiteDeletionContext(origin:s.origin.absoluteString,installation:s.owner,account:String(repeating:"c",count:64))
+        let r=LiteAccountDeletionCheckpoint(version:1,context:c,operation:String(repeating:"d",count:32),createdAt:identityNow)
+        try await j.replace(LiteAccountDeletionCheckpoint.key(origin:c.origin,owner:c.installation),expected:nil,with:JSONEncoder().encode(r))
+        return r
+    }
+    private func accountRow(_ s:IdentityService,_ j:IdentityJournal)async throws->LiteAccountCheckpoint {
+        let k=String(LiteServiceBytes.hash(Data((s.origin.absoluteString+"\0"+s.owner+"\0account").utf8)).prefix(32))
+        let raw=await j.load(k);let data=try XCTUnwrap(raw)
+        return try JSONDecoder().decode(LiteAccountCheckpoint.self,from:data)
+    }
+    func testPersistedDeletionIntentBlocksServiceBeforeSuspensionAndAfterRestart()async throws {
+        let(s,p,j,m)=setup();await m.signIn();_=try await deletionIntent(s,j)
+        let before=await m.canUseService();XCTAssertFalse(before)
+        let restart=LiteAccountIdentityStore(service:s,provider:p,journal:j,now:{Date(timeIntervalSince1970:Double(identityNow))})
+        let after=await restart.canUseService();XCTAssertFalse(after)
+        await restart.signIn();await restart.retry();await restart.signOut()
+        XCTAssertEqual(s.challenges,1);XCTAssertEqual(s.confirms,1);XCTAssertEqual(s.logouts,0)
+    }
+    func testDeletionSuspensionDropsCredentialPreservesAccountAndOperation()async throws {
+        let(s,_,j,m)=setup();await m.signIn();let intent=try await deletionIntent(s,j)
+        try await m.suspendForDeletion(intent.context,operation:intent.operation)
+        try await m.suspendForDeletion(intent.context,operation:intent.operation)
+        let row=try await accountRow(s,j)
+        XCTAssertEqual(row.phase,"deleting");XCTAssertNil(row.credential)
+        XCTAssertEqual(row.session?.account_sha256,intent.context.account);XCTAssertEqual(row.deletionOperation,intent.operation)
+        let allowed=await m.canUseService();XCTAssertFalse(allowed)
+    }
+    func testSuspensionRequiresExactDurableIntentAndCannotSwitchAccount()async throws {
+        let(s,_,j,m)=setup();await m.signIn();let intent=try await deletionIntent(s,j)
+        let wrong=LiteDeletionContext(origin:s.origin.absoluteString,installation:s.owner,account:String(repeating:"e",count:64))
+        do{try await m.suspendForDeletion(wrong,operation:intent.operation);XCTFail()}catch{}
+        do{try await m.suspendForDeletion(intent.context,operation:String(repeating:"f",count:32));XCTFail()}catch{}
+        let row=try await accountRow(s,j);XCTAssertEqual(row.phase,"active")
+        let allowed=await m.canUseService();XCTAssertFalse(allowed)
+    }
+    func testCorruptDeletionIntentFailsClosedWithoutResettingIt()async throws {
+        let(s,_,j,m)=setup();await m.signIn()
+        let k=LiteAccountDeletionCheckpoint.key(origin:s.origin.absoluteString,owner:s.owner),bad=Data("bad-intent".utf8)
+        try await j.replace(k,expected:nil,with:bad)
+        await m.signIn();await m.retry();let allowed=await m.canUseService()
+        let saved=await j.load(k);XCTAssertEqual(saved,bad);XCTAssertFalse(allowed);XCTAssertEqual(s.challenges,1)
+    }
+    func testDeletionIntentDuringRenewalCannotReactivateService()async throws {
+        let s=IdentityService(),p=IdentityProvider(),j=IdentityJournal();s.enableRenewal=true
+        let m=LiteAccountIdentityStore(service:s,provider:p,journal:j,now:{Date(timeIntervalSince1970:Double(s.clock))})
+        await m.signIn();s.clock=identityNow+850
+        s.afterRenew={_=try? await self.deletionIntent(s,j)}
+        let allowed=await m.canUseService();XCTAssertFalse(allowed)
+        let row=try await accountRow(s,j);XCTAssertEqual(row.phase,"renew")
+        let intentKey=LiteAccountDeletionCheckpoint.key(origin:s.origin.absoluteString,owner:s.owner)
+        let raw=await j.load(intentKey);let intent=try JSONDecoder().decode(LiteAccountDeletionCheckpoint.self,from:XCTUnwrap(raw))
+        try await m.suspendForDeletion(intent.context,operation:intent.operation)
+        let suspended=try await accountRow(s,j);XCTAssertEqual(suspended.phase,"deleting")
+        XCTAssertNil(suspended.renewalOperation);XCTAssertNil(suspended.credential)
+    }
+    func testCandidateManagementViewRendersPendingWithoutSendingOrClaimingComplete()async throws {
+        let(s,_,j,m)=setup();await m.signIn();let intent=try await deletionIntent(s,j)
+        try await m.suspendForDeletion(intent.context,operation:intent.operation)
+        let deletion=IdentityDeletionService()
+        let view=try LiteAccountManagementView(identity:m,service:deletion)
+        let host=UIHostingController(rootView:NavigationStack{view}.environment(\.locale,Locale(identifier:"zh_TW")))
+        let window=UIWindow(frame:CGRect(x:0,y:0,width:430,height:932))
+        window.rootViewController=host;window.makeKeyAndVisible()
+        defer{window.isHidden=true;window.rootViewController=nil}
+        host.view.layoutIfNeeded();try await Task.sleep(nanoseconds:300_000_000)
+        let image=UIGraphicsImageRenderer(bounds:host.view.bounds).image{_ in host.view.drawHierarchy(in:host.view.bounds,afterScreenUpdates:true)}
+        let attachment=XCTAttachment(image:image);attachment.name="account-deletion-pending-candidate";attachment.lifetime = .keepAlways;add(attachment)
+        XCTAssertEqual(deletion.requests,0)
+        let row=try await accountRow(s,j);XCTAssertEqual(row.phase,"deleting")
+        XCTAssertNil(LiteRootView(lidarAvailable:false).accountManagement)
     }
     func testChallengeSavedBeforeApplePromptAndAckBeforeServiceUse()async throws {
         let(s,p,j,m)=setup();p.beforeSignIn={let rows=try await j.records();XCTAssertEqual(rows.first?.phase,"apple")}

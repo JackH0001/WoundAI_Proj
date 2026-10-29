@@ -185,9 +185,13 @@ struct LiteAccountCheckpoint:Codable,Equatable {
     var phase:String
     var credential:LiteAppleIdentity?=nil,session:LiteAccountSession?=nil
     var renewalOperation:String?=nil,renewalGeneration:Int?=nil
+    var deletionOperation:String?=nil
     func validate()throws {
         try challenge.validate()
-        guard version==1,URL(string:origin)?.scheme=="https",["apple","confirm","active","logout","ended","reauthenticate","renew"].contains(phase) else {throw LiteAccountFailure.invalid}
+        guard version==1,URL(string:origin)?.scheme=="https",["apple","confirm","active","logout","ended","reauthenticate","renew","deleting"].contains(phase) else {throw LiteAccountFailure.invalid}
+        if phase=="deleting" {
+            guard let op=deletionOperation,LiteServiceBytes.hex(op,32),session != nil,credential==nil else{throw LiteAccountFailure.invalid}
+        } else if deletionOperation != nil {throw LiteAccountFailure.invalid}
         if let credential{try credential.validate(challenge,requireAuthorizationCode:phase=="confirm")}
         if phase=="reauthenticate" && (credential != nil || session != nil) {throw LiteAccountFailure.invalid}
         if let session{try session.validate(challenge)}
@@ -201,7 +205,7 @@ struct LiteAccountCheckpoint:Codable,Equatable {
 }
 
 /// Candidate only: injection and a protected journal required; not a production tab.
-@MainActor final class LiteAccountIdentityStore:ObservableObject {
+@MainActor final class LiteAccountIdentityStore:ObservableObject,LiteDeletionIdentity {
     @Published private(set) var message="服務帳號登入與研究同意分開處理。"
     @Published private(set) var busy=false
     let service:any LiteAccountIdentityService,provider:any LiteAppleIdentityProvider,journal:any LiteServiceJournal
@@ -211,6 +215,32 @@ struct LiteAccountCheckpoint:Codable,Equatable {
         self.service=service;self.provider=provider;self.journal=journal;self.now=now
     }
     private func key(_ owner:String)->String{String(LiteServiceBytes.hash(Data((service.origin.absoluteString+"\0"+owner+"\0account").utf8)).prefix(32))}
+    private func hasDeletionIntent(_ owner:String)async throws->Bool {
+        try await journal.load(LiteAccountDeletionCheckpoint.key(origin:service.origin.absoluteString,owner:owner)) != nil
+    }
+    func deletionContext()async throws->LiteDeletionContext {
+        guard await canUseService() else{throw LiteAccountFailure.unavailable}
+        let owner=try await service.installation();let(_,r)=try await read(owner)
+        guard let r,r.phase=="active",let account=r.session?.account_sha256 else{throw LiteAccountFailure.invalid}
+        return LiteDeletionContext(origin:service.origin.absoluteString,installation:owner,account:account)
+    }
+    func suspendForDeletion(_ context:LiteDeletionContext,operation:String)async throws {
+        try context.validate();guard context.origin==service.origin.absoluteString,LiteServiceBytes.hex(operation,32),
+            try await service.installation()==context.installation else{throw LiteAccountFailure.conflict}
+        let(owner,op)=(context.installation,operation)
+        guard let intent=try await journal.load(LiteAccountDeletionCheckpoint.key(origin:context.origin,owner:owner)) else{throw LiteAccountFailure.invalid}
+        let deletion=try JSONDecoder().decode(LiteAccountDeletionCheckpoint.self,from:intent);try deletion.validate()
+        guard deletion.context==context,deletion.operation==op else{throw LiteAccountFailure.conflict}
+        generation+=1;blocked=true
+        let(old,r)=try await read(owner)
+        guard let r,r.session?.account_sha256==context.account else{throw LiteAccountFailure.conflict}
+        if r.phase=="deleting" {guard r.deletionOperation==op else{throw LiteAccountFailure.conflict};return}
+        guard ["active","renew"].contains(r.phase) else{throw LiteAccountFailure.conflict}
+        var next=r;next.phase="deleting";next.deletionOperation=op;next.credential=nil
+        next.renewalOperation=nil;next.renewalGeneration=nil
+        _=try await save(owner,old,next)
+        message="刪帳要求處理中；一般服務已暫停，請至刪帳頁核對原進度。手機紀錄保留。"
+    }
     private func read(_ owner:String)async throws ->(Data?,LiteAccountCheckpoint?) {
         let data=try await journal.load(key(owner));guard let data else{return(nil,nil)}
         let r=try JSONDecoder().decode(LiteAccountCheckpoint.self,from:data);try r.validate()
@@ -235,7 +265,7 @@ struct LiteAccountCheckpoint:Codable,Equatable {
             return
         }
         try session.validate(record.challenge)
-        guard generation==started else{throw LiteAccountFailure.conflict}
+        guard generation==started,try await !hasDeletionIntent(owner) else{throw LiteAccountFailure.conflict}
         guard session.expires_at>Int(now().timeIntervalSince1970) else{throw LiteAccountFailure.invalid}
         var next=record;next.phase="active";next.session=session
         next.credential?.authorizationCode=nil // Single-use code is no longer needed after acknowledgment.
@@ -248,6 +278,7 @@ struct LiteAccountCheckpoint:Codable,Equatable {
         generation+=1;let started=generation;blocked=true
         do {
             let owner=try await service.installation();let(old,previous)=try await read(owner)
+            guard try await !hasDeletionIntent(owner),previous?.phase != "deleting" else{message="刪帳要求處理中；請核對原刪帳進度，不能重新開啟登入。";return}
             guard generation==started else{throw LiteAccountFailure.conflict}
             guard (previous?.phase != "confirm" || (previous?.challenge.expires_at ?? 0)<=Int(now().timeIntervalSince1970)),previous?.phase != "logout",previous?.phase != "renew" else{message="上次登入或登出尚未確認，請先按重試；不用重新購買。";return}
             let c=try await service.challenge(operation:UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased());try c.validate()
@@ -267,6 +298,7 @@ struct LiteAccountCheckpoint:Codable,Equatable {
         guard !busy else{return};busy=true;defer{busy=false}
         do {
             let owner=try await service.installation();let(old,r)=try await read(owner)
+            guard try await !hasDeletionIntent(owner),r?.phase != "deleting" else{message="請至刪帳頁核對原進度；不會重送登入或續期。";return}
             guard let old,let r else{return}
             if r.phase=="confirm"{try await confirm(owner,old,r)}
             else if r.phase=="logout"{try await finishLogout(owner,old,r)}
@@ -283,6 +315,7 @@ struct LiteAccountCheckpoint:Codable,Equatable {
         generation+=1;blocked=true
         do {
             let owner=try await service.installation();let(old,r)=try await read(owner)
+            guard try await !hasDeletionIntent(owner),r?.phase != "deleting" else{message="刪帳要求處理中；請核對原刪帳進度。";return}
             guard let r else{return};var next=r;next.phase="logout";next.renewalOperation=nil;next.renewalGeneration=nil
             let saved:Data
             do {saved=try await save(owner,old,next)} // local service closes before network
@@ -311,7 +344,7 @@ struct LiteAccountCheckpoint:Codable,Equatable {
             throw LiteAccountFailure.grantRecoveryRequired
         }
         try session.validate(record.challenge)
-        guard generation==started,session.renewal_generation==n+1,
+        guard generation==started,try await !hasDeletionIntent(owner),session.renewal_generation==n+1,
               (session.renewed_at ?? Int.max)<=Int(now().timeIntervalSince1970),
               session.account_sha256==previous.account_sha256,session.app_account_token==previous.app_account_token,
               session.family_expires_at==previous.family_expires_at else{throw LiteAccountFailure.conflict}
@@ -325,6 +358,7 @@ struct LiteAccountCheckpoint:Codable,Equatable {
         busy=true;defer{busy=false};let started=generation
         do {
             let owner=try await service.installation();var(old,r)=try await read(owner)
+            guard try await !hasDeletionIntent(owner) else{return false}
             guard let record=r,["active","renew"].contains(record.phase),let credential=record.credential else{return false}
             guard try await provider.authorized(user:credential.user) else{await signOut();return false}
             guard !blocked,generation==started else{return false}
@@ -342,7 +376,8 @@ struct LiteAccountCheckpoint:Codable,Equatable {
                   confirmed.expires_at>Int(now().timeIntervalSince1970) else{return false}
             guard try await service.status(final.challenge)==confirmed else{return false}
             let saved=try await journal.load(key(owner));let currentOwner=try await service.installation()
-            return !blocked && generation==started && currentOwner==owner && saved==old
+            let deletionPending=try await hasDeletionIntent(owner)
+            return !blocked && generation==started && currentOwner==owner && saved==old && !deletionPending
         } catch {return false}
     }
 }

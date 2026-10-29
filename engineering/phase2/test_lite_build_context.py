@@ -98,6 +98,21 @@ class ContextTests(unittest.TestCase):
             module.write_text(source)
             with self.assertRaisesRegex(ValueError,'missing from build allowlist'):stager.validate_runtime_imports(self.repo)
 
+    def test_optional_deletion_guard_does_not_hide_unguarded_or_other_imports(self):
+        module = self.repo/'Backend/Flask/lite_attest_http.py'
+        valid = ('def install_lite_attest(app, *, deletion=None):\n'
+                 '    if deletion is not None:\n'
+                 '        from lite_account_deletion import AccountDeletion\n')
+        self.write(self.repo/'Backend/Flask/lite_account_deletion.py', b'# optional\n')
+        module.write_text(valid);stager.validate_runtime_imports(self.repo)
+        self.write(self.repo/'Backend/Flask/unreviewed.py', b'# not reviewed\n')
+        for source in [valid.replace('deletion=None','deletion=True'),valid.replace('is not None','is None'),
+                       valid.replace('    if deletion is not None:\n','').replace('        from','    from'),
+                       valid + '        from unreviewed import value\n',
+                       valid + '    else:\n        from lite_account_deletion import AccountDeletion\n']:
+            module.write_text(source)
+            with self.assertRaisesRegex(ValueError,'missing from build allowlist'):stager.validate_runtime_imports(self.repo)
+
     def test_packaged_gate_starts_without_any_commerce_modules(self):
         staged = self.base/'isolated-runtime';staged.mkdir()
         for name in stager.FLASK_FILES:
@@ -112,12 +127,13 @@ from lite_attest_http import install_lite_attest
 optional = ('lite_service_operations', 'lite_service_http', 'lite_usage_ledger',
             'lite_subscription_authority', 'lite_service_subscription_links', 'lite_native_purchase',
             'lite_subscription_runtime', 'lite_subscription_executor', 'lite_account_identity',
-            'lite_apple_identity_provider', 'lite_apple_account_events')
+            'lite_apple_identity_provider', 'lite_apple_account_events', 'lite_account_deletion')
 assert all(importlib.util.find_spec(name) is None for name in optional)
 app = Flask('staged-legacy')
 install_lite_attest(app)
 assert 'lite_attest_http' in app.extensions
 assert not any(rule.rule.startswith('/api/v1/lite/service/') for rule in app.url_map.iter_rules())
+assert not any(rule.rule.startswith('/api/v1/lite/account/deletion/') for rule in app.url_map.iter_rules())
 assert app.test_client().post('/api/v1/lite/attest/challenge', json={}).status_code == 503
 assert not any(name in sys.modules for name in optional)
 # An incomplete opt-in image must fail startup, never silently fall back.
