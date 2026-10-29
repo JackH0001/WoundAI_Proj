@@ -43,6 +43,10 @@ jobs:
         run: |
           python -m unittest -v test_lite_service_history > evidence/service-history-tests.log 2>&1
           python tools/lite_service_history_probe.py --output evidence/service-history-probe.json
+      - name: Bounded account data inventory without deletion (synthetic only)
+        run: |
+          python -m unittest -v test_lite_account_data_inventory > evidence/account-data-inventory-tests.log 2>&1
+          python tools/lite_account_data_inventory_probe.py --output evidence/account-data-inventory-probe.json
       - name: Legacy image dependency closure and isolated startup
         run: python -m unittest -v test_lite_build_context > evidence/build-context-tests.log 2>&1
       - name: Reproduce unresolved rollout gaps separately from fixed regressions
