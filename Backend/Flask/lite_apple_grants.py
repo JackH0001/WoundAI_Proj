@@ -62,12 +62,14 @@ class AppleGrantAuthority:
     immutable = staticmethod(SubscriptionRuntime.immutable)
 
     def __init__(self, *, provider, verifier, store, audit_store, cipher, namespace, identity_key, lifecycle=None):
+        from lite_grant_key_custody import AccountGrantCipher
         if (not isinstance(provider, AppleOAuthProvider) or not isinstance(verifier, AppleIdentityVerifier)
-                or not isinstance(cipher, GrantCipher) or provider.client_id != verifier.audience
+                or not isinstance(cipher, (GrantCipher,AccountGrantCipher)) or provider.client_id != verifier.audience
                 or type(identity_key) is not bytes or len(identity_key) != 32):
             raise ValueError('matching trusted Apple grant configuration required')
         _subject(namespace)
-        if identity_key in cipher._keys.values(): raise ValueError('identity and encryption keys must differ')
+        if isinstance(cipher,GrantCipher) and identity_key in cipher._keys.values():
+            raise ValueError('identity and encryption keys must differ')
         if store is audit_store or (getattr(store, 'path', None) is not None
                 and getattr(store, 'path', None) == getattr(audit_store, 'path', None)):
             raise ValueError('mutable credential vault must be separate from audit')
@@ -76,6 +78,16 @@ class AppleGrantAuthority:
         self.binding = dict(namespace=namespace, issuer=verifier.issuer, audience=verifier.audience,
             identity_key_sha256=hashlib.sha256(identity_key).hexdigest())
         self.lifecycle = lifecycle
+        crypto_mode = key('apple-grant-crypto-mode',namespace)
+        if isinstance(cipher,AccountGrantCipher):
+            if lifecycle is None or cipher.lifecycle is not lifecycle or lifecycle.binding != self.binding:
+                raise ValueError('account key custody requires matching indexed authority')
+            if (store.load(crypto_mode) is None
+                    and store.load(key('apple-grant-config',namespace)) is not None):
+                raise StateUnavailable('legacy grant ciphertext requires reviewed key migration')
+            self.immutable(store,crypto_mode,cipher.mode)
+        elif store.load(crypto_mode) is not None:
+            raise StateUnavailable('account key custody cannot silently downgrade')
         mode_key = key('apple-grant-inventory-required',namespace)
         # A previous vault may contain grants from failed/unconfirmed sign-ins,
         # even when no human-account row exists. Never infer an empty inventory
@@ -91,7 +103,7 @@ class AppleGrantAuthority:
             self.immutable(store,mode_key,dict(v=1,binding=self.binding))
         elif store.load(mode_key) is not None:
             raise StateUnavailable('account grant inventory cannot be silently disabled')
-        for kid, fingerprint in cipher.fingerprints.items():
+        for kid, fingerprint in (cipher.fingerprints.items() if isinstance(cipher,GrantCipher) else ()):
             self.immutable(store, key('apple-grant-key', digest([namespace, kid])), dict(v=1, sha256=fingerprint))
 
     def _id(self, installation, operation):
@@ -174,6 +186,10 @@ class AppleGrantAuthority:
             if old[1]['context'] != context: raise IdentityRejected('saved Apple grant differs')
             if old[1]['phase'] == 'ready': return self._receipt(identity, old)
             raise GrantUncertain('saved code cannot be replayed; explicit Apple sign-in required')
+        if hasattr(self.cipher,'prepare'):
+            # Provisioning is external to this runtime. Never consume Apple's
+            # one-use code when its account key has not been safely established.
+            self.cipher.prepare(context)
         # A code cannot be consumed under two different login operations/devices.
         self.immutable(self.audit, key('apple-code-claim', digest([self.namespace, digest(authorization_code)])),
             dict(v=1, grant_id=identity, context_sha256=digest(context)))

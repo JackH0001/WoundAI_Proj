@@ -131,6 +131,10 @@ jobs:
           test_lite_fenced_http test_lite_raw_depth_contract test_lite_raw_depth_store
           test_lite_raw_depth_http test_lite_revision test_lite_http_lifecycle
           > evidence/app-backend-tests.log 2>&1
+      - name: Per-account grant keys and retained backup erasure (synthetic only)
+        run: |
+          python -m unittest -v test_lite_grant_key_custody > evidence/grant-key-custody-tests.log 2>&1
+          python tools/lite_grant_key_custody_probe.py --output evidence/grant-key-custody-probe.json
       - name: Publish readiness separately from test correctness
         run: |
           python - <<'PY'

@@ -43,3 +43,7 @@ Google 的 scheduled-for-destruction 階段仍可復原；destroyed 表示客戶
 - 已關閉帳號不可因還原舊 JWT、舊同意書或舊密文重新登入／上傳；已銷毀金鑰不可由備援恢復。
 - 模擬 key unavailable、錯誤 key version、備援損壞、跨環境還原、程序中斷及重試；不得建立替代新身分掩蓋錯誤。
 - 復原失敗保持關閉，撤回新增臨時權限，保留所有證據；真正 provider、IAM、KMS 與成本驗收前不能作正式刪帳完成宣告。
+
+## 實作進度補註
+
+後續已加入預設不啟用的每帳號 wrapped-DEK、固定 KMS version adapter 與銷毀狀態核對；見 [每帳號金鑰本機驗收](lite_account_key_custody_20261029.md)。只在本機替身上驗證，沒有建立或銷毀真實金鑰。上述營運規格仍須完成供應、IAM、雙人核准、版本輪替及災復演練；不能視為已部署。KMS 邏輯銷毀也不等於 Google 所有物理備份立即移除。
