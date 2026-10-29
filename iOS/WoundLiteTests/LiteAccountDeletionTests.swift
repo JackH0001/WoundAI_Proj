@@ -317,3 +317,105 @@ private actor DeletionJournal:LiteServiceJournal {
         XCTAssertEqual(saved,r);XCTAssertNoThrow(try saved.validate())
     }
 }
+
+@MainActor final class LiteDispositionProgressTests:XCTestCase {
+    private let op=String(repeating:"e",count:32)
+    private func receipt(_ changes:[String:Any]=[:],progress:[String:Any]=[:])throws->LiteDeletionReceipt {
+        var d=try JSONSerialization.jsonObject(with:JSONEncoder().encode(DeletionService().reply(op))) as! [String:Any]
+        var p:[String:Any]=["v":1,"catalog_sha256":LiteDispositionProgress.catalog,"revision":1,
+            "service_total":2,"service_sealed":2,"service_state":"current_sealed",
+            "grant_key_state":"destroy_scheduled","blocked_lanes":[],"pending_lanes":LiteDispositionProgress.pending]
+        p.merge(progress){_,new in new}
+        d.merge(["v":2,"grants_examined":2,"grants_revoked":2,"apple_revocation":"confirmed",
+                 "data_disposition":"pending","disposition":p]){_,new in new}
+        d.merge(changes){_,new in new}
+        return try JSONDecoder().decode(LiteDeletionReceipt.self,from:JSONSerialization.data(withJSONObject:d))
+    }
+    func testLegacyReceiptUpgradesWithoutChangingOriginalIntent()throws {
+        let old=DeletionService().reply(op),new=try receipt()
+        XCTAssertNoThrow(try new.validate(owner:deletionOwner,operation:op,previous:old))
+        XCTAssertFalse(new.account_deleted);XCTAssertTrue(new.local_records_preserved)
+    }
+    func testScheduledDestructionIsNotCompletedOrUnrecoverable()throws {
+        let r=try receipt();try r.validate(owner:deletionOwner,operation:op)
+        XCTAssertEqual(r.disposition?.keyText,"已排程，等待銷毀確認")
+        XCTAssertFalse(r.account_deleted);XCTAssertEqual(r.data_disposition,"pending")
+    }
+    func testAppleConfirmedReceiptMayAdvanceDataProgress()throws {
+        let first=try receipt(),next=try receipt(progress:["revision":2,"grant_key_state":"unrecoverable"])
+        XCTAssertNoThrow(try next.validate(owner:deletionOwner,operation:op,previous:first))
+        XCTAssertFalse(next.account_deleted);XCTAssertEqual(next.disposition?.pending_lanes.count,4)
+    }
+    func testV2CannotDowngradeToLegacyEvenAfterAppleConfirmed()throws {
+        let r=try receipt(),old=DeletionService().reply(op)
+        XCTAssertThrowsError(try old.validate(owner:deletionOwner,operation:op,previous:r))
+    }
+    func testMissingOrUnrecognizedDispositionCatalogIsRejected()throws {
+        for p in [["catalog_sha256":String(repeating:"a",count:64)], ["pending_lanes":[]], ["v":2]] as [[String:Any]] {
+            let r=try receipt(progress:p);XCTAssertThrowsError(try r.validate(owner:deletionOwner,operation:op))
+        }
+    }
+    func testServiceCountsAndStatusMustAgree()throws {
+        for p in [["service_total":-1],["service_total":100001],["service_sealed":3],
+                  ["service_state":"not_started"],["service_state":"pending"],
+                  ["service_state":"erased"],["revision":0],["revision":1000001]] as [[String:Any]] {
+            let r=try receipt(progress:p);XCTAssertThrowsError(try r.validate(owner:deletionOwner,operation:op))
+        }
+    }
+    func testPendingKeyRequiresAppleRevocationConfirmation()throws {
+        let r=try receipt(["apple_revocation":"pending","grants_revoked":1])
+        XCTAssertThrowsError(try r.validate(owner:deletionOwner,operation:op))
+    }
+    func testUnknownDuplicateOrUnsortedBlockedLanesAreRejected()throws {
+        for lanes in [["all_done"],["grant_key","grant_key"],["service_results","grant_key"]] {
+            let r=try receipt(progress:["blocked_lanes":lanes]);XCTAssertThrowsError(try r.validate(owner:deletionOwner,operation:op))
+        }
+    }
+    func testReorderedResponsesCannotRegressCountsOrKeyState()throws {
+        let latest=try receipt(progress:["revision":3,"grant_key_state":"unrecoverable"])
+        for p in [["revision":2,"grant_key_state":"unrecoverable"],
+                  ["revision":4],["revision":4,"service_sealed":1,"service_state":"pending"],
+                  ["revision":3,"blocked_lanes":["grant_key"]]] as [[String:Any]] {
+            let r=try receipt(progress:p);XCTAssertThrowsError(try r.validate(owner:deletionOwner,operation:op,previous:latest))
+        }
+    }
+    func testMalformedPreviousStateIsRejectedWithoutForceUnwrapCrash()throws {
+        let old=try receipt(progress:["service_state":"unknown"]),r=try receipt(progress:["revision":2])
+        XCTAssertThrowsError(try r.validate(owner:deletionOwner,operation:op,previous:old))
+    }
+    func testNoVersionCanClaimFullDeletionOrCancelSubscription()throws {
+        for c in [["account_deleted":true],["subscription_cancelled":true],["local_records_preserved":false],
+                  ["data_disposition":"completed"]] as [[String:Any]] {
+            let r=try receipt(c,progress:["grant_key_state":"unrecoverable"])
+            XCTAssertThrowsError(try r.validate(owner:deletionOwner,operation:op))
+        }
+    }
+    func testStatusRestartPersistsProgressWithoutAnotherDeletionOrApplePrompt()async throws {
+        let s=DeletionService(),i=DeletionIdentity(),j=DeletionJournal()
+        let m=LiteAccountDeletionStore(service:s,identity:i,journal:j)
+        await m.requestConfirmed();let operation=try XCTUnwrap(m.record?.operation)
+        s.saved[operation]=try receipt(["operation":operation])
+        await m.retry();XCTAssertTrue(m.message.contains("已排程，等待銷毀確認"))
+        let next=LiteAccountDeletionStore(service:s,identity:i,journal:j);await next.reload()
+        XCTAssertEqual(next.record?.receipt?.disposition,m.record?.receipt?.disposition)
+        s.saved[operation]=try receipt(["operation":operation],progress:["revision":2,"grant_key_state":"unrecoverable"])
+        await next.retry();XCTAssertTrue(next.message.contains("已確認無法解密"))
+        XCTAssertTrue(next.message.contains("尚未完成刪除"));XCTAssertEqual(s.requests.count,1);XCTAssertEqual(i.authCalls,0)
+    }
+    func testLateOldStatusCannotReplaceSavedProgress()async throws {
+        let s=DeletionService(),i=DeletionIdentity(),j=DeletionJournal()
+        let m=LiteAccountDeletionStore(service:s,identity:i,journal:j);await m.requestConfirmed()
+        let operation=try XCTUnwrap(m.record?.operation)
+        s.saved[operation]=try receipt(["operation":operation],progress:["revision":2,"grant_key_state":"unrecoverable"])
+        await m.retry();let before=await j.rows()
+        s.saved[operation]=try receipt(["operation":operation]);await m.retry()
+        let after=await j.rows();XCTAssertEqual(before,after);XCTAssertEqual(s.requests.count,1)
+    }
+    func testProgressHTTPIsDecodedWithExistingPrivacyTransport()async throws {
+        let t=DeletionHTTPTransport();t.data=try JSONEncoder().encode(receipt())
+        let s=try LiteAccountDeletionHTTPService(origin:deletionOrigin,transport:t)
+        let r=try await s.status(operation:op,installation:deletionOwner)
+        XCTAssertEqual(r.disposition?.grant_key_state,"destroy_scheduled")
+        XCTAssertEqual(t.requests.count,1);XCTAssertEqual(t.requests.first?.url?.path,"/api/v1/lite/account/deletion/status")
+    }
+}

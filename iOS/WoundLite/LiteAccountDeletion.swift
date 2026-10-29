@@ -31,21 +31,66 @@ struct LiteDeletionContext: Codable, Equatable {
     }
 }
 
-/// This version understands pending disposition only. A future complete-deletion
-/// receipt needs a separately validated data-disposition contract.
+/// Explicitly incomplete catalog: terminal receipts for individual lanes never
+/// imply that historical media, research data or the entire account was erased.
+struct LiteDispositionProgress: Codable, Equatable {
+    static let catalog="490147fc0741120d0f36252d2d6c03f15da67e1b89bd3bc217c6d1b6848fc891"
+    static let pending=["historical_versions_backups","research_association_disposition",
+                        "identity_subscription_retention","live_provider_device_acceptance"]
+    let v:Int,catalog_sha256:String,revision:Int,service_total:Int,service_sealed:Int
+    let service_state:String,grant_key_state:String,blocked_lanes:[String],pending_lanes:[String]
+    func validate(apple:String,previous:Self?=nil)throws {
+        let serviceOrder=["not_started":0,"pending":1,"current_sealed":2]
+        let keyOrder=["not_started":0,"destroy_scheduled":1,"unrecoverable":2]
+        guard v==1,catalog_sha256==Self.catalog,(0...1000000).contains(revision),
+              (0...100000).contains(service_total),(0...service_total).contains(service_sealed),
+              let sr=serviceOrder[service_state],let kr=keyOrder[grant_key_state],
+              pending_lanes==Self.pending,blocked_lanes==Array(Set(blocked_lanes)).sorted(),
+              blocked_lanes.allSatisfy({["apple_revocation","service_results","grant_key"].contains($0)}),
+              service_state != "not_started" || service_sealed==0,
+              service_state != "pending" || service_sealed<service_total,
+              service_state != "current_sealed" || service_sealed==service_total,
+              grant_key_state=="not_started" || apple=="confirmed",
+              revision>0 || (sr==0 && kr==0 && blocked_lanes.isEmpty)
+        else{throw LiteDeletionFailure.invalid}
+        if let p=previous {
+            guard let ps=serviceOrder[p.service_state],let pk=keyOrder[p.grant_key_state],
+                  catalog_sha256==p.catalog_sha256,service_total==p.service_total,revision>=p.revision,
+                  service_sealed>=p.service_sealed,sr>=ps,kr>=pk,
+                  revision>p.revision || self==p else{throw LiteDeletionFailure.conflict}
+        }
+    }
+    var serviceText:String {
+        service_state=="current_sealed" ? "目前結果已封存（\(service_sealed)/\(service_total)）" :
+        service_state=="not_started" ? "尚未開始" : "處理中（\(service_sealed)/\(service_total)）"
+    }
+    var keyText:String {
+        grant_key_state=="unrecoverable" ? "已確認無法解密" :
+        grant_key_state=="destroy_scheduled" ? "已排程，等待銷毀確認" : "尚未開始"
+    }
+}
+
+/// v1 remains readable; v2 reports individually verified progress only.
 struct LiteDeletionReceipt: Codable, Equatable {
     let v:Int, state:String, operation:String, installation:String, requested_at:Int
     let inventory_sha256:String, grant_total:Int, revocation_scan:Int, grants_examined:Int, grants_revoked:Int
     let apple_revocation:String, data_disposition:String
     let account_deleted:Bool, subscription_cancelled:Bool, local_records_preserved:Bool
+    var disposition:LiteDispositionProgress?=nil
     func validate(owner:String,operation:String,previous:Self?=nil) throws {
-        guard v==1,state=="account_deletion_pending",self.operation==operation,LiteServiceBytes.hex(operation,32),
+        guard [1,2].contains(v),state=="account_deletion_pending",self.operation==operation,LiteServiceBytes.hex(operation,32),
               installation==owner,requested_at>=0,LiteServiceBytes.hex(inventory_sha256),
               (0...10000).contains(grant_total),(1...1000000).contains(revocation_scan),
               (0...grant_total).contains(grants_examined),(0...grants_examined).contains(grants_revoked),
               ["not_started","in_progress","pending","confirmed"].contains(apple_revocation),
-              data_disposition=="not_started",!account_deleted,!subscription_cancelled,local_records_preserved
+              !account_deleted,!subscription_cancelled,local_records_preserved
         else {throw LiteDeletionFailure.invalid}
+        if v==1 {
+            guard data_disposition=="not_started",disposition==nil else{throw LiteDeletionFailure.invalid}
+        } else {
+            guard data_disposition=="pending",let progress=disposition else{throw LiteDeletionFailure.invalid}
+            try progress.validate(apple:apple_revocation,previous:previous?.disposition)
+        }
         if apple_revocation=="not_started" && (grants_examined != 0 || grants_revoked != 0) {throw LiteDeletionFailure.invalid}
         if apple_revocation=="confirmed" && (grants_examined != grant_total || grants_revoked != grant_total) {throw LiteDeletionFailure.invalid}
         if apple_revocation=="pending" && (grants_examined != grant_total || grants_revoked==grant_total) {throw LiteDeletionFailure.invalid}
@@ -53,7 +98,10 @@ struct LiteDeletionReceipt: Codable, Equatable {
             guard requested_at==p.requested_at,inventory_sha256==p.inventory_sha256,grant_total==p.grant_total,
                   revocation_scan>=p.revocation_scan,
                   revocation_scan>p.revocation_scan || (grants_examined>=p.grants_examined && grants_revoked>=p.grants_revoked),
-                  p.apple_revocation != "confirmed" || self==p else{throw LiteDeletionFailure.conflict}
+                  v>=p.v,
+                  p.apple_revocation != "confirmed" || (apple_revocation==p.apple_revocation &&
+                    grants_examined==p.grants_examined && grants_revoked==p.grants_revoked && revocation_scan==p.revocation_scan)
+            else{throw LiteDeletionFailure.conflict}
         }
     }
 }
@@ -294,6 +342,13 @@ struct LiteAccountDeletionCheckpoint: Codable, Equatable {
         guard let r=record else{return}
         guard let reply=r.receipt else{message="刪帳要求已存於手機，尚未確認雲端受理。一般服務暫停，手機紀錄保留。";return}
         let apple=reply.apple_revocation=="confirmed" ? "Apple 授權撤銷已確認。":"Apple 授權撤銷仍在處理或待核對。"
-        message="雲端已受理，帳號服務已關閉。"+apple+"帳號資料清理尚未開始，尚未完成刪除；手機紀錄仍保留。"
+        if let progress=reply.disposition {
+            let waiting=progress.blocked_lanes.isEmpty ? "":"有步驟尚待確認，可核對原進度，不會另建要求。"
+            message=["雲端已受理，帳號服務已關閉。",apple,"目前服務結果：",progress.serviceText,
+                "；Apple 憑證金鑰：",progress.keyText,"。",waiting,
+                "歷史版本、備份及研究等資料仍待處理，尚未完成刪除；手機紀錄保留。"].joined()
+        } else {
+            message="雲端已受理，帳號服務已關閉。"+apple+"帳號資料清理尚未開始，尚未完成刪除；手機紀錄仍保留。"
+        }
     }
 }

@@ -24,7 +24,7 @@ struct LiteAccountManagementView:View {
                 }.disabled(identity.busy || deletion.busy)
                 Section("刪除帳號") {
                     Text("提出後會停止此帳號在各裝置上的雲端服務，並處理 Apple 登入授權。手機紀錄、Apple 訂閱及研究撤回分別處理。")
-                    Text("目前驗收版的帳號資料清理尚未接通，提出要求不代表資料已刪除。")
+                    Text("目前驗收版會分別回報各項處理進度，完整帳號資料清理仍在驗證中；提出要求不代表資料已刪除。")
                         .foregroundStyle(.secondary)
                     Button("刪除帳號…",role:.destructive){confirming=true}
                         .disabled(identity.busy || deletion.busy)
@@ -36,7 +36,14 @@ struct LiteAccountManagementView:View {
                 Text(deletion.message).accessibilityIdentifier("accountDeletionStatus")
                 if let r=deletion.record?.receipt {
                     LabeledContent("Apple 授權",value:r.apple_revocation=="confirmed" ? "撤銷已確認":"處理／核對中")
-                    LabeledContent("帳號資料清理",value:"尚未開始")
+                    if let progress=r.disposition {
+                        LabeledContent("目前服務結果",value:progress.serviceText)
+                        LabeledContent("Apple 憑證金鑰",value:progress.keyText)
+                        Text("歷史版本、備份、研究資料及其他帳號資料仍待處理或核對，個別步驟完成不代表全部刪除。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    } else {
+                        LabeledContent("帳號資料清理",value:"尚未開始")
+                    }
                     LabeledContent("帳號刪除",value:"尚未完成")
                 }
                 if deletion.record != nil || deletion.needsReview {
@@ -60,6 +67,6 @@ struct LiteAccountManagementView:View {
         .alert("確認提出刪帳要求？",isPresented:$confirming){
             Button("確認提出並停止帳號服務",role:.destructive){Task{await deletion.requestConfirmed()}}
             Button("取消",role:.cancel){}
-        }message:{Text("會先保存同一筆要求再傳送；無法確認時可重試核對。手機紀錄保留，Apple 訂閱需另行取消。目前驗收版尚不會清除帳號資料。")}
+        }message:{Text("會先保存同一筆要求再傳送；無法確認時可重試核對。手機紀錄保留，Apple 訂閱需另行取消。各項處理會分別回報，目前驗收版尚未完成全部資料清理。")}
     }
 }

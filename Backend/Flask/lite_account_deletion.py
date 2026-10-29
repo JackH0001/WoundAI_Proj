@@ -36,6 +36,7 @@ class AccountDeletion:
             raise ValueError('deletion progress and audit must be separate')
         self.bridge, self.lifecycle, self.grants = bridge, bridge.lifecycle, bridge.grants
         self.store, self.audit = store, audit_store
+        self.disposition = None
         self.scope = self.lifecycle.scope
         self.reauthentication = DeletionIdentity(self)
         self.immutable(store, key('account-deletion-config', bridge.namespace),
@@ -44,6 +45,15 @@ class AccountDeletion:
     def _job_key(self, person):
         _hex(person)
         return key('account-deletion-job', digest([self.scope, person]))
+
+    def attach_disposition(self, disposition):
+        # Explicit candidate composition only; keep legacy startup import-safe.
+        from lite_disposition_progress import DispositionProgress
+        if not isinstance(disposition, DispositionProgress) or disposition.deletion is not self:
+            raise ValueError('matching disposition progress required')
+        if self.disposition is not None and self.disposition is not disposition:
+            raise ValueError('disposition already attached')
+        self.disposition = disposition
 
     def _plan(self, person):
         row = self.lifecycle._read(person)
@@ -116,7 +126,8 @@ class AccountDeletion:
         person = self._owner(installation, operation)
         _, row = self._ensure(person)
         self._record_scan(row[1])
-        return self._public(row[1])
+        base = self._public(row[1])
+        return self.disposition.decorate(person, base) if self.disposition is not None else base
 
     def _record_scan(self, c):
         if c['phase'] in ('pending','revoked'):

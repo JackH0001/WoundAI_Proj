@@ -139,6 +139,10 @@ jobs:
         run: |
           python -m unittest -v test_lite_service_disposition > evidence/service-disposition-tests.log 2>&1
           python tools/lite_service_disposition_probe.py --output evidence/service-disposition-probe.json
+      - name: Bounded deletion disposition and native progress contract (synthetic only)
+        run: |
+          python -m unittest -v test_lite_disposition_progress > evidence/disposition-progress-tests.log 2>&1
+          python tools/lite_disposition_progress_probe.py --output evidence/disposition-progress-probe.json
       - name: Publish readiness separately from test correctness
         run: |
           python - <<'PY'
