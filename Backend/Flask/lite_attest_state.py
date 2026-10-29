@@ -289,7 +289,7 @@ class AssertionAdmission:
                 raise AdmissionRejected('challenge missing, consumed or expired')
             deletion_path = re.fullmatch(re.escape('/api/v1/lite/data/' + state['installation']) + r'(?:/[0-9a-f]{32})?', path) is not None
             account_deletion = method == 'POST' and path in (
-                '/api/v1/lite/account/deletion/request', '/api/v1/lite/account/deletion/status')
+                '/api/v1/lite/account/deletion/request', '/api/v1/lite/account/deletion/status', '/api/v1/lite/account/deletion/reauth/challenge', '/api/v1/lite/account/deletion/reauth/confirm')
             if account_deletion and challenge.get('purpose', 'assert') != 'withdraw':
                 raise AdmissionRejected('account deletion requires privacy challenge')
             if challenge.get('purpose', 'assert') == 'withdraw' and not ((method == 'DELETE' and deletion_path) or account_deletion):

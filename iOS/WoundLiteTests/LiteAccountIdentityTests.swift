@@ -89,6 +89,35 @@ private actor IdentityJournal:LiteServiceJournal {
         let raw=await j.load(k);let data=try XCTUnwrap(raw)
         return try JSONDecoder().decode(LiteAccountCheckpoint.self,from:data)
     }
+    private func savedRecovery(_ s:IdentityService,_ j:IdentityJournal)async throws->LiteAccountDeletionCheckpoint {
+        var r=try await deletionIntent(s,j)
+        let q=LiteDeletionChallenge(v:1,installation:s.owner,operation:r.operation,reauth_operation:String(repeating:"e",count:32),account_sha256:r.context.account,nonce:String(repeating:"a",count:64),state:String(repeating:"b",count:64),created_at:identityNow,expires_at:identityNow+300,audience:"com.woundai.lite",purpose:"continue_deletion")
+        let k=LiteAccountDeletionCheckpoint.key(origin:r.context.origin,owner:s.owner),old=await j.load(k)
+        r.recovery=LiteDeletionRecovery(attempt:q.reauth_operation,challenge:q)
+        try await j.replace(k,expected:old,with:JSONEncoder().encode(r));return r
+    }
+    func testDeletionAppleProofDoesNotExchangeCodeRenewOrReactivate()async throws {
+        let(s,p,j,m)=setup();s.requireCode=true;await m.signIn();let r=try await savedRecovery(s,j)
+        let token=try await m.authenticateDeletion(r.recovery!.challenge!,context:r.context)
+        XCTAssertEqual(token,"synthetic-not-real-jwt");XCTAssertEqual(p.calls,2)
+        XCTAssertEqual(s.confirms,1);XCTAssertEqual(s.renewCalls,0);XCTAssertEqual(s.challenges,1)
+        let row=try await accountRow(s,j);XCTAssertEqual(row.phase,"deleting");XCTAssertNil(row.credential)
+        let allowed=await m.canUseService();XCTAssertFalse(allowed)
+    }
+    func testDeletionProofRejectsJournalChangeDuringApplePrompt()async throws {
+        let(s,p,j,m)=setup();await m.signIn();let r=try await savedRecovery(s,j)
+        p.beforeSignIn={await j.corrupt()}
+        do{_=try await m.authenticateDeletion(r.recovery!.challenge!,context:r.context);XCTFail()}catch{}
+        XCTAssertEqual(s.confirms,1);XCTAssertEqual(s.renewCalls,0)
+    }
+    func testDeletionProofRequiresSavedChallengeBeforeOpeningApple()async throws {
+        let(s,p,j,m)=setup();await m.signIn();let r=try await savedRecovery(s,j)
+        let k=LiteAccountDeletionCheckpoint.key(origin:r.context.origin,owner:s.owner),old=await j.load(k)
+        var noChallenge=r;noChallenge.recovery=nil
+        try await j.replace(k,expected:old,with:JSONEncoder().encode(noChallenge))
+        do{_=try await m.authenticateDeletion(r.recovery!.challenge!,context:r.context);XCTFail()}catch{}
+        XCTAssertEqual(p.calls,1);XCTAssertEqual(s.confirms,1)
+    }
     func testPersistedDeletionIntentBlocksServiceBeforeSuspensionAndAfterRestart()async throws {
         let(s,p,j,m)=setup();await m.signIn();_=try await deletionIntent(s,j)
         let before=await m.canUseService();XCTAssertFalse(before)

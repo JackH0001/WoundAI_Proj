@@ -13,9 +13,11 @@ from lite_attest_state import CAS_ATTEMPTS, StateUnavailable
 from lite_subscription_executor import key
 from lite_subscription_runtime import SubscriptionRuntime
 from lite_usage_ledger import digest, _hex
+from lite_deletion_identity import DeletionIdentity, DeletionIdentityExpired
 
 PREFIX = '/api/v1/lite/account/deletion/'
-DELETION_PATHS = frozenset(PREFIX + s for s in ('request', 'status'))
+DELETION_ACTIONS = ('request','status','reauth/challenge','reauth/confirm')
+DELETION_PATHS = frozenset(PREFIX + s for s in DELETION_ACTIONS)
 
 
 class DeletionBusy(StateUnavailable): pass
@@ -35,6 +37,7 @@ class AccountDeletion:
         self.bridge, self.lifecycle, self.grants = bridge, bridge.lifecycle, bridge.grants
         self.store, self.audit = store, audit_store
         self.scope = self.lifecycle.scope
+        self.reauthentication = DeletionIdentity(self)
         self.immutable(store, key('account-deletion-config', bridge.namespace),
                        dict(v=1, scope=self.scope, lease_seconds=self.LEASE_SECONDS))
 
@@ -103,7 +106,8 @@ class AccountDeletion:
         return person
 
     def begin(self, installation, operation):
-        self.bridge.begin_account_closure(installation, operation)
+        if not self.reauthentication.resume(installation,operation):
+            self.bridge.begin_account_closure(installation, operation)
         return self.status(installation, operation)
 
     def status(self, installation, operation):
@@ -205,17 +209,27 @@ def blueprint(coordinator):
             if admission is None: return jsonify(error='lite_attestation_required'),401
             b = loads_json_object_strict(request.get_data().decode())
             fields = {'anon_id','operation'} | ({'confirmation'} if kind=='request' else set())
+            if kind.startswith('reauth/'):
+                fields |= {'reauth_operation','account_sha256'}
+                fields |= {'confirmation'} if kind=='reauth/challenge' else {'identity_token','state'}
             if (request.mimetype != 'application/json' or set(b) != fields
-                    or kind == 'request' and b['confirmation'] != 'delete_account'):
+                    or kind == 'request' and b['confirmation'] != 'delete_account'
+                    or kind == 'reauth/challenge' and b['confirmation'] != 'continue_deletion'):
                 raise ValueError('explicit deletion confirmation required')
             if b['anon_id'] != admission.installation: return jsonify(error='lite_owner_mismatch'),403
+            if kind.startswith('reauth/'):
+                args = (admission.installation,b['operation'],b['reauth_operation'],b['account_sha256'])
+                if kind == 'reauth/challenge':
+                    return jsonify(coordinator.reauthentication.challenge(*args)),200
+                return jsonify(coordinator.reauthentication.confirm(*args,b['identity_token'],b['state'])),202
             result = (coordinator.begin if kind=='request' else coordinator.status)(admission.installation,b['operation'])
             return jsonify(result),202
+        except DeletionIdentityExpired: return jsonify(error='lite_deletion_reauth_expired',keep_local=True),410
         except IdentityRejected: return jsonify(error='lite_deletion_identity_required',keep_local=True),401
         except (ValueError,TypeError,KeyError): return jsonify(error='lite_deletion_conflict',keep_local=True),409
         except Exception: return jsonify(error='lite_deletion_unconfirmed',keep_local=True,retry_saved_request=True),503
-    for kind in ('request','status'):
-        bp.add_url_rule(PREFIX+kind,kind,lambda kind=kind:action(kind),methods=['POST'])
+    for kind in DELETION_ACTIONS:
+        bp.add_url_rule(PREFIX+kind,kind.replace('/','_'),lambda kind=kind:action(kind),methods=['POST'])
     @bp.after_request
     def no_cache(response):
         response.headers['Cache-Control']='no-store'

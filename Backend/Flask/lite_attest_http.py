@@ -136,7 +136,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
                             and request.endpoint in {'lite_service_http.prepare','lite_service_http.run','lite_service_http.status','lite_service_http.recover','lite_service_http.resubmit'})
             purchase_only=(request.path in purchase_paths and request.endpoint in {'lite_native_purchase.context','lite_native_purchase.confirm'})
             account_only=(request.path in account_paths and request.endpoint in {'lite_account_identity.challenge','lite_account_identity.confirm','lite_account_identity.status','lite_account_identity.logout','lite_account_identity.renew'})
-            deletion_only=(request.path in deletion_paths and request.endpoint in {'lite_account_deletion.request','lite_account_deletion.status'})
+            deletion_only=(request.path in deletion_paths and request.endpoint in {'lite_account_deletion.request','lite_account_deletion.status','lite_account_deletion.reauth_challenge','lite_account_deletion.reauth_confirm'})
             account_only=account_only or deletion_only
             service_only=service_only or purchase_only or account_only
             if not ((request.method == 'POST' and (control or request.path in POST_PATHS or service_only)) or

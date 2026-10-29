@@ -28,7 +28,7 @@ enum LiteAttestRequest {
                          "/api/v1/lite/service/prepare", "/api/v1/lite/service/run", "/api/v1/lite/service/status", "/api/v1/lite/service/recover", "/api/v1/lite/service/resubmit",
                          "/api/v1/lite/purchase/context", "/api/v1/lite/purchase/confirm",
                          "/api/v1/lite/account/challenge", "/api/v1/lite/account/confirm", "/api/v1/lite/account/status", "/api/v1/lite/account/logout", "/api/v1/lite/account/renew",
-                         "/api/v1/lite/account/deletion/request", "/api/v1/lite/account/deletion/status"]
+                         "/api/v1/lite/account/deletion/request", "/api/v1/lite/account/deletion/status", "/api/v1/lite/account/deletion/reauth/challenge", "/api/v1/lite/account/deletion/reauth/confirm"]
         let epochDelete = path.hasPrefix("/api/v1/lite/data/" + installation + "/") &&
             matches(String(path.dropFirst(("/api/v1/lite/data/" + installation + "/").count)), "[0-9a-f]{32}")
         guard (method == "POST" && postPaths.contains(path)) ||

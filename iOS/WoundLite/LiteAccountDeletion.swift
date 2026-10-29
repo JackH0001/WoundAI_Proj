@@ -1,6 +1,25 @@
 import Foundation
 
-enum LiteDeletionFailure: Error { case invalid, unavailable, identity, conflict }
+enum LiteDeletionFailure: Error { case invalid, unavailable, identity, conflict, expired }
+
+struct LiteDeletionChallenge: Codable, Equatable {
+    let v:Int,installation:String,operation:String,reauth_operation:String,account_sha256:String
+    let nonce:String,state:String,created_at:Int,expires_at:Int,audience:String,purpose:String
+    var appleChallenge:LiteAccountChallenge {
+        LiteAccountChallenge(v:v,installation:installation,operation:reauth_operation,nonce:nonce,state:state,
+            created_at:created_at,expires_at:expires_at,audience:audience,authorization_code_required:false)
+    }
+    func validate(_ context:LiteDeletionContext,operation:String,attempt:String)throws {
+        try context.validate();try appleChallenge.validate()
+        guard purpose=="continue_deletion",installation==context.installation,account_sha256==context.account,
+              self.operation==operation,LiteServiceBytes.hex(operation,32),reauth_operation==attempt
+        else{throw LiteDeletionFailure.conflict}
+    }
+}
+struct LiteDeletionRecovery:Codable,Equatable {
+    let attempt:String
+    var challenge:LiteDeletionChallenge?,identityToken:String?
+}
 
 struct LiteDeletionContext: Codable, Equatable {
     let origin: String, installation: String, account: String
@@ -42,12 +61,22 @@ struct LiteDeletionReceipt: Codable, Equatable {
 @MainActor protocol LiteDeletionIdentity {
     func deletionContext() async throws ->LiteDeletionContext
     func suspendForDeletion(_ context:LiteDeletionContext,operation:String) async throws
+    func authenticateDeletion(_ challenge:LiteDeletionChallenge,context:LiteDeletionContext) async throws ->String
+}
+extension LiteDeletionIdentity {
+    func authenticateDeletion(_ challenge:LiteDeletionChallenge,context:LiteDeletionContext)async throws->String {throw LiteDeletionFailure.unavailable}
 }
 @MainActor protocol LiteAccountDeletionService {
     var origin:URL {get}
     func installation() async throws ->String
     func request(operation:String,installation:String) async throws ->LiteDeletionReceipt
     func status(operation:String,installation:String) async throws ->LiteDeletionReceipt
+    func deletionChallenge(context:LiteDeletionContext,operation:String,attempt:String)async throws->LiteDeletionChallenge
+    func confirmDeletion(_ challenge:LiteDeletionChallenge,context:LiteDeletionContext,identityToken:String)async throws->LiteDeletionReceipt
+}
+extension LiteAccountDeletionService {
+    func deletionChallenge(context:LiteDeletionContext,operation:String,attempt:String)async throws->LiteDeletionChallenge {throw LiteDeletionFailure.unavailable}
+    func confirmDeletion(_ challenge:LiteDeletionChallenge,context:LiteDeletionContext,identityToken:String)async throws->LiteDeletionReceipt {throw LiteDeletionFailure.unavailable}
 }
 
 /// Privacy transport is deliberately independent of research opt-in and normal
@@ -61,7 +90,7 @@ struct LiteSignedDeletionTransport: LiteAuthenticatedTransport {
     }
     func send(_ request:URLRequest,installation:String) async throws ->(Data,HTTPURLResponse) {
         guard try await self.installation()==installation,request.httpMethod=="POST",
-              ["request","status"].map({"/api/v1/lite/account/deletion/"+$0}).contains(request.url?.path ?? "")
+              ["request","status","reauth/challenge","reauth/confirm"].map({"/api/v1/lite/account/deletion/"+$0}).contains(request.url?.path ?? "")
         else{throw LiteDeletionFailure.invalid}
         return try await client.send(request,installation:installation,requestID:UUID(),allowSending:allowPrivacyRequest)
     }
@@ -80,19 +109,39 @@ struct LiteSignedDeletionTransport: LiteAuthenticatedTransport {
         guard LiteServiceBytes.hex(operation,32),try await installation()==owner else{throw LiteDeletionFailure.conflict}
         var body=["anon_id":owner,"operation":operation]
         if kind=="request" {body["confirmation"]="delete_account"}
+        let data=try await post(kind,owner:owner,body:body,expected:202)
+        let r=try JSONDecoder().decode(LiteDeletionReceipt.self,from:data);try r.validate(owner:owner,operation:operation);return r
+    }
+    func deletionChallenge(context:LiteDeletionContext,operation:String,attempt:String)async throws->LiteDeletionChallenge {
+        try context.validate();guard context.origin==origin.absoluteString,LiteServiceBytes.hex(operation,32),LiteServiceBytes.hex(attempt,32) else{throw LiteDeletionFailure.invalid}
+        let data=try await post("reauth/challenge",owner:context.installation,body:["anon_id":context.installation,"operation":operation,
+            "reauth_operation":attempt,"account_sha256":context.account,"confirmation":"continue_deletion"],expected:200)
+        let c=try JSONDecoder().decode(LiteDeletionChallenge.self,from:data);try c.validate(context,operation:operation,attempt:attempt);return c
+    }
+    func confirmDeletion(_ challenge:LiteDeletionChallenge,context:LiteDeletionContext,identityToken:String)async throws->LiteDeletionReceipt {
+        try challenge.validate(context,operation:challenge.operation,attempt:challenge.reauth_operation)
+        guard context.origin==origin.absoluteString,(1...16000).contains(identityToken.utf8.count) else{throw LiteDeletionFailure.invalid}
+        let data=try await post("reauth/confirm",owner:context.installation,body:["anon_id":context.installation,"operation":challenge.operation,
+            "reauth_operation":challenge.reauth_operation,"account_sha256":context.account,"state":challenge.state,"identity_token":identityToken],expected:202)
+        let r=try JSONDecoder().decode(LiteDeletionReceipt.self,from:data);try r.validate(owner:context.installation,operation:challenge.operation);return r
+    }
+    private func post(_ kind:String,owner:String,body:[String:String],expected:Int)async throws->Data {
+        guard try await installation()==owner else{throw LiteDeletionFailure.conflict}
         var req=URLRequest(url:origin.appendingPathComponent("api/v1/lite/account/deletion/"+kind));req.httpMethod="POST"
         req.setValue("application/json",forHTTPHeaderField:"Content-Type");req.httpBody=try JSONSerialization.data(withJSONObject:body,options:[.sortedKeys]);req.timeoutInterval=30
         let(data,response)=try await transport.send(req,installation:owner)
         guard try await installation()==owner,response.url==req.url,data.count<=20000 else{throw LiteDeletionFailure.invalid}
         if response.statusCode==401 {throw LiteDeletionFailure.identity}
-        guard response.statusCode==202 else{throw LiteDeletionFailure.unavailable}
-        let r=try JSONDecoder().decode(LiteDeletionReceipt.self,from:data);try r.validate(owner:owner,operation:operation);return r
+        if response.statusCode==410 {throw LiteDeletionFailure.expired}
+        guard response.statusCode==expected else{throw LiteDeletionFailure.unavailable}
+        return data
     }
 }
 
 struct LiteAccountDeletionCheckpoint: Codable, Equatable {
     let version:Int,context:LiteDeletionContext,operation:String,createdAt:Int
     var receipt:LiteDeletionReceipt?
+    var recovery:LiteDeletionRecovery?
     static func key(origin:String,owner:String)->String {
         String(LiteServiceBytes.hash(Data((origin+"\0"+owner+"\0account-deletion").utf8)).prefix(32))
     }
@@ -100,6 +149,13 @@ struct LiteAccountDeletionCheckpoint: Codable, Equatable {
         try context.validate()
         guard version==1,LiteServiceBytes.hex(operation,32),createdAt>=0 else{throw LiteDeletionFailure.invalid}
         try receipt?.validate(owner:context.installation,operation:operation)
+        if let r=recovery {
+            guard receipt==nil,LiteServiceBytes.hex(r.attempt,32) else{throw LiteDeletionFailure.invalid}
+            try r.challenge?.validate(context,operation:operation,attempt:r.attempt)
+            if let token=r.identityToken {
+                guard r.challenge != nil,(1...16000).contains(token.utf8.count) else{throw LiteDeletionFailure.invalid}
+            }
+        }
     }
 }
 
@@ -150,17 +206,89 @@ struct LiteAccountDeletionCheckpoint: Codable, Equatable {
             record=current
             try await identity.suspendForDeletion(current.context,operation:current.operation)
             let reply:LiteDeletionReceipt
-            if current.receipt==nil {reply=try await service.request(operation:current.operation,installation:owner)}
+            if current.receipt==nil {reply=try await pendingReply(current)}
             else {reply=try await service.status(operation:current.operation,installation:owner)}
             try reply.validate(owner:owner,operation:current.operation,previous:current.receipt)
             guard reply.requested_at<=Int(now().timeIntervalSince1970)+60 else{throw LiteDeletionFailure.invalid}
-            current.receipt=reply;_=try await save(owner,old,current);needsReview=false;identityRequired=false;describe()
+            current.receipt=reply;current.recovery=nil;_=try await save(owner,old,current);needsReview=false;identityRequired=false;describe()
         } catch LiteDeletionFailure.identity {
             identityRequired=true
-            message="雲端尚未確認刪帳：身分需要重新核對。本機要求與紀錄保留，一般服務保持暫停；目前驗收版尚未接通刪帳專用身分復原，請勿反覆重試或刪除 App。"
+            message="雲端尚未確認刪帳。請按「核對身分並繼續原刪帳要求」，使用原 Apple 帳號核對。原要求與紀錄保留，一般服務保持暫停。"
+        } catch LiteDeletionFailure.expired {
+            identityRequired=true;message="這次身分核對已逾時。請按「核對身分並繼續原刪帳要求」重新核對；仍會沿用同一筆刪帳要求。"
         } catch {
             message="刪帳處理尚未確認完成。原要求與手機紀錄保留；請按「核對原刪帳進度」，不會另建要求。"
         }
+    }
+    private func pendingReply(_ r:LiteAccountDeletionCheckpoint)async throws->LiteDeletionReceipt {
+        do {return try await service.request(operation:r.operation,installation:r.context.installation)}
+        catch LiteDeletionFailure.identity {
+            if let c=r.recovery?.challenge,let token=r.recovery?.identityToken {
+                return try await service.confirmDeletion(c,context:r.context,identityToken:token)
+            }
+            throw LiteDeletionFailure.identity
+        }
+    }
+    /// Only this explicit button may open Apple UI. Retry/reload never prompts,
+    /// changes the original deletion ID, or restores the general service login.
+    func reauthenticate()async {
+        guard !busy else{return};busy=true;defer{busy=false}
+        do {
+            let owner=try await service.installation();let(raw,r)=try await read(owner)
+            guard var current=r,var old=raw,current.receipt==nil else{return}
+            record=current;try await identity.suspendForDeletion(current.context,operation:current.operation)
+            // A server may already have accepted the original request/proof.
+            do {
+                let reply=try await pendingReply(current)
+                try reply.validate(owner:owner,operation:current.operation)
+                guard reply.requested_at<=Int(now().timeIntervalSince1970)+60 else{throw LiteDeletionFailure.invalid}
+                current.receipt=reply;current.recovery=nil;_=try await save(owner,old,current)
+                identityRequired=false;describe();return
+            } catch LiteDeletionFailure.identity {} catch LiteDeletionFailure.expired {}
+            if current.recovery==nil || (current.recovery?.challenge?.expires_at ?? Int.max)<=Int(now().timeIntervalSince1970) {
+                current.recovery=LiteDeletionRecovery(attempt:UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased())
+                old=try await save(owner,old,current) // persist attempt before network / Apple UI
+            }
+            guard var recovery=current.recovery else{throw LiteDeletionFailure.invalid}
+            if recovery.challenge==nil {
+                let c=try await service.deletionChallenge(context:current.context,operation:current.operation,attempt:recovery.attempt)
+                try c.validate(current.context,operation:current.operation,attempt:recovery.attempt)
+                recovery.challenge=c;current.recovery=recovery;old=try await save(owner,old,current)
+            }
+            guard let c=recovery.challenge,c.created_at<=Int(now().timeIntervalSince1970)+60,c.expires_at>Int(now().timeIntervalSince1970) else{throw LiteDeletionFailure.expired}
+            if recovery.identityToken==nil {
+                recovery.identityToken=try await identity.authenticateDeletion(c,context:current.context)
+                current.recovery=recovery;old=try await save(owner,old,current) // protected journal; no code or refresh token
+            }
+            guard let token=recovery.identityToken else{throw LiteDeletionFailure.invalid}
+            let reply=try await service.confirmDeletion(c,context:current.context,identityToken:token)
+            try reply.validate(owner:owner,operation:current.operation)
+            guard reply.requested_at<=Int(now().timeIntervalSince1970)+60 else{throw LiteDeletionFailure.invalid}
+            current.receipt=reply;current.recovery=nil;_=try await save(owner,old,current)
+            needsReview=false;identityRequired=false;describe()
+        } catch LiteAccountFailure.cancelled {
+            identityRequired=true;message="已取消這次身分核對；原刪帳要求與手機紀錄保留。一般服務仍暫停，可稍後再核對。"
+        } catch LiteDeletionFailure.expired {
+            await clearRecovery(expired:true)
+            identityRequired=true;message="身分核對已逾時，請再次按核對身分。原刪帳要求不變，不會恢復一般服務。"
+        } catch LiteDeletionFailure.identity {
+            await clearRecovery(expired:false)
+            identityRequired=true;message="尚未確認為原 Apple 帳號，請重新核對身分。原刪帳要求不變，沒有恢復服務或建立新帳號。"
+        } catch {
+            identityRequired=true;message="尚未確認原帳號身分或雲端受理。請保留原要求，先核對原刪帳進度；必要時使用原 Apple 帳號重新核對。手機紀錄保留。"
+        }
+    }
+    private func clearRecovery(expired:Bool)async {
+        // Clear only the exact checkpoint this UI owns. Another task's newer
+        // proof/receipt must survive a stale error response.
+        guard let expected=record,expected.receipt==nil else{return}
+        do {
+            let owner=try await service.installation();let(raw,r)=try await read(owner)
+            guard r==expected,let raw else{return}
+            var next=expected
+            if expired{next.recovery=nil}else{next.recovery?.identityToken=nil}
+            _=try await save(owner,raw,next)
+        } catch {needsReview=true}
     }
     private func describe() {
         guard let r=record else{return}

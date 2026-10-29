@@ -241,6 +241,24 @@ struct LiteAccountCheckpoint:Codable,Equatable {
         _=try await save(owner,old,next)
         message="刪帳要求處理中；一般服務已暫停，請至刪帳頁核對原進度。手機紀錄保留。"
     }
+    func authenticateDeletion(_ challenge:LiteDeletionChallenge,context:LiteDeletionContext)async throws->String {
+        guard !busy else{throw LiteAccountFailure.conflict};busy=true;defer{busy=false}
+        try challenge.validate(context,operation:challenge.operation,attempt:challenge.reauth_operation)
+        try await suspendForDeletion(context,operation:challenge.operation)
+        let started=generation
+        let key=LiteAccountDeletionCheckpoint.key(origin:context.origin,owner:context.installation)
+        guard let saved=try await journal.load(key) else{throw LiteAccountFailure.conflict}
+        let intent=try JSONDecoder().decode(LiteAccountDeletionCheckpoint.self,from:saved);try intent.validate()
+        guard intent.context==context,intent.operation==challenge.operation,intent.receipt==nil,
+              intent.recovery?.challenge==challenge,challenge.expires_at>Int(now().timeIntervalSince1970) else{throw LiteAccountFailure.conflict}
+        let credential=try await provider.signIn(challenge.appleChallenge)
+        try credential.validate(challenge.appleChallenge,requireAuthorizationCode:false)
+        guard generation==started,try await service.installation()==context.installation,
+              try await journal.load(key)==saved else{throw LiteAccountFailure.conflict}
+        // Return only the ID token. Never exchange/persist a new authorization
+        // code, create a refresh grant, or change the ordinary session state.
+        return credential.identityToken
+    }
     private func read(_ owner:String)async throws ->(Data?,LiteAccountCheckpoint?) {
         let data=try await journal.load(key(owner));guard let data else{return(nil,nil)}
         let r=try JSONDecoder().decode(LiteAccountCheckpoint.self,from:data);try r.validate()

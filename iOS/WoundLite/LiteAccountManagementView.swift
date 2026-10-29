@@ -43,6 +43,12 @@ struct LiteAccountManagementView:View {
                     Button("核對原刪帳進度") {Task{await deletion.retry()}}
                         .disabled(deletion.busy).accessibilityIdentifier("accountDeletionRetry")
                 }
+                if let pending=deletion.record,pending.receipt==nil,!deletion.needsReview {
+                    Button("核對身分並繼續原刪帳要求") {Task{await deletion.reauthenticate()}}
+                        .disabled(deletion.busy || identity.busy).accessibilityIdentifier("accountDeletionReauthenticate")
+                    Text("只有按此按鈕才會開啟 Apple 身分核對；請使用原帳號。這不會恢復雲端服務、研究上傳或訂閱額度。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
             }
             Section("保留與訂閱") {
                 Text("手機照片與紀錄保留。研究資料的撤回請使用「資料與撤回」，不會因重新登入而自動恢復研究。")

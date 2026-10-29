@@ -217,14 +217,14 @@ final class LiteAttestClientTests: XCTestCase {
     func testDeletionPostsUsePrivacyChallengesButOrdinaryAccountPostsDoNot() async throws {
         let device=AttestDeviceDouble(), vault=AttestMemory(), http=AttestHTTPDouble()
         let c=try client(device,vault,http), owner=try await c.registeredInstallation()
-        for suffix in ["deletion/request", "deletion/status", "status"] {
+        for suffix in ["deletion/request", "deletion/status", "deletion/reauth/challenge", "deletion/reauth/confirm", "status"] {
             var r=request("/api/v1/lite/account/"+suffix,body:Data("{}".utf8))
             r.setValue("application/json",forHTTPHeaderField:"Content-Type")
             _=try await c.send(r,installation:owner,requestID:UUID(),allowSending:{true})
         }
         let purposes=await http.purposes()
-        XCTAssertEqual(purposes,["register","withdraw","withdraw","assert"])
-        let calls=await http.snapshot();XCTAssertEqual(calls.1.count,3)
+        XCTAssertEqual(purposes,["register","withdraw","withdraw","withdraw","withdraw","assert"])
+        let calls=await http.snapshot();XCTAssertEqual(calls.1.count,5)
     }
     func testRegistrationPersistsKeyAndDropsAcknowledgedProof() async throws {
         let device = AttestDeviceDouble(), vault = AttestMemory(), http = AttestHTTPDouble()

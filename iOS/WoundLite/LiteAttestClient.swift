@@ -302,7 +302,7 @@ actor LiteAttestClient {
         // Only the two reviewed deletion POSTs share the privacy budget.
         // Other POSTs must never bypass ordinary service admission.
         let privacy = method == "DELETE" || (method == "POST" &&
-            ["/api/v1/lite/account/deletion/request", "/api/v1/lite/account/deletion/status"].contains(url.path))
+            ["/api/v1/lite/account/deletion/request", "/api/v1/lite/account/deletion/status", "/api/v1/lite/account/deletion/reauth/challenge", "/api/v1/lite/account/deletion/reauth/confirm"].contains(url.path))
         let c = try await challenge(key: value.key, purpose: privacy ? "withdraw" : "assert")
         let bytes = try LiteAttestRequest.clientData(audience: audience, installation: installation,
             keyID: keyData(value.key), challenge: Data(base64Encoded: c.challenge)!, requestID: requestID.uuidString.lowercased(),

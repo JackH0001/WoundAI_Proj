@@ -119,8 +119,9 @@ jobs:
           python tools/lite_refresh_revocation_race_probe.py --output evidence/refresh-revocation-race.json
       - name: Account deletion intake and bounded revocation resume (synthetic only)
         run: |
-          python -m unittest -v test_lite_account_deletion > evidence/account-deletion-tests.log 2>&1
+          python -m unittest -v test_lite_account_deletion test_lite_deletion_identity > evidence/account-deletion-tests.log 2>&1
           python tools/lite_account_deletion_probe.py --output evidence/account-deletion-probe.json
+          python tools/lite_deletion_identity_probe.py --output evidence/deletion-identity-probe.json
       - name: Synthetic verified uploads, revision, reconsent and loopback
         run: >-
           python -m unittest -v test_lite_quota test_lite_reconsent
