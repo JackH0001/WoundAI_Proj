@@ -18,10 +18,10 @@ import test_lite_native_purchase as native
 
 
 class Fixture:
-    def __init__(self, host):
+    def __init__(self, host, service_catalog=False):
         self.g = GrantFixture(host); self.f = self.g.f; old = self.f.b
         self.lifecycle = AccountLifecycle(store=SQLiteStateStore(self.f.h.f.root/'lifecycle.sqlite'),
-            audit_store=SQLiteStateStore(self.f.h.f.root/'lifecycle-audit.sqlite'),binding=self.g.a.binding,clock=self.f.now)
+            audit_store=SQLiteStateStore(self.f.h.f.root/'lifecycle-audit.sqlite'),binding=self.g.a.binding,clock=self.f.now,service_catalog=service_catalog)
         # Start an explicitly new synthetic vault. Production cannot simply
         # turn this on over an old vault without an inventory migration.
         self.g.store=SQLiteStateStore(self.f.h.f.root/'indexed-grant-vault.sqlite')
@@ -374,7 +374,7 @@ class ClosureHTTPTests(unittest.TestCase):
         self.h=self.base.h;self.g=self.base.g;b=self.base.bridge;g=self.g
         root=self.h.f.h.f.root
         self.lifecycle=AccountLifecycle(store=SQLiteStateStore(root/'http-lifecycle.sqlite'),
-            audit_store=SQLiteStateStore(root/'http-lifecycle-audit.sqlite'),binding=g.a.binding,clock=self.h.f.now)
+            audit_store=SQLiteStateStore(root/'http-lifecycle-audit.sqlite'),binding=g.a.binding,clock=self.h.f.now,service_catalog=getattr(self,"service_catalog",False))
         g.store=SQLiteStateStore(root/'http-indexed-vault.sqlite')
         g.a=AppleGrantAuthority(provider=g.provider,verifier=g.f.verifier,store=g.store,audit_store=g.audit,
             cipher=g.cipher,namespace=b.namespace,identity_key=b.secret,lifecycle=self.lifecycle)

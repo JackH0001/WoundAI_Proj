@@ -74,6 +74,7 @@ class ServiceAccounts:
         if not isinstance(lifecycle,AccountLifecycle):raise ValueError('trusted account lifecycle required')
         k=hashlib.sha256(b'lite/service-accounts/lifecycle/1').digest()
         expected=dict(v=1,binding=lifecycle.binding)
+        if lifecycle.service_catalog: expected.update(v=2,service_catalog='linked-operations/1')
         self.store.compare_exchange(k,0,expected)
         row=self.store.load(k)
         if row is None or row[1]!=expected:raise StateUnavailable('service lifecycle binding differs')
@@ -222,10 +223,21 @@ class ServiceOperations:
     def key(subject,operation):
         return hashlib.sha256(('lite/service-op/1\0'+_subject(subject)+'\0'+_hex(operation,32)).encode()).digest()
 
+    def admit_operation(self,subject,operation):
+        """Catalog slot wins the SAME account CAS as closure, before any result write."""
+        self.accounts.require_active(dict(subject=subject))
+        life=self.accounts.lifecycle
+        if life is not None and life.service_catalog:
+            life.services.reserve(subject[6:],operation)
+
     def load(self,subject,operation):
         row=self.store.load(self.key(subject,operation))
         if row is None:return None
         revision,v=row
+        if type(v) is dict and type(v.get('v')) is int and v['v']==3:
+            from lite_service_disposition import validate_seal
+            validate_seal(v,subject,operation)
+            return row
         try:
             fields={'v','subject_hash','operation','day','created','expires','image_sha256','model','digest','worker','result','result_sha256'}
             if (type(v) is not dict or type(v.get('v')) is not int or v['v'] not in (1,2)
@@ -251,7 +263,11 @@ class ServiceOperations:
     def _require(self,subject,operation):
         row=self.load(subject,operation)
         if row is None:raise OperationUnknown('unknown operation')
-        if row[1]['v']==2 or self.now()>=row[1]['expires']:raise OperationExpired('result read window expired; do not silently rerun')
+        if row[1]['v'] in (2,3) or self.now()>=row[1]['expires']:raise OperationExpired('result read window expired; do not silently rerun')
+        life=self.accounts.lifecycle
+        if life is not None and life.service_catalog:
+            if not subject.startswith('apple-') or life.services.member(subject[6:],operation) is None:
+                raise StateUnavailable('existing service operation lacks verified catalog membership')
         return row
 
     def prepare(self,installation,operation,image_sha256):
@@ -263,6 +279,7 @@ class ServiceOperations:
             quota=self.ledger.snapshot(subject,now//86400,grant)
             if quota['attempts']>=quota['attempt_limit']:raise UsageLimit('attempt_quota',(now//86400+1)*86400-now)
             if quota['remaining']==0:raise UsageLimit('success_quota',(now//86400+1)*86400-now)
+            self.admit_operation(subject,operation)
             value=dict(v=1,subject_hash=digest(subject),operation=operation,day=now//86400,created=now,
                 expires=now+RESULT_TTL,image_sha256=image_sha256,model=self.model_version,
                 digest=digest(['service-only/v1',image_sha256,self.model_version]),worker=secrets.token_hex(16),
@@ -310,6 +327,7 @@ class ServiceOperations:
             reply['cancel_reason'] = ('reservation_expired' if self.ledger.expired_reservation_proof(ticket)
                 else 'preflight_rejected' if receipt['result_sha256']==digest(['preflight_rejected',v['image_sha256']])
                 else 'cancelled_unknown')
+        self.accounts.require_active(account)
         return reply
 
     def run(self,installation,operation,raw):

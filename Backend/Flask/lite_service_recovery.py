@@ -81,8 +81,9 @@ class ServiceRecovery:
         if proof is None or proof!=value['fence']:
             raise StateUnavailable('parent fence no longer confirmed')
         new=value['successor']
+        self.ops.admit_operation(subject,new['operation'])
         self.ops.store.compare_exchange(self.ops.key(subject,new['operation']),0,new)
-        observed=self.ops.load(subject,new['operation'])
+        observed=self.ops._require(subject,new['operation'])
         if observed is None:raise StateUnavailable('successor creation unconfirmed')
         # Results may have progressed; immutable input/worker/time cannot change.
         if any(observed[1][k]!=new[k] for k in new if k not in ('v','result','result_sha256')):

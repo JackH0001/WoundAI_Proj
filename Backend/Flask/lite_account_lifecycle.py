@@ -19,7 +19,7 @@ class AccountLifecycle:
     immutable = staticmethod(SubscriptionRuntime.immutable)
     MAX_GRANTS = 10000
 
-    def __init__(self, *, store, audit_store, binding, clock):
+    def __init__(self, *, store, audit_store, binding, clock, service_catalog=False):
         if (type(binding) is not dict or set(binding) != {'namespace','issuer','audience','identity_key_sha256'}
                 or not callable(clock)):
             raise ValueError('trusted identity binding required')
@@ -29,10 +29,18 @@ class AccountLifecycle:
         if store is audit_store or (getattr(store,'path',None) is not None
                 and getattr(store,'path',None) == getattr(audit_store,'path',None)):
             raise ValueError('lifecycle and audit stores must be separate')
+        if type(service_catalog) is not bool: raise ValueError("explicit service catalog policy required")
+        self.service_catalog = service_catalog
+        self.version = 2 if service_catalog else 1
         self.store, self.audit, self.binding, self.clock = store, audit_store, dict(binding), clock
         self.scope = digest(self.binding)
-        self.immutable(store, key('account-lifecycle-config',binding['namespace']),
-                       dict(v=1,binding=self.binding,max_grants=self.MAX_GRANTS))
+        config = dict(v=self.version,binding=self.binding,max_grants=self.MAX_GRANTS)
+        if service_catalog: config["service_catalog"] = "linked-operations/1"
+        self.immutable(store, key("account-lifecycle-config",binding["namespace"]),config)
+        self.services = None
+        if service_catalog:
+            from lite_account_service_inventory import AccountServiceInventory
+            self.services = AccountServiceInventory(self)
 
     def now(self):
         n = self.clock()
@@ -48,25 +56,36 @@ class AccountLifecycle:
         if row is None: return None
         c = row[1]
         try:
-            if (set(c) != {'v','scope','person','phase','head','count','closure'}
-                    or type(c['v']) is not int or c['v'] != 1 or c['scope'] != self.scope
+            fields = {'v','scope','person','phase','head','count','closure'}
+            if self.service_catalog: fields |= {'service_head','service_count'}
+            if (set(c) != fields
+                    or type(c['v']) is not int or c['v'] != self.version or c['scope'] != self.scope
                     or c['person'] != person or c['phase'] not in ('active','closing')
                     or type(c['count']) is not int or not 0 <= c['count'] <= self.MAX_GRANTS
                     or (c['head'] is None) != (c['count'] == 0)):
                 raise ValueError()
             if c['head'] is not None: _hex(c['head'])
+            if self.service_catalog:
+                if (type(c['service_count']) is not int or not 0 <= c['service_count'] <= self.services.MAX_OPERATIONS
+                        or (c['service_head'] is None) != (c['service_count'] == 0)): raise ValueError()
+                if c['service_head'] is not None: _hex(c['service_head'])
             if c['phase'] == 'active':
                 if c['closure'] is not None: raise ValueError()
             else:
                 d = c['closure']
                 if (type(d) is not dict or set(d) != {'operation','requester','requested_at','inventory_sha256'}
                         or type(d['requested_at']) is not int or not 0 <= d['requested_at'] <= self.now()
-                        or d['inventory_sha256'] != digest([self.scope,person,c['head'],c['count']])):
+                        or d['inventory_sha256'] != self.inventory_digest(c)):
                     raise ValueError()
                 _hex(d['operation'],32); _subject(d['requester'])
         except (TypeError,ValueError,KeyError):
             raise StateUnavailable('account lifecycle corrupt; never reset') from None
         return row
+
+    def inventory_digest(self, root):
+        value = [self.scope,root['person'],root['head'],root['count']]
+        if self.service_catalog: value += ['service-catalog/1',root['service_head'],root['service_count']]
+        return digest(value)
 
     def initialize_new(self, person, *, existing_account):
         """Only trusted verified enrollment, before the first grant exchange.
@@ -78,7 +97,8 @@ class AccountLifecycle:
         row = self._read(person)
         if row is None:
             if existing_account: raise StateUnavailable('existing account requires verified grant inventory')
-            initial = dict(v=1,scope=self.scope,person=person,phase='active',head=None,count=0,closure=None)
+            initial = dict(v=self.version,scope=self.scope,person=person,phase='active',head=None,count=0,closure=None)
+            if self.service_catalog: initial.update(service_head=None,service_count=0)
             try: self.store.compare_exchange(self._key(person),0,initial)
             except StateUnavailable: pass
         return self.require_active(person)
@@ -184,7 +204,7 @@ class AccountLifecycle:
                     raise AccountClosing('another account deletion request is already pending')
                 return self.progress(person,installation,operation)
             d = dict(operation=operation,requester=installation,requested_at=self.now(),
-                     inventory_sha256=digest([self.scope,person,c['head'],c['count']]))
+                     inventory_sha256=self.inventory_digest(c))
             try: self.store.compare_exchange(self._key(person),rev,dict(c,phase='closing',closure=d))
             except StateUnavailable: pass
         raise StateUnavailable('account closure unconfirmed; retry saved request')
