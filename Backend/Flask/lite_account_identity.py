@@ -145,7 +145,7 @@ class AccountIdentityBridge:
     Existing installations cannot silently switch people. A separate reviewed
     unlink/account-deletion procedure is required; logout never erases research.
     """
-    def __init__(self, *, runtime, verifier, store, audit_store, namespace, identity_key, events=None, grants=None, renewal=False):
+    def __init__(self, *, runtime, verifier, store, audit_store, namespace, identity_key, events=None, grants=None, renewal=False, lifecycle=None):
         if not isinstance(runtime, SubscriptionRuntime) or not isinstance(verifier, AppleIdentityVerifier):
             raise ValueError('trusted runtime and Apple verifier required')
         _subject(namespace)
@@ -174,6 +174,17 @@ class AccountIdentityBridge:
             self.immutable(store, grant_key, dict(v=1, binding=grants.binding))
         elif store.load(grant_key) is not None:
             raise StateUnavailable('Apple grant custody cannot be silently disabled')
+        self.lifecycle = lifecycle
+        lifecycle_key = key('human-lifecycle-required',namespace)
+        if lifecycle is not None:
+            from lite_account_lifecycle import AccountLifecycle
+            if (not isinstance(lifecycle,AccountLifecycle) or grants is None
+                    or grants.lifecycle is not lifecycle or lifecycle.binding != grants.binding):
+                raise ValueError('matching grant inventory and lifecycle required')
+            self.immutable(store,lifecycle_key,dict(v=1,binding=lifecycle.binding))
+            self.registry.attach_lifecycle(lifecycle)
+        elif store.load(lifecycle_key) is not None:
+            raise StateUnavailable('account lifecycle cannot be silently disabled')
         if type(renewal) is not bool: raise ValueError('explicit renewal policy required')
         self.renewals = None
         renewal_key = key('human-renewal-required', namespace)
@@ -221,6 +232,11 @@ class AccountIdentityBridge:
 
     def challenge(self, installation, operation):
         _hex(operation,32)
+        self._lifecycle_required()
+        if self.lifecycle is not None and self.registry.store.load(self.registry.key(installation)) is not None:
+            a = self.registry.registration(installation)
+            if not a['subject'].startswith('apple-'): raise IdentityRejected('verified Apple account required')
+            self.lifecycle.require_active(a['subject'][6:])
         for _ in range(CAS_ATTEMPTS):
             old = self._read(installation)
             if old and old[1]['operation'] == operation:
@@ -248,6 +264,7 @@ class AccountIdentityBridge:
 
     def confirm(self, installation, operation, signed, state, authorization_code=None):
         _hex(operation,32)
+        self._lifecycle_required()
         if type(signed) is not str or not 1 <= len(signed) <= 16000: raise IdentityRejected('bounded identity required')
         for _ in range(CAS_ATTEMPTS):
             row=self._read(installation)
@@ -261,6 +278,8 @@ class AccountIdentityBridge:
                 claims=self.verifier.verify(signed,c['nonce'])
                 if claims['issued'] < c['created_at']-30: raise IdentityRejected('token predates challenge')
                 identity=hmac.new(self.secret, (self.namespace+'\0'+self.verifier.issuer+'\0'+claims['sub']).encode(),hashlib.sha256).hexdigest()
+                if self.lifecycle is not None:
+                    self.lifecycle.initialize_new(identity,existing_account=self.store.load(key('human-account',identity)) is not None)
                 if self.events is not None:
                     self.events.require_identity(identity, claims['issued'])
                     self.immutable(self.audit, self._authorization_key(installation,operation),
@@ -282,6 +301,7 @@ class AccountIdentityBridge:
                 continue
             if c['token_sha256'] != token_hash or self.now() >= c['session_expires_at']:
                 raise IdentityRejected('saved sign-in differs or expired')
+            if self.lifecycle is not None: self.lifecycle.require_active(c['account']['identity_sha256'])
             if self.grants is not None:
                 self.grants.capture(installation, operation, c['nonce'], signed, authorization_code)
             a=c['account'];proof=digest(['apple-device-binding/1',self.namespace,installation,a])
@@ -305,7 +325,23 @@ class AccountIdentityBridge:
             return self.status(installation)
         raise StateUnavailable('sign-in confirmation raced; keep local evidence')
 
+    def _lifecycle_required(self):
+        if self.lifecycle is None and self.store.load(key('human-lifecycle-required',self.namespace)) is not None:
+            raise StateUnavailable('account lifecycle required by durable policy')
+
+    def begin_account_closure(self, installation, operation):
+        """Coordinator primitive; not exposed as completed deletion in the App."""
+        if self.lifecycle is None: raise IdentityRejected('account lifecycle unavailable')
+        a = self.registry.registration(installation)
+        person = a['subject'][6:] if a['subject'].startswith('apple-') else ''
+        row = self.lifecycle._read(person)
+        if row is not None and row[1]['phase'] == 'closing':
+            return self.lifecycle.progress(person,installation,operation)
+        c = self.require_session(installation)
+        return self.lifecycle.close(c['account']['identity_sha256'],installation,operation)
+
     def _live_session(self, installation):
+        self._lifecycle_required()
         if self.grants is None and self.store.load(key('human-grants-required',self.namespace)) is not None:
             raise StateUnavailable('Apple grant authority required by durable policy')
         if self.events is None and self.store.load(key('human-events-required',self.namespace)) is not None:
@@ -314,6 +350,7 @@ class AccountIdentityBridge:
         if row is None or row[1]['phase']!='active':
             raise IdentityRejected('sign-in required')
         c=row[1]
+        if self.lifecycle is not None: self.lifecycle.require_active(c['account']['identity_sha256'])
         if self.grants is not None:
             self.grants.require(installation, c['operation'], c['account']['identity_sha256'])
         if self.events is not None:

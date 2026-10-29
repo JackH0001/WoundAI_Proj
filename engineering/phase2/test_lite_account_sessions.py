@@ -171,12 +171,16 @@ class RenewalTests(unittest.TestCase):
     def test_event_during_apple_refresh_cannot_restore_service(self):
         f=self.f;f.advance(86401);f.g.hook=lambda _:f.event()
         with self.assertRaises(IdentityRejected):f.renew()
-    def test_revocation_during_refresh_does_not_overwrite_tombstone(self):
+    def test_revocation_during_refresh_waits_for_late_credential(self):
         f=self.f;f.advance(86401)
         def hook(url):
-            if url==TOKEN_URL:f.g.revoke()
+            if url==TOKEN_URL:
+                with self.assertRaises(GrantUncertain):f.g.revoke()
         f.g.hook=hook
-        with self.assertRaises(GrantUncertain):f.renew()
+        with self.assertRaises(IdentityRejected):f.renew()
+        self.assertEqual(f.g.store.load(f.g.grant_key())[1]['phase'],'ready')
+        f.g.hook=lambda _:None
+        self.assertEqual(f.g.revoke()['state'],'apple_token_revoked')
         self.assertEqual(f.g.store.load(f.g.grant_key())[1]['phase'],'revoked')
     def test_wrong_refresh_subject_cannot_authorize(self):
         f=self.f;f.advance(86401);f.g.token=f.f.token(f.c,sub='wrong')

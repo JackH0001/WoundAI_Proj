@@ -60,7 +60,7 @@ class GrantCipher:
 class AppleGrantAuthority:
     immutable = staticmethod(SubscriptionRuntime.immutable)
 
-    def __init__(self, *, provider, verifier, store, audit_store, cipher, namespace, identity_key):
+    def __init__(self, *, provider, verifier, store, audit_store, cipher, namespace, identity_key, lifecycle=None):
         if (not isinstance(provider, AppleOAuthProvider) or not isinstance(verifier, AppleIdentityVerifier)
                 or not isinstance(cipher, GrantCipher) or provider.client_id != verifier.audience
                 or type(identity_key) is not bytes or len(identity_key) != 32):
@@ -74,7 +74,22 @@ class AppleGrantAuthority:
         self.namespace, self._identity_key = namespace, identity_key
         self.binding = dict(namespace=namespace, issuer=verifier.issuer, audience=verifier.audience,
             identity_key_sha256=hashlib.sha256(identity_key).hexdigest())
+        self.lifecycle = lifecycle
+        mode_key = key('apple-grant-inventory-required',namespace)
+        # A previous vault may contain grants from failed/unconfirmed sign-ins,
+        # even when no human-account row exists. Never infer an empty inventory
+        # from only the currently active account/session.
+        if (lifecycle is not None and store.load(mode_key) is None
+                and store.load(key('apple-grant-config',namespace)) is not None):
+            raise StateUnavailable('legacy grant vault requires explicit inventory migration')
         self.immutable(store, key('apple-grant-config', namespace), dict(v=1, binding=self.binding))
+        if lifecycle is not None:
+            from lite_account_lifecycle import AccountLifecycle
+            if not isinstance(lifecycle,AccountLifecycle) or lifecycle.binding != self.binding:
+                raise ValueError('matching account lifecycle required')
+            self.immutable(store,mode_key,dict(v=1,binding=self.binding))
+        elif store.load(mode_key) is not None:
+            raise StateUnavailable('account grant inventory cannot be silently disabled')
         for kid, fingerprint in cipher.fingerprints.items():
             self.immutable(store, key('apple-grant-key', digest([namespace, kid])), dict(v=1, sha256=fingerprint))
 
@@ -104,8 +119,20 @@ class AppleGrantAuthority:
             raise StateUnavailable('grant revocation intent corrupt')
         return row is not None
 
+    def _lifecycle_required(self):
+        if self.lifecycle is None and self.store.load(key('apple-grant-inventory-required',self.namespace)) is not None:
+            raise StateUnavailable('account grant inventory required by durable policy')
+
+    def _active(self, person, identity):
+        self._lifecycle_required()
+        if self.lifecycle is not None:
+            self.lifecycle.require_active(person)
+            if self.lifecycle.member(person,identity) is None:
+                raise StateUnavailable('existing grant requires reviewed inventory backfill')
+
     def _receipt(self, identity, row):
         c = row[1]
+        self._active(c['context']['identity_sha256'],identity)
         if c['phase'] != 'ready' or self._revoking(identity): raise IdentityRejected('Apple grant is not active')
         validation = self._validation(identity)
         if validation is not None and validation[1]['phase'] != 'valid':
@@ -133,6 +160,11 @@ class AppleGrantAuthority:
         claims = self.verifier.verify(signed, nonce)
         person = hmac.new(self._identity_key,
             (self.namespace+'\0'+self.verifier.issuer+'\0'+claims['sub']).encode(), hashlib.sha256).hexdigest()
+        self._lifecycle_required()
+        if self.lifecycle is not None:
+            if self._row(identity) is not None and self.lifecycle.member(person,identity) is None:
+                raise StateUnavailable('existing grant requires reviewed inventory backfill')
+            self.lifecycle.reserve_grant(person,installation,operation)
         context = dict(authority=self.binding, grant_id=identity, code_sha256=digest(authorization_code),
             token_sha256=digest(signed), identity_sha256=person, issued_at=claims['issued'])
         if self._revoking(identity): raise IdentityRejected('Apple grant revoked')
@@ -150,6 +182,7 @@ class AppleGrantAuthority:
             return self.capture(installation, operation, nonce, signed, authorization_code)
         # Do not dispatch if a revocation won after the claim.
         if self._revoking(identity): raise IdentityRejected('Apple grant revocation pending')
+        self._active(person,identity)
         row = self._row(identity)
         if row is None or row[1] != claimed: raise StateUnavailable('grant claim unconfirmed')
         try:
@@ -221,15 +254,45 @@ class AppleGrantAuthority:
             raise StateUnavailable('Apple validation concurrent; retry saved renewal')
         current=self._validation(identity)
         if current is None or current[1]!=claimed: raise StateUnavailable('Apple validation claim unconfirmed')
-        if self._revoking(identity): raise IdentityRejected('grant revocation pending')
+        if self._revoking(identity):
+            self.store.compare_exchange(k,current[0],dict(claimed,phase='rejected'))
+            raise IdentityRejected('grant revocation pending')
+        try: self._active(person,identity)
+        except Exception:
+            # No external refresh was dispatched; release this validation claim
+            # so closure can still revoke the already captured credential.
+            self.store.compare_exchange(k,current[0],dict(claimed,phase='rejected'))
+            raise
         tokens=self.cipher.open(row[1]['envelope'],row[1]['context'])
         try:
             updated=self.provider.refresh(tokens['refresh_token'])
+        except GrantRejected:
+            self.store.compare_exchange(k,current[0],dict(claimed,phase='rejected'))
+            raise
+        except Exception:
+            self.store.compare_exchange(k,current[0],dict(claimed,phase='uncertain'))
+            raise GrantUncertain('Apple refresh unconfirmed; explicit sign-in required') from None
+        # Preserve a returned credential even if identity validation later fails.
+        # Otherwise revoking only the old token could falsely appear complete.
+        # This encrypted response is part of future vault-version disposition;
+        # it is not a renewal authorization or a research/audit payload.
+        output_context=dict(grant_context=row[1]['context'],checked_at=n)
+        output_key=key('apple-grant-refresh-output',digest([identity,n]))
+        try:
+            output=dict(v=1,context=output_context,envelope=self.cipher.seal(updated,output_context))
+            try:self.store.compare_exchange(output_key,0,output)
+            except StateUnavailable:pass
+            recorded=self.store.load(output_key)
+            if (recorded is None or set(recorded[1])!={'v','context','envelope'}
+                    or type(recorded[1]['v']) is not int or recorded[1]['v']!=1
+                    or recorded[1]['context']!=output_context
+                    or self.cipher.open(recorded[1]['envelope'],output_context)!=updated):
+                raise StateUnavailable('refresh output persistence unconfirmed')
             claims=self.verifier.verify_refresh(updated['id_token'],nonce,row[1]['context']['issued_at'])
             hashed=hmac.new(self._identity_key,(self.namespace+'\0'+self.verifier.issuer+'\0'+claims['sub']).encode(),hashlib.sha256).hexdigest()
             if not hmac.compare_digest(hashed,person): raise GrantRejected('Apple refresh subject differs')
         except IdentityRejected:
-            self.store.compare_exchange(k,current[0],dict(claimed,phase='rejected'))
+            self.store.compare_exchange(k,current[0],dict(claimed,phase='uncertain'))
             raise GrantRejected('Apple refresh rejected; explicit sign-in required') from None
         except Exception:
             self.store.compare_exchange(k,current[0],dict(claimed,phase='uncertain'))
@@ -242,7 +305,6 @@ class AppleGrantAuthority:
         saved=self._row(identity)
         if saved is None or saved[1]!=stored:
             raise GrantUncertain('refreshed credential persistence unconfirmed')
-        if self._revoking(identity): raise IdentityRejected('grant revocation pending')
         valid=dict(claimed,phase='valid')
         self.immutable(self.audit,key('apple-grant-validated',digest([identity,n])),valid)
         try:self.store.compare_exchange(k,current[0],valid)
@@ -267,6 +329,9 @@ class AppleGrantAuthority:
                 receipt = dict(v=1, state='apple_token_revoked', grant_id=identity)
                 self.immutable(self.audit, key('apple-grant-revoked', identity), receipt)
                 return receipt
+            validation = self._validation(identity)
+            if validation is not None and validation[1]['phase'] in ('validating','uncertain'):
+                raise GrantUncertain('refresh outcome must be resolved before confirmed revocation')
             if c['envelope'] is None: raise GrantUncertain('exchange has no confirmed token; revocation pending')
             tokens = self.cipher.open(c['envelope'], c['context'])
             self.provider.revoke(tokens['refresh_token'])

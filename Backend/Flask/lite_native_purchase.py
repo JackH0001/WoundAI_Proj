@@ -28,6 +28,7 @@ class NativePurchaseBridge:
 
     def context(self,installation,operation):
         a=self.registry.registration(installation)
+        self.registry.require_active(a)
         k=self._key(installation,operation);old=self.store.load(k);p=self.authority.policy
         self.runtime._policy(self.runtime.links.active)
         claim=self.runtime.store.load(self.runtime._account_key(a))
@@ -87,7 +88,9 @@ class NativePurchaseBridge:
                     or r.get('product_id')!=p.product or r.get('environment')!=p.environment):
                 raise UsageConflict('receipt already belongs to another account')
             _hex(r['association_sha256'])
-            self.runtime.ready(self.registry.registration(installation));return dict(r)
+            a=self.registry.registration(installation)
+            self.registry.require_active(a)
+            self.runtime.ready(a);return dict(r)
         # Current Server API verification in stable transition validates ownership
         # and never grants quota from this client JWS alone. Historical restores
         # keep their old binding; fresh quota admission still queries Apple.

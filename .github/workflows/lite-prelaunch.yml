@@ -112,6 +112,11 @@ jobs:
           python -m unittest -v test_lite_review_portal test_lite_review_human
           test_lite_review_executor test_plan_lite_review_human test_medical_consent_operations
           > evidence/review-operations-tests.log 2>&1
+      - name: Account grant inventory and closure races (synthetic only)
+        run: |
+          python -m unittest -v test_lite_account_lifecycle > evidence/account-closure-tests.log 2>&1
+          python tools/lite_account_closure_probe.py --output evidence/account-closure-probe.json
+          python tools/lite_refresh_revocation_race_probe.py --output evidence/refresh-revocation-race.json
       - name: Synthetic verified uploads, revision, reconsent and loopback
         run: >-
           python -m unittest -v test_lite_quota test_lite_reconsent

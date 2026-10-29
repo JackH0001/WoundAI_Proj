@@ -66,6 +66,27 @@ class ServiceAccounts:
         self.admission_guard=admission_guard
         if bootstrap is not None and not callable(bootstrap):raise ValueError('trusted bootstrap required')
         self.bootstrap=bootstrap
+        self.lifecycle=None
+
+    def attach_lifecycle(self,lifecycle):
+        """Trusted startup composition; missing component fails closed thereafter."""
+        from lite_account_lifecycle import AccountLifecycle
+        if not isinstance(lifecycle,AccountLifecycle):raise ValueError('trusted account lifecycle required')
+        k=hashlib.sha256(b'lite/service-accounts/lifecycle/1').digest()
+        expected=dict(v=1,binding=lifecycle.binding)
+        self.store.compare_exchange(k,0,expected)
+        row=self.store.load(k)
+        if row is None or row[1]!=expected:raise StateUnavailable('service lifecycle binding differs')
+        self.lifecycle=lifecycle
+
+    def require_active(self,account):
+        if self.lifecycle is None:
+            if self.store.load(hashlib.sha256(b'lite/service-accounts/lifecycle/1').digest()) is not None:
+                raise StateUnavailable('service account lifecycle required')
+            return
+        subject=account['subject']
+        if not subject.startswith('apple-'):raise StateUnavailable('verified Apple lifecycle account required')
+        self.lifecycle.require_active(subject[6:])
 
     @staticmethod
     def key(installation):return hashlib.sha256(('lite/service-account/1\0'+_subject(installation)).encode()).digest()
@@ -75,12 +96,14 @@ class ServiceAccounts:
         ServiceBinding(subject,token,original_transaction if original_transaction is not None else '0').validate()
         value=dict(v=1,installation_hash=digest(installation),subject=subject,token=token,
                    original_transaction=original_transaction,proof=proof_sha256)
+        self.require_active(value)
         self.store.compare_exchange(self.key(installation),0,value)
         readback=self.store.load(self.key(installation))
         if readback is None:raise StateUnavailable('account provisioning unconfirmed')
         if readback[1]!=value:
             raise UsageConflict('service account cannot be silently replaced')
         if self.bootstrap is not None:self.bootstrap(installation)
+        self.require_active(value)
 
     def registration(self,installation):
         """Immutable trusted installation mapping, without a subscription overlay."""
@@ -100,6 +123,7 @@ class ServiceAccounts:
 
     def resolve(self,installation):
         account=self.registration(installation)
+        self.require_active(account)
         if self.subscription_links is not None:
             original=self.subscription_links.lookup(account['subject'],account['token'])
             if original is not None:
@@ -109,6 +133,7 @@ class ServiceAccounts:
         return account
 
     def grant(self,account,now):
+        self.require_active(account)
         if self.admission_guard is not None and self.admission_guard(account) is not True:
             raise StateUnavailable('subscription cutover admission paused or unconfirmed')
         if account['original_transaction'] is None:return free_grant(account['subject'],now)
@@ -306,7 +331,9 @@ class ServiceOperations:
         if not self.ledger.claim(ticket,v['worker']):return self.status(installation,operation)
         # Any unexpected model or persistence exception remains pending. No
         # second executor, automatic timeout release or guessed failure outcome.
+        self.accounts.require_active(account)
         result=self.inference.infer(rgb);result_hash=digest(result)
+        self.accounts.require_active(account)
         for _ in range(CAS_ATTEMPTS):
             revision,current=self._require(subject,operation)
             if current['result'] is not None:
