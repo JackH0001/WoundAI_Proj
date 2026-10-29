@@ -121,6 +121,12 @@ class RefreshingAppleIdentityVerifier(AppleIdentityVerifier):
         self._still_current(snapshot)
         return result
 
+    def verify_refresh(self, signed, nonce, original_issued):
+        header=identity_header(signed)
+        snapshot=self._current(header['kid']);result=snapshot.verify_refresh(signed,nonce,original_issued)
+        self._still_current(snapshot)
+        return result
+
     def _still_current(self, snapshot):
         with self._lock:
             wall,mono=self._time()

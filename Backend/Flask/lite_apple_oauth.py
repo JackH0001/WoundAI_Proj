@@ -135,3 +135,20 @@ class AppleOAuthProvider:
         if body.strip(): raise GrantUncertain('Apple revocation response unconfirmed')
         # Apple documents 200 for both revoked and already-invalid tokens.
         return True
+
+    def refresh(self, refresh_token):
+        """Validate the retained refresh grant; never retry an uncertain POST."""
+        old = bounded_secret(refresh_token, 2048)
+        raw = self._post(TOKEN_URL, dict(grant_type='refresh_token', refresh_token=old))
+        try:
+            value = loads_json_object_strict(raw.decode('utf-8'))
+            if (not {'access_token','id_token','token_type','expires_in'} <= set(value)
+                    or value['token_type'] != 'Bearer' or type(value['expires_in']) is not int
+                    or not 0 < value['expires_in'] <= 86400): raise ValueError()
+            # Apple normally omits refresh_token on refresh. Never erase it.
+            value['refresh_token'] = value.get('refresh_token', old)
+            for f in ('access_token','refresh_token'): bounded_secret(value[f], 2048)
+            bounded_secret(value['id_token'], 6000)
+            return {k:value[k] for k in ('access_token','refresh_token','id_token','token_type','expires_in')}
+        except Exception:
+            raise GrantUncertain('Apple refresh response unconfirmed') from None

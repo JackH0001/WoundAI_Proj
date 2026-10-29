@@ -30,6 +30,21 @@ class OAuthTests(unittest.TestCase):
         self.assertEqual(fields, dict(client_id='com.woundai.lite', client_secret='synthetic-client',
             grant_type='authorization_code', code='single-use'))
 
+    def test_refresh_preserves_old_token_when_apple_omits_it(self):
+        value=dict(self.payload);value.pop('refresh_token');self.response=(200,json.dumps(value).encode())
+        self.assertEqual(self.p.refresh('retained-token')['refresh_token'],'retained-token')
+        self.assertEqual(self.calls[0][1],dict(grant_type='refresh_token',refresh_token='retained-token',client_id='com.woundai.lite',client_secret='synthetic-client'))
+    def test_refresh_accepts_explicit_rotation(self):
+        self.assertEqual(self.p.refresh('old')['refresh_token'],'synthetic-refresh')
+    def test_refresh_malformed_or_unknown_reply_is_not_retried(self):
+        for response in [(200,b'{}'),(200,b'{"id_token":"a","id_token":"b"}'),OSError('secret')]:
+            self.response=response
+            with self.assertRaises(GrantUncertain):self.p.refresh('retained')
+        self.assertEqual(len(self.calls),3)
+    def test_refresh_invalid_grant_is_rejected(self):
+        self.response=(400,b'{"error":"invalid_grant"}')
+        with self.assertRaises(GrantRejected):self.p.refresh('retained')
+
     def test_revoke_accepts_empty_200_and_uses_refresh_hint(self):
         self.response = (200, b'')
         self.assertTrue(self.p.revoke('synthetic-refresh'))

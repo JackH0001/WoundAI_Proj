@@ -107,6 +107,13 @@ class AppleGrantAuthority:
     def _receipt(self, identity, row):
         c = row[1]
         if c['phase'] != 'ready' or self._revoking(identity): raise IdentityRejected('Apple grant is not active')
+        validation = self._validation(identity)
+        if validation is not None and validation[1]['phase'] != 'valid':
+            if validation[1]['phase'] == 'validating':
+                if self.verifier.clock() >= validation[1]['checked_at']+120:
+                    raise GrantUncertain('Apple validation outcome unknown; explicit sign-in required')
+                raise StateUnavailable('Apple validation in progress')
+            raise GrantRejected('Apple refresh must be recovered with explicit sign-in')
         self.cipher.open(c['envelope'], c['context'])  # Missing/wrong keys fail closed.
         receipt = dict(v=1, state='grant_ready', grant_id=identity,
             identity_sha256=c['context']['identity_sha256'], original_issued_at=c['context']['issued_at'])
@@ -177,6 +184,71 @@ class AppleGrantAuthority:
         if row is None or row[1]['context']['identity_sha256'] != person:
             raise IdentityRejected('matching Apple grant required')
         return self._receipt(identity, row)
+
+    def _validation(self, identity):
+        row = self.store.load(key('apple-grant-validation',identity))
+        if row is None: return None
+        c=row[1]
+        if (type(c) is not dict or set(c)!={'v','grant_id','phase','checked_at'}
+                or type(c['v']) is not int or c['v']!=1 or c['grant_id']!=identity
+                or c['phase'] not in ('validating','valid','uncertain','rejected')
+                or type(c['checked_at']) is not int or not 0<=c['checked_at']<=self.verifier.clock()):
+            raise StateUnavailable('Apple validation state corrupt')
+        return row
+
+    def fresh_until(self, installation, operation, person):
+        receipt=self.require(installation,operation,person)
+        identity=receipt['grant_id'];row=self._validation(identity)
+        if row is None: return receipt['original_issued_at']+86400
+        c=row[1]
+        proof=self.audit.load(key('apple-grant-validated',digest([identity,c['checked_at']])))
+        if proof is None or proof[1]!=c: raise StateUnavailable('Apple validation audit unconfirmed')
+        return c['checked_at']+86400
+
+    def validate_for_session(self, installation, operation, person, nonce):
+        """At most one refresh validation per day; immutable original iat is retained.
+
+        An uncertain external exchange is not repeated automatically. Its saved
+        grant remains available to the revocation coordinator. Explicit fresh
+        sign-in is required; neither a new family nor a quota reset is invented.
+        """
+        if self.verifier.clock()<self.fresh_until(installation,operation,person): return
+        identity=self._id(installation,operation);row=self._row(identity)
+        previous=self._validation(identity);n=self.verifier.clock()
+        claimed=dict(v=1,grant_id=identity,phase='validating',checked_at=n)
+        k=key('apple-grant-validation',identity)
+        if not self.store.compare_exchange(k,previous[0] if previous else 0,claimed):
+            raise StateUnavailable('Apple validation concurrent; retry saved renewal')
+        current=self._validation(identity)
+        if current is None or current[1]!=claimed: raise StateUnavailable('Apple validation claim unconfirmed')
+        if self._revoking(identity): raise IdentityRejected('grant revocation pending')
+        tokens=self.cipher.open(row[1]['envelope'],row[1]['context'])
+        try:
+            updated=self.provider.refresh(tokens['refresh_token'])
+            claims=self.verifier.verify_refresh(updated['id_token'],nonce,row[1]['context']['issued_at'])
+            hashed=hmac.new(self._identity_key,(self.namespace+'\0'+self.verifier.issuer+'\0'+claims['sub']).encode(),hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(hashed,person): raise GrantRejected('Apple refresh subject differs')
+        except IdentityRejected:
+            self.store.compare_exchange(k,current[0],dict(claimed,phase='rejected'))
+            raise GrantRejected('Apple refresh rejected; explicit sign-in required') from None
+        except Exception:
+            self.store.compare_exchange(k,current[0],dict(claimed,phase='uncertain'))
+            raise GrantUncertain('Apple refresh unconfirmed; explicit sign-in required') from None
+        # A revoke may have changed the vault while Apple was responding. Never
+        # overwrite its tombstone or revive it. Keep the original grant context.
+        stored=dict(row[1],envelope=self.cipher.seal(updated,row[1]['context']))
+        try:self.store.compare_exchange(key('apple-grant',identity),row[0],stored)
+        except StateUnavailable:pass
+        saved=self._row(identity)
+        if saved is None or saved[1]!=stored:
+            raise GrantUncertain('refreshed credential persistence unconfirmed')
+        if self._revoking(identity): raise IdentityRejected('grant revocation pending')
+        valid=dict(claimed,phase='valid')
+        self.immutable(self.audit,key('apple-grant-validated',digest([identity,n])),valid)
+        try:self.store.compare_exchange(k,current[0],valid)
+        except StateUnavailable:pass
+        if self._validation(identity)[1]!=valid: raise StateUnavailable('refresh validation unconfirmed')
+        self.require(installation,operation,person)
 
     def revoke(self, installation, operation):
         """Trusted deletion coordinator only; no public route or deletion claim.

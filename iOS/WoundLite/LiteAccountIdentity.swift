@@ -17,12 +17,19 @@ struct LiteAccountChallenge: Codable, Equatable {
 struct LiteAccountSession: Codable, Equatable {
     let v: Int, state: String, installation: String, operation: String, account_sha256: String, app_account_token: String
     let expires_at: Int
+    var renewal_generation:Int?=nil,renewed_at:Int?=nil,family_expires_at:Int?=nil
     func validate(_ c:LiteAccountChallenge) throws {
         try c.validate()
         guard v == 1, state == "signed_in", installation == c.installation, operation == c.operation,
               LiteServiceBytes.hex(account_sha256), let token=UUID(uuidString:app_account_token),
               token.uuidString.lowercased()==app_account_token, token != UUID(uuidString:"00000000-0000-0000-0000-000000000000"),
-              expires_at > c.created_at, expires_at <= c.expires_at+900 else { throw LiteAccountFailure.invalid }
+              expires_at > c.created_at else { throw LiteAccountFailure.invalid }
+        if let generation=renewal_generation,let renewed=renewed_at,let family=family_expires_at {
+            guard (0...10000).contains(generation),renewed>=c.created_at,family==c.created_at+30*86400,
+                  expires_at<=family,expires_at<=renewed+(generation==0 ? 1200:900),expires_at>renewed else{throw LiteAccountFailure.invalid}
+        } else {
+            guard renewal_generation==nil,renewed_at==nil,family_expires_at==nil,expires_at<=c.expires_at+900 else{throw LiteAccountFailure.invalid}
+        }
     }
 }
 
@@ -46,6 +53,10 @@ struct LiteAppleIdentity: Codable, Equatable {
     func confirm(_ challenge:LiteAccountChallenge,credential:LiteAppleIdentity) async throws -> LiteAccountSession
     func status(_ challenge:LiteAccountChallenge) async throws -> LiteAccountSession
     func logout(_ challenge:LiteAccountChallenge) async throws
+    func renew(_ challenge:LiteAccountChallenge,operation:String,generation:Int) async throws ->LiteAccountSession
+}
+extension LiteAccountIdentityService {
+    func renew(_ challenge:LiteAccountChallenge,operation:String,generation:Int) async throws ->LiteAccountSession {throw LiteAccountFailure.unavailable}
 }
 
 @MainActor protocol LiteAppleIdentityProvider {
@@ -62,7 +73,7 @@ struct LiteSignedAccountTransport:LiteAuthenticatedTransport {
     }
     func send(_ request:URLRequest,installation:String) async throws ->(Data,HTTPURLResponse) {
         guard try await self.installation()==installation,
-              ["challenge","confirm","status","logout"].map({"/api/v1/lite/account/"+$0}).contains(request.url?.path ?? "") else { throw LiteAccountFailure.invalid }
+              ["challenge","confirm","status","logout","renew"].map({"/api/v1/lite/account/"+$0}).contains(request.url?.path ?? "") else { throw LiteAccountFailure.invalid }
         return try await client.send(request,installation:installation,requestID:UUID(),allowSending:allowService)
     }
 }
@@ -75,17 +86,23 @@ struct LiteSignedAccountTransport:LiteAuthenticatedTransport {
         self.origin=origin;self.transport=transport
     }
     func installation() async throws ->String {try await transport.installation()}
-    private func send(_ kind:String,owner:String,body:[String:String])async throws ->Data {
+    private func send(_ kind:String,owner:String,body:[String:Any])async throws ->Data {
         guard try await installation()==owner else {throw LiteAccountFailure.conflict}
         var r=URLRequest(url:origin.appendingPathComponent("api/v1/lite/account/"+kind))
-        r.httpMethod="POST";r.setValue("application/json",forHTTPHeaderField:"Content-Type");r.httpBody=try JSONEncoder().encode(body);r.timeoutInterval=30
+        r.httpMethod="POST";r.setValue("application/json",forHTTPHeaderField:"Content-Type");r.httpBody=try JSONSerialization.data(withJSONObject:body,options:[.sortedKeys]);r.timeoutInterval=30
         let(data,response)=try await transport.send(r,installation:owner)
         guard try await installation()==owner,data.count<=20000,
               response.url==r.url else {throw LiteAccountFailure.unavailable}
-        if kind=="confirm",response.statusCode==409 {
+        if ["confirm","renew"].contains(kind),response.statusCode==409 {
             struct Recovery:Decodable {let error:String,keep_local:Bool,explicit_sign_in_required:Bool,retry_saved_code:Bool}
             if let r=try? JSONDecoder().decode(Recovery.self,from:data),r.error=="lite_apple_grant_recovery_required",
                r.keep_local,r.explicit_sign_in_required,!r.retry_saved_code {throw LiteAccountFailure.grantRecoveryRequired}
+        }
+        if kind=="renew",response.statusCode==401 {
+            struct Expired:Decodable {let error:String,keep_local:Bool}
+            if let r=try? JSONDecoder().decode(Expired.self,from:data),r.error=="lite_sign_in_required",r.keep_local {
+                throw LiteAccountFailure.grantRecoveryRequired
+            }
         }
         guard response.statusCode==200 else {throw LiteAccountFailure.unavailable}
         return data
@@ -107,6 +124,12 @@ struct LiteSignedAccountTransport:LiteAuthenticatedTransport {
         struct Receipt:Decodable {let v:Int,state:String,installation:String,operation:String}
         let r=try JSONDecoder().decode(Receipt.self,from:await send("logout",owner:c.installation,body:["anon_id":c.installation,"operation":c.operation]))
         guard r.v==1,r.state=="signed_out",r.installation==c.installation,r.operation==c.operation else {throw LiteAccountFailure.conflict}
+    }
+    func renew(_ c:LiteAccountChallenge,operation:String,generation:Int)async throws ->LiteAccountSession {
+        try c.validate();guard LiteServiceBytes.hex(operation,32),(0..<10000).contains(generation) else{throw LiteAccountFailure.invalid}
+        let r=try JSONDecoder().decode(LiteAccountSession.self,from:await send("renew",owner:c.installation,
+            body:["anon_id":c.installation,"operation":c.operation,"renewal_operation":operation,"expected_generation":generation]))
+        try r.validate(c);guard r.renewal_generation==generation+1 else{throw LiteAccountFailure.conflict};return r
     }
     func status(_ c:LiteAccountChallenge)async throws ->LiteAccountSession {
         let r=try JSONDecoder().decode(LiteAccountSession.self,from:await send("status",owner:c.installation,body:["anon_id":c.installation]))
@@ -161,14 +184,19 @@ struct LiteAccountCheckpoint:Codable,Equatable {
     let version:Int,origin:String,challenge:LiteAccountChallenge
     var phase:String
     var credential:LiteAppleIdentity?=nil,session:LiteAccountSession?=nil
+    var renewalOperation:String?=nil,renewalGeneration:Int?=nil
     func validate()throws {
         try challenge.validate()
-        guard version==1,URL(string:origin)?.scheme=="https",["apple","confirm","active","logout","ended","reauthenticate"].contains(phase) else {throw LiteAccountFailure.invalid}
+        guard version==1,URL(string:origin)?.scheme=="https",["apple","confirm","active","logout","ended","reauthenticate","renew"].contains(phase) else {throw LiteAccountFailure.invalid}
         if let credential{try credential.validate(challenge,requireAuthorizationCode:phase=="confirm")}
         if phase=="reauthenticate" && (credential != nil || session != nil) {throw LiteAccountFailure.invalid}
         if let session{try session.validate(challenge)}
         if phase=="confirm" && credential==nil{throw LiteAccountFailure.invalid}
-        if phase=="active" && (credential==nil || session==nil){throw LiteAccountFailure.invalid}
+        if ["active","renew"].contains(phase) && (credential==nil || session==nil){throw LiteAccountFailure.invalid}
+        if phase=="renew" {
+            guard let op=renewalOperation,LiteServiceBytes.hex(op,32),let n=renewalGeneration,
+                  (0..<10000).contains(n),session?.renewal_generation==n else{throw LiteAccountFailure.invalid}
+        } else if renewalOperation != nil || renewalGeneration != nil {throw LiteAccountFailure.invalid}
     }
 }
 
@@ -221,7 +249,7 @@ struct LiteAccountCheckpoint:Codable,Equatable {
         do {
             let owner=try await service.installation();let(old,previous)=try await read(owner)
             guard generation==started else{throw LiteAccountFailure.conflict}
-            guard (previous?.phase != "confirm" || (previous?.challenge.expires_at ?? 0)<=Int(now().timeIntervalSince1970)),previous?.phase != "logout" else{message="上次登入或登出尚未確認，請先按重試；不用重新購買。";return}
+            guard (previous?.phase != "confirm" || (previous?.challenge.expires_at ?? 0)<=Int(now().timeIntervalSince1970)),previous?.phase != "logout",previous?.phase != "renew" else{message="上次登入或登出尚未確認，請先按重試；不用重新購買。";return}
             let c=try await service.challenge(operation:UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased());try c.validate()
             guard generation==started else{try? await service.logout(c);throw LiteAccountFailure.conflict}
             guard c.installation==owner,c.created_at<=Int(now().timeIntervalSince1970),c.expires_at>Int(now().timeIntervalSince1970) else{throw LiteAccountFailure.invalid}
@@ -242,6 +270,7 @@ struct LiteAccountCheckpoint:Codable,Equatable {
             guard let old,let r else{return}
             if r.phase=="confirm"{try await confirm(owner,old,r)}
             else if r.phase=="logout"{try await finishLogout(owner,old,r)}
+            else if r.phase=="renew"{try await renew(owner,old,r)}
             else if r.phase=="reauthenticate"{message="請按重新登入以取得新的 Apple 授權；不會重送舊授權碼。"}
             else{message="目前沒有待確認的登入操作。"}
         } catch {message="帳號核對尚未完成，請稍後重試；本機紀錄仍保留。"}
@@ -254,7 +283,7 @@ struct LiteAccountCheckpoint:Codable,Equatable {
         generation+=1;blocked=true
         do {
             let owner=try await service.installation();let(old,r)=try await read(owner)
-            guard let r else{return};var next=r;next.phase="logout"
+            guard let r else{return};var next=r;next.phase="logout";next.renewalOperation=nil;next.renewalGeneration=nil
             let saved:Data
             do {saved=try await save(owner,old,next)} // local service closes before network
             catch {
@@ -266,17 +295,54 @@ struct LiteAccountCheckpoint:Codable,Equatable {
             try await finishLogout(owner,saved,next)
         } catch {message="本次服務連線已暫停；登出尚未完成，請按重試。原紀錄保留。"}
     }
+    private func renew(_ owner:String,_ old:Data,_ record:LiteAccountCheckpoint)async throws {
+        guard record.phase=="renew",let operation=record.renewalOperation,let n=record.renewalGeneration,
+              let previous=record.session else{throw LiteAccountFailure.invalid}
+        let started=generation
+        let session:LiteAccountSession
+        do{session=try await service.renew(record.challenge,operation:operation,generation:n)}
+        catch LiteAccountFailure.grantRecoveryRequired {
+            guard generation==started else{throw LiteAccountFailure.conflict}
+            var next=record;next.phase="reauthenticate";next.credential=nil;next.session=nil
+            next.renewalOperation=nil;next.renewalGeneration=nil
+            _=try await save(owner,old,next)
+            guard generation==started else{throw LiteAccountFailure.conflict}
+            message="Apple 授權需要重新確認，請按重新登入。原紀錄與已用次數保留。"
+            throw LiteAccountFailure.grantRecoveryRequired
+        }
+        try session.validate(record.challenge)
+        guard generation==started,session.renewal_generation==n+1,
+              (session.renewed_at ?? Int.max)<=Int(now().timeIntervalSince1970),
+              session.account_sha256==previous.account_sha256,session.app_account_token==previous.app_account_token,
+              session.family_expires_at==previous.family_expires_at else{throw LiteAccountFailure.conflict}
+        var next=record;next.phase="active";next.session=session;next.renewalOperation=nil;next.renewalGeneration=nil
+        _=try await save(owner,old,next)
+        guard generation==started else{throw LiteAccountFailure.conflict}
+        message="服務連線已更新；原紀錄、研究同意與今日已用次數不變。"
+    }
     func canUseService()async ->Bool {
-        guard !blocked else{return false}
+        guard !blocked,!busy else{return false}
+        busy=true;defer{busy=false};let started=generation
         do {
-            let owner=try await service.installation();let(old,r)=try await read(owner)
-            guard let r,r.phase=="active",let session=r.session,let credential=r.credential,
-                  session.expires_at>Int(now().timeIntervalSince1970) else{return false}
+            let owner=try await service.installation();var(old,r)=try await read(owner)
+            guard let record=r,["active","renew"].contains(record.phase),let credential=record.credential else{return false}
             guard try await provider.authorized(user:credential.user) else{await signOut();return false}
-            guard try await service.status(r.challenge)==session else{return false}
-            let current=try await journal.load(key(owner))
-            let currentOwner=try await service.installation()
-            return !blocked && currentOwner==owner && current==old
+            guard !blocked,generation==started else{return false}
+            if record.phase=="renew",let saved=old {try await renew(owner,saved,record);(old,r)=try await read(owner)}
+            guard var current=r,current.phase=="active",let session=current.session else{return false}
+            let time=Int(now().timeIntervalSince1970)
+            if let n=session.renewal_generation,time>=session.expires_at-60,time<(session.family_expires_at ?? 0),let saved=old {
+                current.phase="renew";current.renewalGeneration=n
+                current.renewalOperation=UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased()
+                let pending=try await save(owner,saved,current) // persist before dispatch; retries reuse this operation
+                guard !blocked,generation==started else{return false}
+                try await renew(owner,pending,current);(old,r)=try await read(owner)
+            }
+            guard let final=r,final.phase=="active",let confirmed=final.session,
+                  confirmed.expires_at>Int(now().timeIntervalSince1970) else{return false}
+            guard try await service.status(final.challenge)==confirmed else{return false}
+            let saved=try await journal.load(key(owner));let currentOwner=try await service.installation()
+            return !blocked && generation==started && currentOwner==owner && saved==old
         } catch {return false}
     }
 }

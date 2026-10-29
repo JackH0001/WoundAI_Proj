@@ -104,8 +104,9 @@ jobs:
           python tools/lite_apple_provider_probe.py --output evidence/apple-provider-probe.json
       - name: Apple single-use code custody and revocation fences (synthetic only)
         run: |
-          python -m unittest -v test_lite_apple_oauth test_lite_apple_grants > evidence/apple-grant-tests.log 2>&1
+          python -m unittest -v test_lite_apple_oauth test_lite_apple_grants test_lite_account_sessions > evidence/apple-grant-tests.log 2>&1
           python tools/lite_apple_grant_probe.py --output evidence/apple-grant-probe.json
+          python tools/lite_session_renewal_probe.py --output evidence/session-renewal-probe.json
       - name: Review entry, isolation, medical migration and containment rehearsal
         run: >-
           python -m unittest -v test_lite_review_portal test_lite_review_human

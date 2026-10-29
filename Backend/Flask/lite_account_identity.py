@@ -20,7 +20,7 @@ from lite_subscription_runtime import SubscriptionRuntime
 from lite_subscription_executor import key
 
 PREFIX = '/api/v1/lite/account/'
-ACCOUNT_PATHS = {PREFIX + p for p in ('challenge', 'confirm', 'status', 'logout')}
+ACCOUNT_PATHS = {PREFIX + p for p in ('challenge', 'confirm', 'status', 'logout', 'renew')}
 
 
 class IdentityRejected(ValueError): pass
@@ -100,6 +100,18 @@ class AppleIdentityVerifier:
         except Exception as exc:
             raise IdentityRejected('Apple identity, signature or nonce rejected') from exc
 
+    def verify_refresh(self, signed, nonce, original_issued):
+        c=self._claims(signed,['iss','aud','sub','iat','exp']);now=self.clock()
+        if (type(original_issued) is not int or type(c['sub']) is not str or not 1<=len(c['sub'])<=255
+                or not c['sub'].isascii() or not c['sub'].isprintable()
+                or any(type(c[f]) is not int for f in ('iat','exp'))
+                or not original_issued-30<=c['iat']<=now+30 or not now<c['exp']
+                or not 0<c['exp']-c['iat']<=86400
+                or ('nonce' in c and c['nonce']!=nonce)
+                or ('nbf' in c and (type(c['nbf']) is not int or c['nbf']>now))):
+            raise IdentityRejected('Apple refresh identity rejected')
+        return dict(sub=c['sub'],issued=c['iat'],expires=c['exp'])
+
     def event(self, signed):
         """Apple account notifications have no required nonce/exp. Not ID tokens.
 
@@ -133,7 +145,7 @@ class AccountIdentityBridge:
     Existing installations cannot silently switch people. A separate reviewed
     unlink/account-deletion procedure is required; logout never erases research.
     """
-    def __init__(self, *, runtime, verifier, store, audit_store, namespace, identity_key, events=None, grants=None):
+    def __init__(self, *, runtime, verifier, store, audit_store, namespace, identity_key, events=None, grants=None, renewal=False):
         if not isinstance(runtime, SubscriptionRuntime) or not isinstance(verifier, AppleIdentityVerifier):
             raise ValueError('trusted runtime and Apple verifier required')
         _subject(namespace)
@@ -162,6 +174,16 @@ class AccountIdentityBridge:
             self.immutable(store, grant_key, dict(v=1, binding=grants.binding))
         elif store.load(grant_key) is not None:
             raise StateUnavailable('Apple grant custody cannot be silently disabled')
+        if type(renewal) is not bool: raise ValueError('explicit renewal policy required')
+        self.renewals = None
+        renewal_key = key('human-renewal-required', namespace)
+        if renewal:
+            if grants is None or events is None: raise ValueError('renewal requires grant custody and Apple events')
+            from lite_account_sessions import SessionRenewals
+            self.renewals = SessionRenewals(self)
+            self.immutable(store, renewal_key, self.renewals.policy)
+        elif store.load(renewal_key) is not None:
+            raise StateUnavailable('session renewal protection cannot be silently disabled')
 
     def _authorization_key(self, installation, operation):
         return key('human-authorization', digest([self.namespace,installation,operation]))
@@ -283,13 +305,13 @@ class AccountIdentityBridge:
             return self.status(installation)
         raise StateUnavailable('sign-in confirmation raced; keep local evidence')
 
-    def require_session(self, installation):
+    def _live_session(self, installation):
         if self.grants is None and self.store.load(key('human-grants-required',self.namespace)) is not None:
             raise StateUnavailable('Apple grant authority required by durable policy')
         if self.events is None and self.store.load(key('human-events-required',self.namespace)) is not None:
             raise StateUnavailable('Apple account event authority required by durable policy')
         row=self._read(installation)
-        if row is None or row[1]['phase']!='active' or self.now()>=row[1]['session_expires_at']:
+        if row is None or row[1]['phase']!='active':
             raise IdentityRejected('sign-in required')
         c=row[1]
         if self.grants is not None:
@@ -308,11 +330,26 @@ class AccountIdentityBridge:
             raise IdentityRejected('account mapping differs')
         return c
 
+    def require_session(self, installation):
+        c = self._live_session(installation)
+        if self.renewals is None and self.store.load(key('human-renewal-required',self.namespace)) is not None:
+            raise StateUnavailable('durable session renewal policy required')
+        if self.renewals is not None: c = self.renewals.effective(installation,c)
+        if self.now() >= c['session_expires_at']: raise IdentityRejected('sign-in required')
+        return c
+
+    def renew(self, installation, operation, renewal_operation, expected_generation):
+        if self.renewals is None: raise IdentityRejected('renewal is not enabled')
+        return self.renewals.renew(installation,operation,renewal_operation,expected_generation)
+
     def status(self, installation):
         c=self.require_session(installation)
-        return dict(v=1,state='signed_in',installation=installation,operation=c['operation'],
+        result = dict(v=1,state='signed_in',installation=installation,operation=c['operation'],
             account_sha256=digest(c['account']['subject']),app_account_token=c['account']['token'],
             expires_at=c['session_expires_at'])
+        if self.renewals is not None:
+            result.update({f:c[f] for f in ('renewal_generation','renewed_at','family_expires_at')})
+        return result
 
     def logout(self, installation, operation):
         _hex(operation,32)
@@ -335,9 +372,11 @@ def blueprint(bridge):
             body=loads_json_object_strict(request.get_data().decode())
             fields={'anon_id'} | ({'operation'} if kind!='status' else set()) | ({'identity_token','state'} if kind=='confirm' else set())
             if kind == 'confirm' and bridge.grants is not None: fields.add('authorization_code')
+            if kind == 'renew': fields |= {'renewal_operation','expected_generation'}
             if request.mimetype!='application/json' or set(body)!=fields: raise IdentityRejected('exact account fields required')
             if body['anon_id']!=admission.installation:return jsonify(error='lite_owner_mismatch'),403
             if kind=='confirm':result=bridge.confirm(admission.installation,body['operation'],body['identity_token'],body['state'],body.get('authorization_code'))
+            elif kind=='renew':result=bridge.renew(admission.installation,body['operation'],body['renewal_operation'],body['expected_generation'])
             elif kind=='status':result=bridge.status(admission.installation)
             else:result=getattr(bridge,kind)(admission.installation,body['operation'])
             return jsonify(result)
@@ -357,7 +396,7 @@ def blueprint(bridge):
                         explicit_sign_in_required=True,retry_saved_code=False),409
             return jsonify(error='lite_account_unconfirmed',keep_local=True),503
         except Exception:return jsonify(error='lite_account_unconfirmed',keep_local=True),503
-    for kind in ('challenge','confirm','status','logout'):
+    for kind in ('challenge','confirm','status','logout','renew'):
         bp.add_url_rule(PREFIX+kind,kind,lambda kind=kind:action(kind),methods=['POST'])
     @bp.after_request
     def no_cache(r):r.headers['Cache-Control']='no-store';return r

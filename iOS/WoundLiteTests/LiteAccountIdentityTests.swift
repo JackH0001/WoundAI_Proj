@@ -18,6 +18,9 @@ private actor IdentityJournal:LiteServiceJournal {
     var owner="synthetic-device",challenges=0,confirms=0,logouts=0,fail=false,logoutFail=false,wrongAck=false,expired=false,ended=false
     var afterConfirm:(()async->Void)?,afterChallenge:(()async->Void)?
     var requireCode=false,recovery=false,received=[LiteAppleIdentity]()
+    var enableRenewal=false,clock=identityNow,renewCalls=0,rotations=0,renewFail=false,renewRecovery=false,renewWrongAccount=false
+    var renewed:LiteAccountSession?,renewReceipts=[String:LiteAccountSession](),renewOperations=[String]()
+    var beforeRenew:(()async throws->Void)?,afterRenew:(()async->Void)?
     func installation()async throws->String{owner}
     func challenge(operation:String)async throws->LiteAccountChallenge {
         challenges+=1;await afterChallenge?()
@@ -27,11 +30,28 @@ private actor IdentityJournal:LiteServiceJournal {
     func confirm(_ c:LiteAccountChallenge,credential:LiteAppleIdentity)async throws->LiteAccountSession {
         confirms+=1;received.append(credential);if fail{throw LiteAccountFailure.unavailable};await afterConfirm?()
         if recovery{throw LiteAccountFailure.grantRecoveryRequired}
-        return LiteAccountSession(v:1,state:"signed_in",installation:wrongAck ? "other":c.installation,operation:c.operation,account_sha256:String(repeating:"c",count:64),app_account_token:"10000000-0000-4000-8000-000000000001",expires_at:identityNow+900)
+        var r=LiteAccountSession(v:1,state:"signed_in",installation:wrongAck ? "other":c.installation,operation:c.operation,account_sha256:String(repeating:"c",count:64),app_account_token:"10000000-0000-4000-8000-000000000001",expires_at:identityNow+900)
+        if enableRenewal{r.renewal_generation=0;r.renewed_at=identityNow;r.family_expires_at=identityNow+30*86400;renewed=r};return r
     }
     func status(_ c:LiteAccountChallenge)async throws->LiteAccountSession {
         if ended{throw LiteAccountFailure.unavailable}
+        if enableRenewal,let renewed{return renewed}
         return LiteAccountSession(v:1,state:"signed_in",installation:c.installation,operation:c.operation,account_sha256:String(repeating:"c",count:64),app_account_token:"10000000-0000-4000-8000-000000000001",expires_at:identityNow+900)
+    }
+    func renew(_ c:LiteAccountChallenge,operation:String,generation:Int)async throws->LiteAccountSession {
+        renewCalls+=1;renewOperations.append(operation);try await beforeRenew?()
+        if renewRecovery{throw LiteAccountFailure.grantRecoveryRequired}
+        guard !ended,enableRenewal else{throw LiteAccountFailure.unavailable}
+        let result:LiteAccountSession
+        if let prior=renewReceipts[operation]{result=prior}
+        else {
+            guard renewed?.renewal_generation==generation else{throw LiteAccountFailure.conflict}
+            var r=LiteAccountSession(v:1,state:"signed_in",installation:c.installation,operation:c.operation,
+                account_sha256:String(repeating:renewWrongAccount ? "d":"c",count:64),app_account_token:"10000000-0000-4000-8000-000000000001",expires_at:clock+900)
+            r.renewal_generation=generation+1;r.renewed_at=clock;r.family_expires_at=identityNow+30*86400
+            rotations+=1;renewed=r;renewReceipts[operation]=r;result=r
+        }
+        await afterRenew?();if renewFail{throw LiteAccountFailure.unavailable};return result
     }
     func logout(_ c:LiteAccountChallenge)async throws{logouts+=1;if logoutFail{throw LiteAccountFailure.unavailable};ended=true}
 }
@@ -169,6 +189,73 @@ private actor IdentityJournal:LiteServiceJournal {
     }
 }
 
+@MainActor final class LiteAccountRenewalTests:XCTestCase {
+    private func setup()->(IdentityService,IdentityProvider,IdentityJournal,LiteAccountIdentityStore){
+        let s=IdentityService(),p=IdentityProvider(),j=IdentityJournal();s.enableRenewal=true
+        return(s,p,j,LiteAccountIdentityStore(service:s,provider:p,journal:j,now:{Date(timeIntervalSince1970:Double(s.clock))}))
+    }
+    func testExpiredSessionRenewsWithoutApplePromptOrConfirmation()async throws {
+        let(s,p,j,m)=setup();await m.signIn();s.clock+=901
+        let allowed=await m.canUseService();XCTAssertTrue(allowed);XCTAssertEqual(p.calls,1);XCTAssertEqual(s.confirms,1);XCTAssertEqual(s.rotations,1)
+        let r=try await j.records().first!;XCTAssertEqual(r.session?.renewal_generation,1);XCTAssertEqual(r.phase,"active")
+        XCTAssertTrue(m.message.contains("今日已用次數不變"))
+    }
+    func testRenewalIntentSavedBeforeDispatch()async throws {
+        let(s,_,j,m)=setup();await m.signIn();s.clock+=901
+        s.beforeRenew={let r=try await j.records().first!;XCTAssertEqual(r.phase,"renew");XCTAssertEqual(r.renewalGeneration,0);XCTAssertNotNil(r.renewalOperation)}
+        let allowed=await m.canUseService();XCTAssertTrue(allowed)
+    }
+    func testLostReplyRestartKeepsSameOperationAndRotatesOnce()async throws {
+        let(s,p,j,m)=setup();await m.signIn();s.clock+=901;s.renewFail=true
+        let first=await m.canUseService();XCTAssertFalse(first)
+        let pending=try await j.records().first!;XCTAssertEqual(pending.phase,"renew")
+        s.renewFail=false;let restarted=LiteAccountIdentityStore(service:s,provider:p,journal:j,now:{Date(timeIntervalSince1970:Double(s.clock))})
+        let second=await restarted.canUseService();XCTAssertTrue(second);XCTAssertEqual(s.rotations,1)
+        XCTAssertEqual(s.renewOperations,[pending.renewalOperation!,pending.renewalOperation!]);XCTAssertEqual(p.calls,1)
+    }
+    func testJournalFailureBeforeDispatchNeverRenews()async {
+        let(s,_,j,m)=setup();await m.signIn();s.clock+=901;await j.fail(4)
+        let allowed=await m.canUseService();XCTAssertFalse(allowed);XCTAssertEqual(s.renewCalls,0)
+    }
+    func testAckSaveFailureRetriesSameReceipt()async throws {
+        let(s,_,j,m)=setup();await m.signIn();s.clock+=901;await j.fail(5)
+        let first=await m.canUseService();XCTAssertFalse(first)
+        let second=await m.canUseService();XCTAssertTrue(second);XCTAssertEqual(s.rotations,1)
+        XCTAssertEqual(s.renewOperations[0],s.renewOperations[1])
+    }
+    func testLogoutDuringRenewalCannotReactivate()async throws {
+        let(s,_,j,m)=setup();await m.signIn();s.clock+=901;s.afterRenew={await m.signOut()}
+        let allowed=await m.canUseService();XCTAssertFalse(allowed)
+        let r=try await j.records().first!;XCTAssertEqual(r.phase,"ended");XCTAssertNil(r.renewalOperation)
+    }
+    func testDifferentAccountAcknowledgmentNeverActivates()async throws {
+        let(s,_,j,m)=setup();await m.signIn();s.clock+=901;s.renewWrongAccount=true
+        let allowed=await m.canUseService();XCTAssertFalse(allowed)
+        let r=try await j.records().first!;XCTAssertEqual(r.phase,"renew");XCTAssertEqual(r.session?.renewal_generation,0)
+    }
+    func testAppleRecoveryNeedsExplicitSignInWithoutRepeatedRenewal()async throws {
+        let(s,p,j,m)=setup();await m.signIn();s.clock+=901;s.renewRecovery=true
+        let first=await m.canUseService();XCTAssertFalse(first);let second=await m.canUseService();XCTAssertFalse(second)
+        let r=try await j.records().first!;XCTAssertEqual(r.phase,"reauthenticate");XCTAssertNil(r.credential)
+        XCTAssertEqual(s.renewCalls,1);XCTAssertEqual(p.calls,1)
+    }
+    func testFamilyExpiryDoesNotSilentlyStartNewLogin()async {
+        let(s,p,_,m)=setup();await m.signIn();s.clock+=30*86400
+        let allowed=await m.canUseService();XCTAssertFalse(allowed);XCTAssertEqual(s.renewCalls,0);XCTAssertEqual(p.calls,1)
+    }
+    func testFreshSessionDoesNotRenewOnEveryStatus()async {
+        let(s,_,_,m)=setup();await m.signIn()
+        for _ in 0..<3{let allowed=await m.canUseService();XCTAssertTrue(allowed)}
+        XCTAssertEqual(s.renewCalls,0)
+    }
+    func testRenewalCannotCarryPartialOrOverlongMetadata()throws {
+        let c=LiteAccountChallenge(v:1,installation:"device",operation:String(repeating:"1",count:32),nonce:String(repeating:"a",count:64),state:String(repeating:"b",count:64),created_at:identityNow,expires_at:identityNow+300,audience:"com.woundai.lite")
+        var r=LiteAccountSession(v:1,state:"signed_in",installation:c.installation,operation:c.operation,account_sha256:String(repeating:"c",count:64),app_account_token:"10000000-0000-4000-8000-000000000001",expires_at:identityNow+2000)
+        r.renewal_generation=1;XCTAssertThrowsError(try r.validate(c))
+        r.renewed_at=identityNow;r.family_expires_at=identityNow+30*86400;XCTAssertThrowsError(try r.validate(c))
+    }
+}
+
 private actor IdentityWire:LiteAuthenticatedTransport {
     var payload=Data(),status=200,alternate:URL?,sent=[URLRequest]()
     func installation()->String{"synthetic-device"}
@@ -179,6 +266,27 @@ private actor IdentityWire:LiteAuthenticatedTransport {
     }
 }
 @MainActor final class LiteAccountHTTPTests:XCTestCase {
+    func testRenewalSendsBoundGenerationAndNoAppleCredential()async throws {
+        let s=IdentityService();s.enableRenewal=true
+        let c=try await s.challenge(operation:String(repeating:"1",count:32)),p=IdentityProvider()
+        _=try await s.confirm(c,credential:p.signIn(c));s.clock+=901
+        let op=String(repeating:"2",count:32),r=try await s.renew(c,operation:op,generation:0)
+        let wire=IdentityWire(),http=try LiteAccountHTTPService(origin:s.origin,transport:wire)
+        await wire.plan(try JSONEncoder().encode(r));let received=try await http.renew(c,operation:op,generation:0);XCTAssertEqual(received,r)
+        let request=await wire.requests().first!;let body=try JSONSerialization.jsonObject(with:request.httpBody!) as! [String:Any]
+        XCTAssertEqual(Set(body.keys),["anon_id","operation","renewal_operation","expected_generation"])
+        XCTAssertEqual(body["expected_generation"] as? Int,0);XCTAssertEqual(request.url?.path,"/api/v1/lite/account/renew")
+    }
+    func testExpiredFamilyCanRecoverWithExplicitSignInButTransportFailureCannot()async throws {
+        let s=IdentityService(),c=try await s.challenge(operation:String(repeating:"1",count:32)),wire=IdentityWire()
+        let http=try LiteAccountHTTPService(origin:s.origin,transport:wire),payload=Data("{\"error\":\"lite_sign_in_required\",\"keep_local\":true}".utf8)
+        for status in [401,503] {
+            await wire.plan(payload,code:status)
+            do{_=try await http.renew(c,operation:String(repeating:"2",count:32),generation:0);XCTFail()}
+            catch{XCTAssertEqual(error as? LiteAccountFailure,status==401 ? .grantRecoveryRequired:.unavailable)}
+        }
+    }
+
     func testExactRoutesNeverSendClientSubjectOrTierOrAppleUser()async throws {
         let w=IdentityWire(),s=IdentityService(),op=String(repeating:"1",count:32)
         let c=try await s.challenge(operation:op),p=IdentityProvider(),http=try LiteAccountHTTPService(origin:s.origin,transport:w)
