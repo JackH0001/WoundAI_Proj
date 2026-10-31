@@ -5,6 +5,7 @@ HTTP observes durable, audit-bound receipts; it never starts cleanup. Research,
 version history and other retained account data still need their own executors.
 """
 from pathlib import Path
+from abc import ABC, abstractmethod
 from lite_account_deletion import AccountDeletion
 from lite_account_identity import IdentityRejected
 from lite_attest_state import CAS_ATTEMPTS, StateUnavailable
@@ -29,6 +30,20 @@ def aliases(a, b):
             and (ab is bb or getattr(ab, 'name', None) is not None and ab.name == getattr(bb, 'name', None)))
 
 
+class ResearchDispositionLane(ABC):
+    """Private composition contract, not an authority exposed to HTTP callers.
+
+    Keep the general/native/key-worker packages independent of the research
+    implementation. A trusted composition supplies a concrete validated lane;
+    it cannot be selected by configuration strings or user request payloads.
+    """
+    @abstractmethod
+    def advance(self, person, *, limit=20, apply=False):raise NotImplementedError
+
+    @abstractmethod
+    def status(self, person):raise NotImplementedError
+
+
 class DispositionProgress:
     immutable = staticmethod(SubscriptionRuntime.immutable)
 
@@ -44,8 +59,28 @@ class DispositionProgress:
             raise ValueError('disposition progress and audit require independent stores')
         self.deletion, self.results, self.cipher = deletion, results, cipher
         self.store, self.audit = store, audit_store
+        self.research = None
         self.immutable(store, key('disposition-progress-config', deletion.scope),
                        dict(v=1, scope=deletion.scope, catalog=CATALOG))
+
+    def attach_research(self, worker):
+        """Explicit private-worker composition; public routes still only observe.
+
+        v2 intentionally keeps research/history pending until full historical
+        retention and provider acceptance exist. Current-media sealing alone
+        cannot remove that outward pending lane.
+        """
+        from lite_store_locations import location, overlaps
+        if not isinstance(worker,ResearchDispositionLane) or worker.d is not self.deletion:
+            raise ValueError('matching account research media worker required')
+        if self.research is not None and self.research is not worker:
+            raise ValueError('research worker already attached')
+        peers=(self.store,self.audit,self.results.store,self.results.audit,self.results.ops.store,
+            self.results.ops.ledger.store,self.cipher.store,self.cipher.audit)
+        if any(overlaps(location(s),location(p)) for s in
+                (worker.store,worker.audit,worker.c.store,worker.c.audit,worker.r.store) for p in peers):
+            raise ValueError('research worker cannot share service or progress scopes')
+        self.research=worker
 
     def _plan(self, person):
         p = self.deletion._plan(person)
@@ -156,6 +191,10 @@ class DispositionProgress:
         # Detect a missing/corrupt prior observation before dispatching work.
         self._read(p)
         self.immutable(self.audit, key('disposition-progress-intent', digest(p)), p)
+        if self.research is not None:
+            # A failure leaves the original research checkpoint resumable and
+            # does not dispatch unbounded cleanup from a status request.
+            self.research.advance(person,limit=min(limit,20),apply=True)
         service = grant_key = None; blocked = []
         try: service = self.results.advance(person, limit=limit)
         except (StateUnavailable, IdentityRejected): blocked.append('service_results')

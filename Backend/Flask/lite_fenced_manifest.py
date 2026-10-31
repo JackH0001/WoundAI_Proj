@@ -183,3 +183,34 @@ class FencedManifest:
             # Acknowledge/finish races only remove work or change acknowledgement
             # flags; a fresh pass still verifies each remaining object's seal.
         raise StateUnavailable('sealed plan confirmation contention')
+
+    def seal_pending_batch(self, owner, objects, *, limit=20):
+        """Seal at most limit distinct planned names; retain remaining plans.
+
+        The withdrawal CAS freezes admission. Acknowledgements/finish may still
+        race, but no new plan can appear. Never drop a plan before seal readback.
+        """
+        if (not isinstance(objects,FencedObjects) or objects.bucket.name!=self.bucket or objects.epoch!=self.epoch
+                or type(limit) is not int or not 1<=limit<=20):
+            raise ValueError('matching objects and bounded plan batch required')
+        _,state=self._load(owner)
+        if not state['withdrawn']:raise StateUnavailable('close admission before pending-plan cleanup')
+        if not state['writers']:return dict(sealed_this_attempt=0,remaining_planned_objects=0,remaining_writers=0)
+        names=sorted({name for plans in state['writers'].values() for name in plans})[:limit]
+        for name in names:
+            kind,identifier=name.split(':');objects.seal(ObjectRef(owner,kind,identifier))
+        for _ in range(CAS_ATTEMPTS):
+            revision,current=self._load(owner)
+            if not current['withdrawn']:raise StateUnavailable('withdrawal fence changed')
+            writers={ticket:{n:v for n,v in plans.items() if n not in names}
+                for ticket,plans in current['writers'].items()}
+            current['writers']={ticket:plans for ticket,plans in writers.items() if plans}
+            try:
+                if self.store.compare_exchange(self._key(owner),revision,current):break
+            except StateUnavailable:pass
+        else:raise StateUnavailable('pending-plan checkpoint unconfirmed')
+        _,saved=self._load(owner)
+        if not saved['withdrawn']:raise StateUnavailable('saved withdrawal changed')
+        remaining=len({n for plans in saved['writers'].values() for n in plans})
+        return dict(sealed_this_attempt=len(names),remaining_planned_objects=remaining,
+                    remaining_writers=len(saved['writers']))
