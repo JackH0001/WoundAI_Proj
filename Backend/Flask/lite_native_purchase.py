@@ -26,7 +26,7 @@ class NativePurchaseBridge:
         _hex(operation,32)
         return key('native-purchase-context',digest([self.runtime.scope,installation,operation]))
 
-    def context(self,installation,operation):
+    def context(self,installation,operation, *, existing_only=False):
         a=self.registry.registration(installation)
         self.registry.require_active(a)
         k=self._key(installation,operation);old=self.store.load(k);p=self.authority.policy
@@ -34,6 +34,8 @@ class NativePurchaseBridge:
         claim=self.runtime.store.load(self.runtime._account_key(a))
         if claim:self.runtime._batch_ready(a,claim[1])
         if old is None:
+            if existing_only:
+                raise UsageConflict('saved context required')
             self.runtime.ready(a)
             now=self.runtime.links.now()
             c=dict(v=1,operation=operation,installation=installation,account_sha256=digest(a['subject']),
@@ -58,9 +60,7 @@ class NativePurchaseBridge:
     def confirm(self,installation,operation,signed_transaction):
         if type(signed_transaction) is not str or not 1<=len(signed_transaction)<=12000:
             raise SubscriptionRejected('bounded Apple transaction required')
-        if self.store.load(self._key(installation,operation)) is None:
-            raise UsageConflict('saved context required')
-        c=self.context(installation,operation);p=self.authority.policy
+        c=self.context(installation,operation,existing_only=True);p=self.authority.policy
         try:
             self.authority.verifier.verify_and_decode_signed_transaction(signed_transaction)
             s=signed_transaction.split('.')[1]
@@ -113,9 +113,12 @@ def blueprint(bridge):
             if admission is None:return jsonify(error='lite_attestation_required'),401
             body=loads_json_object_strict(request.get_data().decode())
             fields={'anon_id','operation'}|({'signed_transaction'} if kind=='confirm' else set())
+            existing_only = kind == 'context' and body.get('mode') == 'existing'
+            if existing_only:
+                fields.add('mode')
             if request.mimetype!='application/json' or set(body)!=fields:raise UsageConflict('exact purchase fields required')
             if body['anon_id']!=admission.installation:return jsonify(error='lite_owner_mismatch'),403
-            r=(bridge.context(admission.installation,body['operation']) if kind=='context' else
+            r=(bridge.context(admission.installation,body['operation'],existing_only=existing_only) if kind=='context' else
                bridge.confirm(admission.installation,body['operation'],body['signed_transaction']))
             return jsonify(r)
         except SubscriptionRejected:return jsonify(error='lite_purchase_owner_or_transaction_rejected',keep_local=True),409

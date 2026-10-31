@@ -4,13 +4,14 @@ import StoreKit
 /// Opt-in Sandbox adapter; not connected to the public UI or startup.
 @MainActor final class LiteStoreKitPurchaseProvider: LitePurchaseProvider {
     private var transactions:[String:Transaction]=[:]
+    private var quotedProduct: (offer: LiteMonthlyOffer, item: Product)?
     private let environment:String
     init() { environment="Sandbox" }
     #if DEBUG && targetEnvironment(simulator)
     init(xcodeTest:Bool) { environment=xcodeTest ? "Xcode":"Sandbox" }
     #endif
     private func event(_ result:VerificationResult<Transaction>) throws -> LitePurchaseEvent {
-        guard case .verified(let t)=result, t.productID == "com.woundai.lite.plus.monthly",
+        guard case .verified(let t)=result, t.productID == LiteMonthlyOffer.productID,
               t.productType == .autoRenewable, t.ownershipType == .purchased, !t.isUpgraded,
               let token=t.appAccountToken else { throw LitePurchaseFailure.invalid }
         let env=t.environment == .sandbox ? "Sandbox" : t.environment == .xcode ? "Xcode":"Production"
@@ -19,12 +20,30 @@ import StoreKit
             product:t.productID,environment:env,signed:result.jwsRepresentation)
         transactions[e.transaction]=t;return e
     }
-    func purchase(product:String,token:UUID) async throws -> LitePurchaseOutcome {
-        guard product == "com.woundai.lite.plus.monthly",
-              let item=try await Product.products(for:[product]).first(where:{$0.id==product && $0.type == .autoRenewable}) else {
+    func monthlyOffer() async throws -> LiteMonthlyOffer {
+        quotedProduct = nil
+        guard let storefront = await Storefront.current,
+              let item = try await Product.products(for: [LiteMonthlyOffer.productID]).first,
+              item.id == LiteMonthlyOffer.productID, item.type == .autoRenewable,
+              let subscription = item.subscription,
+              subscription.subscriptionPeriod.unit == .month, subscription.subscriptionPeriod.value == 1,
+              subscription.introductoryOffer == nil, item.price > 0,
+              !item.displayName.isEmpty, !item.displayPrice.isEmpty,
+              await Storefront.current?.id == storefront.id else {
             throw LitePurchaseFailure.unavailable
         }
-        switch try await item.purchase(options:[.appAccountToken(token)]) {
+        let offer = LiteMonthlyOffer(name: item.displayName, displayPrice: item.displayPrice,
+            price: item.price, currency: item.priceFormatStyle.currencyCode, storefront: storefront.id)
+        quotedProduct = (offer, item)
+        return offer
+    }
+
+    func purchase(offer: LiteMonthlyOffer, token: UUID) async throws -> LitePurchaseOutcome {
+        guard await Storefront.current?.id == offer.storefront,
+              let quote = quotedProduct, quote.offer == offer else {
+            throw LitePurchaseFailure.offerChanged
+        }
+        switch try await quote.item.purchase(options:[.appAccountToken(token)]) {
         case .success(let r):return .completed(try event(r))
         case .pending:return .pending
         case .userCancelled:return .cancelled
@@ -38,6 +57,9 @@ import StoreKit
     }
     func restore() async throws -> [LitePurchaseEvent] {
         try await AppStore.sync() // Only invoked by explicit restore button.
+        return try await knownPurchases()
+    }
+    func knownPurchases() async throws -> [LitePurchaseEvent] {
         var out:[String:LitePurchaseEvent]=[:]
         for await r in Transaction.currentEntitlements { let e=try event(r);out[e.transaction]=e }
         for e in try await unfinished() { out[e.transaction]=e }

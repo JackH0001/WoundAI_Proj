@@ -36,9 +36,11 @@ private actor SessionJournal: LiteServiceJournal {
     let event = LitePurchaseEvent(transaction: "123", original: "100", token: sessionToken,
         product: "com.woundai.lite.plus.monthly", environment: "Sandbox", signed: "synthetic-jws")
     var buys = 0, finishes = 0, restores = 0, pending = false
-    func purchase(product: String, token: UUID) async throws -> LitePurchaseOutcome {
+    func monthlyOffer() async throws -> LiteMonthlyOffer { nativeTestOffer }
+    func knownPurchases() async throws -> [LitePurchaseEvent] { pending ? [event] : [] }
+    func purchase(offer: LiteMonthlyOffer, token: UUID) async throws -> LitePurchaseOutcome {
         XCTAssertEqual(token.uuidString.lowercased(), sessionToken)
-        XCTAssertEqual(product, event.product); buys += 1; pending = true
+        XCTAssertEqual(offer, nativeTestOffer); buys += 1; pending = true
         return .completed(event)
     }
     func restore() async throws -> [LitePurchaseEvent] { restores += 1; return [event] }
@@ -191,7 +193,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
     }
     func testBeforeSignInNeitherPurchaseNorRecognitionIsDispatched() async throws {
         let wire = try SessionWire(), r = try runtime(wire, SessionJournal())
-        await r.purchases.purchase()
+        await r.purchases.purchaseDisplayedTestOffer()
         let id = await wire.capture(), image = await wire.image()
         _ = try await r.service.enqueue(captureID: id, jpeg: image)
         let pending = try await r.service.resume(id) { _ in image }
@@ -205,7 +207,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
         let id = await wire.capture(), image = await wire.image()
         _ = try await r.service.enqueue(captureID: id, jpeg: image)
         let done = try await r.service.resume(id) { _ in image }; XCTAssertEqual(done.note, "confirmed")
-        await r.purchases.purchase(); await r.purchases.restore()
+        await r.purchases.purchaseDisplayedTestOffer(); await r.purchases.restore()
         XCTAssertEqual(kit.buys, 1); XCTAssertEqual(kit.restores, 1); XCTAssertEqual(kit.finishes, 1)
         let restarted = try runtime(wire, journal, storeKit: kit)
         let old = try await restarted.service.resume(id) { _ in XCTFail("Must not reload JPEG"); return nil }
@@ -217,7 +219,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
     func testLostPurchaseConfirmationRecoversWithoutSecondPurchase() async throws {
         let wire = try SessionWire(), journal = SessionJournal(), kit = SessionStoreKit()
         let r = try runtime(wire, journal, storeKit: kit); await r.identity.signIn(); await wire.loseConfirmation()
-        await r.purchases.purchase(); XCTAssertEqual(kit.finishes, 0)
+        await r.purchases.purchaseDisplayedTestOffer(); XCTAssertEqual(kit.finishes, 0)
         let restarted = try runtime(wire, journal, storeKit: kit); await restarted.purchases.reconcile()
         XCTAssertEqual(kit.buys, 1); XCTAssertEqual(kit.finishes, 1)
         await restarted.purchases.reconcile(); XCTAssertEqual(kit.finishes, 1)
@@ -225,14 +227,14 @@ private actor SessionWire: LiteAuthenticatedTransport {
     func testLogoutStopsPurchasesAndPreservesJournal() async throws {
         let wire = try SessionWire(), journal = SessionJournal(), kit = SessionStoreKit()
         let r = try runtime(wire, journal, storeKit: kit); await r.identity.signIn(); await r.identity.signOut()
-        let before = await journal.snapshot(); await r.purchases.purchase()
+        let before = await journal.snapshot(); await r.purchases.purchaseDisplayedTestOffer()
         XCTAssertEqual(kit.buys, 0); let after = await journal.snapshot(); XCTAssertEqual(before, after)
         let counts = await wire.counts(); XCTAssertNil(counts["purchase/context"])
     }
     func testLogoutDuringContextResponseCannotOpenStoreKit() async throws {
         let wire = try SessionWire(), kit = SessionStoreKit(), r = try runtime(wire, SessionJournal(), storeKit: kit)
         await r.identity.signIn(); await wire.onContext { await r.identity.signOut() }
-        await r.purchases.purchase(); XCTAssertEqual(kit.buys, 0)
+        await r.purchases.purchaseDisplayedTestOffer(); XCTAssertEqual(kit.buys, 0)
         let counts = await wire.counts(); XCTAssertEqual(counts["purchase/context"], 1); XCTAssertNil(counts["purchase/confirm"])
     }
     func testDeletionIntentFencesAllOrdinaryClientsAcrossRestartButProgressWorks() async throws {
@@ -242,7 +244,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
         XCTAssertNotNil(d.record?.receipt); XCTAssertFalse(d.record?.receipt?.account_deleted ?? true)
         let operation = d.record?.operation
         let restarted = try runtime(wire, journal, storeKit: kit)
-        await restarted.purchases.purchase(); XCTAssertEqual(kit.buys, 0)
+        await restarted.purchases.purchaseDisplayedTestOffer(); XCTAssertEqual(kit.buys, 0)
         let id = await wire.capture(), image = await wire.image()
         _ = try await restarted.service.enqueue(captureID: id, jpeg: image)
         _ = try await restarted.service.resume(id) { _ in image }
@@ -254,25 +256,25 @@ private actor SessionWire: LiteAuthenticatedTransport {
     func testFailedIdentityJournalPreventsAppleAndServiceCalls() async throws {
         let wire = try SessionWire(), journal = SessionJournal(), apple = SessionApple(), kit = SessionStoreKit()
         let r = try runtime(wire, journal, apple: apple, storeKit: kit); await journal.fail(true)
-        await r.identity.signIn(); await r.purchases.purchase()
+        await r.identity.signIn(); await r.purchases.purchaseDisplayedTestOffer()
         XCTAssertEqual(apple.calls, 0); XCTAssertEqual(kit.buys, 0)
         let counts = await wire.counts(); XCTAssertNil(counts["account/confirm"]); XCTAssertNil(counts["purchase/context"])
     }
     func testProductionContextNeverReachesSandboxStoreKit() async throws {
         let wire = try SessionWire(), kit = SessionStoreKit(), r = try runtime(wire, SessionJournal(), storeKit: kit)
-        await r.identity.signIn(); await wire.setProduction(); await r.purchases.purchase()
+        await r.identity.signIn(); await wire.setProduction(); await r.purchases.purchaseDisplayedTestOffer()
         XCTAssertEqual(kit.buys, 0)
     }
     func testOriginChangeCannotReuseSavedIdentity() async throws {
         let wire = try SessionWire(), journal = SessionJournal(), kit = SessionStoreKit()
         let first = try runtime(wire, journal); await first.identity.signIn()
         let second = try runtime(wire, journal, storeKit: kit, origin: URL(string: "https://other.invalid")!)
-        await second.purchases.purchase(); XCTAssertEqual(kit.buys, 0)
+        await second.purchases.purchaseDisplayedTestOffer(); XCTAssertEqual(kit.buys, 0)
         let counts = await wire.counts(); XCTAssertNil(counts["purchase/context"])
     }
     func testChangedInstallationDoesNotAdoptOldSession() async throws {
         let wire = try SessionWire(), kit = SessionStoreKit(), r = try runtime(wire, SessionJournal(), storeKit: kit)
-        await r.identity.signIn(); await wire.changeOwner(); await r.purchases.purchase()
+        await r.identity.signIn(); await wire.changeOwner(); await r.purchases.purchaseDisplayedTestOffer()
         XCTAssertEqual(kit.buys, 0)
     }
     func testPurposeTransportRejectsResearchAndForeignURLWithoutDispatch() async throws {
@@ -360,7 +362,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
         let wire = try SessionWire(), kit = SessionStoreKit()
         let first = try runtime(wire, LiteServiceFileJournal(directory: dir), storeKit: kit)
         let image = await wire.image(), id = "00000000-0000-0000-0000-000000000001"
-        await first.identity.signIn(); await first.purchases.purchase()
+        await first.identity.signIn(); await first.purchases.purchaseDisplayedTestOffer()
         let done = try await first.recognizeSaved(recordID: id, jpeg: image), before = await wire.counts()
         let reopened = try runtime(wire, LiteServiceFileJournal(directory: dir), storeKit: kit)
         let saved = try await reopened.service.storedIfPresent(LiteNativeSession.captureID(recordID: id))

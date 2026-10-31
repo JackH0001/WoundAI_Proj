@@ -172,6 +172,28 @@ class PurchaseHTTPTests(unittest.TestCase):
         self.assertEqual(self.h.client.post(PREFIX+'context',json={}).status_code,401)
         raw=json.dumps(dict(anon_id='different',operation='1'*32)).encode()
         self.assertEqual(self.h.post_signed(PREFIX+'context',raw).status_code,403)
+
+    def test_existing_context_lookup_never_creates_a_row_or_debits_quota(self):
+        stores = [self.p.bridge.store, self.p.bridge.audit, self.h.ledger.store, self.h.privacy.store]
+        before = [rows(store) for store in stores]
+        self.assertEqual(self.post('context', mode='existing').status_code, 409)
+        self.assertEqual(before, [rows(store) for store in stores])
+        original = self.post('context')
+        self.assertEqual(original.status_code, 200)
+        after = [rows(store) for store in stores]
+        for _ in range(2):
+            response = self.post('context', mode='existing')
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json, original.json)
+        self.assertEqual(after, [rows(store) for store in stores])
+        self.assertEqual(self.h.model_calls, 0)
+
+    def test_unknown_context_mode_and_mode_on_confirm_are_rejected_without_creation(self):
+        before = rows(self.p.bridge.store)
+        for bad in (None, True, 'create', 'EXISTING'):
+            self.assertEqual(self.post('context', mode=bad).status_code, 409)
+        self.assertEqual(self.post('confirm', mode='existing', signed_transaction='invalid').status_code, 409)
+        self.assertEqual(before, rows(self.p.bridge.store))
     def test_client_tier_token_or_subject_fields_not_accepted(self):
         for k,v in [('paid',True),('app_account_token',self.h.token),('subject',self.h.subject)]:
             self.assertEqual(self.post('context',**{k:v}).status_code,409)

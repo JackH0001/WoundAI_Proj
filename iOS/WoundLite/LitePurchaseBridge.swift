@@ -1,6 +1,17 @@
 import Foundation
 
-enum LitePurchaseFailure: Error, Equatable { case invalid, accountMismatch, unavailable, journalConflict }
+enum LitePurchaseFailure: Error, Equatable { case invalid, accountMismatch, unavailable, journalConflict, offerChanged }
+
+/// Only the reviewed one-month product is offered. Storefront belongs to the
+/// quote, even where two storefronts use the same currency and display price.
+struct LiteMonthlyOffer: Equatable {
+    static let productID = "com.woundai.lite.plus.monthly"
+    let name: String
+    let displayPrice: String
+    let price: Decimal
+    let currency: String
+    let storefront: String
+}
 
 struct LitePurchaseContext: Codable, Equatable, Sendable {
     let v: Int, operation: String, installation: String, account_sha256: String
@@ -13,7 +24,7 @@ struct LitePurchaseContext: Codable, Equatable, Sendable {
               [account_sha256,registration_sha256,scope_sha256].allSatisfy({LiteServiceBytes.hex($0)}),
               let token = UUID(uuidString:app_account_token), token.uuidString.lowercased() == app_account_token,
               token != UUID(uuidString:"00000000-0000-0000-0000-000000000000"),
-              product_id == "com.woundai.lite.plus.monthly", ["Sandbox","Production","Xcode"].contains(environment),
+              product_id == LiteMonthlyOffer.productID, ["Sandbox","Production","Xcode"].contains(environment),
               created_at >= 0, expires_at > created_at, expires_at-created_at == 900 else { throw LitePurchaseFailure.invalid }
     }
 }
@@ -46,7 +57,7 @@ struct LitePurchaseAcknowledgment: Codable, Equatable, Sendable {
 @MainActor protocol LitePurchaseService {
     var origin: URL { get }
     func installation() async throws -> String
-    func context(operation: String) async throws -> LitePurchaseContext
+    func context(operation: String, existingOnly: Bool) async throws -> LitePurchaseContext
     func confirm(_ context: LitePurchaseContext, event: LitePurchaseEvent) async throws -> LitePurchaseAcknowledgment
 }
 
@@ -91,9 +102,11 @@ struct LiteSignedPurchaseTransport: LiteAuthenticatedTransport {
               response.statusCode == 200 else { throw LitePurchaseFailure.unavailable }
         return try JSONDecoder().decode(type,from:data)
     }
-    func context(operation: String) async throws -> LitePurchaseContext {
+    func context(operation: String, existingOnly: Bool = false) async throws -> LitePurchaseContext {
         let owner=try await installation()
-        let c=try await send("context",body:["anon_id":owner,"operation":operation],owner:owner,as:LitePurchaseContext.self)
+        var body = ["anon_id": owner, "operation": operation]
+        if existingOnly { body["mode"] = "existing" }
+        let c=try await send("context",body:body,owner:owner,as:LitePurchaseContext.self)
         try c.validate()
         guard c.installation == owner, c.operation == operation, c.environment == environment else { throw LitePurchaseFailure.accountMismatch }
         return c
@@ -127,7 +140,9 @@ enum LitePurchaseOutcome { case completed(LitePurchaseEvent), pending, cancelled
 enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
 
 @MainActor protocol LitePurchaseProvider {
-    func purchase(product: String, token: UUID) async throws -> LitePurchaseOutcome
+    func monthlyOffer() async throws -> LiteMonthlyOffer
+    func purchase(offer: LiteMonthlyOffer, token: UUID) async throws -> LitePurchaseOutcome
+    func knownPurchases() async throws -> [LitePurchaseEvent]
     func restore() async throws -> [LitePurchaseEvent]
     func unfinished() async throws -> [LitePurchaseEvent]
     func updates() -> AsyncStream<LitePurchaseUpdate>
@@ -138,6 +153,8 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
 @MainActor final class LiteNativePurchaseStore: ObservableObject {
     @Published private(set) var message="請先確認服務帳號；訂閱與研究同意分開處理。"
     @Published private(set) var busy=false
+    @Published private(set) var offer: LiteMonthlyOffer?
+    @Published private(set) var loadingOffer = false
     let service: any LitePurchaseService, provider: any LitePurchaseProvider, journal: any LiteServiceJournal
     private let now: () -> Date
     private var processing=Set<String>()
@@ -153,7 +170,7 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
     }
     private func context() async throws -> LitePurchaseContext {
         let operation=UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased()
-        let c=try await service.context(operation:operation);try c.validate()
+        let c=try await service.context(operation:operation, existingOnly: false);try c.validate()
         guard c.installation == (try await service.installation()), c.operation == operation,
               c.created_at <= Int(now().timeIntervalSince1970), c.expires_at > Int(now().timeIntervalSince1970) else { throw LitePurchaseFailure.invalid }
         _=try await save(operation,nil,LitePurchaseCheckpoint(version:1,origin:service.origin.absoluteString,context:c))
@@ -161,6 +178,12 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
     }
     private func process(_ event:LitePurchaseEvent,using supplied:LitePurchaseContext?=nil) async throws {
         let owner=try await service.installation()
+        // A saved acknowledgment is scoped to the original service account.
+        // Even a finished transaction must match today's explicit restore/buy context.
+        if let supplied {
+            guard supplied.installation == owner else { throw LitePurchaseFailure.accountMismatch }
+            try event.validate(supplied)
+        }
         let key=id(service.origin.absoluteString+"\0"+owner+"\0"+event.environment+"\0"+event.transaction)
         guard processing.insert(key).inserted else { return }
         defer { processing.remove(key) }
@@ -169,6 +192,15 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
             record=try JSONDecoder().decode(LitePurchaseCheckpoint.self,from:old);try record.validate()
             guard record.origin == service.origin.absoluteString, record.context.installation == owner,
                   record.event?.sameTransaction(as:event) == true else { throw LitePurchaseFailure.accountMismatch }
+            if let supplied, record.context.account_sha256 != supplied.account_sha256 {
+                throw LitePurchaseFailure.accountMismatch
+            }
+            if supplied == nil, record.acknowledgment != nil {
+                // Recheck the original owner before finishing from a cached
+                // receipt. This lookup cannot create a missing context.
+                let current = try await service.context(operation: record.context.operation, existingOnly: true)
+                guard current == record.context else { throw LitePurchaseFailure.accountMismatch }
+            }
         } else {
             let c:LitePurchaseContext
             if let supplied { c=supplied } else { c=try await context() }
@@ -193,15 +225,49 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
             "購買與目前服務帳號不符，未移轉訂閱或增加額度；請保留原紀錄並核對帳號。" :
             "購買關聯尚未確認，原紀錄與交易保留。請按「核對未完成購買」，不要重複購買。"
     }
-    func purchase() async {
-        guard !busy else{return};busy=true;defer{busy=false}
+    private func reconcileKnown(_ events: [LitePurchaseEvent], using context: LitePurchaseContext) async throws {
+        // Validate the whole StoreKit batch before mutating its first transaction.
+        for event in events { try event.validate(context) }
+        for event in events { try await process(event, using: context) }
+    }
+    func loadOffer() async {
+        guard !busy, !loadingOffer else { return }
+        loadingOffer = true
+        defer { loadingOffer = false }
+        offer = try? await provider.monthlyOffer()
+    }
+
+    func purchase(accepting displayed: LiteMonthlyOffer) async {
+        guard !busy, !loadingOffer, offer == displayed else { return }
+        busy = true
+        defer { busy = false }
         do {
+            let current = try await provider.monthlyOffer()
+            offer = current
+            guard current == displayed else {
+                message = "Apple 的訂閱方案已變更。請確認畫面上的新方案後再決定是否訂閱。"
+                return
+            }
+        } catch {
+            offer = nil
+            message = "目前無法核對 Apple 的商品與價格，尚未開始購買。"
+            return
+        }
+        do {
+            let known = try await provider.knownPurchases()
             let c=try await context()
-            switch try await provider.purchase(product:c.product_id,token:UUID(uuidString:c.app_account_token)!) {
+            if !known.isEmpty {
+                try await reconcileKnown(known, using: c)
+                return
+            }
+            switch try await provider.purchase(offer: displayed, token: UUID(uuidString:c.app_account_token)!) {
             case .completed(let e):try await process(e,using:c)
             case .pending:message="購買等待核准，尚未增加額度；核准後會核對原交易。"
             case .cancelled:message="已取消購買；原紀錄、額度與研究同意不變。"
             }
+        } catch LitePurchaseFailure.offerChanged {
+            offer = nil
+            message = "商店或商品資料已變更。請重新讀取價格後再決定是否訂閱。"
         } catch { failed(error) }
     }
     func restore() async {
@@ -209,7 +275,7 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
         do {
             let c=try await context();let events=try await provider.restore()
             if events.isEmpty { message="沒有找到可恢復的訂閱；未建立新帳號或重設額度。" }
-            for e in events { try await process(e,using:c) }
+            try await reconcileKnown(events, using: c)
         } catch { failed(error) }
     }
     func reconcile() async {
