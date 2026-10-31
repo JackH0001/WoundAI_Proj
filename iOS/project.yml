@@ -50,6 +50,12 @@ settings:
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     SWIFT_STRICT_CONCURRENCY: minimal
 
+targetTemplates:
+  LitePrivacyManifest:
+    sources:
+      - path: ${privacyDirectory}/PrivacyInfo.xcprivacy
+        buildPhase: resources
+
 targets:
 
   WoundMeasurementApp:
@@ -99,6 +105,10 @@ targets:
   WoundLite:
     type: application
     platform: iOS
+    templates:
+      - LitePrivacyManifest
+    templateAttributes:
+      privacyDirectory: WoundLite
     sources:
       - path: WoundMeasurementApp/Generated
       - path: WoundMeasurementApp/Core
@@ -133,8 +143,6 @@ targets:
       - path: WoundLite/Assets.xcassets
         type: folder.assetcatalog
         buildPhase: resources
-      - path: WoundLite/PrivacyInfo.xcprivacy
-        buildPhase: resources
       - path: WoundLite/Info.plist
         buildPhase: none
     settings:
@@ -142,6 +150,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.woundai.lite
         CURRENT_PROJECT_VERSION: "38"
         WOUNDLITE_BACKEND_URL: "https://woundai-lite-candidate-421209514056.asia-east1.run.app"
+        WOUNDLITE_NATIVE_SANDBOX_ORIGIN: ""
         CODE_SIGN_ENTITLEMENTS: WoundLite/WoundLite.entitlements
         INFOPLIST_FILE: WoundLite/Info.plist
         GENERATE_INFOPLIST_FILE: NO

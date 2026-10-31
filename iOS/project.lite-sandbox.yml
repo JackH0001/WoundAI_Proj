@@ -1,0 +1,51 @@
+# Separate project output: generating this profile does not replace the usual
+# project or opt an ordinary Release archive into the Sandbox.
+name: WoundAILiteNativeSandbox
+include:
+  - project.yml
+targets:
+  WoundLite:
+    preBuildScripts:
+      - name: Check native service binding for device builds
+        basedOnDependencyAnalysis: false
+        script: |
+          if [ "$PLATFORM_NAME" = "iphoneos" ] && [ "$WOUNDLITE_NATIVE_SANDBOX_ORIGIN" != "https://woundai-lite-native-sandbox-421209514056.asia-east1.run.app" ]; then
+            echo "error: Native Sandbox device builds require the reviewed, explicit service origin."
+            exit 1
+          fi
+    templateAttributes:
+      privacyDirectory: LiteNativeSandbox
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: LiteNativeSandbox/WoundLite.entitlements
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WOUND_LITE WOUND_LITE_NATIVE_SANDBOX"
+      configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WOUND_LITE DEBUG WOUND_LITE_NATIVE_SANDBOX"
+  WoundLiteTests:
+    settings:
+      base:
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WOUND_LITE_NATIVE_SANDBOX"
+  WoundLiteNativeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - WoundLiteNativeUITests
+    dependencies:
+      - target: WoundLite
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.woundai.lite.native-uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: WoundLite
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(WOUNDLITE_UI_EXPECTATION)"
+schemes:
+  WoundLiteNativeEntry:
+    build:
+      targets:
+        WoundLite: all
+        WoundLiteNativeUITests: [test]
+    test:
+      config: Release
+      targets:
+        - WoundLiteNativeUITests

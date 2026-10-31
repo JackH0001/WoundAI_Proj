@@ -138,23 +138,32 @@ struct LiteSignedAccountTransport:LiteAuthenticatedTransport {
 }
 
 /// Explicit native provider: no scopes for name/email, no token decoding as identity.
-@MainActor final class LiteAppleSignInProvider:NSObject,LiteAppleIdentityProvider,ASAuthorizationControllerDelegate,ASAuthorizationControllerPresentationContextProviding {
-    private let anchor:ASPresentationAnchor
+@MainActor final class LiteAppleSignInProvider:NSObject,LiteAppleIdentityProvider,ASAuthorizationControllerDelegate {
+    private final class Presentation: NSObject, ASAuthorizationControllerPresentationContextProviding {
+        let window: ASPresentationAnchor
+        init(_ window: ASPresentationAnchor) { self.window = window }
+        func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor { window }
+    }
+    private let resolveWindow: () -> ASPresentationAnchor?
+    private var presentation: Presentation?
     private var continuation:CheckedContinuation<LiteAppleIdentity,Error>?
     private var challenge:LiteAccountChallenge?
     private var controller:ASAuthorizationController?
-    init(anchor:ASPresentationAnchor){self.anchor=anchor}
+    init(window: @escaping () -> ASPresentationAnchor?) { resolveWindow = window }
     func signIn(_ c:LiteAccountChallenge)async throws ->LiteAppleIdentity {
         try c.validate();guard continuation==nil else {throw LiteAccountFailure.conflict}
+        guard let window = resolveWindow(), window.isKeyWindow,
+              window.windowScene?.activationState == .foregroundActive else { throw LiteAccountFailure.unavailable }
         return try await withCheckedThrowingContinuation { continuation in
             self.continuation=continuation;self.challenge=c
             let request=ASAuthorizationAppleIDProvider().createRequest()
             request.nonce=c.nonce;request.state=c.state;request.requestedScopes=[]
             let controller=ASAuthorizationController(authorizationRequests:[request])
-            self.controller=controller;controller.delegate=self;controller.presentationContextProvider=self;controller.performRequests()
+            let presentation = Presentation(window)
+            self.presentation = presentation
+            self.controller=controller;controller.delegate=self;controller.presentationContextProvider=presentation;controller.performRequests()
         }
     }
-    func presentationAnchor(for controller:ASAuthorizationController)->ASPresentationAnchor {anchor}
     func authorizationController(controller:ASAuthorizationController,didCompleteWithAuthorization authorization:ASAuthorization) {
         do {
             guard let c=challenge,let apple=authorization.credential as? ASAuthorizationAppleIDCredential,
@@ -169,7 +178,7 @@ struct LiteSignedAccountTransport:LiteAuthenticatedTransport {
         finish(.failure((error as? ASAuthorizationError)?.code == .canceled ? LiteAccountFailure.cancelled:error))
     }
     private func finish(_ result:Result<LiteAppleIdentity,Error>) {
-        let c=continuation;continuation=nil;challenge=nil;controller=nil;c?.resume(with:result)
+        let c=continuation;continuation=nil;challenge=nil;controller=nil;presentation=nil;c?.resume(with:result)
     }
     func authorized(user:String)async throws ->Bool {
         try await withCheckedThrowingContinuation { continuation in

@@ -135,11 +135,59 @@ private actor SessionWire: LiteAuthenticatedTransport {
         XCTAssertNil(LiteRootView(lidarAvailable: false).nativeSession)
         XCTAssertTrue(LiteRootView(lidarAvailable: false, nativeSession: r).nativeSession === r)
     }
+
+    #if WOUND_LITE_NATIVE_SANDBOX
+    func testCandidateAcceptsOnlyItsExactSignedBundleAndDedicatedOrigin() throws {
+        let binding = LiteNativeCandidateBinding.self
+        XCTAssertTrue(LiteNativeBuild.includesService)
+        XCTAssertEqual(try binding.origin(bundleID: "com.woundai.lite", configured: binding.address).absoluteString,
+                       binding.address)
+        XCTAssertNotEqual(binding.audience, Bundle.main.object(forInfoDictionaryKey: "LiteAttestAudience") as? String)
+        for value: String? in [nil, "", LiteBackendConfiguration.dedicatedOrigin, binding.address + "/",
+                               binding.address + "?env=Sandbox", binding.address + ".example.org",
+                               binding.address.replacingOccurrences(of: "https:", with: "http:")] {
+            XCTAssertThrowsError(try binding.origin(bundleID: "com.woundai.lite", configured: value))
+        }
+        XCTAssertThrowsError(try binding.origin(bundleID: "com.woundai.app", configured: binding.address))
+    }
+    #else
+    func testOrdinaryBuildOmitsNativeCandidateEntry() {
+        XCTAssertFalse(LiteNativeBuild.includesService)
+    }
+    #endif
     func testRegistrationIsExplicitAndDoesNotSignInOrBuy() async throws {
         let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit()
         let r = try runtime(wire, SessionJournal(), apple: apple, storeKit: kit)
         await r.registerDevice(); let counts = await wire.counts()
         XCTAssertEqual(counts, ["registration": 1]); XCTAssertEqual(apple.calls, 0); XCTAssertEqual(kit.buys, 0)
+        XCTAssertEqual(r.registration, .confirmed)
+    }
+
+    func testCheckingExistingRegistrationAfterRestartNeverRegistersOrSends() async throws {
+        let wire = try SessionWire(), journal = SessionJournal()
+        for _ in 0..<2 {
+            let session = try runtime(wire, journal)
+            await session.checkExistingRegistration()
+            XCTAssertEqual(session.registration, .confirmed)
+        }
+        let counts = await wire.counts(), rows = await journal.snapshot()
+        XCTAssertEqual(counts, ["registration": 0])
+        XCTAssertTrue(rows.isEmpty)
+    }
+
+    func testMissingAndUnreadableRegistrationCannotBeConfused() async throws {
+        let wire = try SessionWire(), journal = SessionJournal()
+        for locked in [false, true] {
+            let session = try LiteNativeSession(origin: origin, transport: wire, identityProvider: SessionApple(),
+                purchaseProvider: SessionStoreKit(), journal: journal, register: { await wire.register() },
+                existing: { if locked { throw LiteAttestFailure.unavailable }; return nil })
+            await session.checkExistingRegistration()
+            XCTAssertEqual(session.registration, locked ? .unreadable : .required)
+            if locked { await session.registerDevice() }
+        }
+        let counts = await wire.counts(), rows = await journal.snapshot()
+        XCTAssertEqual(counts, ["registration": 0])
+        XCTAssertTrue(rows.isEmpty)
     }
     func testBeforeSignInNeitherPurchaseNorRecognitionIsDispatched() async throws {
         let wire = try SessionWire(), r = try runtime(wire, SessionJournal())
