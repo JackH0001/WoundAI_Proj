@@ -24,6 +24,19 @@ def encoded(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode('utf-8')
 
 
+def read_validation(store, identity, now):
+    """Shared refresh checkpoint decoder; a revoker needs a clock, not login keys."""
+    row = store.load(key('apple-grant-validation', identity))
+    if row is None: return None
+    c = row[1]
+    if (type(c) is not dict or set(c) != {'v','grant_id','phase','checked_at'}
+            or type(c['v']) is not int or c['v'] != 1 or c['grant_id'] != identity
+            or c['phase'] not in ('validating','valid','uncertain','rejected')
+            or type(c['checked_at']) is not int or not 0 <= c['checked_at'] <= now):
+        raise StateUnavailable('Apple validation state corrupt')
+    return row
+
+
 class GrantCipher:
     """AES-256-GCM with context authentication and explicit key-version selection."""
     def __init__(self, *, keys, current):
@@ -236,15 +249,7 @@ class AppleGrantAuthority:
         return self._receipt(identity, row)
 
     def _validation(self, identity):
-        row = self.store.load(key('apple-grant-validation',identity))
-        if row is None: return None
-        c=row[1]
-        if (type(c) is not dict or set(c)!={'v','grant_id','phase','checked_at'}
-                or type(c['v']) is not int or c['v']!=1 or c['grant_id']!=identity
-                or c['phase'] not in ('validating','valid','uncertain','rejected')
-                or type(c['checked_at']) is not int or not 0<=c['checked_at']<=self.verifier.clock()):
-            raise StateUnavailable('Apple validation state corrupt')
-        return row
+        return read_validation(self.store, identity, self.verifier.clock())
 
     def fresh_until(self, installation, operation, person):
         receipt=self.require(installation,operation,person)

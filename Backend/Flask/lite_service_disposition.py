@@ -32,8 +32,9 @@ class ServiceResultDisposition:
 
     def __init__(self,*,operations,lifecycle,store,audit_store):
         from lite_service_operations import ServiceOperations
+        from lite_disposition_context import ResultReadContext
         from lite_account_lifecycle import AccountLifecycle
-        if (not isinstance(operations,ServiceOperations) or not isinstance(lifecycle,AccountLifecycle)
+        if (not isinstance(operations,(ServiceOperations,ResultReadContext)) or not isinstance(lifecycle,AccountLifecycle)
                 or not lifecycle.service_catalog or operations.accounts.lifecycle is not lifecycle):
             raise ValueError('matching opt-in service catalog and operations required')
         all_stores=(store,audit_store,operations.store,lifecycle.store,lifecycle.audit,operations.ledger.store)

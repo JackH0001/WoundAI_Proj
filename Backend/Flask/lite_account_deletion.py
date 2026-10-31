@@ -28,7 +28,8 @@ class AccountDeletion:
     LEASE_SECONDS = 120
 
     def __init__(self, *, bridge, store, audit_store):
-        if (not isinstance(bridge, AccountIdentityBridge) or bridge.lifecycle is None
+        from lite_disposition_context import ClosedAccountContext
+        if (not isinstance(bridge, (AccountIdentityBridge, ClosedAccountContext)) or bridge.lifecycle is None
                 or bridge.grants is None or bridge.grants.lifecycle is not bridge.lifecycle):
             raise ValueError('matching indexed identity and grant authorities required')
         if store is audit_store or (getattr(store, 'path', None) is not None
@@ -38,7 +39,7 @@ class AccountDeletion:
         self.store, self.audit = store, audit_store
         self.disposition = None
         self.scope = self.lifecycle.scope
-        self.reauthentication = DeletionIdentity(self)
+        self.reauthentication = DeletionIdentity(self) if isinstance(bridge, AccountIdentityBridge) else None
         self.immutable(store, key('account-deletion-config', bridge.namespace),
                        dict(v=1, scope=self.scope, lease_seconds=self.LEASE_SECONDS))
 
@@ -116,6 +117,7 @@ class AccountDeletion:
         return person
 
     def begin(self, installation, operation):
+        if self.reauthentication is None: raise IdentityRejected('worker cannot accept account deletion')
         if not self.reauthentication.resume(installation,operation):
             self.bridge.begin_account_closure(installation, operation)
         return self.status(installation, operation)
@@ -212,7 +214,8 @@ class AccountDeletion:
 
 
 def blueprint(coordinator):
-    if not isinstance(coordinator, AccountDeletion): raise ValueError('trusted deletion coordinator required')
+    if not isinstance(coordinator, AccountDeletion) or coordinator.reauthentication is None:
+        raise ValueError('trusted public deletion coordinator required')
     bp = Blueprint('lite_account_deletion', __name__)
     def action(kind):
         try:

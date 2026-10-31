@@ -28,32 +28,39 @@ class CommandRejected(ValueError):pass
 class ExecutionUncertain(StateUnavailable):pass
 
 
+def validate_manifest(manifest, *, expected_manifest, expected_source, expected_image):
+    m=copy.deepcopy(manifest)
+    _hex(expected_manifest);_hex(expected_source,40);_hex(expected_image)
+    if (type(m) is not dict or set(m)!={'v','namespace','source','image','operation','accounts',
+                'not_before','expires_at','max_commands','steps','limit','seconds'}
+            or type(m['v']) is not int or m['v']!=1 or digest(m)!=expected_manifest
+            or m['source']!=expected_source or m['image']!=expected_image):
+        raise ValueError('explicit pinned disposition manifest required')
+    _subject(m['namespace']);_hex(m['operation'])
+    if (any(type(m[k]) is not int for k in ('not_before','expires_at','max_commands','steps','limit','seconds'))
+            or not 0<=m['not_before']<m['expires_at']<=m['not_before']+3600
+            or not 1<=m['max_commands']<=100 or not 1<=m['steps']<=100
+            or m['max_commands']*m['steps']>1000 or not 1<=m['limit']<=20 or not 1<=m['seconds']<=60
+            or type(m['accounts']) is not list or not 1<=len(m['accounts'])<=10):
+        raise ValueError('finite account, dispatch and time bounds required')
+    persons={}
+    for a in m['accounts']:
+        if type(a) is not dict or set(a)!={'person','plan_sha256'}:raise ValueError('exact account plan required')
+        _hex(a['person']);_hex(a['plan_sha256'])
+        if a['person'] in persons:raise ValueError('duplicate account')
+        persons[a['person']]=a['plan_sha256']
+    return m, persons
+
+
 class DispositionExecutor:
     immutable=staticmethod(SubscriptionRuntime.immutable)
 
     def __init__(self,*,enabled=False,manifest,expected_manifest,expected_source,expected_image,
                  worker,store,audit_store,operator_keys,drain_keys,clock=time.time):
-        m=copy.deepcopy(manifest)
-        _hex(expected_manifest);_hex(expected_source,40);_hex(expected_image)
-        if (enabled is not True or not isinstance(worker,AccountDispositionWorker) or not callable(clock)
-                or type(m) is not dict or set(m)!={'v','namespace','source','image','operation','accounts',
-                    'not_before','expires_at','max_commands','steps','limit','seconds'}
-                or type(m['v']) is not int or m['v']!=1 or digest(m)!=expected_manifest
-                or m['source']!=expected_source or m['image']!=expected_image):
-            raise ValueError('explicit pinned disposition manifest required')
-        _subject(m['namespace']);_hex(m['operation'])
-        if (any(type(m[k]) is not int for k in ('not_before','expires_at','max_commands','steps','limit','seconds'))
-                or not 0<=m['not_before']<m['expires_at']<=m['not_before']+3600
-                or not 1<=m['max_commands']<=100 or not 1<=m['steps']<=100
-                or m['max_commands']*m['steps']>1000 or not 1<=m['limit']<=20 or not 1<=m['seconds']<=60
-                or type(m['accounts']) is not list or not 1<=len(m['accounts'])<=10):
-            raise ValueError('finite account, dispatch and time bounds required')
-        persons={}
-        for a in m['accounts']:
-            if type(a) is not dict or set(a)!={'person','plan_sha256'}:raise ValueError('exact account plan required')
-            _hex(a['person']);_hex(a['plan_sha256'])
-            if a['person'] in persons:raise ValueError('duplicate account')
-            persons[a['person']]=a['plan_sha256']
+        if enabled is not True or not isinstance(worker, AccountDispositionWorker) or not callable(clock):
+            raise ValueError('explicit worker enablement required')
+        m, persons = validate_manifest(manifest, expected_manifest=expected_manifest,
+            expected_source=expected_source, expected_image=expected_image)
         def checked(keys):
             if type(keys) is not dict or not 1<=len(keys)<=4:raise ValueError('bounded verification keys required')
             for n,b in keys.items():
