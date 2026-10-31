@@ -6,6 +6,7 @@ executes a command, revokes a token, destroys a key or removes media.
 """
 import base64
 import hashlib
+import os
 from pathlib import Path
 import re
 import time
@@ -31,12 +32,14 @@ from lite_service_history import ServiceResultHistory
 from lite_store_locations import LimitedStateStore, location, overlaps
 from lite_subscription_executor import key
 from lite_usage_ledger import digest, _hex, _subject
+from lite_provider_budget import ProviderBudget, validate_policy
+from lite_provider_transport import BudgetedSession, apple_revoker
 
 READ = ('lifecycle', 'lifecycle_audit', 'identity', 'identity_audit', 'accounts', 'quota')
 WRITE = ('keys', 'grants', 'deletion', 'results', 'progress', 'research', 'research_closure',
          'research_media', 'service_history', 'research_history', 'worker', 'executor')
 AUDIT = tuple(n+'_audit' for n in WRITE if n != 'research')
-STORES = READ + WRITE + AUDIT + ('operations',)
+STORES = READ + WRITE + AUDIT + ('operations', 'provider_budget', 'provider_budget_audit')
 
 
 def exact(v, fields):
@@ -54,7 +57,7 @@ def preflight(raw, *, expected_config, expected_source, expected_image, secrets,
     if (type(raw) is not bytes or not 1 <= len(raw) <= 65536
             or hashlib.sha256(raw).hexdigest() != expected_config): raise ValueError('bounded pinned configuration required')
     c = loads_json_object_strict(raw.decode())
-    exact(c, 'schema enabled deployment binding buckets stores media policies manifest manifest_sha256 signers apple')
+    exact(c, 'schema enabled deployment binding buckets stores media policies manifest manifest_sha256 provider_budget signers apple')
     if c['schema'] != 'lite-disposition-startup/1' or c['enabled'] is not True:
         raise ValueError('explicit private disposition enablement required')
     d = exact(c['deployment'], 'source image project project_number service_account keyring')
@@ -66,6 +69,11 @@ def preflight(raw, *, expected_config, expected_source, expected_image, secrets,
     _subject(b['namespace']); _hex(b['identity_key_sha256'])
     if b['issuer'] != 'https://appleid.apple.com' or b['audience'] != 'com.woundai.lite': raise ValueError('Lite binding required')
     validate_manifest(c['manifest'], expected_manifest=c['manifest_sha256'], expected_source=expected_source, expected_image=expected_image)
+    limits = validate_policy(c['provider_budget'], digest(c['provider_budget']))
+    if (limits['manifest'] != c['manifest_sha256'] or limits['source'] != expected_source
+            or limits['image'] != expected_image or limits['not_before'] != c['manifest']['not_before']
+            or limits['expires_at'] < c['manifest']['expires_at']):
+        raise ValueError('provider budget must bind the same reviewed source and execution window')
     signers = exact(c['signers'], 'operator drain'); decoded = []
     for role in ('operator', 'drain'):
         value = signers[role]
@@ -134,18 +142,38 @@ def revoke_transport(url, fields):
 
 class CloudProviders:
     def connect(self, c):
+        if os.environ.get('DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA') != 'true':
+            raise ValueError('private worker must disable background bucket metadata requests')
         from google.auth.compute_engine import Credentials
         from google.auth.transport.requests import AuthorizedSession
         from google.cloud.storage import Client
         d = c['deployment']; self.credentials = Credentials(service_account_email=d['service_account'])
-        self.client = Client(project=d['project'], credentials=self.credentials)
-        self.kms = DispositionKMSSession(AuthorizedSession(self.credentials), d['keyring'], digest(c['binding']),
-            [a['person'] for a in c['manifest']['accounts']])
+        self.config = c
+        # Bootstrap is control-plane traffic: metadata and finite journal CAS,
+        # never media/key/Apple work. Its separate bounds need deployment review.
+        self.control = AuthorizedSession(self.credentials, max_refresh_attempts=0)
+        self.control.trust_env = False
+        self.client = Client(project=d['project'], credentials=self.credentials, _http=self.control)
+        self.allocation = None
     def identity_checked(self, c):
         if self.credentials.service_account_email != c['deployment']['service_account']: raise ValueError('runtime identity differs')
     def bucket(self, name): return self.client.bucket(name)
     def state(self, bucket, prefix): return GCSStateStore(bucket, prefix=prefix)
-    def oauth(self, secret): return AppleOAuthProvider(client_id='com.woundai.lite', client_secret=secret, post=revoke_transport)
+    def activate_budget(self, allocation):
+        if os.environ.get('DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA') != 'true':
+            raise ValueError('private worker metadata policy changed')
+        from google.auth.transport.requests import AuthorizedSession
+        from google.cloud.storage import Client
+        c = self.config; self.allocation = allocation
+        storage = AuthorizedSession(self.credentials, max_refresh_attempts=0); storage.trust_env = False
+        kms = AuthorizedSession(self.credentials, max_refresh_attempts=0); kms.trust_env = False
+        self.client = Client(project=c['deployment']['project'],credentials=self.credentials,
+            _http=BudgetedSession(storage,allocation,provider='gcs',authorized=True))
+        self.kms = DispositionKMSSession(BudgetedSession(kms,allocation,provider='kms',response_limit=32768,authorized=True),
+            c['deployment']['keyring'],digest(c['binding']),[a['person'] for a in c['manifest']['accounts']])
+    def oauth(self, secret):
+        if self.allocation is None: raise StateUnavailable('provider allocation required before Apple access')
+        return AppleOAuthProvider(client_id='com.woundai.lite',client_secret=secret,post=apple_revoker(self.allocation))
 
 
 def build_disposition(raw, *, expected_config, expected_source, expected_image, secrets, providers=None,
@@ -168,6 +196,20 @@ def build_disposition(raw, *, expected_config, expected_source, expected_image, 
     locs = [location(x) for x in s.values()]
     if any(overlaps(a,b) for i,a in enumerate(locs) for b in locs[i+1:]): raise ValueError('resolved storage overlaps')
     if any(loc[0]=='gcs' and loc[1]==c['media']['bucket'] for loc in locs): raise ValueError('resolved state shares research media')
+    budget = ProviderBudget(policy=c['provider_budget'],expected=digest(c['provider_budget']),
+        store=s['provider_budget'],audit_store=s['provider_budget_audit'],clock=clock)
+    allocation = budget.allocate()
+    p.activate_budget(allocation)
+    # All operational stores and media must use the newly bounded transport.
+    # Retain the just-verified metadata without issuing an unmetered extra read.
+    verified = {n:dict(b._properties) for n,b in buckets.items()}
+    buckets = {n:p.bucket(n) for n in buckets}
+    for n,b in buckets.items(): b._properties = verified[n]
+    s = {n:p.state(buckets[v['bucket']],v['prefix']) for n,v in c['stores'].items()
+         if n not in ('provider_budget','provider_budget_audit')}
+    operational = [location(x) for x in s.values()]
+    if operational != [loc for n,loc in zip(c['stores'],locs) if n not in ('provider_budget','provider_budget_audit')]:
+        raise ValueError('provider activation changed store locations')
     for n in READ: s[n] = LimitedStateStore(s[n], mode='read')
     for n in AUDIT: s[n] = LimitedStateStore(s[n], mode='create')
     life = AccountLifecycle(store=s['lifecycle'], audit_store=s['lifecycle_audit'], binding=c['binding'], clock=clock, service_catalog=True)
@@ -203,6 +245,7 @@ def build_disposition(raw, *, expected_config, expected_source, expected_image, 
         expected_source=expected_source,expected_image=expected_image,worker=worker,store=s['executor'],audit_store=s['executor_audit'],
         operator_keys=signers[0],drain_keys=signers[1],clock=clock)
     for a in c['manifest']['accounts']: executor.inspect(a['person'])
+    executor.provider_allocation = allocation
     return executor
 
 

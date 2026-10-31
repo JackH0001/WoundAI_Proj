@@ -15,6 +15,8 @@ from lite_service_history import ServiceResultHistory
 from lite_store_locations import LimitedStateStore
 from lite_subscription_executor import key,canonical
 from lite_usage_ledger import digest
+from lite_provider_budget import ProviderBudget, BudgetUnavailable
+from lite_provider_transport import BudgetedSession
 from test_lite_disposition_executor import public,signed
 from test_lite_subscription_grace import rows
 import test_lite_native_purchase as native
@@ -33,6 +35,7 @@ class Providers:
         self.calls.append('identity')
         if self.wrong_identity:raise ValueError('wrong runtime')
     def state(self,bucket,prefix):return self.f.stores[prefix.rsplit('/',1)[-1]]
+    def activate_budget(self,allocation):self.allocation=allocation
     def oauth(self,secret):return self.f.f.w.p.deletion.grants.provider
 
 
@@ -56,7 +59,8 @@ class Fixture:
             research_closure_audit=m.closure.audit,research_media=m.w.store,research_media_audit=m.w.audit,
             service_history=f.service.jobs,service_history_audit=f.service.audit,research_history=f.h.jobs,
             research_history_audit=f.h.audit,worker=f.store,worker_audit=f.audit,
-            executor=f.f.store('startup-executor'),executor_audit=f.f.store('startup-executor-audit'),operations=f.f.ops.store)
+            executor=f.f.store('startup-executor'),executor_audit=f.f.store('startup-executor-audit'),operations=f.f.ops.store,
+            provider_budget=f.f.store('startup-provider-budget'),provider_budget_audit=f.f.store('startup-provider-budget-audit'))
         assert set(self.stores)==set(startup.STORES)
         self.operator=ed25519.Ed25519PrivateKey.generate();self.drainer=ed25519.Ed25519PrivateKey.generate()
         self.buckets={f.service_bucket.name:f.service_bucket,f.h.bucket.name:f.h.bucket}
@@ -76,6 +80,9 @@ class Fixture:
             stores={n:dict(bucket=f.service_bucket.name,prefix='lite-native/test/'+n) for n in self.stores},
             media=dict(bucket=f.h.bucket.name),policies=dict(service=f.service.policy,research=f.h.policy),
             manifest=manifest,manifest_sha256=digest(manifest),
+            provider_budget=dict(v=1,namespace='startup-budget',manifest=digest(manifest),source='a'*40,image='b'*64,
+                not_before=self.now,expires_at=self.now+3600,max_allocations=12,requests=5000,
+                send_bytes=1024**2,receive_bytes=32*1024**2,seconds=60),
             signers=dict(operator={'operator':base64.b64encode(public(self.operator)).decode()},
                 drain={'observer':base64.b64encode(public(self.drainer)).decode()}),
             apple=dict(team='TEAM000001',key_id='OAUTH00001',file='oauth.pem',sha256=hashlib.sha256(private).hexdigest()))
@@ -180,11 +187,13 @@ class StartupTests(unittest.TestCase):
             with self.assertRaises(StateUnavailable):self.f.build()
     def test_unknown_account_does_not_initialize(self):
         self.f.c['manifest']['accounts'][0]['person']='0'*64;self.f.c['manifest_sha256']=digest(self.f.c['manifest'])
+        self.f.c['provider_budget']['manifest']=self.f.c['manifest_sha256']
         before=self.f.snap()
         with self.assertRaises(ValueError):self.f.build()
         self.assertEqual(before,self.f.snap())
     def test_wrong_account_plan_refuses_entry(self):
         self.f.c['manifest']['accounts'][0]['plan_sha256']='0'*64;self.f.c['manifest_sha256']=digest(self.f.c['manifest'])
+        self.f.c['provider_budget']['manifest']=self.f.c['manifest_sha256']
         before=self.f.snap()
         with self.assertRaises(ValueError):self.f.build()
         self.assertEqual(before,self.f.snap())
@@ -221,6 +230,78 @@ class StartupTests(unittest.TestCase):
         self.f.now+=1000;e=self.f.build()
         self.assertFalse(e.inspect(self.f.person)['account_deleted'])
         with self.assertRaises(ValueError):e.execute(self.f.command())
+    def budget(self):
+        return ProviderBudget(policy=self.f.c['provider_budget'],expected=digest(self.f.c['provider_budget']),
+            store=self.f.stores['provider_budget'],audit_store=self.f.stores['provider_budget_audit'],clock=lambda:self.f.now)
+    def test_factory_reserves_before_activating_operational_transport(self):
+        called=[];activate=self.f.providers.activate_budget
+        def checked(allocation):
+            called.append(self.budget().status()['allocated_attempts']);activate(allocation)
+        with patch.object(self.f.providers,'activate_budget',side_effect=checked):self.f.build()
+        self.assertEqual(called,[1]);self.assertIs(self.f.e.provider_allocation,self.f.providers.allocation)
+    def test_factory_restart_cannot_reset_provider_allocation(self):
+        self.f.c['provider_budget']['max_allocations']=1;self.f.build();before=self.f.snap()
+        with self.assertRaises(BudgetUnavailable):self.f.build()
+        self.assertEqual(before,self.f.snap());self.assertEqual(self.budget().status()['allocated_attempts'],1)
+    def test_activation_failure_consumes_allocation_without_cleanup(self):
+        before=self.f.snap()
+        with patch.object(self.f.providers,'activate_budget',side_effect=StateUnavailable('startup interrupted')):
+            with self.assertRaises(StateUnavailable):self.f.build()
+        self.assertEqual(before,self.f.snap());self.assertEqual(self.budget().status()['allocated_attempts'],1)
+        self.f.build();self.assertEqual(self.budget().status()['allocated_attempts'],2)
+    def test_changed_budget_cannot_reuse_existing_journal(self):
+        self.f.build();self.f.c['provider_budget']['requests']+=1
+        with self.assertRaises(BudgetUnavailable):self.f.build()
+    def test_budget_manifest_mismatch_stops_before_connection(self):
+        self.f.c['provider_budget']['manifest']='0'*64
+        with self.assertRaises(ValueError):self.f.build()
+        self.assertEqual(self.f.providers.calls,[])
+    def test_cloud_factory_binds_all_operational_transports_to_one_allocation(self):
+        import os
+        self.enterContext(patch.dict(os.environ,DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA='true'))
+        from google.auth.credentials import AnonymousCredentials
+        credentials=AnonymousCredentials();credentials.service_account_email=self.f.c['deployment']['service_account']
+        provider=startup.CloudProviders()
+        with patch('google.auth.compute_engine.Credentials',return_value=credentials):provider.connect(self.f.c)
+        allocation=self.budget().allocate();provider.activate_budget(allocation)
+        self.addCleanup(provider.control.close);self.addCleanup(provider.client.close)
+        self.addCleanup(provider.kms.session.close)
+        self.assertEqual(provider.control._max_refresh_attempts,0)
+        storage=provider.bucket(next(iter(self.f.buckets))).client._http
+        self.assertIsInstance(storage,BudgetedSession);self.assertIs(storage.allocation,allocation)
+        self.assertIs(provider.kms.session.allocation,allocation)
+        self.assertEqual(storage.session._max_refresh_attempts,0)
+        self.assertEqual(provider.kms.session.session._max_refresh_attempts,0)
+
+    def test_cloud_factory_refuses_implicit_background_requests(self):
+        import os
+        with patch.dict(os.environ,DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA='false'):
+            with patch('google.auth.compute_engine.Credentials') as credentials:
+                with self.assertRaisesRegex(ValueError,'background'):startup.CloudProviders().connect(self.f.c)
+                credentials.assert_not_called()
+
+    def test_exhaustion_during_work_preserves_claim_and_blocks_blind_replay(self):
+        self.f.c['provider_budget']['requests']=2
+        e=self.f.build();command=self.f.command();before=self.f.snap()
+        unavailable=patch.object(e.store,'load',side_effect=BudgetUnavailable('allocation exhausted'))
+        def exhausted(*args,**kw):
+            for _ in range(2):
+                e.provider_allocation.begin(provider='gcs',method='GET',send_bytes=0,response_limit=1)
+            # Failure reporting also needs storage; exhaustion must not erase
+            # the original running claim or grant another caller execution.
+            unavailable.start()
+            e.provider_allocation.begin(provider='gcs',method='GET',send_bytes=0,response_limit=1)
+        try:
+            with patch.object(e.w,'run',side_effect=exhausted):
+                response=e.create_app().test_client().post(PATH,json=dict(command=command,drain=None))
+            self.assertEqual(response.status_code,503)
+            self.assertFalse(response.json['retry_automatically'])
+        finally:unavailable.stop()
+        e=self.f.build();view=e.inspect(self.f.person)
+        self.assertEqual(set(view['commands'].values()),{'running'})
+        with patch.object(e.w,'run',side_effect=AssertionError('must not replay')):
+            response=e.create_app().test_client().post(PATH,json=dict(command=command,drain=None))
+        self.assertEqual(response.status_code,503);self.assertEqual(before,self.f.snap())
 
 
 if __name__=='__main__':unittest.main()

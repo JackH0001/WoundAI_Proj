@@ -27,7 +27,8 @@ routes, rather than Python module imports alone, enforce these operation limits.
 ## Startup contract
 
 - Required environment: `LITE_DISPOSITION_CONFIG`, `LITE_DISPOSITION_CONFIG_SHA256`,
-  `LITE_DISPOSITION_SOURCE`, `LITE_DISPOSITION_IMAGE_SHA256`, `LITE_DISPOSITION_SECRETS`.
+  `LITE_DISPOSITION_SOURCE`, `LITE_DISPOSITION_IMAGE_SHA256`, `LITE_DISPOSITION_SECRETS`,
+  and `DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA=true`.
 - The regular JSON file is at most 64 KiB; the mounted signing key is at most
   16 KiB and has an independent SHA-256. No secret value is part of the JSON.
 - Configuration schema `lite-disposition-startup/1` has exact fields. Deployment
@@ -39,7 +40,7 @@ routes, rather than Python module imports alone, enforce these operation limits.
   Even a harmless metadata update requires a newly reviewed snapshot; this is an
   intentional conservative startup refusal, not an assertion that all changes
   are unsafe. Research media must occupy a separate bucket from every state store.
-- `stores` names all 30 state locations. Declared prefixes cannot overlap, and
+- `stores` names all 32 state locations. Declared prefixes cannot overlap, and
   resolved store locations are checked again. No bucket is silently discovered.
 - Existing native lifecycle, account catalog, identity/grant, per-account-key,
   deletion and progress configuration must exist and match. Missing native
@@ -55,6 +56,10 @@ routes, rather than Python module imports alone, enforce these operation limits.
 `CloudProviders.identity_checked` checks the configured credential identity. It
 is not a substitute for a live metadata identity/IAM test or proof of effective
 permissions. No such live claim is made by the synthetic tests.
+
+The factory now also requires durable provider allocations before operational
+startup reads. See [provider budget contract](lite_provider_budget_20261031.md)
+for request/payload limits, non-refundable restart reservations and exclusions.
 
 ## Narrow dependencies and proposed permission boundaries
 
@@ -76,8 +81,8 @@ still deployment gates. The source includes no cloud provisioning or IAM changes
 ## Package and CI
 
 `tools/stage_lite_disposition_candidate.py` produces a new directory outside the
-repo, with 45 explicit Python modules and four image-profile files. It checks
-nested static imports, symlinks and copy/hash consistency. The 49-file manifest
+repo, with 47 explicit Python modules and four image-profile files. It checks
+nested static imports, symlinks and copy/hash consistency. The 51-file manifest
 records whether the source tree was dirty and does not approve release.
 `verify_disposition_package.py` verifies exact contents before importing startup;
 it does not instantiate the app or contact providers.
@@ -104,7 +109,7 @@ python -m unittest discover -v -s engineering/phase2 -p 'test_lite*.py'
 python tools/stage_lite_disposition_candidate.py --repo . --output /tmp/new-private-disposition-context
 ```
 
-The 31 new tests use generated data, real application factories and signed HTTP
+The original 31 startup/package tests and subsequent budget integration tests use generated data, real application factories and signed HTTP
 commands, with synthetic storage/Apple/KMS transports. The independent probe
 restarts the graph between calls, replays a completed request with worker execution
 forbidden, and compares original capture, identity/audit and quota state. Six
@@ -124,7 +129,7 @@ the production policy.
 ## Remaining gates
 
 No real provider calls, patient data, production secrets or keys were used. Before
-deployment, finish hard deadlines/cancellation, GCS request/byte/cost limits, real
+deployment, finish hard deadlines/cancellation, control-plane and billing limits, real
 process drain verification, IAM/secret custody, live provider failure recovery and
 the fixed-source execution review. A Gunicorn timeout alone is not proof of safe
 provider cancellation. Deferred soft-deleted objects, retention/holds, backups,

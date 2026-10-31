@@ -32,7 +32,7 @@ class PackageTests(unittest.TestCase):
     def test_independent_package_no_model_secret_or_web_routes(self):
         for n in ('models/weight.onnx','upload.jpg','.env','app.py','lite_native_startup.py','secret.p8'):
             p=self.root/'Backend/Flask'/n;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('not for worker')
-        m=self.build();self.assertEqual(len(m['files']),49);self.assertFalse(m['release_approved'])
+        m=self.build();self.assertEqual(len(m['files']),51);self.assertFalse(m['release_approved'])
         r=self.verify();self.assertEqual(r.returncode,0,r.stderr)
         self.assertFalse(json.loads(r.stdout)['application_started']);self.assertFalse(json.loads(r.stdout)['cloud_access'])
     def test_new_nested_dependency_blocks_staging(self):
@@ -57,7 +57,8 @@ class PackageTests(unittest.TestCase):
         (self.out/'unexpected.txt').write_text('unexpected');self.assertNotEqual(self.verify().returncode,0)
     def test_profile_is_nonroot_pinned_private_factory(self):
         s=(ROOT/'Backend/LiteDisposition/Dockerfile').read_text()
-        for v in ('@sha256:', '--require-hashes', 'pip check', 'USER woundai', 'lite_disposition_startup:application()'):self.assertIn(v,s)
+        for v in ('@sha256:', '--require-hashes', 'pip check', 'USER woundai', 'lite_disposition_startup:application()',
+                  'DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA=true'):self.assertIn(v,s)
         self.assertNotIn('app:app',s);self.assertNotIn('LITE_DISPOSITION_CONFIG=',s)
         self.assertNotIn('onnxruntime==',(ROOT/'Backend/LiteDisposition/requirements.lock').read_text())
 
