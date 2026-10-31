@@ -58,3 +58,78 @@ class ServiceResultHistory(ExactGenerationHistory):
         return dict(v=1,inventory_sha256=page['inventory_sha256'],next_cursor=page['next_cursor'],
             results=results,pending_operations=[r['operation'] for r in results if r['status']!='listed_history_absent_at_check'],
             account_deleted=False,physical_backups_erased=False)
+
+    def _scan_plan(self,person):
+        return dict(v=1,policy=self.policy,closure=self.d.plan(person))
+
+    def _scan_read(self,p):
+        row=self.jobs.load(key('service-history-scan',digest(p)))
+        if row is None:return None
+        j=row[1]
+        if (type(j) is not dict or set(j)!={'v','plan','step','round','cursor','remaining','checked','soft_pending','soft_unverified'}
+                or type(j['v']) is not int or j['v']!=1 or j['plan']!=p
+                or any(type(j[k]) is not int or not 0<=j[k]<=1000000 for k in
+                       ('step','round','remaining','checked','soft_pending','soft_unverified'))
+                or j['round']<1 or j['remaining']+j['checked']!=p['closure']['total']
+                or max(j['soft_pending'],j['soft_unverified'])>j['checked']
+                or (j['cursor'] is None)!=(j['remaining']==0)):
+            raise StateUnavailable('service history scan corrupt; never reset')
+        if j['cursor'] is not None:
+            n=self.d.life.services.node(p['closure']['person'],j['cursor'])
+            if n['position']!=j['remaining']:raise StateUnavailable('service history cursor differs')
+        for kind,value in (('plan',p),('checkpoint',j)):
+            proof=self.audit.load(key('service-history-scan-'+kind,digest(value)))
+            if proof is None or proof[1]!=value:raise StateUnavailable('original service history scan evidence missing')
+        return row
+
+    def _scan_save(self,p,old,j):
+        if max(j['step'],j['round'])>1000000:raise StateUnavailable('service scan revision requires review')
+        self.immutable(self.audit,key('service-history-scan-checkpoint',digest(j)),j)
+        try:self.jobs.compare_exchange(key('service-history-scan',digest(p)),0 if old is None else old[0],j)
+        except StateUnavailable:pass
+        saved=self._scan_read(p)
+        if saved is None or saved[1]['step']<j['step'] or (saved[1]['step']==j['step'] and saved[1]!=j):
+            raise StateUnavailable('service history scan checkpoint unconfirmed')
+        return saved
+
+    @staticmethod
+    def _scan_initial(p,*,step=0,round=1):
+        c=p['closure']
+        return dict(v=1,plan=p,step=step,round=round,cursor=c['head'],remaining=c['total'],
+                    checked=0,soft_pending=0,soft_unverified=0)
+
+    @staticmethod
+    def _scan_receipt(j,apply):
+        return dict(v=1,plan_sha256=digest(j['plan']),round=j['round'],apply=apply,
+            scan_finished=j['remaining']==0,operations_checked=j['checked'],
+            active_history_absent_in_verified_scope=j['remaining']==0,
+            soft_pending_operations=j['soft_pending'],soft_unverified_operations=j['soft_unverified'],
+            current_fences_preserved=True,observed_scope_only=True,account_deleted=False,physical_backups_erased=False)
+
+    def advance_account(self,person,*,versions=20,apply=False,rescan=False):
+        """One frozen operation per call, retained until its batch is confirmed.
+
+        This persisted cursor replaces caller-managed paging for private worker
+        composition. Soft data stays pending; complete observations require an
+        explicit new round to recheck. Dry-run reads only the saved checkpoint.
+        """
+        if type(versions) is not int or not 1<=versions<=50 or type(apply) is not bool or type(rescan) is not bool:
+            raise ValueError('bounded explicit service scan required')
+        p=self._scan_plan(person);row=self._scan_read(p)
+        j=self._scan_initial(p) if row is None else row[1]
+        if not apply:return self._scan_receipt(j,False)
+        self.immutable(self.audit,key('service-history-scan-plan',digest(p)),p)
+        if row is None:return self._scan_receipt(self._scan_save(p,None,j)[1],True)
+        if j['remaining']==0:
+            if rescan:
+                j=self._scan_save(p,row,self._scan_initial(p,step=j['step']+1,round=j['round']+1))[1]
+            return self._scan_receipt(j,True)
+        if rescan:raise StateUnavailable('active service scan must finish before rescan')
+        n=self.d.life.services.node(person,j['cursor'])
+        r=self.advance(person,n['operation'],limit=versions,apply=True)
+        if r['active_history_absent_at_check'] and not r['audit_batch_pending']:
+            value=dict(j,step=j['step']+1,cursor=n['previous'],remaining=j['remaining']-1,
+                checked=j['checked']+1,soft_pending=j['soft_pending']+int(r['soft_versions_observed']>0 or r['soft_more']),
+                soft_unverified=j['soft_unverified']+int(not r['soft_inventory_available']))
+            j=self._scan_save(p,row,value)[1]
+        return self._scan_receipt(j,True)
