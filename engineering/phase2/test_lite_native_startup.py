@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from PIL import Image
 import lite_native_startup as startup
+from test_lite_signed_client import SignedServiceClient, b64
 import test_lite_native_backend as native
 from lite_attest_state import SQLiteStateStore, StateUnavailable
 
@@ -235,14 +236,8 @@ class StartupPreflightTests(unittest.TestCase):
         client.assert_called_once_with(project='synthetic-only',credentials=credentials)
 
 
-class StartupHTTPTests(unittest.TestCase):
+class StartupHTTPTests(SignedServiceClient, unittest.TestCase):
     """The same signed user journeys, now built entirely from mounted settings."""
-    register=native.NativeBackendTests.register
-    headers=native.NativeBackendTests.headers
-    post_signed=native.NativeBackendTests.post_signed
-    json_request=native.NativeBackendTests.json_request
-    run_request=native.NativeBackendTests.run_request
-    complete=native.NativeBackendTests.complete
     post=native.NativeBackendTests.post
     login=native.NativeBackendTests.login
     quota=native.NativeBackendTests.quota
@@ -251,7 +246,7 @@ class StartupHTTPTests(unittest.TestCase):
     def setUp(self):
         self.h=Fixture(self);self.e=self.h.e;self.backend=self.h.compose()
         self.app=self.backend.create_app();self.client=self.app.test_client()
-        self.counter=0;self.key=native.attest_http.b64(self.e.key_id);self.register()
+        self.counter=0;self.key=b64(self.e.key_id);self.register()
         buf=io.BytesIO();Image.new('RGB',(64,64),(200,100,120)).save(buf,format='JPEG')
         self.f=SimpleNamespace(jpeg=buf.getvalue());self.image_hash=sha(self.f.jpeg);self.login_serial=100
     test_free_two=native.NativeBackendTests.test_end_to_end_two_free_then_block_without_research_or_original_mutation

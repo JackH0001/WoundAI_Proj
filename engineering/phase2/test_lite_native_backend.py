@@ -27,9 +27,8 @@ from test_lite_apple_grants import GrantFixture
 from test_lite_grant_key_custody import KMSSession
 from test_lite_subscription_grace import rows
 import test_lite_native_purchase as native
-import test_lite_attest_http as attest_http
+from test_lite_signed_client import SignedServiceClient, b64
 import test_lite_attest_enrollment as enrollment
-import test_lite_service_http as service_http
 
 
 class Fixture:
@@ -70,14 +69,7 @@ class Fixture:
     def snapshot(self): return {k:rows(s) for k,s in self.stores.items()}
 
 
-class NativeBackendTests(unittest.TestCase):
-    register = attest_http.HTTPTests.register
-    headers = attest_http.HTTPTests.headers
-    post_signed = attest_http.HTTPTests.post_signed
-    json_request = service_http.ServiceHTTPTests.json_request
-    run_request = service_http.ServiceHTTPTests.run_request
-    complete = service_http.ServiceHTTPTests.complete
-
+class NativeBackendTests(SignedServiceClient, unittest.TestCase):
     @classmethod
     def setUpClass(cls): native.NativePurchaseTests.setUpClass()
 
@@ -87,7 +79,7 @@ class NativeBackendTests(unittest.TestCase):
     def initialize(self,day_offset=86400):
         self.h=Fixture(self,day_offset); self.e=self.h.e; self.backend=self.h.compose()
         self.app=self.backend.create_app(); self.client=self.app.test_client()
-        self.counter=0; self.key=attest_http.b64(self.e.key_id); self.register()
+        self.counter=0; self.key=b64(self.e.key_id); self.register()
         image=Image.new('RGB',(64,64),(200,100,120)); buf=io.BytesIO(); image.save(buf,format='JPEG')
         self.f=SimpleNamespace(jpeg=buf.getvalue()); self.image_hash=hashlib.sha256(self.f.jpeg).hexdigest()
         self.login_serial=100

@@ -16,16 +16,13 @@ from lite_attest_state import SQLiteStateStore,StateUnavailable
 from lite_usage_ledger import UsageLedger,free_grant,digest,UsageConflict,UsageLimit
 from lite_service_operations import ServiceOperations,ServiceAccounts,RasterInference,RESULT_TTL
 from lite_service_http import PREFIX
+from test_lite_signed_client import SignedServiceClient
 import test_lite_attest_http as http_fixture
 import test_lite_attest_enrollment as enrollment_fixture
 import test_lite_quota as media_fixture
 
 
-class ServiceHTTPTests(unittest.TestCase):
-    register=http_fixture.HTTPTests.register
-    headers=http_fixture.HTTPTests.headers
-    post_signed=http_fixture.HTTPTests.post_signed
-
+class ServiceHTTPTests(SignedServiceClient, unittest.TestCase):
     def setUp(self):
         self.e=enrollment_fixture.EnrollmentTests();self.e.setUp();self.addCleanup(self.e.doCleanups)
         self.f=media_fixture.LiteQuotaTests();self.f.setUp();self.addCleanup(self.f.doCleanups)
@@ -46,25 +43,6 @@ class ServiceHTTPTests(unittest.TestCase):
 
     def initialize_day(self):
         self.ledger.initialize_day(self.subject,self.e.now//86400,baseline_successes=0,baseline_attempts=0,manifest_sha256='d'*64)
-
-    def json_request(self,kind,n=1,**extra):
-        body=dict(anon_id=self.owner,operation=f'{n:032x}')
-        if kind=='prepare':body['image_sha256']=self.image_hash
-        body.update(extra)
-        return self.post_signed(PREFIX+kind,json.dumps(body).encode())
-
-    def run_request(self,n=1,raw=None,**fields):
-        builder=EnvironBuilder(method='POST',data=dict(anon_id=self.owner,operation=f'{n:032x}',
-                    image=(io.BytesIO(self.f.jpeg if raw is None else raw),'synthetic.jpg'),**fields))
-        try:
-            env=builder.get_environ();data=env['wsgi.input'].read();ctype=env['CONTENT_TYPE']
-        finally:builder.close()
-        return self.post_signed(PREFIX+'run',data,ctype)
-
-    def complete(self,n=1):
-        self.assertEqual(self.json_request('prepare',n).status_code,200)
-        response=self.run_request(n);self.assertEqual(response.status_code,200,response.json)
-        return response
 
     def quota(self):
         return self.ledger.snapshot(self.subject,self.e.now//86400,free_grant(self.subject,self.e.now))

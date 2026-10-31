@@ -3,9 +3,7 @@
 Temporary SQLite security state/budget and LocalStore media; no external service.
 """
 import ast
-import base64
 from concurrent.futures import ThreadPoolExecutor
-import hashlib
 import io
 import json
 from pathlib import Path
@@ -14,9 +12,6 @@ import threading
 import unittest
 from unittest.mock import patch
 
-import cbor2
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ec
 from flask import Flask
 from werkzeug.test import EnvironBuilder
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'Backend/Flask'))
@@ -24,16 +19,12 @@ from lite_attest_http import install_lite_attest, CHALLENGE_PATH, REGISTER_PATH
 from lite_attest_budget import RequestBudget, BudgetExceeded
 from lite_privacy_state import PrivacyState
 from lite_attest_state import SQLiteStateStore, StateUnavailable
-from lite_attest_assertion import CATEGORY, VERSION
-from lite_attest_request import client_data
 import test_lite_attest_enrollment as enrollment_fixture
+from test_lite_signed_client import SignedHTTPClient, b64
 import test_lite_quota as media_fixture
 
 
-def b64(value):return base64.b64encode(value).decode('ascii')
-
-
-class HTTPTests(unittest.TestCase):
+class HTTPTests(SignedHTTPClient, unittest.TestCase):
     def setUp(self):
         self.e=enrollment_fixture.EnrollmentTests();self.e.setUp();self.addCleanup(self.e.doCleanups)
         self.f=media_fixture.LiteQuotaTests();self.f.setUp();self.addCleanup(self.f.doCleanups)
@@ -44,39 +35,12 @@ class HTTPTests(unittest.TestCase):
         install_lite_attest(self.app,service=self.e.service,budget=self.budget,privacy=self.privacy)
         self.key=b64(self.e.key_id);self.counter=0
 
-    def register(self):
-        challenge=self.client.post(CHALLENGE_PATH,json=dict(key_id=self.key,purpose='register'))
-        self.assertEqual(challenge.status_code,200,challenge.json)
-        self.assertEqual(challenge.json['challenge'],b64(self.e.challenge.nonce))
-        result=self.client.post(REGISTER_PATH,json=dict(key_id=self.key,challenge_id=challenge.json['challenge_id'],attestation=b64(self.e.encoded)))
-        self.assertEqual(result.status_code,200,result.json)
-        self.owner=result.json['installation'];return result
-
-    def headers(self,path,raw,content_type,method='POST',purpose='assert'):
-        response=self.client.post(CHALLENGE_PATH,json=dict(key_id=self.key,purpose=purpose))
-        self.assertEqual(response.status_code,200,response.json)
-        challenge=response.json;self.counter+=1
-        rid='11111111-1111-4111-8111-111111111111'
-        data=client_data(audience='lite-test',installation=self.owner,key_id=self.e.key_id,
-                        challenge=base64.b64decode(challenge['challenge']),request_id=rid,
-                        method=method,path=path,content_type=content_type,body=raw)
-        auth=hashlib.sha256(self.e.r.policy.app_id.encode()).digest()+b'\x80'+self.counter.to_bytes(4,'big')
-        auth+=cbor2.dumps({CATEGORY:2,VERSION:'33'})
-        signature=self.e.r.key.sign(hashlib.sha256(auth+hashlib.sha256(data).digest()).digest(),ec.ECDSA(hashes.SHA256()))
-        assertion=cbor2.dumps(dict(signature=signature,authenticatorData=auth))
-        return {'X-Lite-Key-ID':self.key,'X-Lite-Assertion':b64(assertion),
-                'X-Lite-Challenge-ID':challenge['challenge_id'],'X-Lite-Request-ID':rid}
-
     def segment_bytes(self,owner=None):
         builder=EnvironBuilder(method='POST',data=dict(anon_id=owner or self.owner,research_consent='true',
                                             image=(io.BytesIO(self.f.jpeg),'synthetic.jpg')))
         try:
             env=builder.get_environ();return env['wsgi.input'].read(),env['CONTENT_TYPE']
         finally:builder.close()
-
-    def post_signed(self,path,raw,content_type='application/json'):
-        headers=self.headers(path,raw,content_type)
-        return self.client.post(path,data=raw,content_type=content_type,headers=headers)
 
     def test_zero_length_delete_with_gunicorn_stream_reaches_auth_guard(self):
         response=self.client.delete('/api/v1/lite/data/'+'0'*32,

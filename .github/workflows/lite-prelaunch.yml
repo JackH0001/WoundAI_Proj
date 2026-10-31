@@ -24,7 +24,9 @@ jobs:
       - name: Stage private disposition source without model or credentials
         run: python3 tools/stage_lite_disposition_candidate.py --repo . --output /tmp/lite-disposition-context
       - name: Build private disposition image and verify packaged imports
-        run: docker build --tag lite-disposition-ci /tmp/lite-disposition-context
+        run: |
+          chmod -R u=rwX,go= /tmp/lite-disposition-context
+          docker build --tag lite-disposition-ci /tmp/lite-disposition-context
       - name: Missing disposition pins must refuse startup without network
         run: |
           set +e
@@ -50,7 +52,9 @@ jobs:
       - name: Stage exact private worker source without model or credentials
         run: python3 tools/stage_lite_key_candidate.py --repo . --output /tmp/lite-key-context
       - name: Build private worker and verify packaged imports
-        run: docker build --tag lite-key-worker-ci /tmp/lite-key-context
+        run: |
+          chmod -R u=rwX,go= /tmp/lite-key-context
+          docker build --tag lite-key-worker-ci /tmp/lite-key-context
       - name: Missing deployment pins must refuse startup without network
         run: |
           set +e

@@ -8,7 +8,6 @@ import threading
 import unittest
 from unittest.mock import patch
 import test_lite_subscription_authority as apple
-import test_lite_service_http as http
 from lite_attest_state import SQLiteStateStore, StateUnavailable, GCSStateStore
 from lite_service_operations import ServiceAccounts
 from lite_service_subscription_links import ServiceSubscriptionLinks, SubscriptionLinkConflict
@@ -263,7 +262,8 @@ class SignedFlowTests(unittest.TestCase):
     def setUpClass(cls):apple.AuthorityTests.setUpClass()
 
     def setUp(self):
-        self.h=http.ServiceHTTPTests();self.h.setUp();self.addCleanup(self.h.doCleanups)
+        from test_lite_service_http import ServiceHTTPTests
+        self.h=ServiceHTTPTests();self.h.setUp();self.addCleanup(self.h.doCleanups)
         self.a=apple.AuthorityTests();self.a.setUp();self.addCleanup(self.a.doCleanups)
         # Initialize this synthetic day explicitly; never reset the fixture's old day.
         self.h.e.now=apple.NOW;self.h.initialize_day()
