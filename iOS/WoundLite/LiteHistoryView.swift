@@ -79,7 +79,7 @@ struct LiteHistoryView: View {
                         }
                         Section("量測紀錄（點選查看・左滑刪除）") {
                             ForEach(visibleRecords) { r in
-                                Button { selected = r } label: { row(r) }
+                                Button { selected = r } label: { row(r).contentShape(Rectangle()) }
                                     .buttonStyle(.plain)
                                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                         Button("刪除", role: .destructive) { pendingDelete = r }
@@ -126,8 +126,13 @@ struct LiteHistoryView: View {
         HStack(spacing: 10) {
             LiteThumb(name: r.imageName, store: store)
             VStack(alignment: .leading, spacing: 2) {
-                Text(String(format: r.areaSeries == nil ? "面積紀錄 %.2f cm²" : "LiDAR %.2f cm²", r.surfaceCm2)).font(.headline)
-                Text(r.areaSeries?.rawValue ?? "量測來源待核對").font(.caption2).foregroundStyle(.secondary)
+                if let series = r.areaSeries {
+                    Text(String(format: "LiDAR %.2f cm²", r.surfaceCm2)).font(.headline)
+                    Text(series.rawValue).font(.caption2).foregroundStyle(.secondary)
+                } else {
+                    Text("未提供面積").font(.headline)
+                    Text("點選查看原因").font(.caption2).foregroundStyle(.secondary)
+                }
                 Text([r.woundName ?? "未分組", r.woundLocation?.label ?? "待補位置"].joined(separator: "・")).font(.caption).foregroundStyle(.secondary)
                 Text(Self.pretty(r.dateISO) + (r.source == "cloud" ? "・雲端辨識" : "・手動圈選"))
                     .font(.caption).foregroundStyle(.secondary)
@@ -236,7 +241,7 @@ struct LiteContourChangeSummary: Equatable {
     var text: String {
         let old = String(format: "%.2f", before), new = String(format: "%.2f", after)
         guard comparable else {
-            return "圈選已修正 · LiDAR 表面積估算 \(new) cm²。原值來源不同，保留但不作前後比較。"
+            return "圈選已修正 · LiDAR 表面積估算 \(new) cm²。原值來源不同或品質資訊不足，僅顯示這次估算。"
         }
         return old == new ? "圈選已修正；LiDAR 表面積估算仍顯示 \(new) cm²。"
             : "圈選已修正 · LiDAR 表面積估算 \(old) → \(new) cm²"
@@ -300,6 +305,7 @@ struct LiteRecordDetailView: View {
                         }
                         .buttonStyle(.bordered)
                         .disabled(busy || pdfBusy || !imageLoadFinished)
+                        .accessibilityIdentifier("lite.report.share")
                         Text("只在本機製作，不重新辨識或扣額度。PDF 含照片與位置，分享前請確認接收對象。")
                             .font(.caption).foregroundStyle(.secondary)
                         if let pdfError { Text(pdfError).font(.footnote).foregroundStyle(.orange) }
@@ -330,7 +336,7 @@ struct LiteRecordDetailView: View {
                             consent: LitePrefs.researchConsent == true,
                             withdrawalBlocked: withdrawal.blocksUploads,
                             retiredResearch: r.cloudSync.map { !withdrawal.blocksUploads && !LiteWithdrawalJournal.standard.permits($0.binding) } ?? false),
-                        calculating: busy || pdfBusy, change: changeSummary,
+                        calculating: busy, change: changeSummary,
                         note: note, noteIsInformational: noteIsInformational,
                         canEdit: r.depthName != nil && image != nil,
                         syncAllowed: r.cloudSync.map { LiteWithdrawalJournal.standard.permits($0.binding) } == true && LitePrefs.researchConsent == true,
@@ -342,6 +348,7 @@ struct LiteRecordDetailView: View {
                             note = nil
                             Task { await store.syncRevision(recordID: recordId) }
                         })
+                        .disabled(pdfBusy)
                 }
             }
             .navigationTitle("量測紀錄")
@@ -421,16 +428,22 @@ struct LiteRecordDetailView: View {
             .disabled(busy)
             Text(r.woundLocation?.label ?? "位置尚未填寫，可由上方分組選單補齊。")
                 .font(.footnote).foregroundStyle(.secondary)
-            Text(String(format: r.areaSeries == nil ? "面積紀錄：%.2f cm²" : "LiDAR 表面積估算：%.2f cm²", r.surfaceCm2)).font(.title3).bold()
-            Text(r.areaSeries?.rawValue ?? "量測來源待核對，不納入趨勢").font(.caption).foregroundStyle(.secondary)
-            Text(String(format: r.areaSeries == nil ? "另一面積紀錄 %.2f cm²（來源待核對）" : "相機方向投影估算 %.2f cm²（不同於表面積）", r.projectedCm2)).font(.footnote)
+            let assessment = r.savedArea
+            if let series = assessment.series {
+                Text(String(format: "LiDAR 表面積估算：%.2f cm²", r.surfaceCm2)).font(.title3).bold()
+                Text(series.rawValue).font(.caption).foregroundStyle(.secondary)
+                Text(String(format: "相機方向投影估算 %.2f cm²", r.projectedCm2)).font(.footnote)
+            } else if case .unavailable(let reason) = assessment {
+                Text("未提供面積").font(.title3).bold()
+                Text(reason).font(.footnote)
+            }
             LiteVolumeReferenceView(volume: r.volumeMl, depth: r.maxDepthMm)
             if let context = r.measurementContext {
                 ForEach(context.warnings, id: \.self) { Text("⚠ " + $0).font(.caption).foregroundStyle(.orange) }
-                Text(context.isKnownSurface
-                     ? "影像與深度通過資料對應檢查，不代表已完成實物精度驗證。"
-                     : "這筆量測的來源版本目前無法核對，保留原值供檢視，不納入趨勢。")
-                    .font(.caption).foregroundStyle(.secondary)
+                if case .current = assessment {
+                    Text("已核對保存的面積來源與拍攝品質，數值僅供參考。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             } else {
                 Text("舊版紀錄保留原數值；當時的完整品質資訊未記錄，不與本版量測連成同一條趨勢。")
                     .font(.caption).foregroundStyle(.secondary)

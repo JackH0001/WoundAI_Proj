@@ -20,16 +20,12 @@ enum LitePDFReport {
     }
 
     static func areaLines(_ record: LiteRecord, image: UIImage?) -> [String] {
-        guard let c = record.measurementContext, c.isKnownSurface,
-              c.orientation == "normalized", c.depthWidth > 0, c.depthHeight > 0,
+        let area = record.savedArea
+        if case .unavailable(let reason) = area { return ["未提供面積：" + reason] }
+        guard case .current(let verdict) = area, let c = record.measurementContext,
               polygons(record, image: image) != nil else {
             return ["未提供面積：本筆的尺度、影像或圈選來源無法完整核對；原紀錄保留於 App。"]
         }
-        let result = DepthAreaResult(surfaceAreaCm2: record.surfaceCm2,
-            projectedAreaCm2: record.projectedCm2, coverage: c.coverage,
-            medianDistanceM: c.distanceM, tiltDeg: record.tiltDeg)
-        let verdict = liteVerdict(result)
-        guard verdict.usable else { return ["未提供面積：" + (verdict.blocker ?? "品質資訊不足。") ] }
         var lines = [String(format: "LiDAR 表面積估算：%.2f cm²", record.surfaceCm2),
                      String(format: "相機方向投影估算：%.2f cm²", record.projectedCm2),
                      "來源：免貼紙 LiDAR 深度估算；不同於貼紙校正面積。",

@@ -44,9 +44,45 @@ enum LiteAreaSeries: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-extension LiteRecord {
-    var areaSeries: LiteAreaSeries? {
-        guard let measurementContext else { return .legacy }
-        return measurementContext.isKnownSurface ? .current : nil
+/// What the saved measurement supports displaying. Legacy numbers belong to
+/// their original history series only. A PDF also requires matching photo pixels.
+enum LiteSavedArea {
+    case current(LiteVerdict)
+    case legacy
+    case unavailable(String)
+
+    var series: LiteAreaSeries? {
+        switch self {
+        case .current: .current
+        case .legacy: .legacy
+        case .unavailable: nil
+        }
     }
+}
+
+extension LiteRecord {
+    var savedArea: LiteSavedArea {
+        guard let context = measurementContext else {
+            guard surfaceCm2.isFinite, projectedCm2.isFinite, surfaceCm2 >= 0, projectedCm2 >= 0
+            else { return .unavailable("舊紀錄的面積數值無法核對。") }
+            return .legacy
+        }
+        guard context.isKnownSurface else { return .unavailable("這筆紀錄的面積來源無法核對。") }
+        guard context.orientation == "normalized",
+              (8...4096).contains(context.depthWidth), (8...4096).contains(context.depthHeight),
+              (1...16384).contains(context.imageWidth), (1...16384).contains(context.imageHeight)
+        else { return .unavailable("缺少可核對的影像方向或尺寸。") }
+        let depthAspect = Double(context.depthWidth) / Double(context.depthHeight)
+        let imageAspect = Double(context.imageWidth) / Double(context.imageHeight)
+        guard abs(depthAspect / imageAspect - 1) <= 0.01 else {
+            return .unavailable("保存的影像與深度圖比例不符。")
+        }
+        let verdict = liteVerdict(DepthAreaResult(surfaceAreaCm2: surfaceCm2,
+            projectedAreaCm2: projectedCm2, coverage: context.coverage,
+            medianDistanceM: context.distanceM, tiltDeg: tiltDeg))
+        if verdict.usable { return .current(verdict) }
+        return .unavailable(verdict.blocker ?? "深度品質資訊不足。")
+    }
+
+    var areaSeries: LiteAreaSeries? { savedArea.series }
 }

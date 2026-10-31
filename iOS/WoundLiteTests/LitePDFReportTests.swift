@@ -51,6 +51,77 @@ final class LitePDFReportTests: XCTestCase {
         r = record(); r.surfaceCm2 = .nan
         XCTAssertTrue(LitePDFReport.areaLines(r, image: image()).joined().contains("未提供面積"))
     }
+    func testLowCoverageCannotSupplyAHistoryPointOrPercentageBaseline() throws {
+        var first = record()
+        first.id = "first"; first.dateISO = "2026-10-26T01:00:00Z"
+        var bad = first
+        bad.id = "bad"; bad.dateISO = "2026-10-27T01:00:00Z"
+        bad.surfaceCm2 = 20; bad.projectedCm2 = 20
+        bad.measurementContext?.coverage = 0.1
+        let latest = record()
+        let records = [latest, bad, first]
+        let original = try JSONEncoder().encode(bad)
+
+        XCTAssertTrue(LitePDFReport.areaLines(bad, image: image()).joined().contains("未提供面積"))
+        XCTAssertNil(bad.areaSeries)
+        XCTAssertNil(LiteGrouping.changePercent(bad, in: records))
+        XCTAssertEqual(LiteGrouping.changePercent(latest, in: records), 0)
+        XCTAssertEqual(LiteWoundTrend.points(woundID: try XCTUnwrap(first.woundID), records: records).map(\.id),
+                       [first.id, latest.id])
+        XCTAssertEqual(try JSONDecoder().decode(LiteRecord.self, from: original).surfaceCm2, 20)
+    }
+
+    func testUnknownOrientationAndInvalidDepthDimensionsCannotBeReportedAsCurrentArea() {
+        var bad = record()
+        bad.measurementContext?.orientation = "unknown"
+        XCTAssertNil(bad.areaSeries)
+        XCTAssertTrue(LitePDFReport.areaLines(bad, image: image()).joined().contains("未提供面積"))
+        bad = record(); bad.measurementContext?.depthHeight = 1
+        XCTAssertNil(bad.areaSeries)
+        XCTAssertTrue(LitePDFReport.areaLines(bad, image: image()).joined().contains("未提供面積"))
+    }
+
+    func testIncompatibleAspectAndImpossibleStoredDistanceAreWithheldWithoutChangingTheRecord() {
+        var r = record()
+        r.measurementContext?.depthHeight = 32
+        XCTAssertNil(r.areaSeries)
+        XCTAssertTrue(LitePDFReport.areaLines(r, image: image()).joined().contains("未提供面積"))
+        r = record(); r.measurementContext?.distanceM = .greatestFiniteMagnitude
+        XCTAssertNil(r.areaSeries)
+        XCTAssertFalse(LitePDFReport.areaLines(r, image: image()).joined().contains("10.08"))
+        XCTAssertEqual(r.surfaceCm2, 10.08)
+    }
+
+    @MainActor
+    func testReadingAndExportingHistoryLeavesSavedIndexIntactAndDoesNotQueueResearch() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let index = directory.appendingPathComponent("records.json")
+        let store = LiteStore(fileURL: index)
+        var r = record(); r.measurementContext?.coverage = 0.7
+        XCTAssertTrue(store.add(r))
+        r.id = "low-coverage"; r.measurementContext?.coverage = 0.1
+        XCTAssertTrue(store.add(r))
+        let before = try Data(contentsOf: index)
+        let reloaded = LiteStore(fileURL: index)
+        let points = LiteWoundTrend.points(woundID: try XCTUnwrap(r.woundID), records: reloaded.records)
+        XCTAssertEqual(points.map(\.area), [10.08])
+        for row in reloaded.records {
+            let document = try XCTUnwrap(PDFDocument(data: LitePDFReport.render(record: row, image: image())))
+            let text = try XCTUnwrap(document.string)
+            if row.id == "low-coverage" {
+                XCTAssertNil(row.areaSeries)
+                XCTAssertFalse(text.contains("10.08"))
+            } else {
+                XCTAssertEqual(row.areaSeries, .current)
+                XCTAssertTrue(text.contains("10.08"))
+                XCTAssertTrue(text.contains("補值"))
+            }
+            XCTAssertNil(row.cloudSync)
+        }
+        XCTAssertEqual(try Data(contentsOf: index), before)
+        XCTAssertTrue(reloaded.syncingRecordIDs.isEmpty)
+    }
     func testWrongDimensionsOrOrientationNeverMisplaceAnOutline() {
         var r = record(); r.measurementContext?.imageWidth = 801
         XCTAssertNil(LitePDFReport.polygons(r, image: image()))
