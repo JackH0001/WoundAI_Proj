@@ -10,6 +10,19 @@ from lite_apple_oauth import REVOKE_URL, MAX_RESPONSE
 from lite_provider_budget import Allocation, BudgetUnavailable
 
 HOSTS = dict(gcs={'storage.googleapis.com'}, kms={'cloudkms.googleapis.com'}, apple={'appleid.apple.com'})
+METADATA_ACCOUNT = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/'
+METADATA_URLS = frozenset(METADATA_ACCOUNT + key for key in ('email', 'token'))
+
+
+class NoRedirectPreparation:
+    # requests otherwise reads the whole redirect body to prepare Response.next
+    # even when allow_redirects=False, before our bounded reader sees it.
+    def resolve_redirects(self, *args, **kwargs):
+        return iter(())
+
+
+class PlainProviderSession(NoRedirectPreparation, requests.Session):
+    pass
 
 
 class BudgetedSession:
@@ -22,17 +35,25 @@ class BudgetedSession:
     an in-flight OS/network call. This is not a hard wall-clock guarantee.
     """
     def __init__(self, session, allocation, *, provider, response_limit=65536, authorized=False):
-        if (not isinstance(allocation, Allocation) or provider not in HOSTS
+        if (not isinstance(allocation, Allocation) or provider not in (*HOSTS, 'metadata')
                 or not callable(getattr(session,'request',None)) or type(authorized) is not bool
                 or type(response_limit) is not int or not 1 <= response_limit <= 1024**2):
             raise ValueError('explicit provider session and allocation required')
         self.session, self.allocation, self.provider = session, allocation, provider
         self.response_limit, self.authorized = response_limit, authorized
+        self.closed = False
         self.is_mtls = False
 
     def request(self, method, url, **kw):
         u = urlsplit(url)
-        if (u.scheme != 'https' or u.hostname not in HOSTS[self.provider] or u.username is not None
+        if self.closed:
+            raise BudgetUnavailable('provider transport closed')
+        if self.provider == 'metadata':
+            if (url not in METADATA_URLS or method != 'GET' or self.authorized
+                    or set(kw) - {'timeout'} or self.response_limit > 16384):
+                raise BudgetUnavailable('metadata endpoint outside approved transport')
+            kw['headers'] = {'Metadata-Flavor': 'Google'}
+        elif (u.scheme != 'https' or u.hostname not in HOSTS[self.provider] or u.username is not None
                 or u.password is not None or u.port not in (None,443) or u.fragment
                 or len(url) > 16384):
             raise BudgetUnavailable('provider endpoint outside approved transport')
@@ -65,6 +86,9 @@ class BudgetedSession:
         response = None
         try:
             response = self.session.request(method,url,**kw)
+            if self.provider == 'metadata' and (response.url != url or response.status_code != 200
+                    or response.headers.get('Metadata-Flavor') != 'Google'):
+                raise BudgetUnavailable('metadata identity service refused')
             if response.url != url and urlsplit(response.url)[:2] != u[:2]:
                 raise BudgetUnavailable('provider response origin differs')
             if 300 <= response.status_code < 400 or response.headers.get('Content-Encoding','identity') != 'identity':
@@ -95,11 +119,13 @@ class BudgetedSession:
             if response is not None: response.close()
             raise BudgetUnavailable('provider attempt unconfirmed; keep original intent') from None
 
-    def close(self): self.session.close()
+    def close(self):
+        self.closed = True
+        self.session.close()
 
 
 def apple_revoker(allocation):
-    session = requests.Session(); session.trust_env = False
+    session = PlainProviderSession(); session.trust_env = False
     transport = BudgetedSession(session,allocation,provider='apple',response_limit=MAX_RESPONSE)
     def post(url, fields):
         if url != REVOKE_URL: raise StateUnavailable('private worker can only revoke Apple grants')

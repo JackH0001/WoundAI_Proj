@@ -88,8 +88,9 @@ checks the original claim survives when error reporting also cannot write.
 The scope is payload/request accounting, not a cloud billing quote. Bootstrap
 metadata, allocation journal reads/CAS, credential acquisition, TLS headers,
 provider internal work, retries outside these adapters, and persistent storage
-are not counted by this data-plane meter. Control-plane bounds, IAM enforcement,
-hard supervision, cost measurement and live failure/recovery still require a
+are not counted by this data-plane meter. A [separate per-start meter](lite_disposition_bootstrap_20261031.md)
+now covers the metadata endpoint and startup bucket/journal requests. Bounds
+across process restarts, IAM enforcement, hard supervision, cost measurement and live failure/recovery still require a
 separate fixed-source execution review. Do not deploy on the strength of these
 local tests or describe the whole account as erased.
 

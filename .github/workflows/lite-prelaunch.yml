@@ -122,7 +122,7 @@ jobs:
           python tools/lite_disposition_startup_probe.py --output evidence/disposition-startup-probe.json
       - name: Durable provider budget and real SDK transport boundaries (synthetic only)
         run: |
-          python -m unittest -v test_lite_provider_budget test_lite_provider_transport > evidence/provider-budget-tests.log 2>&1
+          python -m unittest -v test_lite_provider_budget test_lite_provider_transport test_lite_disposition_bootstrap > evidence/provider-budget-tests.log 2>&1
           python tools/lite_provider_budget_probe.py --output evidence/provider-budget-probe.json
       - name: Legacy image dependency closure and isolated startup
         run: python -m unittest -v test_lite_build_context > evidence/build-context-tests.log 2>&1

@@ -31,7 +31,8 @@ routes, rather than Python module imports alone, enforce these operation limits.
   and `DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA=true`.
 - The regular JSON file is at most 64 KiB; the mounted signing key is at most
   16 KiB and has an independent SHA-256. No secret value is part of the JSON.
-- Configuration schema `lite-disposition-startup/1` has exact fields. Deployment
+- Configuration schema `lite-disposition-startup/2` requires a separate
+  `bootstrap_budget`; v1 is rejected before contacting any provider. Deployment
   pins the project, project number, named runtime identity, asia-east1 key ring,
   source commit and image digest. Lite issuer/audience/namespace and identity-key
   **digest** must match existing native bindings. The HMAC key itself is not loaded.
@@ -53,9 +54,11 @@ routes, rather than Python module imports alone, enforce these operation limits.
   create-only writes. These markers may remain after a later validation refusal.
   Startup performs no provider disposition and does not remove earlier evidence.
 
-`CloudProviders.identity_checked` checks the configured credential identity. It
-is not a substitute for a live metadata identity/IAM test or proof of effective
-permissions. No such live claim is made by the synthetic tests.
+Before any bucket access, the private worker compares the attached identity
+reported at the fixed metadata email endpoint against the approved identity.
+Only then does it acquire a single short-lived bearer. It does not discover
+credentials from the workstation, proxy settings or a file. This comparison
+is not proof of effective IAM. See [startup limits](lite_disposition_bootstrap_20261031.md).
 
 The factory now also requires durable provider allocations before operational
 startup reads. See [provider budget contract](lite_provider_budget_20261031.md)

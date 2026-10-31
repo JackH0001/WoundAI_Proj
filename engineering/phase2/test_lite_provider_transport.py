@@ -120,7 +120,7 @@ class TransportTests(unittest.TestCase):
     def test_apple_revoke_only_and_bounded_form(self):
         adapter=Adapter([reply(b'')]);import requests
         session=requests.Session();session.trust_env=False;session.mount('https://',adapter);self.addCleanup(session.close)
-        with patch('lite_provider_transport.requests.Session',return_value=session):post=apple_revoker(self.lease)
+        with patch('lite_provider_transport.PlainProviderSession',return_value=session):post=apple_revoker(self.lease)
         with self.assertRaises(StateUnavailable):post('https://appleid.apple.com/auth/token',{})
         status,body=post('https://appleid.apple.com/auth/revoke',{'token':'synthetic','client_secret':'synthetic'})
         self.assertEqual((status,body),(200,b''));self.assertEqual(len(adapter.calls),1)

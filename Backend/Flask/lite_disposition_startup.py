@@ -17,6 +17,7 @@ from lite_account_lifecycle import AccountLifecycle
 from lite_account_research_closure import AccountResearchClosure
 from lite_apple_oauth import AppleClientSecret, AppleOAuthProvider, REVOKE_URL, post_apple_form
 from lite_attest_state import GCSStateStore, StateUnavailable
+import lite_disposition_bootstrap as bootstrap
 from lite_disposition_context import (ClosedAccountContext, GrantRevocationContext,
     RegistryReadContext, ResultReadContext, existing)
 from lite_disposition_executor import DispositionExecutor, validate_manifest
@@ -57,8 +58,8 @@ def preflight(raw, *, expected_config, expected_source, expected_image, secrets,
     if (type(raw) is not bytes or not 1 <= len(raw) <= 65536
             or hashlib.sha256(raw).hexdigest() != expected_config): raise ValueError('bounded pinned configuration required')
     c = loads_json_object_strict(raw.decode())
-    exact(c, 'schema enabled deployment binding buckets stores media policies manifest manifest_sha256 provider_budget signers apple')
-    if c['schema'] != 'lite-disposition-startup/1' or c['enabled'] is not True:
+    exact(c, 'schema enabled deployment binding buckets stores media policies manifest manifest_sha256 provider_budget bootstrap_budget signers apple')
+    if c['schema'] != 'lite-disposition-startup/2' or c['enabled'] is not True:
         raise ValueError('explicit private disposition enablement required')
     d = exact(c['deployment'], 'source image project project_number service_account keyring')
     if d['source'] != expected_source or d['image'] != expected_image: raise ValueError('source/image pins differ')
@@ -74,6 +75,7 @@ def preflight(raw, *, expected_config, expected_source, expected_image, secrets,
             or limits['image'] != expected_image or limits['not_before'] != c['manifest']['not_before']
             or limits['expires_at'] < c['manifest']['expires_at']):
         raise ValueError('provider budget must bind the same reviewed source and execution window')
+    bootstrap.validate_limits(c['bootstrap_budget'])
     signers = exact(c['signers'], 'operator drain'); decoded = []
     for role in ('operator', 'drain'):
         value = signers[role]
@@ -141,20 +143,22 @@ def revoke_transport(url, fields):
 
 
 class CloudProviders:
-    def connect(self, c):
+    def connect(self, c, *, clock=time.time):
+        if getattr(self, '_started', False):
+            raise StateUnavailable('bootstrap attempt already consumed')
+        self._started = True
         if os.environ.get('DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA') != 'true':
             raise ValueError('private worker must disable background bucket metadata requests')
-        from google.auth.compute_engine import Credentials
-        from google.auth.transport.requests import AuthorizedSession
         from google.cloud.storage import Client
-        d = c['deployment']; self.credentials = Credentials(service_account_email=d['service_account'])
         self.config = c
-        # Bootstrap is control-plane traffic: metadata and finite journal CAS,
-        # never media/key/Apple work. Its separate bounds need deployment review.
-        self.control = AuthorizedSession(self.credentials, max_refresh_attempts=0)
-        self.control.trust_env = False
-        self.client = Client(project=d['project'], credentials=self.credentials, _http=self.control)
+        self.credentials, self.bootstrap_allocation = bootstrap.acquire(c, clock=clock)
+        self.control = BudgetedSession(bootstrap.google_session(self.credentials), self.bootstrap_allocation,
+                                      provider='gcs', authorized=True)
+        self.client = Client(project=c['deployment']['project'], credentials=self.credentials, _http=self.control)
         self.allocation = None
+    def end_bootstrap(self):
+        if getattr(self, 'control', None) is not None:
+            self.control.close()
     def identity_checked(self, c):
         if self.credentials.service_account_email != c['deployment']['service_account']: raise ValueError('runtime identity differs')
     def bucket(self, name): return self.client.bucket(name)
@@ -162,11 +166,10 @@ class CloudProviders:
     def activate_budget(self, allocation):
         if os.environ.get('DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA') != 'true':
             raise ValueError('private worker metadata policy changed')
-        from google.auth.transport.requests import AuthorizedSession
         from google.cloud.storage import Client
         c = self.config; self.allocation = allocation
-        storage = AuthorizedSession(self.credentials, max_refresh_attempts=0); storage.trust_env = False
-        kms = AuthorizedSession(self.credentials, max_refresh_attempts=0); kms.trust_env = False
+        storage = bootstrap.google_session(self.credentials)
+        kms = bootstrap.google_session(self.credentials)
         self.client = Client(project=c['deployment']['project'],credentials=self.credentials,
             _http=BudgetedSession(storage,allocation,provider='gcs',authorized=True))
         self.kms = DispositionKMSSession(BudgetedSession(kms,allocation,provider='kms',response_limit=32768,authorized=True),
@@ -181,24 +184,28 @@ def build_disposition(raw, *, expected_config, expected_source, expected_image, 
     c, signers, secret = preflight(raw, expected_config=expected_config, expected_source=expected_source,
         expected_image=expected_image, secrets=secrets, clock=clock)
     p = CloudProviders() if providers is None else providers
-    p.connect(c); buckets = {}
-    for name, meta in c['buckets'].items():
-        b = p.bucket(name); b.reload(timeout=10, retry=None); v = b._properties
-        if (type(v) is not dict or digest(v) != meta['metadata_sha256'] or v.get('kind') != 'storage#bucket'
-                or v.get('name') != name or v.get('projectNumber') != c['deployment']['project_number']
-                or v.get('location') != 'ASIA-EAST1'
-                or v.get('iamConfiguration',{}).get('publicAccessPrevention') != 'enforced'
-                or v.get('iamConfiguration',{}).get('uniformBucketLevelAccess',{}).get('enabled') is not True):
-            raise ValueError('reviewed private bucket policy changed')
-        buckets[name] = b
-    p.identity_checked(c)
-    s = {n:p.state(buckets[v['bucket']],v['prefix']) for n,v in c['stores'].items()}
-    locs = [location(x) for x in s.values()]
-    if any(overlaps(a,b) for i,a in enumerate(locs) for b in locs[i+1:]): raise ValueError('resolved storage overlaps')
-    if any(loc[0]=='gcs' and loc[1]==c['media']['bucket'] for loc in locs): raise ValueError('resolved state shares research media')
-    budget = ProviderBudget(policy=c['provider_budget'],expected=digest(c['provider_budget']),
-        store=s['provider_budget'],audit_store=s['provider_budget_audit'],clock=clock)
-    allocation = budget.allocate()
+    try:
+        p.connect(c, clock=clock)
+        p.identity_checked(c)
+        buckets = {}
+        for name, meta in c['buckets'].items():
+            b = p.bucket(name); b.reload(timeout=10, retry=None); v = b._properties
+            if (type(v) is not dict or digest(v) != meta['metadata_sha256'] or v.get('kind') != 'storage#bucket'
+                    or v.get('name') != name or v.get('projectNumber') != c['deployment']['project_number']
+                    or v.get('location') != 'ASIA-EAST1'
+                    or v.get('iamConfiguration',{}).get('publicAccessPrevention') != 'enforced'
+                    or v.get('iamConfiguration',{}).get('uniformBucketLevelAccess',{}).get('enabled') is not True):
+                raise ValueError('reviewed private bucket policy changed')
+            buckets[name] = b
+        s = {n:p.state(buckets[v['bucket']],v['prefix']) for n,v in c['stores'].items()}
+        locs = [location(x) for x in s.values()]
+        if any(overlaps(a,b) for i,a in enumerate(locs) for b in locs[i+1:]): raise ValueError('resolved storage overlaps')
+        if any(loc[0]=='gcs' and loc[1]==c['media']['bucket'] for loc in locs): raise ValueError('resolved state shares research media')
+        budget = ProviderBudget(policy=c['provider_budget'],expected=digest(c['provider_budget']),
+            store=s['provider_budget'],audit_store=s['provider_budget_audit'],clock=clock)
+        allocation = budget.allocate()
+    finally:
+        p.end_bootstrap()
     p.activate_budget(allocation)
     # All operational stores and media must use the newly bounded transport.
     # Retain the just-verified metadata without issuing an unmetered extra read.

@@ -29,7 +29,8 @@ class Providers:
     def __init__(self,f):
         self.f=f;self.calls=[];self.wrong_identity=False
         self.kms=startup.DispositionKMSSession(f.f.f.f.kms,f.c['deployment']['keyring'],digest(f.c['binding']),[f.person])
-    def connect(self,c):self.calls.append('connect')
+    def end_bootstrap(self):pass
+    def connect(self,c,*,clock):self.calls.append('connect')
     def bucket(self,name):return self.f.buckets[name]
     def identity_checked(self,c):
         self.calls.append('identity')
@@ -73,13 +74,14 @@ class Fixture:
         manifest=dict(v=1,namespace='startup-test',source='a'*40,image='b'*64,operation='c'*64,
             accounts=[dict(person=self.person,plan_sha256=digest(f.w._plan(self.person)))],
             not_before=self.now,expires_at=self.now+900,max_commands=20,steps=12,limit=2,seconds=30)
-        self.c=dict(schema='lite-disposition-startup/1',enabled=True,
+        self.c=dict(schema='lite-disposition-startup/2',enabled=True,
             deployment=dict(source='a'*40,image='b'*64,project='synthetic-project',project_number='123456789',
                 service_account='disposition@synthetic-project.iam.gserviceaccount.com',keyring=p.cipher.provider.keyring),
             binding=d.lifecycle.binding,buckets={n:dict(metadata_sha256=digest(b._properties)) for n,b in self.buckets.items()},
             stores={n:dict(bucket=f.service_bucket.name,prefix='lite-native/test/'+n) for n in self.stores},
             media=dict(bucket=f.h.bucket.name),policies=dict(service=f.service.policy,research=f.h.policy),
             manifest=manifest,manifest_sha256=digest(manifest),
+            bootstrap_budget=dict(requests=96, send_bytes=65536, receive_bytes=8*1024**2, seconds=60),
             provider_budget=dict(v=1,namespace='startup-budget',manifest=digest(manifest),source='a'*40,image='b'*64,
                 not_before=self.now,expires_at=self.now+3600,max_allocations=12,requests=5000,
                 send_bytes=1024**2,receive_bytes=32*1024**2,seconds=60),
@@ -256,17 +258,33 @@ class StartupTests(unittest.TestCase):
         self.f.c['provider_budget']['manifest']='0'*64
         with self.assertRaises(ValueError):self.f.build()
         self.assertEqual(self.f.providers.calls,[])
+    def test_old_or_unbounded_bootstrap_config_stops_before_identity_or_storage(self):
+        for change in ({'schema':'lite-disposition-startup/1'}, {'bootstrap_budget':{}},
+                       {'bootstrap_budget':dict(self.f.c['bootstrap_budget'],requests=129)}):
+            with patch.dict(self.f.c,change), self.assertRaises(ValueError): self.f.build()
+            self.assertFalse(self.f.providers.calls)
+    def test_refused_identity_closes_control_before_reading_any_bucket(self):
+        before=self.f.snap()
+        self.f.providers.wrong_identity=True
+        with patch.object(self.f.providers,'bucket',side_effect=AssertionError('unexpected bucket')) as bucket, \
+                patch.object(self.f.providers,'end_bootstrap') as end:
+            with self.assertRaises(ValueError): self.f.build()
+        bucket.assert_not_called()
+        end.assert_called_once_with()
+        self.assertEqual(before,self.f.snap())
     def test_cloud_factory_binds_all_operational_transports_to_one_allocation(self):
         import os
         self.enterContext(patch.dict(os.environ,DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA='true'))
         from google.auth.credentials import AnonymousCredentials
         credentials=AnonymousCredentials();credentials.service_account_email=self.f.c['deployment']['service_account']
         provider=startup.CloudProviders()
-        with patch('google.auth.compute_engine.Credentials',return_value=credentials):provider.connect(self.f.c)
+        with patch.object(startup.bootstrap,'acquire',return_value=(credentials,self.budget().allocate())):
+            provider.connect(self.f.c,clock=lambda:self.f.now)
+        provider.end_bootstrap()
         allocation=self.budget().allocate();provider.activate_budget(allocation)
         self.addCleanup(provider.control.close);self.addCleanup(provider.client.close)
         self.addCleanup(provider.kms.session.close)
-        self.assertEqual(provider.control._max_refresh_attempts,0)
+        self.assertTrue(provider.control.closed)
         storage=provider.bucket(next(iter(self.f.buckets))).client._http
         self.assertIsInstance(storage,BudgetedSession);self.assertIs(storage.allocation,allocation)
         self.assertIs(provider.kms.session.allocation,allocation)
@@ -276,7 +294,7 @@ class StartupTests(unittest.TestCase):
     def test_cloud_factory_refuses_implicit_background_requests(self):
         import os
         with patch.dict(os.environ,DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA='false'):
-            with patch('google.auth.compute_engine.Credentials') as credentials:
+            with patch.object(startup.bootstrap,'acquire') as credentials:
                 with self.assertRaisesRegex(ValueError,'background'):startup.CloudProviders().connect(self.f.c)
                 credentials.assert_not_called()
 

@@ -146,7 +146,7 @@ class Allocation:
         self.last_wall = stamp(clock); self.last_mono = stamp(monotonic)
         self.mono_end = self.last_mono+max(0, self.expires-self.last_wall)
         self.closed = None; self.lock = threading.Lock(); self.completed = 0; self.received = 0
-        self.by_provider = dict(gcs=0, kms=0, apple=0)
+        self.by_provider = dict(gcs=0, kms=0, apple=0, metadata=0)
         self._check()
 
     def _fail(self, reason):
