@@ -50,6 +50,7 @@ from lite_attest_state import StateUnavailable
 from lite_fenced_objects import ObjectSealed, GenerationConflict
 from lite_privacy_state import OwnerWithdrawn
 
+from lite_raster_tools import _polygons_from_mask, _has_face
 import api_flywheel as _fw
 
 # ⚠ 這一行不是樣板。最外層的 catch-all 會呼叫 `logger.exception()`，
@@ -181,42 +182,6 @@ def segment_response(body, anon_id, ip, status=200):
     return response, status
 
 
-def _has_face(bgr):
-    """粗略的人臉偵測；回傳 True / False / None（檢查無法完成）。
-
-    只能降低部分正面人臉風險，無法保證偵測到每一張臉。
-
-    刻意寫得保守（`minNeighbors` 偏高、最小尺寸偏大），因為誤判的代價是
-    把一張合法的傷口照片退掉——民眾版的使用者不會知道為什麼，只會覺得壞了。
-
-    它抓不到：側臉、部分遮擋的臉、以及所有**非人臉的可識別物**
-    （證件、名牌、刺青、病房門牌、背景中的人）。
-
-    ⚠ 這是縱深防禦，不是保證。仍須搭配取景指引與「只拍傷口」的流程約束；
-    後端這一層是補網。**不可以拿它當作放寬前面那一層的理由。**
-    """
-    try:
-        import cv2
-        path = os.path.join(os.path.dirname(__file__), "privacy", "haarcascade_frontalface_default.xml")
-        if not os.path.isfile(path):
-            return None, "cascade_missing"
-        with open(path, "rb") as source:
-            if hashlib.sha256(source.read()).hexdigest() != "0f7d4527844eb514d4a4948e822da90fbb16a34a0bbbbc6adc6498747a5aafb0":
-                return None, "cascade_digest_mismatch"
-        clf = cv2.CascadeClassifier(path)
-        if clf.empty():
-            return None, "cascade_empty"
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        h, w = gray.shape[:2]
-        # 臉要占畫面一定比例才算——傷口特寫裡遠處背景的小人臉區塊多半是誤判，
-        # 而真正的隱私風險是「臉清楚可辨識」的那種。
-        minsz = max(60, int(min(h, w) * 0.12))
-        faces = clf.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=8,
-                                     minSize=(minsz, minsz))
-        return (len(faces) > 0), ("%d" % len(faces))
-    except Exception:
-        # Unknown is not evidence of a clean image; do not expose detector details.
-        return None, "detector_error"
 
 
 # 分割函式由 app.py 在註冊時注入。**不在模組層 import app**——
@@ -229,19 +194,6 @@ def init_lite(segment_fn):
     _SEGMENT = segment_fn
 
 
-def _polygons_from_mask(mask, min_px=64):
-    import cv2
-    import numpy as np
-    cnts, _ = cv2.findContours(np.asarray(mask, np.uint8),
-                               cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    out = []
-    for c in sorted(cnts, key=cv2.contourArea, reverse=True):
-        if cv2.contourArea(c) < min_px:
-            continue
-        ap = cv2.approxPolyDP(c, 0.003 * cv2.arcLength(c, True), True).reshape(-1, 2)
-        if len(ap) >= 3:
-            out.append([[int(x), int(y)] for x, y in ap.tolist()])
-    return out
 
 
 @lite_bp.route("/api/v1/lite/segment", methods=["POST"])
@@ -422,6 +374,7 @@ def _lite_segment_impl():
             # 第一版設在 put_blob 之後，於是落地的 JSON 少了它——
             # 回應裡有、檔案裡沒有，而只看回應完全察覺不到。
             "route": seg_info.get("route"),
+            "student_output_contract": seg_info.get("student_output_contract"),
             "escalated": bool(seg_info.get("escalated")),
             # AI 自己的輪廓也要落地。**沒有它，「民眾改了什麼」就永遠算不出來**——
             # lay 修正率（模型有輸出且人改了它）是比 empty 桶更早、更大量的
@@ -456,6 +409,7 @@ def _lite_segment_impl():
             # 記下 route 與輪廓數，日後才篩得出「哪些是集成救回來的」
             # 與「哪些連集成都空手」——後者是下一輪訓練的優先目標。
             "route": meta["route"], "escalated": meta["escalated"],
+            "student_output_contract": meta.get("student_output_contract"),
             "consent_version": consent_version or None,
         })
 
@@ -473,6 +427,7 @@ def _lite_segment_impl():
         "storage_receipt": storage_receipt,
         # `route` 讓「醫療版看得到、民眾版看不到」這種問題可以在一次回應裡歸因。
         "route": seg_info.get("route") or "student",
+        "student_output_contract": seg_info.get("student_output_contract"),
         "escalated": bool(seg_info.get("escalated")),
     }, anon_id, ip)
 

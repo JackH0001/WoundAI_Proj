@@ -190,7 +190,7 @@ class RasterInference:
 
     def infer(self,rgb):
         import numpy as np
-        from api_lite import _polygons_from_mask
+        from lite_raster_tools import _polygons_from_mask
         output=self.model(rgb);mask,info=output if isinstance(output,tuple) else (output,{})
         h,w=rgb.shape[:2]
         if mask is None:polys=[];confidence=0.

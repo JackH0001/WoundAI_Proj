@@ -49,6 +49,8 @@ jobs:
           python tools/lite_account_data_inventory_probe.py --output evidence/account-data-inventory-probe.json
       - name: Legacy image dependency closure and isolated startup
         run: python -m unittest -v test_lite_build_context > evidence/build-context-tests.log 2>&1
+      - name: Native model contract and raster isolation (synthetic sessions only)
+        run: python -m unittest -v test_lite_native_inference > evidence/native-inference-tests.log 2>&1
       - name: Composed native Sandbox backend through signed HTTP (synthetic only)
         run: |
           python -m unittest -v test_lite_native_backend > evidence/native-backend-tests.log 2>&1
