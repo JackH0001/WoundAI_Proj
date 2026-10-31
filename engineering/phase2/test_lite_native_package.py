@@ -44,6 +44,7 @@ class NativePackageTests(unittest.TestCase):
         for name in ('.env','uploads/original.jpg','store.py','api_lite.py','unknown.py'):
             p=self.root/'Backend/Flask'/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('must not ship')
         m=self.build();self.assertFalse(m['release_approved'])
+        self.assertNotIn('lite_key_provisioning.py',m['files'])
         self.assertEqual(len(m['files']),len(stage.MODULES)+len(stage.ASSETS)+len(stage.PROFILE)+4)
         result=self.verify();self.assertEqual(result.returncode,0,result.stderr)
         data=json.loads(result.stdout);self.assertTrue(data['passed']);self.assertFalse(data['cloud_access'])

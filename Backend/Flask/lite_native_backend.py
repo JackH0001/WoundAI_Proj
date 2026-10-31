@@ -90,7 +90,7 @@ class NativeBackend:
 
 
 def compose_native_backend(*, enabled=False, runtime, rollout, security, budget, privacy,
-        verifier, oauth, key_provider, stores, namespace, identity_key, inference, model_version):
+        verifier, oauth, key_provider, stores, namespace, identity_key, inference, model_version, key_readiness=None):
     """Validate the complete graph before any component writes config markers.
 
     Never calls activate_fresh(), rollout.execute(), a provider, or a cleanup
@@ -151,7 +151,7 @@ def compose_native_backend(*, enabled=False, runtime, rollout, security, budget,
     life = AccountLifecycle(store=stores['lifecycle'], audit_store=stores['lifecycle_audit'],
         binding=binding, clock=verifier.clock, service_catalog=True)
     cipher = AccountGrantCipher(provider=key_provider, lifecycle=life,
-        store=stores['keys'], audit_store=stores['keys_audit'])
+        store=stores['keys'], audit_store=stores['keys_audit'], readiness=key_readiness)
     events = AppleAccountEvents(verifier=verifier, store=stores['events'], audit_store=stores['events_audit'],
         namespace=namespace, identity_key=identity_key)
     grants = AppleGrantAuthority(provider=oauth, verifier=verifier, store=stores['grants'],

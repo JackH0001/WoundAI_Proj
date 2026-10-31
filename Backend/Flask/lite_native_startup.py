@@ -24,6 +24,7 @@ from lite_privacy_state import PrivacyState
 from lite_apple_identity_provider import RefreshingAppleIdentityVerifier
 from lite_apple_oauth import AppleClientSecret, AppleOAuthProvider
 from lite_grant_key_custody import GoogleGrantKeyProvider
+from lite_key_readiness import KeyReadinessClient
 from lite_subscription_authority import ApplePolicy, AppleSubscriptionAuthority, apple_verifier
 from lite_subscription_migration import StableSubscriptionLinks, scope
 from lite_subscription_executor import SignedEvidence
@@ -70,7 +71,8 @@ def preflight(raw, *, expected_config, expected_source, expected_image, secrets,
     if type(raw) is not bytes or not 1<=len(raw)<=256*1024 or hashlib.sha256(raw).hexdigest()!=expected_config:
         raise ValueError('pinned bounded native configuration required')
     c=loads_json_object_strict(raw.decode('utf-8'))
-    exact(c,'schema enabled namespace deployment app apple budgets buckets stores controls secrets model')
+    exact(c,'schema enabled namespace deployment app apple budgets buckets stores controls secrets model'
+          + (' key_preparation' if 'key_preparation' in c else ''))
     if c['schema']!='lite-native-startup/1' or c['enabled'] is not True:
         raise ValueError('explicit native Sandbox enablement required')
     _subject(c['namespace'])
@@ -81,6 +83,9 @@ def preflight(raw, *, expected_config, expected_source, expected_image, secrets,
     text(d['project_number'],r'[1-9][0-9]{5,19}')
     text(d['service_account'],r'[a-z][a-z0-9-]{4,28}[a-z0-9]@'+re.escape(d['project'])+r'\.iam\.gserviceaccount\.com')
     text(d['keyring'],r'projects/'+re.escape(d['project'])+r'/locations/asia-east1/keyRings/[A-Za-z0-9_-]+')
+    if 'key_preparation' in c:
+        prep=exact(c['key_preparation'],'origin')
+        text(prep['origin'],r'https://[a-z0-9][a-z0-9-]+\.a\.run\.app')
     a=exact(c['app'],'bundle app_id team version attest_audience')
     if a['bundle']!=BUNDLE or type(a['app_id']) is not int or a['app_id']<=0:
         raise ValueError('explicit Lite app required')
@@ -180,6 +185,15 @@ class CloudProviders:
         return apple_verifier(policy,roots),AppStoreServerAPIClient(raw_key,a['api_key_id'],a['issuer_id'],BUNDLE,Environment.SANDBOX)
     def identity(self,clock):return RefreshingAppleIdentityVerifier(audience=BUNDLE,clock=clock)
     def oauth(self,secret):return AppleOAuthProvider(client_id=BUNDLE,client_secret=secret)
+    def readiness(self,c,scope):
+        from google.auth.compute_engine import IDTokenCredentials
+        from google.auth.transport.requests import Request,AuthorizedSession
+        origin=c['key_preparation']['origin']
+        credential=IDTokenCredentials(Request(),target_audience=origin,use_metadata_identity_endpoint=True)
+        if credential.service_account_email!=c['deployment']['service_account']:
+            raise ValueError('private service caller identity differs')
+        return KeyReadinessClient(session=AuthorizedSession(credential),origin=origin,
+            scope=scope,keyring=c['deployment']['keyring'])
     def model(self,package,expected):return LiteNativeInference(package=package,preprocessing_sha256=expected)
 
 
@@ -218,11 +232,14 @@ def build_native_runtime(raw, *, expected_config, expected_source, expected_imag
     a=c['app'];security=RegistrationService(stores['security'],policy=AssertionPolicy(a['team']+'.'+BUNDLE,
         frozenset({2,4}),frozenset({a['version']})),audience=a['attest_audience'],environment='production',clock=clock)
     budget=RequestBudget(stores['budget'],minute_limit=c['budgets']['minute'],day_limit=c['budgets']['day'],clock=clock)
+    account_scope=digest(dict(namespace=c['namespace'],issuer='https://appleid.apple.com',audience=BUNDLE,
+        identity_key_sha256=hashlib.sha256(blobs['identity']).hexdigest()))
+    readiness=p.readiness(c,account_scope) if 'key_preparation' in c else None
     return compose_native_backend(enabled=True,runtime=runtime,rollout=rollout,security=security,budget=budget,
         privacy=PrivacyState(stores['privacy']),verifier=p.identity(clock),oauth=p.oauth(secret),
         key_provider=GoogleGrantKeyProvider(session=p.kms,keyring=c['deployment']['keyring']),
         stores={k:stores[k] for k in STORE_NAMES},namespace=c['namespace'],identity_key=blobs['identity'],
-        inference=model.raster,model_version=model.version)
+        inference=model.raster,model_version=model.version,key_readiness=readiness)
 
 
 def application(environment=None):

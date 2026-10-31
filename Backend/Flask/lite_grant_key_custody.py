@@ -123,7 +123,7 @@ class AccountGrantCipher:
     """
     immutable = staticmethod(SubscriptionRuntime.immutable)
 
-    def __init__(self, *, provider, lifecycle, store, audit_store):
+    def __init__(self, *, provider, lifecycle, store, audit_store, readiness=None):
         if not isinstance(provider,GoogleGrantKeyProvider) or not isinstance(lifecycle,AccountLifecycle):
             raise ValueError('explicit account lifecycle and key provider required')
         if store is audit_store or (getattr(store,'path',None) is not None
@@ -131,6 +131,12 @@ class AccountGrantCipher:
             raise ValueError('wrapped keys and audit must be separate')
         self.provider,self.lifecycle,self.store,self.audit = provider,lifecycle,store,audit_store
         self.scope = lifecycle.scope
+        if readiness is not None:
+            from lite_key_readiness import KeyReadinessClient
+            if (not isinstance(readiness,KeyReadinessClient) or readiness.scope!=self.scope
+                    or readiness.keyring!=provider.keyring):
+                raise ValueError('matching private key preparation service required')
+        self.readiness=readiness
         self.mode = dict(v=1,scheme='account-kms-envelope-1',scope=self.scope,keyring=provider.keyring)
         self.immutable(store,key('account-grant-cipher-config',self.scope),self.mode)
 
@@ -213,6 +219,9 @@ class AccountGrantCipher:
         """Resolve provisioning and durable key custody before exchanging a code."""
         person = self._context(context)
         self.lifecycle.require_active(person)
+        if self.readiness is not None and self._read(person) is None:
+            self.readiness.ensure(context,self.provider.version(self.scope,person))
+            self.lifecycle.require_active(person)
         _,dek = self._dek(person,create=True)
         del dek
 

@@ -115,6 +115,35 @@ class StartupPreflightTests(unittest.TestCase):
         args=self.h.arguments();raw=args['raw'].replace(b'"enabled":true',b'"enabled":false,"enabled":true')
         with self.assertRaises(ValueError):startup.build_native_runtime(**dict(args,raw=raw,expected_config=sha(raw)))
         self.assertEqual(self.h.providers.calls,[])
+    def test_optional_private_preparation_origin_is_pinned_and_strict(self):
+        for value in ({'origin':'http://unsafe.a.run.app'},{'origin':'https://evil.example'},
+                      {'origin':'https://private-synthetic.a.run.app','token':'secret'},None):
+            self.rejected(lambda c:c.update(key_preparation=value))
+
+    def test_optional_preparation_requires_injected_matching_client(self):
+        from lite_key_readiness import KeyReadinessClient
+        h=self.h;h.config['key_preparation']={'origin':'https://synthetic-prepare.a.run.app'}
+        captured=[]
+        def readiness(c,scope):
+            captured.append(scope)
+            return KeyReadinessClient(session=MagicMock(),origin=c['key_preparation']['origin'],
+                scope=scope,keyring=c['deployment']['keyring'])
+        h.providers.readiness=readiness
+        b=h.compose()
+        self.assertEqual(captured,[b.identity.lifecycle.scope])
+        self.assertIsNotNone(b.identity.grants.cipher.readiness)
+
+    def test_cloud_preparation_uses_metadata_identity_not_ambient_credentials(self):
+        c=copy.deepcopy(self.h.config);c['key_preparation']={'origin':'https://synthetic-prepare.a.run.app'}
+        from google.auth.compute_engine import _metadata
+        with patch.object(_metadata,'get_service_account_info',return_value={'email':c['deployment']['service_account']}):
+            client=startup.CloudProviders().readiness(c,'a'*64)
+        self.assertEqual(client.session.credentials.service_account_email,c['deployment']['service_account'])
+        self.assertTrue(client.session.credentials._use_metadata_identity_endpoint)
+        self.assertEqual(client.session.credentials._target_audience,c['key_preparation']['origin'])
+        with patch.object(_metadata,'get_service_account_info',return_value={'email':'wrong@example.invalid'}):
+            with self.assertRaisesRegex(ValueError,'identity differs'):startup.CloudProviders().readiness(c,'a'*64)
+
     def test_non_sandbox_wrong_app_or_multiple_builds_refused(self):
         self.rejected(lambda c:c['apple'].update(environment='Production'))
         self.rejected(lambda c:c['app'].update(bundle='com.woundai.mmh'))
