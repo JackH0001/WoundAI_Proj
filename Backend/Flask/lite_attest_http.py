@@ -118,8 +118,10 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
             # not a consumer device key. Check that permission here as well.
             if request.method == 'GET' and request.endpoint in {
                     'lite.lite_records', 'lite.lite_record_image', 'lite.lite_record_preview'}:
-                from api_lite import _lite_reviewer_ok
-                allowed, error = _lite_reviewer_ok()
+                reviewer = current_app.extensions.get('lite_reviewer_auth')
+                if not callable(reviewer):
+                    raise StateUnavailable('reviewer authorization is not configured')
+                allowed, error = reviewer()
                 return None if allowed else error
             configuration = current_app.extensions['lite_attest_http']
             service, budget, privacy = configuration['service'], configuration['budget'], configuration['privacy']

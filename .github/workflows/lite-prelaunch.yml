@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'Backend/Flask/**'
+      - 'Backend/LiteNative/**'
       - 'engineering/phase2/test_lite*.py'
       - 'engineering/phase2/requirements-commerce-test.txt'
       - 'tools/*lite*.py'
@@ -51,6 +52,8 @@ jobs:
         run: python -m unittest -v test_lite_build_context > evidence/build-context-tests.log 2>&1
       - name: Native model contract and raster isolation (synthetic sessions only)
         run: python -m unittest -v test_lite_native_inference > evidence/native-inference-tests.log 2>&1
+      - name: Pinned native startup and independent package (synthetic only)
+        run: python -m unittest -v test_lite_native_startup test_lite_native_package > evidence/native-startup-package-tests.log 2>&1
       - name: Composed native Sandbox backend through signed HTTP (synthetic only)
         run: |
           python -m unittest -v test_lite_native_backend > evidence/native-backend-tests.log 2>&1

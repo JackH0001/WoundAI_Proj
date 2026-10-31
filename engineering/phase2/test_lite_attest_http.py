@@ -274,6 +274,10 @@ class HTTPTests(unittest.TestCase):
         business=[n.lineno for n in calls if isinstance(n.func,ast.Attribute) and n.func.attr=='register_blueprint']
         self.assertEqual(len(gate),1);self.assertTrue(business);self.assertLess(gate[0],min(business))
 
+    def test_missing_reviewer_callback_fails_closed(self):
+        self.app.extensions.pop('lite_reviewer_auth')
+        self.assertEqual(self.client.get('/api/v1/lite/records').status_code,503)
+
 
 class BudgetTests(unittest.TestCase):
     def setUp(self):

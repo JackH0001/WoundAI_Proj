@@ -62,6 +62,13 @@ logger = logging.getLogger(__name__)
 lite_bp = Blueprint("lite", __name__)
 
 
+@lite_bp.record_once
+def _install_reviewer_authorization(state):
+    # Only the legacy research blueprint supplies its JWT/audit permission
+    # checker. The independent native service never imports this module.
+    state.app.extensions['lite_reviewer_auth'] = _lite_reviewer_ok
+
+
 def _fenced_privacy():
     if not has_request_context(): return None
     from lite_fenced_store import FencedPrivacy
