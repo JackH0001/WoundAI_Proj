@@ -1,6 +1,6 @@
 """P1-P4 synthetic regressions. No cloud access or real research media."""
 import json,sys,tempfile,unittest
-from pathlib import Path
+from pathlib import Path,PureWindowsPath
 from unittest.mock import patch,Mock
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'Backend/Flask'))
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'tools'))
@@ -34,6 +34,28 @@ class Disposal(unittest.TestCase):
     def test_default_is_dry_run(self):
         result=self.cleanup();self.assertEqual(result['status'],'dry_run');self.assertEqual(len(result['media'][0]['objects']),8)
         self.assertTrue(all(self.st.exists(k) for k in self.files));self.assertEqual(self.order.state(self.code,'default')['sequence'],1)
+    def test_windows_inventory_uses_portable_keys_without_false_absence(self):
+        expected=inventory(self.st,self.iid)
+        # Python <=3.11 Path.__new__ consults the module's Path global. Keep
+        # the concrete host class before patching that factory below.
+        host_path_type=type(Path(self.st.root))
+        def windows_base(path):
+            base=host_path_type(path);wrapped=Mock();wrapped.exists.return_value=base.exists()
+            entries=[]
+            for p in base.rglob('*'):
+                entry=Mock()
+                entry.relative_to.return_value=PureWindowsPath(p.relative_to(self.st.root).as_posix())
+                entry.is_file.return_value=p.is_file();entry.is_symlink.return_value=p.is_symlink()
+                if p.is_file():entry.read_bytes.return_value=p.read_bytes()
+                entries.append(entry)
+            wrapped.rglob.return_value=entries
+            return wrapped
+        with patch('pathlib.Path',side_effect=windows_base):
+            observed=inventory(self.st,self.iid)
+        self.assertEqual(len(observed),8)
+        self.assertEqual(observed,expected)
+        self.assertTrue(all('\\' not in r['key'] for r in observed))
+        self.assertTrue(all(self.st.exists(k) for k in self.files))
     def test_not_due_keeps_bytes(self):
         result=cleanup_subject(self.order,self.code,'default',POLICY,apply=True,now=101)
         self.assertEqual(result['status'],'not_due');self.assertTrue(self.st.exists(self.files[0]))

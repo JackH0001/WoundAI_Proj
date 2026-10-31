@@ -1,0 +1,230 @@
+name: Lite prelaunch simulation (no deployment)
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'Backend/Flask/**'
+      - 'Backend/LiteNative/**'
+      - 'Backend/LiteKeyWorker/**'
+      - 'engineering/phase2/test_lite*.py'
+      - 'engineering/phase2/requirements-commerce-test.txt'
+      - 'tools/*lite*.py'
+      - '.github/workflows/lite-prelaunch.yml'
+permissions:
+  contents: read
+jobs:
+  key-worker-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Stage exact private worker source without model or credentials
+        run: python3 tools/stage_lite_key_candidate.py --repo . --output /tmp/lite-key-context
+      - name: Build private worker and verify packaged imports
+        run: docker build --tag lite-key-worker-ci /tmp/lite-key-context
+      - name: Missing deployment pins must refuse startup without network
+        run: |
+          set +e
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+            lite-key-worker-ci python -B -c 'from lite_key_startup import application; application({})' > /tmp/lite-key-boot.log 2>&1
+          result=$?
+          set -e
+          test "$result" = 1
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('/tmp/lite-key-boot.log').read_text()
+          assert 'ValueError: explicit private key worker deployment required' in text, text
+          assert 'ModuleNotFoundError' not in text, text
+          print('Private worker refuses unconfigured startup; no network or activation.')
+          PY
+  offline-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: tools:engineering/phase2:Backend/Flask:.
+      WOUNDAI_STORE: local
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies (no model runtime or credentials)
+        run: >-
+          python -m pip install Flask==3.1.3 numpy==2.4.6 Pillow==12.3.0
+          opencv-contrib-python-headless==5.0.0.93 google-cloud-storage==3.13.1
+          PyJWT==2.15.1 cryptography==50.0.2 cbor2==6.1.5 asn1crypto==1.5.1
+          requests==2.34.2 flask-jwt-extended==4.7.4
+          -r engineering/phase2/requirements-commerce-test.txt
+      - name: Cost arithmetic and inner-route concurrency characterization
+        run: |
+          mkdir evidence
+          python -m pip freeze > evidence/python-packages.txt
+          python -m unittest -v test_lite_prelaunch_economics test_lite_prelaunch_quota_probe > evidence/new-tests.log 2>&1
+          python tools/lite_prelaunch_economics.py --output evidence/economics.json
+          python tools/lite_prelaunch_quota_probe.py --output evidence/quota-probe.json
+      - name: Exact service history generations and interrupted audit recovery (synthetic only)
+        run: |
+          python -m unittest -v test_lite_service_history > evidence/service-history-tests.log 2>&1
+          python tools/lite_service_history_probe.py --output evidence/service-history-probe.json
+      - name: Bounded account data inventory without deletion (synthetic only)
+        run: |
+          python -m unittest -v test_lite_account_data_inventory > evidence/account-data-inventory-tests.log 2>&1
+          python tools/lite_account_data_inventory_probe.py --output evidence/account-data-inventory-probe.json
+      - name: Account deletion and independent research admission races (synthetic only)
+        run: |
+          python -m unittest -v test_lite_account_research_closure > evidence/account-research-closure-tests.log 2>&1
+          python tools/lite_account_research_closure_probe.py --output evidence/account-research-closure-probe.json
+      - name: Bounded research media disposition and interrupted paging (synthetic only)
+        run: |
+          python -m unittest -v test_lite_research_media_disposition > evidence/research-media-tests.log 2>&1
+          python tools/lite_research_media_probe.py --output evidence/research-media-probe.json
+          python -m unittest -v test_lite_research_history > evidence/research-history-tests.log 2>&1
+          python tools/lite_research_history_probe.py --output evidence/research-history-probe.json
+      - name: Legacy image dependency closure and isolated startup
+        run: python -m unittest -v test_lite_build_context > evidence/build-context-tests.log 2>&1
+      - name: Native model contract and raster isolation (synthetic sessions only)
+        run: python -m unittest -v test_lite_native_inference > evidence/native-inference-tests.log 2>&1
+      - name: Bounded private account key provisioning (synthetic only)
+        run: |
+          python -m unittest -v test_lite_key_provisioning > evidence/key-provisioning-tests.log 2>&1
+          python tools/lite_key_provisioning_probe.py --output evidence/key-provisioning-probe.json
+      - name: Private key worker startup, package and restart (synthetic only)
+        run: |
+          python -m unittest -v test_lite_key_startup test_lite_key_package > evidence/key-worker-startup-tests.log 2>&1
+          python tools/lite_key_startup_probe.py --output evidence/key-worker-startup-probe.json
+      - name: Pinned native startup and independent package (synthetic only)
+        run: python -m unittest -v test_lite_native_startup test_lite_native_package > evidence/native-startup-package-tests.log 2>&1
+      - name: Composed native Sandbox backend through signed HTTP (synthetic only)
+        run: |
+          python -m unittest -v test_lite_native_backend > evidence/native-backend-tests.log 2>&1
+          python tools/lite_native_backend_probe.py --output evidence/native-backend-probe.json
+      - name: Reproduce unresolved rollout gaps separately from fixed regressions
+        run: |
+          python -m unittest -v test_lite_commerce_review_probe > evidence/review-gap-tests.log 2>&1
+          python tools/lite_commerce_review_probe.py --output evidence/review-gaps.json
+      - name: Durable quota and official Apple verifier with synthetic chains
+        run: |
+          python -m unittest -v test_lite_usage_ledger test_lite_subscription_authority test_lite_usage_probe > evidence/commerce-core-tests.log 2>&1
+          python tools/lite_usage_probe.py --output evidence/atomic-usage-probe.json
+      - name: Opt-in cutover, unstarted leases and cross-day exclusion primitive
+        run: |
+          python -m unittest -v test_lite_usage_recovery test_lite_usage_recovery_http > evidence/usage-recovery-tests.log 2>&1
+          python tools/lite_usage_recovery_probe.py --output evidence/usage-recovery-probe.json
+      - name: Cross-day authorization and cutover failure containment (synthetic only)
+        run: |
+          python -m unittest -v test_lite_service_recovery test_lite_usage_rollout test_lite_cross_day_fixture > evidence/g3-cutover-tests.log 2>&1
+          python tools/lite_cross_day_fixture.py --report evidence/g3-cutover-probe.json
+      - name: Opt-in authenticated service-only coordinator and real loopback
+        # New opt-in retry/rollout behavior is tested separately from legacy gaps.
+        run: |
+          python -m unittest -v test_lite_service_http test_lite_service_loopback test_lite_native_service_contract > evidence/service-flow-tests.log 2>&1
+          python tools/lite_service_flow_probe.py --output evidence/service-flow-probe.json
+      - name: Explicit expired-reservation retry and read-only rollout observations
+        run: |
+          python -m unittest -v test_lite_service_resubmit test_lite_rollout_review test_lite_resubmit_review_fixture > evidence/resubmit-rollout-tests.log 2>&1
+          python tools/lite_resubmit_review_fixture.py --report evidence/resubmit-rollout-probe.json
+      - name: Explicit service-result compaction and race rehearsal (synthetic only)
+        run: |
+          python -m unittest -v test_lite_service_retention test_lite_service_retention_probe > evidence/result-lifecycle-tests.log 2>&1
+          python tools/lite_service_retention_probe.py --output evidence/result-lifecycle-probe.json
+      - name: Verified-account subscription binding and restore (synthetic only)
+        run: |
+          python -m unittest -v test_lite_service_subscription_links test_lite_service_binding_probe > evidence/account-binding-tests.log 2>&1
+          python tools/lite_service_binding_probe.py --output evidence/account-binding-probe.json
+      - name: Signed Apple billing grace and quota preservation (synthetic only)
+        run: |
+          python -m unittest -v test_lite_subscription_grace test_lite_subscription_grace_probe > evidence/subscription-grace-tests.log 2>&1
+          python tools/lite_subscription_grace_probe.py --output evidence/subscription-grace-probe.json
+      # Subscription policy transitions remain explicit, local and default-off.
+      - name: Stable subscription policy migration and reader rollback (synthetic only)
+        run: |
+          python -m unittest -v test_lite_subscription_migration test_lite_subscription_migration_probe > evidence/subscription-migration-tests.log 2>&1
+          python tools/lite_subscription_migration_probe.py --output evidence/subscription-migration-probe.json
+      - name: Review entry, isolation, migration and containment rehearsal
+        # The executor consumes signed external observations; no cloud activation.
+        # Keep simulated transport evidence distinct from a live provider fence.
+        run: |
+          python -m unittest -v test_lite_subscription_executor test_lite_subscription_executor_probe > evidence/subscription-executor-tests.log 2>&1
+          python tools/lite_subscription_executor_probe.py --output evidence/subscription-executor-probe.json
+      - name: Durable multi-batch runtime and opt-in native purchase bridge
+        run: |
+          python -m unittest -v test_lite_account_identity test_lite_subscription_runtime test_lite_native_purchase > evidence/native-purchase-tests.log 2>&1
+          python tools/lite_native_purchase_probe.py --output evidence/native-purchase-probe.json
+          python tools/lite_account_identity_probe.py --output evidence/account-identity-probe.json
+      - name: Durable release, observer outage and cross-instance containment (synthetic only)
+        run: |
+          python -m unittest -v test_lite_service_release test_lite_service_release_probe test_lite_release_proof_cache > evidence/durable-release-tests.log 2>&1
+          python tools/lite_service_release_probe.py --output evidence/durable-release-probe.json
+      - name: Apple key rotation and durable account revocation (synthetic only)
+        run: |
+          python -m unittest -v test_lite_apple_identity_provider test_lite_apple_account_events test_lite_apple_provider_probe > evidence/apple-provider-tests.log 2>&1
+          python tools/lite_apple_provider_probe.py --output evidence/apple-provider-probe.json
+      - name: Apple single-use code custody and revocation fences (synthetic only)
+        run: |
+          python -m unittest -v test_lite_apple_oauth test_lite_apple_grants test_lite_account_sessions test_lite_apple_refresh_retry > evidence/apple-grant-tests.log 2>&1
+          python tools/lite_apple_grant_probe.py --output evidence/apple-grant-probe.json
+          python tools/lite_session_renewal_probe.py --output evidence/session-renewal-probe.json
+      - name: Review entry, isolation, medical migration and containment rehearsal
+        run: >-
+          python -m unittest -v test_lite_review_portal test_lite_review_human
+          test_lite_review_executor test_plan_lite_review_human test_medical_consent_operations
+          > evidence/review-operations-tests.log 2>&1
+      - name: Account grant inventory and closure races (synthetic only)
+        run: |
+          python -m unittest -v test_lite_account_lifecycle > evidence/account-closure-tests.log 2>&1
+          python tools/lite_account_closure_probe.py --output evidence/account-closure-probe.json
+          python tools/lite_refresh_revocation_race_probe.py --output evidence/refresh-revocation-race.json
+      - name: Account deletion intake and bounded revocation resume (synthetic only)
+        run: |
+          python -m unittest -v test_lite_account_deletion test_lite_deletion_identity > evidence/account-deletion-tests.log 2>&1
+          python tools/lite_account_deletion_probe.py --output evidence/account-deletion-probe.json
+          python tools/lite_deletion_identity_probe.py --output evidence/deletion-identity-probe.json
+      - name: Synthetic verified uploads, revision, reconsent and loopback
+        run: >-
+          python -m unittest -v test_lite_quota test_lite_reconsent
+          test_lite_attest_registration test_lite_attest_receipt test_lite_attest_state
+          test_lite_attest_request test_lite_attest_assertion test_lite_attest_enrollment
+          test_lite_attest_http test_lite_fenced_manifest test_lite_fenced_objects
+          test_lite_fenced_http test_lite_raw_depth_contract test_lite_raw_depth_store
+          test_lite_raw_depth_http test_lite_revision test_lite_http_lifecycle
+          > evidence/app-backend-tests.log 2>&1
+      - name: Per-account grant keys and retained backup erasure (synthetic only)
+        run: |
+          python -m unittest -v test_lite_grant_key_custody > evidence/grant-key-custody-tests.log 2>&1
+          python tools/lite_grant_key_custody_probe.py --output evidence/grant-key-custody-probe.json
+      - name: Closed-account service inventory and late-writer seals (synthetic only)
+        run: |
+          python -m unittest -v test_lite_service_disposition > evidence/service-disposition-tests.log 2>&1
+          python tools/lite_service_disposition_probe.py --output evidence/service-disposition-probe.json
+      - name: Bounded deletion disposition and native progress contract (synthetic only)
+        run: |
+          python -m unittest -v test_lite_disposition_progress > evidence/disposition-progress-tests.log 2>&1
+          python tools/lite_disposition_progress_probe.py --output evidence/disposition-progress-probe.json
+      - name: Publish readiness separately from test correctness
+        run: |
+          python - <<'PY'
+          import json, os
+          r = json.load(open('evidence/quota-probe.json'))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('## Offline evidence only\n\n')
+              f.write('Production parallel quota gate: ' + str(r['parallel_quota_gate']) + '\n\n')
+              f.write('Passing characterization tests do NOT authorize launch, billing or deployment. ')
+              f.write('The current check/append HTTP quota race is an expected, recorded launch blocker. ')
+              f.write('The CAS ledger now has opt-in authenticated service-only HTTP tests. ')
+              f.write('Application startup does not enable these routes; cloud/native cutover is still pending. ')
+              f.write('No IAP login, cloud load, live GCS cleanup, real payment or ads were tested.\n')
+              f.write('Review-gap tests intentionally retain the default-off G1/G2/G3 baseline; they do not enable production.\n')
+              f.write('Separate opt-in tests cover daily cutover, leases, cross-day successor authorization and rollback. ')
+              f.write('Native successor persistence is implemented and has separate simulator tests. ')
+              f.write('The live provider adapter and public UI integration are not implemented; release remains blocked.\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lite-prelaunch-offline-evidence
+          path: evidence/

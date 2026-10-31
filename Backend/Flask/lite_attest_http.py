@@ -64,7 +64,7 @@ def _json(raw):
         raise AdmissionRejected('invalid JSON') from exc
 
 
-def install_lite_attest(app, *, service=None, budget=None, privacy=None):
+def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerce=None, purchases=None, identity=None, deletion=None):
     if 'lite_attest_http' in app.extensions:
         raise ValueError('Lite security gate already installed')
     if service is not None and not isinstance(service, RegistrationService):
@@ -73,7 +73,40 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
         raise ValueError('durable request budget required')
     if privacy is not None and not isinstance(privacy, (PrivacyState, FencedPrivacy)):
         raise ValueError('durable privacy coordinator required')
-    app.extensions['lite_attest_http'] = dict(service=service, budget=budget, privacy=privacy)
+    service_paths = frozenset()
+    purchase_paths = frozenset()
+    account_paths = frozenset()
+    deletion_paths = frozenset()
+    # The deployed legacy image deliberately excludes commerce and its Apple
+    # subscription dependencies. Only explicit trusted injection may load them.
+    if commerce is not None:
+        from lite_service_operations import ServiceOperations
+        from lite_service_http import SERVICE_PATHS, blueprint as commerce_blueprint
+        if not isinstance(commerce, ServiceOperations):
+            raise ValueError('trusted service operations required')
+        service_paths = frozenset(SERVICE_PATHS)
+    if purchases is not None:
+        from lite_native_purchase import NativePurchaseBridge,PURCHASE_PATHS,blueprint as purchase_blueprint
+        if not isinstance(purchases,NativePurchaseBridge) or commerce is None or purchases.registry is not commerce.accounts:
+            raise ValueError('matching trusted purchase/service accounts required')
+        purchase_paths=frozenset(PURCHASE_PATHS)
+    if identity is not None:
+        from lite_account_identity import AccountIdentityBridge,ACCOUNT_PATHS,blueprint as identity_blueprint
+        from lite_apple_account_events import blueprint as apple_events_blueprint
+        if not isinstance(identity,AccountIdentityBridge) or commerce is None or identity.registry is not commerce.accounts:
+            raise ValueError('matching trusted human/service accounts required')
+        account_paths=frozenset(ACCOUNT_PATHS)
+    if deletion is not None:
+        from lite_account_deletion import AccountDeletion, DELETION_PATHS, blueprint as deletion_blueprint
+        if not isinstance(deletion, AccountDeletion) or identity is None or deletion.bridge is not identity:
+            raise ValueError('matching trusted deletion/identity coordinator required')
+        deletion_paths=frozenset(DELETION_PATHS)
+    app.extensions['lite_attest_http'] = dict(service=service, budget=budget, privacy=privacy, commerce=commerce)
+    if commerce is not None:app.register_blueprint(commerce_blueprint(commerce))
+    if purchases is not None:app.register_blueprint(purchase_blueprint(purchases))
+    if identity is not None:app.register_blueprint(identity_blueprint(identity))
+    if deletion is not None:app.register_blueprint(deletion_blueprint(deletion))
+    if identity is not None and identity.events is not None:app.register_blueprint(apple_events_blueprint(identity.events))
     bp = Blueprint('lite_attest_http', __name__)
 
     @app.before_request
@@ -85,8 +118,10 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
             # not a consumer device key. Check that permission here as well.
             if request.method == 'GET' and request.endpoint in {
                     'lite.lite_records', 'lite.lite_record_image', 'lite.lite_record_preview'}:
-                from api_lite import _lite_reviewer_ok
-                allowed, error = _lite_reviewer_ok()
+                reviewer = current_app.extensions.get('lite_reviewer_auth')
+                if not callable(reviewer):
+                    raise StateUnavailable('reviewer authorization is not configured')
+                allowed, error = reviewer()
                 return None if allowed else error
             configuration = current_app.extensions['lite_attest_http']
             service, budget, privacy = configuration['service'], configuration['budget'], configuration['privacy']
@@ -99,7 +134,14 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
                     request.headers.get('Content-Encoding', 'identity') != 'identity'):
                 raise AdmissionRejected('noncanonical request target or encoding')
             control = request.path in (CHALLENGE_PATH, REGISTER_PATH)
-            if not ((request.method == 'POST' and (control or request.path in POST_PATHS)) or
+            service_only = (request.path in service_paths and configuration['commerce'] is not None
+                            and request.endpoint in {'lite_service_http.prepare','lite_service_http.run','lite_service_http.status','lite_service_http.recover','lite_service_http.resubmit'})
+            purchase_only=(request.path in purchase_paths and request.endpoint in {'lite_native_purchase.context','lite_native_purchase.confirm'})
+            account_only=(request.path in account_paths and request.endpoint in {'lite_account_identity.challenge','lite_account_identity.confirm','lite_account_identity.status','lite_account_identity.logout','lite_account_identity.renew'})
+            deletion_only=(request.path in deletion_paths and request.endpoint in {'lite_account_deletion.request','lite_account_deletion.status','lite_account_deletion.reauth_challenge','lite_account_deletion.reauth_confirm'})
+            account_only=account_only or deletion_only
+            service_only=service_only or purchase_only or account_only
+            if not ((request.method == 'POST' and (control or request.path in POST_PATHS or service_only)) or
                     (request.method == 'DELETE' and re.fullmatch(PREFIX+r'data/[A-Za-z0-9_-]{1,128}(?:/[0-9a-f]{32})?', request.path))):
                 return jsonify(error='lite_route_not_supported'), 404
             # A bounded 4 KiB challenge body selects the privacy lane. Media
@@ -114,8 +156,10 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
                 budget.reserve(scope='withdraw' if withdrawal else 'general')
                 g.lite_attest_control = data
                 return None
-            budget.reserve(scope='withdraw' if request.method == 'DELETE' else 'general')
-            limit = 0 if request.method == 'DELETE' else 4096 if request.path == REJOIN_PATH else 96*1024 if request.path == REGISTER_PATH else MAX_BODY
+            budget.reserve(scope='withdraw' if request.method == 'DELETE' or deletion_only else 'general')
+            limit = (20000 if (purchase_only or account_only) and request.path.endswith('/confirm') else
+                0 if request.method == 'DELETE' else 4096 if request.path == REJOIN_PATH or (service_only and not request.path.endswith('/run'))
+                else 96*1024 if request.path == REGISTER_PATH else MAX_BODY)
             raw = _body(limit)
             if control:
                 g.lite_attest_control = _json(raw)
@@ -129,7 +173,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
                 # client_data also binds the DELETE path to this installation.
                 parts = request.path.removeprefix(PREFIX+'data/').split('/')
                 owner, requested_epoch = parts[0], parts[1] if len(parts) == 2 else 'legacy'
-            elif request.path == PREFIX+'segment':
+            elif request.path == PREFIX+'segment' or (service_only and request.path.endswith('/run')):
                 if request.mimetype != 'multipart/form-data':
                     raise AdmissionRejected('multipart required')
                 owners = request.form.getlist('anon_id')
@@ -146,6 +190,14 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None):
             if owner != admitted.installation:
                 return jsonify(error='lite_owner_mismatch'), 403
             g.lite_admission = admitted
+            if service_only:
+                if identity is not None and not account_only:
+                    try: identity.require_session(owner)
+                    except ValueError: return jsonify(error='lite_sign_in_required',keep_local=True),401
+                # Explicitly registered, authenticated service work has no research
+                # writer ticket and cannot reach research media through this route.
+                # The service account/usage coordinator separately authorizes work.
+                return None
             if request.path == REJOIN_PATH:
                 if not isinstance(privacy, FencedPrivacy): raise ReconsentRejected('renewal unavailable')
                 return jsonify(Reconsent(privacy).resume(owner, data))

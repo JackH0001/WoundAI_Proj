@@ -28,7 +28,7 @@ import hashlib
 # is no literal fallback here any more.
 from institution_context import BOUND_ORG, token_matches_institution, account_session_claims
 from runtime_secrets import resolve_secret
-from model_preprocessing import load_preprocessing
+from model_preprocessing import load_preprocessing, student_logits_probability, STUDENT_OUTPUT_CONTRACT
 from lite_service_profile import service_profile, install_lite_perimeter, health_response as lite_health_response
 
 SERVICE_PROFILE = service_profile(os.environ)
@@ -1275,6 +1275,11 @@ def segment_wound_ai(image):
                 wound_mask = pred[..., -1]
             else:
                 wound_mask = pred
+            if mkey == 'student':
+                # ONNX export uses activation=None; iOS CoreML embeds sigmoid,
+                # Android applies it before resizing. Clipping raw logits here
+                # used an unintended probability cutoff of sigmoid(0.4)≈0.599.
+                wound_mask = student_logits_probability(wound_mask)
             wound_mask = cv2.resize(
                 wound_mask.astype(np.float32), (orig_w, orig_h),
                 interpolation=cv2.INTER_LINEAR,
@@ -1459,6 +1464,7 @@ def segment_for_lite(image_rgb):
     mask, info = escalate_mask(image_rgb, mask, w, h, policy="on_weak")
     info.setdefault("route", "student")
     info.setdefault("escalated", False)
+    info['student_output_contract'] = STUDENT_OUTPUT_CONTRACT if _active_model_key() == 'student' else None
     return mask, info
 
 
@@ -2104,6 +2110,7 @@ def classify_wound():
             # App 在臨床模式看到 true 要警示:那多半不是這次回診拍的照片。
             'image_reused': bool(image_reused),
             'stage2_segment': {'model': seg_model, 'wound_ratio': round(float(mask.mean()), 4), 'confidence': round(conf, 4),
+                               'student_output_contract': (STUDENT_OUTPUT_CONTRACT if _active_model_key() == 'student' and not route.startswith('phantom_color') else None),
                                'route': route, 'escalated': escalated, 'au_area_ratio': au_ratio, 'iou_student_au': iou_sa,
                                'wound_polygon': wound_poly,
                                # 所有輪廓（由大到小）。只讀 wound_polygon 的話，

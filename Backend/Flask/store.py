@@ -64,6 +64,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from store_errors import ImmutableConflict
 
 from audit_chain_contract import AUDIT_CHAIN_FIELDS, CHAIN_FIELD_VERSIONS, CHAIN_V, \
     UNVERSIONED_CHAIN_VERSIONS, audit_hash, loads_json_object_strict, validate_current_record
@@ -236,10 +237,6 @@ class Store:
 def _record_name() -> str:
     """時間戳前綴的物件名。20 位零填充，確保字典序＝時間序（不補零的話 '9' > '10'）。"""
     return "%020d_%s.jsonl" % (time.time_ns(), uuid.uuid4().hex[:8])
-
-
-class ImmutableConflict(ValueError):
-    """The key exists with different content; callers must not overwrite it."""
 
 
 class ChainConflict(ValueError):

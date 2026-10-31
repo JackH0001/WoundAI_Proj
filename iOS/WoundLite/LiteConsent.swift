@@ -86,6 +86,9 @@ struct LiteConsentView: View {
 /// 2026-08-19 移除「進階（開發測試）」帳密區——雲端辨識已切換到匿名
 /// `lite/segment` 端點，民眾版不再有任何帳號概念（交辦清單第 5 項）。
 struct LiteSettingsView: View {
+    /// Explicit candidate composition; ordinary shipping startup leaves this nil.
+    var accountManagement:LiteAccountManagementView?=nil
+    var nativeSession:LiteNativeSession?=nil
     private var installedVersion: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "未知"
@@ -144,6 +147,23 @@ struct LiteSettingsView: View {
                     LabeledContent("版本（建置號）", value: installedVersion)
                         .textSelection(.enabled)
                 }
+                if let accountManagement {
+                    Section("服務帳號") {
+                        NavigationLink("帳號與刪除") {accountManagement}
+                    }
+                }
+                if let nativeSession {
+                    Section("候選版內部驗收") {
+                        NavigationLink("服務登入、訂閱與刪帳") { LiteNativeSessionView(session:nativeSession) }
+                    }
+                }
+                #if DEBUG && targetEnvironment(simulator)
+                if ProcessInfo.processInfo.arguments.contains("-lite-commerce-lab") {
+                    Section("內部驗證") {
+                        NavigationLink("訂閱、廣告與固定收案（合成）") { LiteCommerceLab() }
+                    }
+                }
+                #endif
                 Section("研究上傳") {
                     Toggle("上傳去識別資料供研究（啟用自動辨識）", isOn: $consent)
                         .onChange(of: consent) { _, v in LitePrefs.researchConsent = v }
