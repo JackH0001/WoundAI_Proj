@@ -75,6 +75,10 @@ jobs:
         run: |
           python -m unittest -v test_lite_account_data_inventory > evidence/account-data-inventory-tests.log 2>&1
           python tools/lite_account_data_inventory_probe.py --output evidence/account-data-inventory-probe.json
+      - name: Account deletion and independent research admission races (synthetic only)
+        run: |
+          python -m unittest -v test_lite_account_research_closure > evidence/account-research-closure-tests.log 2>&1
+          python tools/lite_account_research_closure_probe.py --output evidence/account-research-closure-probe.json
       - name: Legacy image dependency closure and isolated startup
         run: python -m unittest -v test_lite_build_context > evidence/build-context-tests.log 2>&1
       - name: Native model contract and raster isolation (synthetic sessions only)

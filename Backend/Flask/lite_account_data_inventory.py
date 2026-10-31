@@ -138,6 +138,11 @@ class AccountDataInventory:
         if version != (0 if raw is None else raw[0]):
             raise StateUnavailable('research epoch changed during observation')
         self._observe(refs, 'research', r.key(installation), raw)
+        if raw is not None and raw[1]['v']==2:
+            retired=r.retirement(installation)
+            proof=self._observe(refs,'research',r.key(installation,'retired.'+raw[1]['retirement_sha256']))
+            if proof!=retired or hashlib.sha256(encoded(proof)).hexdigest()!=raw[1]['retirement_sha256']:
+                raise StateUnavailable('research retirement proof changed during observation')
         count = 0; seen = set(); first = current
         while True:
             if current in seen: raise StateUnavailable('research consent chain cycles')

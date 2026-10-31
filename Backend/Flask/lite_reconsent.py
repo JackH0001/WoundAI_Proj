@@ -8,7 +8,7 @@ import hashlib
 import json
 import re
 import time
-from lite_attest_state import StateUnavailable
+from lite_attest_state import CAS_ATTEMPTS, StateUnavailable
 from lite_fenced_store import FencedPrivacy
 
 DISCLOSURE = '2026-10-21.rejoin.1'
@@ -35,24 +35,92 @@ class Reconsent:
         return hashlib.sha256(b'woundlite/reconsent/1\0' + self.privacy.objects.bucket.name.encode()
             + b'\0' + owner.encode() + b'\0' + suffix.encode()).digest()
 
-    def load(self, owner):
+    def _state(self, owner):
         row = self.store.load(self.key(owner))
-        if row is None: return 0, 'legacy', None
+        if row is None: return 0, None, None, None
         generation, state = row
-        if (type(state) is not dict or set(state) != {'v', 'owner', 'epoch', 'audit_sha256'} or
-                type(state['v']) is not int or state['v'] != 1 or state['owner'] != owner or epoch(state['epoch']) == 'legacy'):
+        if (type(state) is not dict or type(state.get('v')) is not int or state['v'] not in (1,2)
+                or set(state) != ({'v','owner','epoch','audit_sha256'} |
+                    ({'retirement_sha256'} if state['v']==2 else set())) or state['owner'] != owner):
             raise StateUnavailable('invalid consent state')
+        current = epoch(state['epoch'])
+        retirement = None
+        if state['v']==2:
+            h=state['retirement_sha256']
+            if type(h) is not str or re.fullmatch(r'[0-9a-f]{64}',h) is None:
+                raise StateUnavailable('invalid retirement proof')
+            proof=self.store.load(self.key(owner,'retired.'+h))
+            retirement=None if proof is None else proof[1]
+            previous=None if current=='legacy' else dict(v=1,owner=owner,epoch=current,audit_sha256=state['audit_sha256'])
+            if (type(retirement) is not dict or set(retirement)!={'v','action','owner','bucket',
+                    'closure_sha256','association_sha256','previous'} or type(retirement['v']) is not int
+                    or retirement['v']!=1 or retirement['action']!='account_deletion'
+                    or retirement['owner']!=owner or retirement['bucket']!=self.privacy.objects.bucket.name
+                    or retirement['previous']!=previous
+                    or any(type(retirement[n]) is not str or re.fullmatch(r'[0-9a-f]{64}',retirement[n]) is None
+                           for n in ('closure_sha256','association_sha256'))
+                    or hashlib.sha256(encoded(retirement)).hexdigest()!=h):
+                raise StateUnavailable('missing or inconsistent retirement evidence')
+        if current=='legacy':
+            if state['v']!=2 or state['audit_sha256'] is not None:
+                raise StateUnavailable('invalid retired legacy epoch')
+            return generation,state,None,retirement
         audit = self.store.load(self.key(owner, state['epoch']))
         if audit is None or hashlib.sha256(encoded(audit[1])).hexdigest() != state['audit_sha256']:
             raise StateUnavailable('missing consent audit')
         event = audit[1]
         if event.get('owner') != owner or event.get('new_epoch') != state['epoch']:
             raise StateUnavailable('consent audit identity mismatch')
-        return generation, state['epoch'], event
+        return generation,state,event,retirement
+
+    def load(self, owner):
+        generation,state,event,_=self._state(owner)
+        return generation,'legacy' if state is None else state['epoch'],event
+
+    def retirement(self, owner):
+        return self._state(owner)[3]
+
+    def retire(self, owner, *, closure_sha256, association_sha256):
+        """Trusted account-deletion worker only; no HTTP action or payload deletion.
+
+        Retirement and reconsent contend on the SAME generation. A losing
+        reconsent cannot publish a new epoch. An earlier winning reconsent is
+        included in the next retirement attempt. Unknown audit/CAS results are
+        read back; original consent events remain immutable and readable.
+        """
+        for h in (closure_sha256,association_sha256):
+            if type(h) is not str or re.fullmatch(r'[0-9a-f]{64}',h) is None:
+                raise ValueError('exact closure and association references required')
+        for _ in range(CAS_ATTEMPTS):
+            revision,state,_,retired=self._state(owner)
+            if retired is not None:
+                if (retired['closure_sha256'],retired['association_sha256'])!=(closure_sha256,association_sha256):
+                    raise StateUnavailable('installation retired under a different closure')
+                return retired
+            event=dict(v=1,action='account_deletion',owner=owner,bucket=self.privacy.objects.bucket.name,
+                closure_sha256=closure_sha256,association_sha256=association_sha256,previous=state)
+            h=hashlib.sha256(encoded(event)).hexdigest();ak=self.key(owner,'retired.'+h)
+            proof=self.store.load(ak)
+            if proof is None:
+                try:self.store.compare_exchange(ak,0,event)
+                except StateUnavailable:pass
+                proof=self.store.load(ak)
+            if proof is None or proof[1]!=event:raise StateUnavailable('retirement intent unconfirmed')
+            value=dict(v=2,owner=owner,epoch='legacy' if state is None else state['epoch'],
+                audit_sha256=None if state is None else state['audit_sha256'],retirement_sha256=h)
+            try:
+                if self.store.compare_exchange(self.key(owner),revision,value):return event
+            except StateUnavailable:
+                saved=self._state(owner)[3]
+                if saved==event:return saved
+                raise StateUnavailable('retirement checkpoint unconfirmed') from None
+        raise StateUnavailable('retirement contention; resume original closure')
 
     def resolve(self, owner, supplied):
         supplied = epoch(supplied)
-        if self.load(owner)[1] != supplied:
+        _,state,_,retired=self._state(owner)
+        if retired is not None:raise ReconsentRejected('installation retired by account deletion')
+        if ('legacy' if state is None else state['epoch']) != supplied:
             raise ReconsentRejected('consent epoch changed')
         return self.privacy.scoped(supplied)
 
@@ -65,11 +133,15 @@ class Reconsent:
             raise ReconsentRejected('invalid consent request')
         previous, new = epoch(request['previous_epoch']), epoch(request['new_epoch'])
         if new == 'legacy' or new == previous: raise ReconsentRejected('new epoch required')
-        revision, active, existing = self.load(owner)
+        revision,state,existing,retired=self._state(owner)
+        if retired is not None:raise ReconsentRejected('installation retired by account deletion')
+        active='legacy' if state is None else state['epoch']
         request_sha = hashlib.sha256(encoded(request)).hexdigest()
         if active == new:
             if existing['request_sha256'] != request_sha or self.privacy.scoped(new).is_withdrawn(owner):
                 raise ReconsentRejected('renewal retired or conflicting')
+            if self._state(owner)[3] is not None:
+                raise ReconsentRejected('installation retired by account deletion')
             return self.receipt(owner, new, existing)
         if request['consent_version'] != CONSENT or request['disclosure_version'] != DISCLOSURE:
             raise ReconsentRejected('explicit current consent required')
