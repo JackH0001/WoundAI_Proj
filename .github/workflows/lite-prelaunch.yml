@@ -5,6 +5,7 @@ on:
     paths:
       - 'Backend/Flask/**'
       - 'Backend/LiteNative/**'
+      - 'Backend/LiteKeyWorker/**'
       - 'engineering/phase2/test_lite*.py'
       - 'engineering/phase2/requirements-commerce-test.txt'
       - 'tools/*lite*.py'
@@ -12,6 +13,32 @@ on:
 permissions:
   contents: read
 jobs:
+  key-worker-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Stage exact private worker source without model or credentials
+        run: python3 tools/stage_lite_key_candidate.py --repo . --output /tmp/lite-key-context
+      - name: Build private worker and verify packaged imports
+        run: docker build --tag lite-key-worker-ci /tmp/lite-key-context
+      - name: Missing deployment pins must refuse startup without network
+        run: |
+          set +e
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+            lite-key-worker-ci python -B -c 'from lite_key_startup import application; application({})' > /tmp/lite-key-boot.log 2>&1
+          result=$?
+          set -e
+          test "$result" = 1
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('/tmp/lite-key-boot.log').read_text()
+          assert 'ValueError: explicit private key worker deployment required' in text, text
+          assert 'ModuleNotFoundError' not in text, text
+          print('Private worker refuses unconfigured startup; no network or activation.')
+          PY
   offline-acceptance:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -56,6 +83,10 @@ jobs:
         run: |
           python -m unittest -v test_lite_key_provisioning > evidence/key-provisioning-tests.log 2>&1
           python tools/lite_key_provisioning_probe.py --output evidence/key-provisioning-probe.json
+      - name: Private key worker startup, package and restart (synthetic only)
+        run: |
+          python -m unittest -v test_lite_key_startup test_lite_key_package > evidence/key-worker-startup-tests.log 2>&1
+          python tools/lite_key_startup_probe.py --output evidence/key-worker-startup-probe.json
       - name: Pinned native startup and independent package (synthetic only)
         run: python -m unittest -v test_lite_native_startup test_lite_native_package > evidence/native-startup-package-tests.log 2>&1
       - name: Composed native Sandbox backend through signed HTTP (synthetic only)

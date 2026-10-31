@@ -8,7 +8,6 @@ unchanged. This is a candidate entry, not a production deployment factory.
 """
 from dataclasses import dataclass
 from itertools import combinations
-from pathlib import Path
 import hashlib
 from flask import Flask, jsonify, request
 from lite_account_identity import AccountIdentityBridge, AppleIdentityVerifier, ACCOUNT_PATHS
@@ -20,7 +19,6 @@ from lite_apple_oauth import AppleOAuthProvider
 from lite_attest_budget import RequestBudget
 from lite_attest_enrollment import RegistrationService
 from lite_attest_http import install_lite_attest, CHALLENGE_PATH, REGISTER_PATH
-from lite_attest_state import SQLiteStateStore, GCSStateStore
 from lite_fenced_store import FencedPrivacy
 from lite_privacy_state import PrivacyState
 from lite_grant_key_custody import AccountGrantCipher, GoogleGrantKeyProvider
@@ -41,19 +39,7 @@ STORE_NAMES = tuple(name for lane in ('events', 'lifecycle', 'keys', 'grants',
     'operations', 'recovery')
 
 
-def location(store):
-    """Only concrete durable stores, with physical names rather than object IDs."""
-    if isinstance(store, SQLiteStateStore):
-        return ('sqlite', str(Path(store.path).resolve()))
-    if isinstance(store, GCSStateStore) and type(store.bucket.name) is str and store.bucket.name:
-        return ('gcs', store.bucket.name, store.prefix.strip('/'))
-    raise ValueError('explicit SQLite or named GCS state store required')
-
-
-def overlaps(a, b):
-    if a[:2] != b[:2]: return False
-    if a[0] == 'sqlite': return True
-    return a[2] == b[2] or not a[2] or not b[2] or a[2].startswith(b[2]+'/') or b[2].startswith(a[2]+'/')
+from lite_store_locations import location, overlaps
 
 
 @dataclass(frozen=True)

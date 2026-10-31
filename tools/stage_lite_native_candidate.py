@@ -23,7 +23,7 @@ MODULES=tuple(('audit_chain_contract lite_account_deletion lite_account_identity
     'lite_raster_tools lite_reconsent lite_service_disposition lite_service_http lite_service_operations '
     'lite_service_recovery lite_service_release lite_service_subscription_links lite_subscription_authority '
     'lite_subscription_executor lite_subscription_migration lite_subscription_runtime '
-    'lite_usage_cutover lite_usage_ledger lite_usage_rollout model_preprocessing store_errors').split())
+    'lite_usage_cutover lite_usage_ledger lite_usage_rollout lite_store_locations model_preprocessing store_errors').split())
 ASSETS=('certificates/Apple_App_Attestation_Root_CA.pem','certificates/AppleRootCA-G3.pem',
         'privacy/haarcascade_frontalface_default.xml','privacy/README.md')
 PROFILE=('Dockerfile','requirements.in','requirements.lock','verify_native_package.py')

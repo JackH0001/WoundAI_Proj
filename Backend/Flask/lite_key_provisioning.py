@@ -81,7 +81,7 @@ class AccountKeyProvisioner:
                 or m['scope']!=lifecycle.scope or m['keyring']!=provider.keyring or not callable(clock)):
             raise ValueError('matching provisioning authority required')
         # Separate physical stores. There is no list API and no per-batch account allowlist.
-        from lite_native_backend import location,overlaps
+        from lite_store_locations import location,overlaps
         locations=[location(s) for s in (store,audit_store,lifecycle.store,lifecycle.audit)]
         if any(overlaps(a,b) for i,a in enumerate(locations) for b in locations[i+1:]):
             raise ValueError('provisioning, lifecycle and audit must be separate')
