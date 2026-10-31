@@ -83,6 +83,8 @@ jobs:
         run: |
           python -m unittest -v test_lite_research_media_disposition > evidence/research-media-tests.log 2>&1
           python tools/lite_research_media_probe.py --output evidence/research-media-probe.json
+          python -m unittest -v test_lite_research_history > evidence/research-history-tests.log 2>&1
+          python tools/lite_research_history_probe.py --output evidence/research-history-probe.json
       - name: Legacy image dependency closure and isolated startup
         run: python -m unittest -v test_lite_build_context > evidence/build-context-tests.log 2>&1
       - name: Native model contract and raster isolation (synthetic sessions only)
