@@ -15,6 +15,22 @@ def digest(value):
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def object_key(kind, fields):
+    return bytes.fromhex(digest(["research-withdrawal-issuer/1", kind, fields]))
+
+
+def verify_signature(public, role, pair, encoded):
+    try:
+        if type(encoded) is not str or len(encoded) != 88:
+            raise ValueError()
+        signature = base64.b64decode(encoded, validate=True)
+        if len(signature) != 64 or base64.b64encode(signature).decode() != encoded:
+            raise ValueError()
+        public.verify(signature, ResearchAssociations.message(role, pair))
+    except (ValueError, InvalidSignature):
+        raise ValueError("invalid research association signature") from None
+
+
 def validate_pair(pair):
     if type(pair) is not dict or set(pair) != {'action','scope','bucket','person','native','research','operation','registration'}:
         raise ValueError('invalid research association fields')
@@ -54,12 +70,7 @@ class ResearchAssociations:
             pair = proof['pair']
             validate_pair(pair)
             for role, public_key in keys.items():
-                try:
-                    signature = base64.b64decode(proof[role],validate=True)
-                    if base64.b64encode(signature).decode()!=proof[role]:raise ValueError()
-                    public_key.verify(signature, self.message(role,pair))
-                except (TypeError,ValueError,InvalidSignature):
-                    raise ValueError('invalid research association signature') from None
+                verify_signature(public_key, role, pair, proof[role])
             index = (pair['scope'],pair['bucket'],pair['person'],pair['native'],pair['operation'])
             owner = (pair['bucket'],pair['research'])
             if index in self._pairs or (owner in self._owners and self._owners[owner]!=(pair['person'],pair['native'])):

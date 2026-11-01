@@ -12,7 +12,7 @@ from flask import Blueprint, g, jsonify, request
 from audit_chain_contract import loads_json_object_strict
 from lite_attest_request import RESEARCH_OFFER_PATH as OFFER, RESEARCH_ACCEPT_PATH as ACCEPT
 from lite_attest_state import StateUnavailable
-from lite_research_association import ResearchAssociations, digest, validate_pair
+from lite_research_association import ResearchAssociations, digest, object_key, validate_pair
 
 CONFIRM = "withdraw_this_research_installation_for_this_account_deletion"
 TTL = 600
@@ -43,10 +43,6 @@ def opaque(value, length):
 def ticket_bytes(packet, issued, expires):
     body = dict(packet=packet, issued=issued, expires=expires)
     return ("woundailite-research-ticket/1:" + digest(body)).encode("ascii")
-
-
-def object_key(kind, fields):
-    return bytes.fromhex(digest(["research-withdrawal-issuer/1", kind, fields]))
 
 
 def save_once(store, identity, record):
