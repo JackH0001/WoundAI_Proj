@@ -97,20 +97,23 @@ final class LiteMeasureVM: ObservableObject {
         image = work
         imageW = work.cgImage?.width ?? Int(work.size.width)
         imageH = work.cgImage?.height ?? Int(work.size.height)
-        var dd = d
-        dd?.rgbWidth = imageW
-        dd?.rgbHeight = imageH
-        depth = dd
-        if d == nil {
+        depth = nil
+        guard var dd = d else {
             note = "⚠ 這張照片沒有取得 LiDAR 深度，無法量測。請重拍（勿遮擋鏡頭旁的 LiDAR 感測器）。"
             return true   // 沒深度就不必進圈選——圈了也算不出來
         }
 
-        guard dd?.geometryIssue(imageW: imageW, imageH: imageH, requireOrientation: true) == nil else {
-            depth = nil
+        // Check the delivered pair before binding a fresh camera map to the
+        // normalized JPEG. Existing dimensions must not be silently replaced.
+        guard let orientation = DepthCapture.exifOrientation(raw.imageOrientation),
+              dd.sourceExifOrientation == Int(orientation.rawValue),
+              dd.geometryIssue(imageW: imageW, imageH: imageH, requireOrientation: true) == nil else {
             note = "照片、深度或相機校正資料無法對應，未送出辨識或計算。請重新拍攝。"
             return true
         }
+        dd.rgbWidth = imageW
+        dd.rgbHeight = imageH
+        depth = dd
 
         // 輪廓來源優先序（2026-08-18 規劃）：
         //   ① 地端模型（成熟上線後把 .mlmodel 丟進 WoundLite/Models/ 即自動啟用，離線可用）

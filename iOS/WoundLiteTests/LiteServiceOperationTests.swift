@@ -1,5 +1,6 @@
 import XCTest
 import CryptoKit
+import UIKit
 @testable import WoundLite
 
 private struct ServiceRecoveryFixture: Decodable {
@@ -341,6 +342,42 @@ final class LiteServiceOperationTests: XCTestCase {
         let body=try XCTUnwrap(sent.last?.httpBody);XCTAssertNotNil(body.range(of:image))
         for forbidden in ["raw_depth","consent_epoch","paid","research_consent"] { XCTAssertNil(body.range(of:Data(forbidden.utf8))) }
         let stored=try await client(w,m).stored(f.capture_id);XCTAssertEqual(stored,result)
+    }
+
+    func testSavedPreviewRequiresTheExactCompletedPhotoEvenAtIdenticalDimensions() async throws {
+        let (fixture, wire, _, client) = try await setup()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = LocalImageStore(directory: directory)
+        let jpeg = fixture.image
+        let original = try XCTUnwrap(store.save(jpeg: jpeg))
+        let ready = try await client.stored(fixture.capture_id)
+        let pendingImage = await ImageLoadQueue.shared.verifiedServiceImage(journal: ready, store: store, name: original)
+        XCTAssertNil(pendingImage)
+        try await wire.plan(doneSteps(fixture))
+        let completed = try await client.resume(fixture.capture_id) { _ in jpeg }
+        let sameSize = CGSize(width: completed.width, height: completed.height)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let replacement = UIGraphicsImageRenderer(size: sameSize, format: format).image { ctx in
+            UIColor.cyan.setFill()
+            ctx.fill(CGRect(origin: .zero, size: sameSize))
+        }
+        let otherJPEG = try XCTUnwrap(replacement.jpegData(compressionQuality: 0.92))
+        let other = try XCTUnwrap(store.save(jpeg: otherJPEG))
+        XCTAssertNotEqual(LiteServiceBytes.hash(jpeg), LiteServiceBytes.hash(otherJPEG))
+        let originalImage = await ImageLoadQueue.shared.verifiedServiceImage(journal: completed, store: store, name: original)
+        let otherImage = await ImageLoadQueue.shared.verifiedServiceImage(journal: completed, store: store, name: other)
+        let missing = await ImageLoadQueue.shared.verifiedServiceImage(journal: completed, store: store, name: "missing")
+        XCTAssertNotNil(originalImage)
+        XCTAssertNil(otherImage)
+        XCTAssertNil(missing)
+        XCTAssertEqual(store.rawBytes(original), jpeg)
+        XCTAssertEqual(store.rawBytes(other), otherJPEG)
+        let reread = try await client.stored(fixture.capture_id)
+        XCTAssertEqual(reread, completed)
+        let sent = await wire.requests()
+        XCTAssertEqual(sent.map { $0.url?.lastPathComponent }, ["prepare", "run"])
     }
     func testCompletedOperationIsLocalReadWithoutImageOrNetwork() async throws {
         let (f,w,m,c)=try await setup();try await w.plan(doneSteps(f));let image=f.image

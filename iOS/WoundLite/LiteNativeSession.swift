@@ -272,10 +272,10 @@ struct LiteSavedServiceView: View {
                     LiteServiceStatusView(record: result, client: session.service,
                         loadJPEG: { _ in await MainActor.run { jpeg } }, onRecord: { self.result = $0 })
                         .disabled(session.registration != .confirmed)
-                    if let answer = result.reply?.result, let raw = jpeg, let image = UIImage(data: raw) {
-                        LitePreview(image: image, polys: answer.wound_polygons.map { $0.map { $0.map { Int($0) } } },
-                                    imageW: answer.image_w, imageH: answer.image_h)
-                        Text("服務圈選參照；未覆寫原紀錄或重新計算原面積。")
+                    if let answer = result.reply?.result {
+                        LiteSavedServicePreview(journal: result, answer: answer, images: records.images,
+                                                name: record?.imageName)
+                            .id([result.captureID, String(result.revision), record?.imageName ?? ""])
                     }
                 }
                 if result == nil || (result?.next != "none" && result?.canResubmit != true) {
@@ -287,7 +287,8 @@ struct LiteSavedServiceView: View {
                             catch { failureMessage = "尚未確認；請先核對服務帳號登入及原紀錄，勿重新拍攝或重建工作。" }
                         }
                     }.buttonStyle(.borderedProminent)
-                        .disabled(session.registration != .confirmed || busy || !reviewed || records.needsReload || jpeg == nil)
+                        .disabled(session.registration != .confirmed || busy || !reviewed || records.needsReload ||
+                                  record.map { records.images.exists($0.imageName) } != true)
                 }
                 if busy { ProgressView() }
                 if let failureMessage { Text(failureMessage).foregroundStyle(.orange) }
@@ -296,6 +297,48 @@ struct LiteSavedServiceView: View {
         }.navigationTitle("服務辨識驗收").task {
             await reload()
             await session.checkExistingRegistration()
+        }
+    }
+}
+
+extension ImageLoadQueue {
+    func verifiedServiceImage(journal: LiteServiceRecord, store: LocalImageStore, name: String) -> UIImage? {
+        guard !Task.isCancelled, journal.note == "confirmed", (try? journal.validate()) != nil else { return nil }
+        return autoreleasepool {
+            guard let bytes = store.rawBytes(name), let size = try? LiteServiceBytes.imageSize(bytes),
+                  size.0 == journal.width, size.1 == journal.height,
+                  LiteServiceBytes.hash(bytes) == journal.imageSHA256 else { return nil }
+            return UIImage(data: bytes)
+        }
+    }
+}
+
+private struct LiteSavedServicePreview: View {
+    let journal: LiteServiceRecord
+    let answer: LiteServiceResult
+    let images: LocalImageStore
+    let name: String?
+    @State private var image: UIImage?
+    @State private var checked = false
+
+    var body: some View {
+        Group {
+            if let image {
+                LitePreview(image: image, polys: answer.wound_polygons.map { $0.map { $0.map(Int.init) } },
+                            imageW: answer.image_w, imageH: answer.image_h)
+                Text("服務圈選參照；未覆寫原紀錄或重新計算原面積。")
+            } else if checked {
+                Text("無法核對原照片，這次不顯示服務圈選。原紀錄與辨識回執保留。")
+            } else {
+                ProgressView("正在核對原照片…")
+            }
+        }.task {
+            if let name {
+                let verified = await ImageLoadQueue.shared.verifiedServiceImage(journal: journal, store: images, name: name)
+                guard !Task.isCancelled else { return }
+                image = verified
+            }
+            checked = true
         }
     }
 }
