@@ -127,9 +127,9 @@ private actor SessionWire: LiteAuthenticatedTransport {
     private let origin = URL(string: "https://synthetic.invalid")!
     private func runtime(_ wire: SessionWire, _ journal: any LiteServiceJournal,
                          apple: SessionApple? = nil, storeKit: SessionStoreKit? = nil,
-                         origin: URL? = nil, time: Int = sessionTime) throws -> LiteNativeSession {
+                         origin: URL? = nil, time: Int = sessionTime, captures: LiteCaptureDraftStore? = nil) throws -> LiteNativeSession {
         try LiteNativeSession(origin: origin ?? self.origin, transport: wire, identityProvider: apple ?? SessionApple(),
-            purchaseProvider: storeKit ?? SessionStoreKit(), journal: journal, register: { await wire.register() },
+            purchaseProvider: storeKit ?? SessionStoreKit(), journal: journal, captures: captures, register: { await wire.register() },
             now: { Date(timeIntervalSince1970: Double(time)) })
     }
     func testConstructionAndDefaultRootDoNotRegisterOrSend() async throws {
@@ -381,5 +381,338 @@ private actor SessionWire: LiteAuthenticatedTransport {
         do { _ = try await r.recognizeSaved(recordID: "not-a-record", jpeg: image); XCTFail() } catch { }
         let counts = await wire.counts(), rows = await journal.snapshot()
         XCTAssertEqual(counts, ["registration": 0]); XCTAssertTrue(rows.isEmpty)
+    }
+}
+
+
+extension LiteNativeSessionTests {
+    private func captureDepth() -> DepthCapture {
+        DepthCapture(map: Array(repeating: 0.3, count: 64), width: 8, height: 8,
+            fx: 50, fy: 50, cx: 32, cy: 32, refWidth: 64, refHeight: 64,
+            accuracy: "absolute", filtered: false, rgbWidth: 64, rgbHeight: 64, sourceExifOrientation: 1)
+    }
+    private func captureFiles() -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("capture-test-" + UUID().uuidString)
+    }
+    private func captureFixture(_ wire: SessionWire, in captures: LiteCaptureDraftStore) async throws -> LiteCaptureDraft {
+        try await captures.create(jpeg: wire.image(), depth: captureDepth(),
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!, now: Date(timeIntervalSince1970: 1_800_000_000))
+    }
+    func testCameraDraftPersistsExactPairBeforeAnyServiceOrResearchTransmission() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path)
+        let r = try runtime(wire, SessionJournal(), captures: files)
+        let vm = LiteMeasureVM(native: r), image = await wire.image()
+        let consent = LitePrefs.researchConsent
+        _ = await vm.ingest(try XCTUnwrap(UIImage(data: image)), depth: captureDepth())
+        let draft = try XCTUnwrap(vm.draft), reloaded = try await files.load(draft.id)
+        XCTAssertEqual(reloaded.jpeg, vm.captureJPEG)
+        XCTAssertEqual(try reloaded.depth().map.map(\.bitPattern), captureDepth().map.map(\.bitPattern))
+        let counts = await wire.counts(); XCTAssertEqual(counts, ["registration": 0])
+        XCTAssertEqual(LitePrefs.researchConsent, consent); XCTAssertNil(vm.cloudBinding)
+        let encrypted = try Data(contentsOf: path.appendingPathComponent(draft.id + ".enc"))
+        XCTAssertNil(encrypted.range(of: draft.jpeg)); XCTAssertNil(encrypted.range(of: Data("polygons".utf8)))
+    }
+    func testDraftDiskFailureNeverEnqueuesOrTransmitsAndCanRetryLocally() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path, write: { _, _ in throw LiteServiceFailure.conflict })
+        let r = try runtime(wire, SessionJournal(), captures: files), vm = LiteMeasureVM(native: r)
+        let jpeg = await wire.image()
+        _ = await vm.ingest(try XCTUnwrap(UIImage(data: jpeg)), depth: captureDepth())
+        XCTAssertNil(vm.draft); XCTAssertNotNil(vm.captureJPEG); XCTAssertNotNil(vm.depth)
+        await vm.recognizeNative(); await vm.retryDraftSave()
+        let counts = await wire.counts(); XCTAssertEqual(counts, ["registration": 0])
+        XCTAssertNil(vm.draft); XCTAssertNotNil(vm.captureJPEG)
+    }
+    func testNativeCaptureRecoversAndReusesCompletedResultWithNoSecondRun() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), journal = SessionJournal(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let r = try runtime(wire, journal, captures: files); await r.identity.signIn()
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json")), vm = LiteMeasureVM(native: r)
+        let countsBefore = await wire.counts()
+        await vm.restoreDraft(draft.id, in: store)
+        let countsRestored = await wire.counts(); XCTAssertEqual(countsBefore, countsRestored)
+        await vm.recognizeNative()
+        XCTAssertEqual(vm.serviceResult?.note, "confirmed"); XCTAssertFalse(vm.polys.isEmpty)
+        XCTAssertNotNil(vm.estimate); XCTAssertFalse(vm.hasManualContour); XCTAssertNil(vm.cloudBinding)
+        let saved = try await files.load(draft.id)
+        let r2 = try runtime(wire, journal, captures: files), vm2 = LiteMeasureVM(native: r2)
+        await vm2.restoreDraft(draft.id, in: store)
+        XCTAssertEqual(vm2.polys, saved.polygons); XCTAssertEqual(vm2.captureJPEG, draft.jpeg)
+        await vm2.recognizeNative()
+        let counts = await wire.counts()
+        XCTAssertEqual(counts["service/run"], 1); XCTAssertEqual(counts["service/prepare"], 1)
+        XCTAssertFalse(counts.keys.contains { $0.contains("research") || $0 == "segment" })
+        XCTAssertEqual(try XCTUnwrap(vm2.depth).map.map(\.bitPattern), captureDepth().map.map(\.bitPattern))
+    }
+    func testLostRunReplyResumesFromSameDraftWithStatusOnly() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), journal = SessionJournal(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let r = try runtime(wire, journal, captures: files); await r.identity.signIn(); await wire.loseRun()
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json")), vm = LiteMeasureVM(native: r)
+        await vm.restoreDraft(draft.id, in: store); await vm.recognizeNative()
+        XCTAssertEqual(vm.serviceResult?.note, "unavailable")
+        let restart = try runtime(wire, journal, time: sessionTime + 6, captures: files)
+        let vm2 = LiteMeasureVM(native: restart)
+        await vm2.restoreDraft(draft.id, in: store); await vm2.recognizeNative()
+        XCTAssertEqual(vm2.serviceResult?.note, "confirmed")
+        let counts = await wire.counts(); XCTAssertEqual(counts["service/run"], 1)
+        XCTAssertEqual(counts["service/prepare"], 1); XCTAssertEqual(counts["service/status"], 1)
+    }
+    func testManualContourSurvivesRecognitionUntilExplicitReplacement() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let r = try runtime(wire, SessionJournal(), captures: files); await r.identity.signIn()
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json")), vm = LiteMeasureVM(native: r)
+        await vm.restoreDraft(draft.id, in: store)
+        let manual = [[[5,5],[5,55],[55,55],[55,5]]]
+        await vm.applyManual(manual, correctionIoU: 0.7)
+        let beforeArea = try XCTUnwrap(vm.estimate).surfaceAreaCm2
+        await vm.recognizeNative()
+        XCTAssertEqual(vm.polys, manual); XCTAssertTrue(vm.hasManualContour)
+        XCTAssertEqual(vm.estimate?.surfaceAreaCm2, beforeArea)
+        await vm.replaceWithNativeResult()
+        XCTAssertNotEqual(vm.polys, manual); XCTAssertFalse(vm.hasManualContour)
+        XCTAssertLessThan(try XCTUnwrap(vm.estimate).surfaceAreaCm2, beforeArea)
+        let counts = await wire.counts(); XCTAssertEqual(counts["service/run"], 1)
+    }
+    func testRetakeKeepsBothDraftsAndRestoresManualEditExactly() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path)
+        let r = try runtime(wire, SessionJournal(), captures: files), vm = LiteMeasureVM(native: r)
+        let jpeg = await wire.image()
+        let image = try XCTUnwrap(UIImage(data: jpeg))
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        _ = await vm.ingest(image, depth: captureDepth())
+        let first = try XCTUnwrap(vm.draft)
+        let manual = [[[5,5],[5,55],[55,55],[55,5]]]
+        await vm.applyManual(manual, correctionIoU: 0.7)
+        let before = try XCTUnwrap(vm.estimate)
+        _ = await vm.ingest(image, depth: captureDepth())
+        XCTAssertNotEqual(vm.draft?.id, first.id)
+        await vm.reloadDrafts(in: store); XCTAssertEqual(vm.pendingCaptures.count, 2)
+        await vm.restoreDraft(first.id, in: store)
+        XCTAssertEqual(vm.polys, manual); XCTAssertTrue(vm.hasManualContour)
+        XCTAssertEqual(vm.estimate?.surfaceAreaCm2, before.surfaceAreaCm2)
+        let counts = await wire.counts(); XCTAssertEqual(counts, ["registration": 0])
+    }
+    func testDraftStaleEditsAndSameIDReplacementFailWithoutChangingOriginal() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        var edited = draft; edited.polygons = [[[5,5],[5,55],[55,55],[55,5]]]
+        let saved = try await files.update(edited, previous: draft)
+        do { _ = try await files.update(draft, previous: draft); XCTFail("stale editor must fail") } catch { }
+        do { _ = try await captureFixture(wire, in: files); XCTFail("duplicate ID must fail") } catch { }
+        let current = try await files.load(draft.id); XCTAssertEqual(current, saved)
+    }
+    func testUnreadableDraftLibraryDoesNotPretendEmptyOrTransmit() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        try Data("corrupt".utf8).write(to: path.appendingPathComponent(draft.id + ".enc"))
+        let r = try runtime(wire, SessionJournal(), captures: files), vm = LiteMeasureVM(native: r)
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        await vm.reloadDrafts(in: store); XCTAssertNotNil(vm.draftNotice)
+        await vm.restoreDraft(draft.id, in: store); await vm.recognizeNative()
+        XCTAssertNil(vm.draft)
+        let counts = await wire.counts(); XCTAssertEqual(counts, ["registration": 0])
+    }
+
+    func testCompletedDraftWriteWithLostAcknowledgementRetriesSameCapture() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path, write: { data, url in
+            try HealthDataFiles.write(data, to: url)
+            throw LiteServiceFailure.conflict
+        })
+        let r = try runtime(wire, SessionJournal(), captures: files), vm = LiteMeasureVM(native: r)
+        let jpeg = await wire.image()
+        _ = await vm.ingest(try XCTUnwrap(UIImage(data: jpeg)), depth: captureDepth())
+        XCTAssertNil(vm.draft)
+        let before = try await files.pending(excluding: [])
+        XCTAssertEqual(before.count, 1)
+        await vm.retryDraftSave()
+        XCTAssertEqual(vm.draft?.id, before.first?.id)
+        let after = try await files.pending(excluding: [])
+        XCTAssertEqual(after.count, 1)
+        let counts = await wire.counts(); XCTAssertEqual(counts, ["registration": 0])
+    }
+
+    func testCorruptServiceReceiptStillAllowsLocalDraftButNeverNewRecognition() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), journal = SessionJournal(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let r = try runtime(wire, journal, captures: files); await r.identity.signIn()
+        _ = try await r.recognizeSaved(recordID: draft.id, jpeg: draft.jpeg)
+        try await journal.corruptRecognition()
+        let before = await wire.counts(), vm = LiteMeasureVM(native: r)
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        await vm.restoreDraft(draft.id, in: store)
+        XCTAssertEqual(vm.captureJPEG, draft.jpeg); XCTAssertTrue(vm.serviceUnreadable)
+        await vm.applyManual([[[5,5],[5,55],[55,55],[55,5]]], correctionIoU: 0.7)
+        await vm.recognizeNative(); await vm.resumePendingRecognition()
+        XCTAssertNotNil(vm.estimate); XCTAssertTrue(vm.hasManualContour)
+        let after = await wire.counts(); XCTAssertEqual(before, after)
+        let readBack = try await files.load(draft.id); XCTAssertEqual(readBack.polygons, vm.polys)
+    }
+
+    func testUnreadableMeasurementIndexPreventsDraftRecovery() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let r = try runtime(wire, SessionJournal(), captures: files), vm = LiteMeasureVM(native: r)
+        let index = path.appendingPathComponent("index.json")
+        try Data("incomplete-index".utf8).write(to: index)
+        let store = LiteStore(fileURL: index); XCTAssertTrue(store.needsReload)
+        await vm.reloadDrafts(in: store); await vm.restoreDraft(draft.id, in: store)
+        XCTAssertNotNil(vm.draftNotice); XCTAssertNil(vm.draft); XCTAssertNil(vm.image)
+        let counts = await wire.counts(); XCTAssertEqual(counts, ["registration": 0])
+        XCTAssertEqual(try Data(contentsOf: index), Data("incomplete-index".utf8))
+    }
+
+    func testConfirmedReceiptBeforeContourWriteRecoversWithoutAnotherRequest() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), journal = SessionJournal(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let r = try runtime(wire, journal, captures: files); await r.identity.signIn()
+        _ = try await r.recognizeSaved(recordID: draft.id, jpeg: draft.jpeg)
+        let before = await wire.counts()
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json")), vm = LiteMeasureVM(native: r)
+        await vm.restoreDraft(draft.id, in: store)
+        XCTAssertFalse(vm.polys.isEmpty); XCTAssertNotNil(vm.estimate)
+        let applied = try await files.load(draft.id)
+        await vm.restoreDraft(draft.id, in: store)
+        let reapplied = try await files.load(draft.id)
+        XCTAssertEqual(reapplied, applied, "Reopening a confirmed result must not invent a mask revision")
+        let after = await wire.counts(); XCTAssertEqual(before, after)
+    }
+
+    func testForegroundContinuationHonorsWaitAndStopsWhenConfirmed() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), journal = SessionJournal(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let r = try runtime(wire, journal, captures: files); await r.identity.signIn(); await wire.loseRun()
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json")), vm = LiteMeasureVM(native: r)
+        await vm.restoreDraft(draft.id, in: store)
+        let before = await wire.counts()
+        await vm.resumePendingRecognition()
+        let idle = await wire.counts(); XCTAssertEqual(before, idle, "No initial cloud request without user action")
+        await vm.recognizeNative(); await vm.resumePendingRecognition()
+        let waiting = await wire.counts(); XCTAssertNil(waiting["service/status"])
+        let resumed = try runtime(wire, journal, time: sessionTime + 6, captures: files)
+        let vm2 = LiteMeasureVM(native: resumed)
+        await vm2.restoreDraft(draft.id, in: store); await vm2.resumePendingRecognition()
+        XCTAssertEqual(vm2.serviceResult?.note, "confirmed")
+        let finished = await wire.counts()
+        await vm2.resumePendingRecognition(); await vm2.resumePendingRecognition()
+        let final = await wire.counts(); XCTAssertEqual(final, finished)
+        XCTAssertEqual(final["service/prepare"], 1); XCTAssertEqual(final["service/run"], 1)
+        XCTAssertEqual(final["service/status"], 1)
+    }
+
+    func testSavedCaptureReadbackKeepsExactPairAndInterruptedFinalizationCannotDuplicate() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let r = try runtime(wire, SessionJournal(), captures: files), vm = LiteMeasureVM(native: r)
+        let index = path.appendingPathComponent("index.json"), store = LiteStore(fileURL: index)
+        let location = LiteWoundLocation(side: "right", site: "heel")
+        await vm.restoreDraft(draft.id, in: store)
+        await vm.applyManual([[[5,5],[5,55],[55,55],[55,5]]], correctionIoU: 0.7)
+        let saved = try XCTUnwrap(vm.saveCapture(in: store, selectedWoundID: "", location: location))
+        defer { store.images.delete(saved.imageName); if let d = saved.depthName { store.images.delete(d) } }
+        XCTAssertEqual(saved.id, draft.id); XCTAssertEqual(store.records.count, 1)
+        XCTAssertNil(saved.cloudSync); XCTAssertTrue(saved.manuallyConfirmed == true)
+        XCTAssertEqual(store.images.rawBytes(saved.imageName), draft.jpeg)
+        let depth = try XCTUnwrap(store.loadDepth(try XCTUnwrap(saved.depthName), matchingImage: saved.imageName))
+        XCTAssertEqual(depth.map.map(\.bitPattern), captureDepth().map.map(\.bitPattern))
+        XCTAssertEqual(saved.surfaceCm2, try XCTUnwrap(vm.estimate).surfaceAreaCm2)
+        XCTAssertNil(vm.saveCapture(in: store, selectedWoundID: "", location: location))
+        XCTAssertEqual(vm.finishSavedCapture(in: store), draft.id); XCTAssertNil(vm.image)
+        XCTAssertNil(vm.finishSavedCapture(in: store))
+        let retained = try await files.load(draft.id)
+        XCTAssertNil(retained.savedRecordID, "Simulated termination before draft-finalization write")
+        XCTAssertEqual(retained.jpeg, draft.jpeg)
+        let restartedStore = LiteStore(fileURL: index), restarted = LiteMeasureVM(native: r)
+        await restarted.reloadDrafts(in: restartedStore); XCTAssertTrue(restarted.pendingCaptures.isEmpty)
+        await restarted.restoreDraft(draft.id, in: restartedStore)
+        XCTAssertNil(restarted.draft); XCTAssertEqual(restartedStore.records.count, 1)
+        do { _ = try await files.load(draft.id); XCTFail("Recovery must finish retiring a committed capture copy") } catch { }
+        XCTAssertEqual(store.images.rawBytes(saved.imageName), draft.jpeg)
+    }
+
+    func testNoChangeManualCompletionDoesNotCreateNewDraftRevision() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let r = try runtime(wire, SessionJournal(), captures: files), vm = LiteMeasureVM(native: r)
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        let contour = [[[5,5],[5,55],[55,55],[55,5]]]
+        await vm.restoreDraft(draft.id, in: store); await vm.applyManual(contour, correctionIoU: 0.7)
+        let before = try await files.load(draft.id), area = vm.estimate?.surfaceAreaCm2
+        await vm.applyManual(contour, correctionIoU: 1)
+        let after = try await files.load(draft.id)
+        XCTAssertEqual(before, after); XCTAssertEqual(vm.estimate?.surfaceAreaCm2, area)
+        let counts = await wire.counts(); XCTAssertEqual(counts, ["registration": 0])
+    }
+
+    func testCommittedIndexWithLostAcknowledgementIsReadBackWithoutLosingMedia() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let r = try runtime(wire, SessionJournal(), captures: files), vm = LiteMeasureVM(native: r)
+        let index = path.appendingPathComponent("index.json")
+        let store = LiteStore(fileURL: index, writeIndex: { data, url in
+            try HealthDataFiles.write(data, to: url)
+            throw LiteServiceFailure.conflict
+        })
+        await vm.restoreDraft(draft.id, in: store)
+        await vm.applyManual([[[5,5],[5,55],[55,55],[55,5]]], correctionIoU: 0.7)
+        let saved = try XCTUnwrap(vm.saveCapture(in: store, selectedWoundID: "",
+            location: LiteWoundLocation(side: "right", site: "heel")))
+        defer { store.images.delete(saved.imageName); if let d = saved.depthName { store.images.delete(d) } }
+        XCTAssertEqual(store.records.count, 1); XCTAssertEqual(vm.savedId, saved.id)
+        XCTAssertEqual(store.images.rawBytes(saved.imageName), draft.jpeg)
+        let sidecar = try XCTUnwrap(saved.depthName)
+        XCTAssertNotNil(store.loadDepth(sidecar, matchingImage: saved.imageName))
+        let finalDraft = try XCTUnwrap(vm.draft)
+        await vm.markDraftSaved(finalDraft, in: store)
+        let pending = try await files.pending(excluding: [])
+        XCTAssertTrue(pending.isEmpty)
+        let encrypted = try Data(contentsOf: path.appendingPathComponent(draft.id + ".enc"))
+        let receipt = try XCTUnwrap(PhiCrypto.decryptBytes(encrypted))
+        XCTAssertLessThan(receipt.count, 512)
+        XCTAssertNil(receipt.range(of: Data(draft.jpeg.base64EncodedString().utf8)))
+        do { _ = try await files.load(draft.id); XCTFail("A saved draft is only a receipt, not a hidden photo copy") } catch { }
+        await vm.markDraftSaved(finalDraft, in: store) // Idempotent finalization.
+        XCTAssertEqual(store.records.count, 1)
+        // End the injected write failure before exercising the normal deletion path.
+        let healthyStore = LiteStore(fileURL: index)
+        XCTAssertTrue(healthyStore.delete(saved))
+        XCTAssertFalse(store.images.exists(saved.imageName)); XCTAssertFalse(store.images.exists(sidecar))
+        let afterDeletion = try await files.pending(excluding: [])
+        XCTAssertTrue(afterDeletion.isEmpty, "Deleting a saved record must not resurrect its old capture")
+    }
+
+    func testFailedIndexWriteKeepsDraftAndMeasurementScreen() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let r = try runtime(wire, SessionJournal(), captures: files), vm = LiteMeasureVM(native: r)
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"),
+                              writeIndex: { _, _ in throw LiteServiceFailure.conflict })
+        await vm.restoreDraft(draft.id, in: store)
+        await vm.applyManual([[[5,5],[5,55],[55,55],[55,5]]], correctionIoU: 0.7)
+        XCTAssertNil(vm.saveCapture(in: store, selectedWoundID: "",
+            location: LiteWoundLocation(side: "right", site: "heel")))
+        XCTAssertNil(vm.finishSavedCapture(in: store)); XCTAssertTrue(store.records.isEmpty)
+        XCTAssertNotNil(vm.image); XCTAssertEqual(vm.captureJPEG, draft.jpeg); XCTAssertNotNil(vm.note)
+        let retained = try await files.load(draft.id)
+        XCTAssertEqual(retained.jpeg, draft.jpeg); XCTAssertEqual(retained.polygons, vm.polys)
+        await vm.markDraftSaved(retained, in: store)
+        let stillOriginal = try await files.load(draft.id); XCTAssertEqual(stillOriginal, retained)
     }
 }

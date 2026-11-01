@@ -39,7 +39,7 @@ struct LiteMeasurementContext: Codable, Equatable {
 }
 
 /// The initial contour persists even if the user subsequently edits its boundary.
-struct LiteContourOrigin: Codable, Equatable {
+struct LiteContourOrigin: Codable, Equatable, Sendable {
     let method: String
     var route: String? = nil
     var outputContract: String? = nil

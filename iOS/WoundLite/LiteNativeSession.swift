@@ -70,6 +70,7 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     let identity: LiteAccountIdentityStore
     let purchases: LiteNativePurchaseStore
     let service: LiteServiceClient
+    let captures: LiteCaptureDraftStore
     let deletionService: LiteAccountDeletionHTTPService
     private let balanceTransport: any LiteAuthenticatedTransport
     private var researchLink: LiteResearchDeletionLink?
@@ -85,22 +86,27 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     convenience init(origin: URL, transport: any LiteAuthenticatedTransport,
                      identityProvider: any LiteAppleIdentityProvider, purchaseProvider: any LitePurchaseProvider,
                      journal: any LiteServiceJournal,
+                     captures: LiteCaptureDraftStore? = nil,
                      register: @escaping @Sendable () async throws -> String,
                      existing: (@Sendable () async throws -> String?)? = nil,
                      now: @escaping @Sendable () -> Date = { Date() }) throws {
         try self.init(origin: origin, transport: transport, identityProvider: identityProvider,
                       purchaseProvider: purchaseProvider, journal: journal, register: register,
-                      existing: existing ?? { try await transport.installation() }, access: LiteSandboxAccess(), now: now)
+                      existing: existing ?? { try await transport.installation() }, captures: captures, access: LiteSandboxAccess(), now: now)
     }
 
     private init(origin: URL, transport: any LiteAuthenticatedTransport,
                  identityProvider: any LiteAppleIdentityProvider, purchaseProvider: any LitePurchaseProvider,
                  journal: any LiteServiceJournal, register: @escaping @Sendable () async throws -> String,
                  existing: @escaping @Sendable () async throws -> String?,
-                 access: LiteSandboxAccess, now: @escaping @Sendable () -> Date) throws {
+                 captures: LiteCaptureDraftStore? = nil, access: LiteSandboxAccess, now: @escaping @Sendable () -> Date) throws {
         guard origin.scheme == "https", origin.host != nil, origin.port == nil, origin.path.isEmpty,
               origin.user == nil, origin.password == nil, origin.query == nil, origin.fragment == nil,
               !origin.absoluteString.contains("%") else { throw LiteAccountFailure.invalid }
+        self.captures = captures ?? LiteCaptureDraftStore(directory:
+            FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("lite-capture-drafts")
+                .appendingPathComponent(LiteServiceBytes.hash(Data(origin.absoluteString.utf8))))
         self.origin = origin; self.access = access; self.register = register; self.existing = existing
         func scoped(_ prefix: String, _ actions: [String], ordinary: Bool) -> LiteSandboxScopeTransport {
             LiteSandboxScopeTransport(origin: origin, base: transport,
@@ -136,7 +142,8 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
             transport: LiteSandboxSignedTransport(client: client, access: access),
             identityProvider: LiteAppleSignInProvider(window: window), purchaseProvider: LiteStoreKitPurchaseProvider(),
             journal: LiteServiceFileJournal(directory: directory), register: { try await client.registeredInstallation() },
-            existing: { try await client.existingInstallation() }, access: access, now: { Date() })
+            existing: { try await client.existingInstallation() },
+            captures: LiteCaptureDraftStore(directory: directory.appendingPathComponent("capture-drafts")), access: access, now: { Date() })
         // Create the transport lazily. Viewing account settings never registers
         // an installation, re-enables research or sends an association request.
         let configured = AppSettings.backendURL()
@@ -234,7 +241,7 @@ struct LiteNativeSessionView: View {
             } else {
                 Text("完成裝置登記後，這裡會顯示帳號登入、刪帳及訂閱與恢復購買。")
             }
-            Text("登入後可從既有紀錄開啟服務辨識驗收。正式拍攝流程與完整刪帳驗收尚未啟用。")
+            Text("候選版可在拍攝後選擇個人雲端辨識；研究同意獨立。完整實機與刪帳驗收仍待完成。")
                 .font(.footnote).foregroundStyle(.secondary)
         }.navigationTitle("內部服務驗收")
         .task { await session.checkExistingRegistration() }

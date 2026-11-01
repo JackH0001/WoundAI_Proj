@@ -152,7 +152,7 @@ struct LiteRootView: View {
         TabView(selection: $selectedTab) {
             Group {
                 if lidarOK {
-                    LiteMeasureView(store: store) { id in
+                    LiteMeasureView(store: store, nativeSession: nativeSession) { id in
                         savedRecordToOpen = id
                         selectedTab = .history
                     }
