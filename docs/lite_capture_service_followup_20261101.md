@@ -83,6 +83,10 @@ real depth samples, credentials or private model weights.
 
 ## Remaining boundaries
 
+Follow-up: `lite_capture_retirement_20261102.md` documents the subsequent local
+discard/deletion-fence implementation and its baseline/fixed comparison. The
+results and remaining-boundary list below describe this earlier change as tested.
+
 - The owner reported that TestFlight 38 installed over the existing app, retained
   records and exported PDF correctly. That report validates build 38, not this
   candidate change or native service connectivity.

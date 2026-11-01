@@ -51,6 +51,10 @@ final class LiteStore: ObservableObject {
     private let storageURL: URL?
     private let clock: () -> Date
     private let writeIndex: (Data, URL) throws -> Void
+    private let writeRetirement: (Data, URL) throws -> Void
+    private lazy var retirement = LiteCaptureRetirement(
+        file: LiteCaptureRetirement.file(for: fileURL), write: writeRetirement)
+    var retiredCaptureIDs: Set<String> { retirement.ids }
     var revisionNow: Date { clock() }
     // A failed read is not an empty library. Keep the last verified bytes so a stale
     // store cannot silently overwrite a later save by another store in this process.
@@ -89,8 +93,9 @@ final class LiteStore: ObservableObject {
     }
 
     init(fileURL: URL? = nil, now: @escaping () -> Date = { Date() },
-         writeIndex: @escaping (Data, URL) throws -> Void = { try HealthDataFiles.write($0, to: $1) }) {
-        storageURL = fileURL; clock = now; self.writeIndex = writeIndex; reload()
+         writeIndex: @escaping (Data, URL) throws -> Void = { try HealthDataFiles.write($0, to: $1) },
+         writeRetirement: @escaping (Data, URL) throws -> Void = { try HealthDataFiles.write($0, to: $1) }) {
+        storageURL = fileURL; clock = now; self.writeIndex = writeIndex; self.writeRetirement = writeRetirement; reload()
     }
 
     @discardableResult
@@ -142,6 +147,7 @@ final class LiteStore: ObservableObject {
             storageError = "這筆紀錄已不存在，未刪除任何影像或深度資料。"
             return false
         }
+        guard retireCapture(r.id, requireSavedRecord: true) else { return false }
         let remaining = records.filter { $0.id != r.id }
         guard persist(remaining) else { return false }
         let stillReferenced = Set(remaining.flatMap { [$0.imageName] + [$0.depthName].compactMap { $0 } })
@@ -152,6 +158,39 @@ final class LiteStore: ObservableObject {
             return false
         }
         return true
+    }
+
+    /// An acknowledged local deletion/discard is fenced before media/index
+    /// removal. If later work fails, existing saved records remain usable.
+    func retireCapture(_ id: String, requireSavedRecord: Bool) -> Bool {
+        guard !needsReload, !requireSavedRecord || records.contains(where: { $0.id == id }) else { return false }
+        do {
+            guard try readIndex() == loadedIndex else { throw IndexFailure.changed }
+            try retirement.retire(id)
+            return true
+        } catch {
+            storageError = "刪除標記尚未確認保存，未清除原紀錄；請重新讀取後再試。"
+            return false
+        }
+    }
+
+    func captureCanResume(_ id: String) -> Bool {
+        guard refreshCaptureRetirement() else { return false }
+        return !retirement.ids.contains(id)
+    }
+
+    func refreshCaptureRetirement() -> Bool {
+        guard !needsReload else { return false }
+        do { try retirement.reload(); return true }
+        catch {
+            needsReload = true
+            storageError = "無法核對已刪除的拍攝，暫停恢復與儲存；原檔保留，請重新讀取紀錄。"
+            return false
+        }
+    }
+
+    func captureCleanupFailed() {
+        storageError = "刪除要求已保存，但拍攝草稿尚未確認清理完成；原紀錄仍保留，請解鎖後重試刪除。"
     }
 
     /// 重新量測後覆寫同 id 的那一筆（詳情頁「重新圈選」用）。
@@ -210,6 +249,7 @@ final class LiteStore: ObservableObject {
             guard data != nil || loadedIndex == nil else { throw IndexFailure.changed }
             let rows = try data.map { try JSONDecoder().decode([LiteRecord].self, from: $0) } ?? []
             try validateIDs(rows)
+            try retirement.reload()
             records = rows
             loadedIndex = data
             needsReload = false
@@ -243,6 +283,11 @@ final class LiteStore: ObservableObject {
         // 原子寫入：中途被殺不會留半個 JSON（下次 load 解不開＝整份紀錄消失）。
         do {
             try validateIDs(next)
+            try retirement.reload()
+            let existing = Set(records.map(\.id))
+            guard next.allSatisfy({ existing.contains($0.id) || !retirement.ids.contains($0.id) }) else {
+                throw IndexFailure.invalidIDs
+            }
             guard try readIndex() == loadedIndex else { throw IndexFailure.changed }
             let d = try JSONEncoder().encode(next)
             try writeIndex(d, fileURL)

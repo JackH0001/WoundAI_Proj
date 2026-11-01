@@ -715,4 +715,105 @@ extension LiteNativeSessionTests {
         await vm.markDraftSaved(retained, in: store)
         let stillOriginal = try await files.load(draft.id); XCTAssertEqual(stillOriginal, retained)
     }
+
+    func testDeleteBeforeDraftFinalizationNeverResurrectsAfterRestart() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files), r = try runtime(wire, SessionJournal(), captures: files)
+        let index = path.appendingPathComponent("index.json"), store = LiteStore(fileURL: index)
+        let vm = LiteMeasureVM(native: r)
+        await vm.restoreDraft(draft.id, in: store)
+        await vm.applyManual([[[5,5],[5,55],[55,55],[55,5]]], correctionIoU: 0.7)
+        let saved = try XCTUnwrap(vm.saveCapture(in: store, selectedWoundID: "",
+            location: LiteWoundLocation(side: "right", site: "heel")))
+        // Simulate termination before capture finalization, then an ordinary
+        // library deletion without constructing the native session.
+        XCTAssertTrue(store.delete(saved))
+        let nextStore = LiteStore(fileURL: index), restarted = LiteMeasureVM(native: r)
+        await restarted.reloadDrafts(in: nextStore)
+        XCTAssertTrue(restarted.pendingCaptures.isEmpty)
+        await restarted.restoreDraft(draft.id, in: nextStore)
+        XCTAssertNil(restarted.image); XCTAssertTrue(nextStore.records.isEmpty)
+        do { _ = try await files.load(draft.id); XCTFail("A deleted capture must not remain recoverable") } catch { }
+        XCTAssertFalse(nextStore.add(saved))
+        let counts = await wire.counts(); XCTAssertEqual(counts, ["registration": 0])
+    }
+
+    func testNativeDeleteWaitsForDraftCleanupAndRetriesWithoutCloudCalls() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), healthy = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: healthy)
+        let r = try runtime(wire, SessionJournal(), captures: healthy), vm = LiteMeasureVM(native: r)
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        await vm.restoreDraft(draft.id, in: store)
+        await vm.applyManual([[[5,5],[5,55],[55,55],[55,5]]], correctionIoU: 0.7)
+        let saved = try XCTUnwrap(vm.saveCapture(in: store, selectedWoundID: "",
+            location: LiteWoundLocation(side: "right", site: "heel")))
+        defer { store.images.delete(saved.imageName); if let d = saved.depthName { store.images.delete(d) } }
+        let badFiles = LiteCaptureDraftStore(directory: path, write: { _, _ in throw LiteServiceFailure.conflict })
+        let failing = try runtime(wire, SessionJournal(), captures: badFiles)
+        let first = await failing.deleteLocalRecord(saved, in: store)
+        XCTAssertFalse(first); XCTAssertEqual(store.records.count, 1)
+        XCTAssertTrue(store.images.exists(saved.imageName)); XCTAssertNotNil(store.storageError)
+        let second = await r.deleteLocalRecord(saved, in: store)
+        XCTAssertTrue(second); XCTAssertTrue(store.records.isEmpty)
+        XCTAssertFalse(store.images.exists(saved.imageName))
+        do { _ = try await healthy.load(draft.id); XCTFail("No hidden raw draft after successful deletion") } catch { }
+        let counts = await wire.counts(); XCTAssertEqual(counts, ["registration": 0])
+    }
+
+    func testDiscardKeepsOtherCaptureAndFencesAnAlreadyOpenEditor() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path)
+        let first = try await captureFixture(wire, in: files)
+        let second = try await files.create(jpeg: first.jpeg, depth: captureDepth())
+        let r = try runtime(wire, SessionJournal(), captures: files)
+        let index = path.appendingPathComponent("index.json"), store = LiteStore(fileURL: index)
+        let editor = LiteMeasureVM(native: r), other = LiteMeasureVM(native: r)
+        await editor.restoreDraft(first.id, in: store); await other.restoreDraft(first.id, in: store)
+        await other.discardDraft(first.id, in: store)
+        XCTAssertNil(other.image); XCTAssertEqual(other.pendingCaptures.map(\.id), [second.id])
+        await editor.recognizeNative()
+        await editor.applyManual([[[5,5],[5,55],[55,55],[55,5]]], correctionIoU: 0.7)
+        XCTAssertNil(editor.saveCapture(in: store, selectedWoundID: "", location: LiteWoundLocation(side: "right", site: "heel")))
+        let next = LiteMeasureVM(native: r), newStore = LiteStore(fileURL: index)
+        await next.reloadDrafts(in: newStore); await next.restoreDraft(first.id, in: newStore)
+        XCTAssertNil(next.image); XCTAssertEqual(next.pendingCaptures.map(\.id), [second.id])
+        let retained = try await files.load(second.id); XCTAssertEqual(retained.jpeg, second.jpeg)
+        let counts = await wire.counts(); XCTAssertEqual(counts, ["registration": 0])
+    }
+
+    func testDiscardPreservesCompletedServiceReceiptAndDoesNotChangeResearchConsent() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), journal = SessionJournal(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let r = try runtime(wire, journal, captures: files); await r.identity.signIn()
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json")), vm = LiteMeasureVM(native: r)
+        await vm.restoreDraft(draft.id, in: store); await vm.recognizeNative()
+        let id = try LiteNativeSession.captureID(recordID: draft.id)
+        let before = try await r.service.storedIfPresent(id), counts = await wire.counts()
+        let consent = LitePrefs.researchConsent
+        await vm.discardDraft(draft.id, in: store)
+        let after = try await r.service.storedIfPresent(id), finalCounts = await wire.counts()
+        XCTAssertEqual(before, after); XCTAssertEqual(counts, finalCounts)
+        XCTAssertEqual(finalCounts["service/run"], 1); XCTAssertEqual(LitePrefs.researchConsent, consent)
+        XCTAssertNil(vm.image); XCTAssertTrue(store.records.isEmpty)
+    }
+
+    func testDiscardAcknowledgementLossRemainsPendingUntilReadBackRetry() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), healthy = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: healthy)
+        let files = LiteCaptureDraftStore(directory: path, write: { data, url in
+            try HealthDataFiles.write(data, to: url); throw LiteServiceFailure.conflict
+        })
+        let r = try runtime(wire, SessionJournal(), captures: files), vm = LiteMeasureVM(native: r)
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        await vm.restoreDraft(draft.id, in: store); await vm.discardDraft(draft.id, in: store)
+        XCTAssertNotNil(vm.image); XCTAssertTrue(vm.note?.contains("尚未確認") == true)
+        await vm.recognizeNative()
+        await vm.discardDraft(draft.id, in: store)
+        XCTAssertNil(vm.image); XCTAssertTrue(vm.pendingCaptures.isEmpty)
+        let counts = await wire.counts(); XCTAssertEqual(counts, ["registration": 0])
+    }
 }

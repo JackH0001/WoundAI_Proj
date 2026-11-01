@@ -18,6 +18,7 @@ final class LiteMeasureVM: ObservableObject {
     @Published private(set) var draftNotice: String?
     @Published private(set) var serviceUnreadable = false
     private var draftIdentity: (UUID, Date)?
+    private weak var recordStore: LiteStore?
     @Published var image: UIImage?
     /// The exact normalized JPEG used by the cloud and the local RGB-D sidecar.
     private(set) var captureJPEG: Data?
@@ -51,6 +52,11 @@ final class LiteMeasureVM: ObservableObject {
     func finishSavedCapture(in store: LiteStore) -> String? {
         guard !busy, let id = savedId,
               store.records.contains(where: { $0.id == id }) else { return nil }
+        clearCapture()
+        return id
+    }
+
+    private func clearCapture() {
         gen += 1
         image = nil; captureJPEG = nil; depth = nil; polys = []
         imageW = 0; imageH = 0; estimate = nil
@@ -58,7 +64,6 @@ final class LiteMeasureVM: ObservableObject {
         cloudImageId = nil; cloudBinding = nil; cloudHadPolys = false
         draft = nil; serviceResult = nil; draftIdentity = nil; serviceUnreadable = false
         userEdited = false; source = "manual"; contourOrigin = .manual
-        return id
     }
 
     /// 長邊 ≤2048＋方向烘進像素（與醫療版 `normalizeForBackend` 同規則；
@@ -204,17 +209,19 @@ final class LiteMeasureVM: ObservableObject {
 
     /// Construction, listing and resume only read local encrypted files/journals.
     func reloadDrafts(in store: LiteStore) async {
+        recordStore = store
         guard let native else { return }
-        guard !store.needsReload else {
+        guard store.refreshCaptureRetirement() else {
             draftNotice = "請先完整重讀紀錄，再恢復尚未存入的拍攝；原始檔案保留。"
             return
         }
         do {
             let saved = Set(store.records.map(\.id))
+            try await native.captures.retire(store.retiredCaptureIDs)
             for value in try await native.captures.unfinalized(savedIDs: saved) {
                 try await finalizeDraft(value, in: store)
             }
-            pendingCaptures = try await native.captures.pending(excluding: saved)
+            pendingCaptures = try await native.captures.pending(excluding: saved.union(store.retiredCaptureIDs))
             draftNotice = nil
         } catch { draftNotice = "尚未完成的拍攝無法讀取。請先解鎖後重讀，原檔保留。" }
     }
@@ -230,7 +237,8 @@ final class LiteMeasureVM: ObservableObject {
     }
 
     func restoreDraft(_ id: String, in store: LiteStore) async {
-        guard let native, !busy, !store.needsReload, !store.records.contains(where: { $0.id == id }) else { return }
+        recordStore = store
+        guard let native, !busy, store.captureCanResume(id), !store.records.contains(where: { $0.id == id }) else { return }
         busy = true; busyHint = "正在讀回原拍攝…"; defer { busy = false }
         do {
             let value = try await native.captures.load(id)
@@ -239,6 +247,7 @@ final class LiteMeasureVM: ObservableObject {
             var journal: LiteServiceRecord?, unreadable = false
             do { journal = try await native.service.storedIfPresent(LiteNativeSession.captureID(recordID: id)) }
             catch { unreadable = true }
+            guard store.captureCanResume(id), !store.records.contains(where: { $0.id == id }) else { return }
             gen += 1
             image = img; captureJPEG = value.jpeg; depth = d
             imageW = d.rgbWidth; imageH = d.rgbHeight
@@ -261,6 +270,7 @@ final class LiteMeasureVM: ObservableObject {
     /// resubmission is the only path allowed to request a successor operation.
     func recognizeNative(resubmit: Bool = false) async {
         guard let native, let draft, !busy, !serviceUnreadable else { return }
+        guard recordStore?.captureCanResume(draft.id) != false else { note = "這次拍攝已捨棄或紀錄尚待核對，未再送出辨識。"; return }
         busy = true; busyHint = "正在核對個人雲端辨識…"; defer { busy = false }
         let generation = gen
         do {
@@ -269,7 +279,8 @@ final class LiteMeasureVM: ObservableObject {
                 _ = try await native.service.requestResubmission(LiteNativeSession.captureID(recordID: draft.id))
             }
             let result = try await native.recognizeSaved(recordID: draft.id, jpeg: draft.jpeg)
-            guard generation == gen, self.draft?.id == draft.id else { return }
+            guard generation == gen, self.draft?.id == draft.id,
+                  recordStore?.captureCanResume(draft.id) != false else { return }
             serviceResult = result; note = result.message
             if result.note == "confirmed", !userEdited { try await useNativeResult() }
         } catch { note = "尚未確認辨識結果；照片與深度已保存在手機。請核對服務登入，再續接同一筆。" }
@@ -288,6 +299,7 @@ final class LiteMeasureVM: ObservableObject {
     /// and geometry are checked before changing the draft or estimating an area.
     func useNativeResult() async throws {
         guard let native, let draft, let r = serviceResult, r.note == "confirmed",
+              recordStore?.captureCanResume(draft.id) != false,
               r.captureID == (try LiteNativeSession.captureID(recordID: draft.id)),
               r.origin == native.origin.absoluteString, r.imageSHA256 == LiteServiceBytes.hash(draft.jpeg),
               r.width == imageW, r.height == imageH, let answer = r.reply?.result else { throw LiteServiceFailure.conflict }
@@ -330,9 +342,13 @@ final class LiteMeasureVM: ObservableObject {
     /// intact on an uncertain index write; only a verified save clears the UI.
     func saveCapture(in store: LiteStore, selectedWoundID: String,
                      location: LiteWoundLocation) -> LiteRecord? {
+        recordStore = store
         guard savedId == nil, !busy, !store.needsReload,
               native == nil || draft != nil,
               let e = estimate, liteVerdict(e).usable, let jpeg = captureJPEG, let depth else { return nil }
+        guard draft.map({ store.captureCanResume($0.id) }) != false else {
+            note = "這次拍攝已捨棄或紀錄尚待核對，未重新存入。"; return nil
+        }
         if let draft, store.records.contains(where: { $0.id == draft.id }) {
             note = "這次拍攝已存入紀錄，請從紀錄頁繼續；未建立重複資料。"
             return nil
@@ -371,6 +387,25 @@ final class LiteMeasureVM: ObservableObject {
         }
         savedId = saved.id
         return saved
+    }
+
+    /// User-confirmed local discard. No service call, quota change, or research
+    /// withdrawal is implied. A durable fence precedes removal of the raw copy.
+    func discardDraft(_ id: String, in store: LiteStore) async {
+        guard let native, !busy, !store.needsReload,
+              !store.records.contains(where: { $0.id == id }) else { return }
+        busy = true; busyHint = "正在捨棄本機拍攝…"; defer { busy = false }
+        guard store.retireCapture(id, requireSavedRecord: false) else {
+            note = store.storageError; return
+        }
+        do {
+            try await native.captures.retire([id])
+            if draft?.id == id { clearCapture() }
+            await reloadDrafts(in: store)
+            note = "已捨棄這次拍攝草稿；服務回執保留，未更動研究同意。"
+        } catch {
+            note = "捨棄要求已保存，但本機檔案尚未確認清理完成；已停止此筆續傳，請重試捨棄。"
+        }
     }
 
     /// 手動圈選完成。
@@ -585,6 +620,7 @@ struct LiteMeasureView: View {
     }
     @Environment(\.scenePhase) private var scenePhase
     @State private var confirmServiceReplacement = false
+    @State private var discardCaptureID: String?
     @State private var showCamera = false
     @State private var showTrace = false
     @State private var woundID = ""
@@ -619,13 +655,17 @@ struct LiteMeasureView: View {
                         if !vm.pendingCaptures.isEmpty {
                             Menu("繼續尚未存入的拍攝（\(vm.pendingCaptures.count)）") {
                                 ForEach(vm.pendingCaptures) { item in
-                                    Button(item.createdAt.formatted(date: .numeric, time: .shortened)) {
-                                        Task { await vm.restoreDraft(item.id, in: store) }
+                                    Menu(item.createdAt.formatted(date: .numeric, time: .shortened)) {
+                                        Button("繼續圈選或辨識") { Task { await vm.restoreDraft(item.id, in: store) } }
+                                        Button("捨棄這次拍攝", role: .destructive) { discardCaptureID = item.id }
                                     }
                                 }
                             }.disabled(vm.busy || store.needsReload)
                         }
-                        if let notice = vm.draftNotice { Text(notice).font(.footnote).foregroundStyle(.orange) }
+                        if let notice = vm.draftNotice {
+                            Text(notice).font(.footnote).foregroundStyle(.orange)
+                            Button("重新核對本機拍攝") { Task { await vm.reloadDrafts(in: store) } }.disabled(vm.busy)
+                        }
                     } else if LitePrefs.researchConsent == true {
                         LiteResearchQuotaView()
                     }
@@ -665,6 +705,16 @@ struct LiteMeasureView: View {
             }
             .onAppear { if vm.image == nil { selectLastWound() } }
             .task { await vm.reloadDrafts(in: store) }
+            .confirmationDialog("捨棄尚未存入的拍攝？", isPresented: Binding(
+                get: { discardCaptureID != nil }, set: { if !$0 { discardCaptureID = nil } }), titleVisibility: .visible) {
+                Button("捨棄草稿照片與深度", role: .destructive) {
+                    if let id = discardCaptureID { Task { await vm.discardDraft(id, in: store) } }
+                    discardCaptureID = nil
+                }
+                Button("保留", role: .cancel) { discardCaptureID = nil }
+            } message: {
+                Text("此操作無法復原，不退還已使用的辨識額度，也不會撤回已傳送的研究資料。服務回執仍保留供核對。")
+            }
             .task(id: scenePhase == .active) {
                 guard nativeSession != nil, scenePhase == .active else { return }
                 while !Task.isCancelled {
@@ -727,6 +777,7 @@ struct LiteMeasureView: View {
             Button("重試保存這次拍攝") { Task { await vm.retryDraftSave(); await vm.reloadDrafts(in: store) } }
                 .disabled(vm.busy)
         } else if vm.draft != nil {
+            Button("捨棄這次拍攝", role: .destructive) { discardCaptureID = vm.draft?.id }.disabled(vm.busy)
             Text("個人雲端辨識會傳送這張照片並核對免費／訂閱額度；研究上傳另需同意。也可直接自行圈選。")
                 .font(.footnote).foregroundStyle(.secondary)
             if vm.serviceUnreadable {

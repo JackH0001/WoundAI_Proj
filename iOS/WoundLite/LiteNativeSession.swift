@@ -74,6 +74,7 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     let deletionService: LiteAccountDeletionHTTPService
     private let balanceTransport: any LiteAuthenticatedTransport
     private var researchLink: LiteResearchDeletionLink?
+    private var deletingLocalRecords = Set<String>()
     private let access: LiteSandboxAccess
     private let register: @Sendable () async throws -> String
     private let existing: @Sendable () async throws -> String?
@@ -201,6 +202,17 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
 
     func accountView() throws -> LiteAccountManagementView {
         try LiteAccountManagementView(identity: identity, service: deletionService, researchLink: researchLink)
+    }
+
+    /// Retire unfinished RGB-D before the history index is removed. The store's
+    /// durable marker also prevents resurrection if another view/restart races.
+    func deleteLocalRecord(_ record: LiteRecord, in store: LiteStore) async -> Bool {
+        guard deletingLocalRecords.insert(record.id).inserted else { return false }
+        defer { deletingLocalRecords.remove(record.id) }
+        guard store.retireCapture(record.id, requireSavedRecord: true) else { return false }
+        do { try await captures.retire([record.id]) }
+        catch { store.captureCleanupFailed(); return false }
+        return store.delete(record)
     }
     func deletion(pauseResearch: @escaping () throws -> Void = LitePrefs.pauseResearchForAccountDeletion) -> LiteAccountDeletionStore {
         LiteAccountDeletionStore(service: deletionService, identity: identity, journal: identity.journal, pauseResearch:pauseResearch, now: identity.now)

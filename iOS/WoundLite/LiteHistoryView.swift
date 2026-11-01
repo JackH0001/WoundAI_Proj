@@ -112,7 +112,10 @@ struct LiteHistoryView: View {
                 titleVisibility: .visible
             ) {
                 Button("刪除（無法復原）", role: .destructive) {
-                    if let r = pendingDelete { store.delete(r) }
+                    if let r = pendingDelete {
+                        if let nativeSession { Task { _ = await nativeSession.deleteLocalRecord(r, in: store) } }
+                        else { store.delete(r) }
+                    }
                     pendingDelete = nil
                 }
                 Button("取消", role: .cancel) { pendingDelete = nil }

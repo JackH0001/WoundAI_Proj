@@ -38,13 +38,14 @@ private struct LiteCaptureSavedReceipt: Codable, Equatable {
     let id: String
     let jpegSHA256: String
     let depthSHA256: String
-    init(_ value: LiteCaptureDraft) {
-        version = 1; kind = "saved-measurement"; id = value.id
+    init(_ value: LiteCaptureDraft, kind: String = "saved-measurement") {
+        version = 1; self.kind = kind; id = value.id
         jpegSHA256 = LiteServiceBytes.hash(value.jpeg)
         depthSHA256 = LiteServiceBytes.hash(value.encodedDepth)
     }
     func valid(for expected: String) -> Bool {
-        version == 1 && kind == "saved-measurement" && id == expected && UUID(uuidString: id)?.uuidString == id
+        version == 1 && ["saved-measurement", "retired-capture"].contains(kind)
+            && id == expected && UUID(uuidString: id)?.uuidString == id
             && LiteServiceBytes.hex(jpegSHA256) && LiteServiceBytes.hex(depthSHA256)
     }
 }
@@ -127,9 +128,23 @@ actor LiteCaptureDraftStore {
         let raw = try bytes(previous.id)
         if let existing = try? JSONDecoder().decode(LiteCaptureSavedReceipt.self, from: raw), existing == receipt { return }
         guard try load(previous.id) == previous else { throw LiteServiceFailure.conflict }
+        try saveReceipt(receipt)
+    }
+    /// IDs come only from the measurement store's durable retirement journal.
+    /// Keep service/consent receipts untouched; remove this local RGB-D copy only.
+    func retire(_ ids: Set<String>) throws {
+        for id in ids where UUID(uuidString: id)?.uuidString == id {
+            guard FileManager.default.fileExists(atPath: try file(id).path) else { continue }
+            let raw = try bytes(id)
+            if let receipt = try? JSONDecoder().decode(LiteCaptureSavedReceipt.self, from: raw), receipt.valid(for: id) { continue }
+            let draft = try load(id)
+            try saveReceipt(LiteCaptureSavedReceipt(draft, kind: "retired-capture"))
+        }
+    }
+    private func saveReceipt(_ receipt: LiteCaptureSavedReceipt) throws {
         guard let encrypted = try PhiCrypto.encryptBytes(JSONEncoder().encode(receipt)) else { throw LiteServiceFailure.invalidState }
-        try write(encrypted, file(previous.id))
-        guard try JSONDecoder().decode(LiteCaptureSavedReceipt.self, from: bytes(previous.id)) == receipt else {
+        try write(encrypted, file(receipt.id))
+        guard try JSONDecoder().decode(LiteCaptureSavedReceipt.self, from: bytes(receipt.id)) == receipt else {
             throw LiteServiceFailure.invalidState
         }
     }
