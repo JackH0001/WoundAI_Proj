@@ -54,13 +54,20 @@ def text(value, pattern):
     return value
 
 
-def pinned_file(root, reference, maximum):
+def pinned_file(root, reference, maximum, *, mount=None):
     exact(reference,'file sha256');_hex(reference['sha256'])
     name=text(reference['file'],r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}')
-    base=Path(root).resolve();p=base/name
-    if p.is_symlink() or not p.is_file() or p.stat().st_size>maximum:
+    base = Path(root).resolve()
+    if mount is not None:
+        # Role names come from the schema. Each is a separate read-only volume.
+        base = base / mount
+        if not base.is_dir() or base.is_symlink() or base.resolve() != base:
+            raise ValueError('separate secret mount required')
+    p = base / name
+    if p.is_symlink() or p.resolve() != p or not p.is_file() or p.stat().st_size > maximum:
         raise ValueError('bounded regular mounted file required')
-    raw=p.read_bytes()
+    with p.open('rb') as source:
+        raw = source.read(maximum + 1)
     if not 0<len(raw)<=maximum or hashlib.sha256(raw).hexdigest()!=reference['sha256']:
         raise ValueError('mounted file digest mismatch')
     return raw
@@ -73,7 +80,7 @@ def preflight(raw, *, expected_config, expected_source, expected_image, secrets,
     c=loads_json_object_strict(raw.decode('utf-8'))
     exact(c,'schema enabled namespace deployment app apple budgets buckets stores controls secrets model'
           + (' key_preparation' if 'key_preparation' in c else ''))
-    if c['schema']!='lite-native-startup/1' or c['enabled'] is not True:
+    if c['schema'] not in ('lite-native-startup/1', 'lite-native-startup/2') or c['enabled'] is not True:
         raise ValueError('explicit native Sandbox enablement required')
     _subject(c['namespace'])
     d=exact(c['deployment'],'source image project project_number service_account keyring')
@@ -95,6 +102,8 @@ def preflight(raw, *, expected_config, expected_source, expected_image, secrets,
     if apple['environment']!='Sandbox':raise ValueError('candidate accepts Sandbox subscriptions only')
     policy=ApplePolicy(BUNDLE,a['app_id'],apple['product'],'Sandbox');policy.validate()
     for k in ('oauth_key_id','api_key_id'):text(apple[k],r'[A-Z0-9]{10}')
+    if apple['oauth_key_id'] == apple['api_key_id']:
+        raise ValueError('separate Apple signing key IDs required')
     text(apple['issuer_id'],r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}')
     if type(apple['roots']) is not list or not 1<=len(apple['roots'])<=4:
         raise ValueError('bounded pinned Apple roots required')
@@ -132,16 +141,22 @@ def preflight(raw, *, expected_config, expected_source, expected_image, secrets,
             or release['usage_namespace']!=usage['namespace'] or release['fence']!=usage['writer_fence_sha256']):
         raise ValueError('subscription/release/usage pins differ')
     secret_refs=exact(c['secrets'],'identity oauth api')
-    blobs={k:pinned_file(secrets,v,16384) for k,v in secret_refs.items()}
-    if len({v['file'] for v in secret_refs.values()})!=3 or len(blobs['identity'])!=32:
+    separate_mounts = c['schema'] == 'lite-native-startup/2'
+    blobs = {role: pinned_file(secrets, ref, 16384, mount=role if separate_mounts else None)
+             for role, ref in secret_refs.items()}
+    if len(blobs['identity']) != 32 or (not separate_mounts and len({v['file'] for v in secret_refs.values()}) != 3):
         raise ValueError('three explicit secret mounts and 32-byte identity key required')
     oauth_key=serialization.load_pem_private_key(blobs['oauth'],password=None)
     api_key=serialization.load_pem_private_key(blobs['api'],password=None)
     # Validate both key roles with the existing P-256 policy before any provider.
     secret=AppleClientSecret(team=a['team'],key_id=apple['oauth_key_id'],client_id=BUNDLE,private_key=oauth_key,clock=clock)
     AppleClientSecret(team=a['team'],key_id=apple['api_key_id'],client_id=BUNDLE,private_key=api_key,clock=clock)
-    roots=[x509.load_pem_x509_certificate(pinned_file(secrets,r,32768)).public_bytes(serialization.Encoding.DER)
-           for r in apple['roots']]
+    if oauth_key.public_key().public_numbers() == api_key.public_key().public_numbers():
+        raise ValueError('separate Apple signing keys required')
+    roots = []
+    for index, ref in enumerate(apple['roots'], start=1):
+        raw_root = pinned_file(secrets, ref, 32768, mount=f'root-{index}' if separate_mounts else None)
+        roots.append(x509.load_pem_x509_certificate(raw_root).public_bytes(serialization.Encoding.DER))
     if len({hashlib.sha256(r).digest() for r in roots})!=len(roots):raise ValueError('duplicate Apple root')
     exact(c['model'],'preprocessing_sha256');_hex(c['model']['preprocessing_sha256'])
     return c,policy,evidence,secret,blobs,roots

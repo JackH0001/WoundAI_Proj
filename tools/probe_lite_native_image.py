@@ -80,6 +80,7 @@ def run():
     pid = None
     try:
         h = fixture.Fixture(case)
+        h.isolate_secret_mounts()
         case.h, case.e, case.backend = h, h.e, h.compose()
         case.counter, case.key, case.login_serial = 0, fixture.b64(h.e.key_id), 100
         account = case.backend.identity
@@ -145,7 +146,8 @@ def run():
         case.assertEqual(rows(h.privacy.store), original_privacy)
         geometry = first.json['result']['wound_polygons']
         case.assertTrue(geometry)
-        return dict(passed=True, source=manifest['git_head'], packaged_files=package_status['files'],
+        return dict(passed=True, source=manifest['git_head'], secret_layout=h.config['schema'],
+                    packaged_files=package_status['files'],
                     machine=platform.machine(), uid=os.getuid(), server='gunicorn', model_calls=1, used=1,
                     image_sha256=case.image_hash, detected_polygons=len(geometry),
                     original_receipt_replayed=True, research_state_unchanged=True, research_route=404,

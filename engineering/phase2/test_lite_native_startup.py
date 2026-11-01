@@ -78,6 +78,17 @@ class Fixture(native.Fixture):
             secrets=dict(identity=save('identity.bin',b'n'*32),oauth=save('oauth.p8',p8()),api=save('api.p8',p8())),
             model=dict(preprocessing_sha256='a'*64))
         self.providers=Providers(self)
+    def isolate_secret_mounts(self):
+        self.config['schema'] = 'lite-native-startup/2'
+        references = list(self.config['secrets'].items()) + [
+            (f'root-{index}', ref) for index, ref in enumerate(self.config['apple']['roots'], start=1)
+        ]
+        for role, ref in references:
+            directory = self.secret_dir / role
+            directory.mkdir()
+            (self.secret_dir / ref['file']).rename(directory / 'value')
+            ref['file'] = 'value'
+
     def arguments(self,c=None):
         c=self.config if c is None else c;raw=encoded(c)
         return dict(raw=raw,expected_config=sha(raw),expected_source=self.release.n.r.source,
@@ -106,7 +117,7 @@ class StartupPreflightTests(unittest.TestCase):
         self.rejected(lambda c:c.update(unknown=True))
     def test_enablement_and_schema_are_explicit(self):
         for v in (False,1,'true'):self.rejected(lambda c:c.update(enabled=v))
-        self.rejected(lambda c:c.update(schema='lite-native-startup/2'))
+        self.rejected(lambda c:c.update(schema='lite-native-startup/3'))
     def test_config_source_image_pins_are_independent(self):
         for k,v in [('expected_config','0'*64),('expected_source','0'*40),('expected_image','0'*64)]:
             with self.subTest(k=k),self.assertRaises(ValueError):
@@ -168,6 +179,48 @@ class StartupPreflightTests(unittest.TestCase):
         self.rejected(lambda c:c['secrets'].update(api=c['secrets']['oauth']))
         h=self.h;path=h.secret_dir/'identity.bin';path.write_bytes(b'short')
         self.rejected(lambda c:c['secrets']['identity'].update(sha256=sha(b'short')))
+    def test_separate_secret_volumes_start_and_restart_with_identical_leaf_names(self):
+        self.h.isolate_secret_mounts()
+        self.h.compose()
+        first = self.h.all_rows()
+        self.h.compose()
+        self.assertEqual(first, self.h.all_rows())
+
+    def test_separate_mounts_never_fall_back_to_flat_secrets(self):
+        h = self.h
+        h.isolate_secret_mounts()
+        (h.secret_dir / 'identity' / 'value').rename(h.secret_dir / 'value')
+        self.rejected(lambda c: None)
+
+    def test_separate_mount_directory_may_not_redirect_to_another_directory(self):
+        h = self.h
+        h.isolate_secret_mounts()
+        path = h.secret_dir / 'oauth'
+        path.rename(h.secret_dir / 'elsewhere')
+        path.symlink_to(h.secret_dir / 'elsewhere', target_is_directory=True)
+        self.rejected(lambda c: None)
+
+    def test_separate_mounts_validate_leaf_names_hashes_and_size_before_providers(self):
+        self.h.isolate_secret_mounts()
+        for name in ('../api/value', 'extra/path', '/tmp/value'):
+            with self.subTest(name=name):
+                self.rejected(lambda c: c['secrets']['oauth'].update(file=name))
+        self.rejected(lambda c: c['apple']['roots'][0].update(sha256='0'*64))
+        (self.h.secret_dir / 'api' / 'value').write_bytes(b'x' * 16385)
+        self.rejected(lambda c: None)
+
+    def test_apple_signing_roles_require_independent_key_ids(self):
+        self.rejected(lambda c: c['apple'].update(api_key_id=c['apple']['oauth_key_id']))
+
+    def test_apple_signing_roles_reject_same_key_under_two_names(self):
+        h = self.h
+        # A different PEM serialization still represents the same private key.
+        oauth_key = serialization.load_pem_private_key((h.secret_dir/'oauth.p8').read_bytes(), password=None)
+        alias = oauth_key.private_bytes(serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption())
+        (h.secret_dir / 'api.p8').write_bytes(alias)
+        self.rejected(lambda c: c['secrets']['api'].update(sha256=sha(alias)))
+
     def test_secret_symlink_rejected(self):
         h=self.h;raw=(h.secret_dir/'identity.bin').read_bytes()
         (h.secret_dir/'other.bin').write_bytes(raw);(h.secret_dir/'link.bin').symlink_to('other.bin')

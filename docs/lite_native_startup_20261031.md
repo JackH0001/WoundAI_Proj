@@ -25,7 +25,8 @@ account JSON key or automatic lookup of another service is supported:
 - `LITE_NATIVE_SECRET_DIR`: explicitly mounted directory; references are single
   filenames, bounded regular files, not symlinks, checked against their digests.
 
-Configuration is schema `lite-native-startup/1`, with `enabled: true` and exact
+Configuration uses `lite-native-startup/2` for separate mounted secrets, or the existing
+`lite-native-startup/1` flat layout, with `enabled: true` and exact
 field sets (unknown fields rejected):
 
 | Section | Required contents |
@@ -40,6 +41,23 @@ field sets (unknown fields rejected):
 | `controls` | Independent operator/observer **public** keys, durable release manifest, usage plan and baseline records; all hashes/identities must agree. No private operator keys in the web service. |
 | `secrets` | Three distinct mounted references: 32-byte identity HMAC, P-256 Sign in with Apple key, P-256 App Store Server API key. |
 | `model` | Preprocessing digest; three ONNX artifacts additionally checked against source-controlled artifact hashes. |
+
+### Individual secret volumes for the candidate
+
+Cloud Run mounts one Secret Manager secret at each directory. Items in a single volume select versions of that one secret. Use this layout with the v2 schema. The mount paths below are examples for a candidate revision. Use an individually approved, numeric version of each named secret.
+
+| Config reference | Example mount directory | File inside the volume |
+|---|---|---|
+| `LITE_NATIVE_CONFIG` | `/etc/lite/config` | `settings.json`, with the reviewed configuration digest |
+| `secrets.identity` | `/etc/lite/inputs/identity` | `value`, the 32-byte account identity key |
+| `secrets.oauth` | `/etc/lite/inputs/oauth` | `value`, the Sign in with Apple signing key |
+| `secrets.api` | `/etc/lite/inputs/api` | `value`, the App Store Server API signing key |
+| `apple.roots[0]` | `/etc/lite/inputs/root-1` | `value`, the first reviewed public certificate |
+| Additional root entries | `/etc/lite/inputs/root-2` through `root-4` as listed | `value` in each directory |
+
+Set `LITE_NATIVE_SECRET_DIR` to the common parent `/etc/lite/inputs`. Each reference contains its own leaf filename and SHA-256. Directory names are derived from the role and the certificate order. Access for the runtime identity must be limited to its required secrets. Keep the key preparation worker and the disposition worker on their own reviewed mounts and identities. An existing v1 configuration continues to read its flat files. Both layouts require separate Apple key IDs and key pairs. A missing or contradictory mount stops startup before cloud providers are connected. Restore a previous configuration together with its exact mount layout, image and version pins.
+
+An isolated Linux run exercises the factory and signed requests with generated inputs. The actual provider mount permissions, runtime identity and live Apple credentials still require a candidate readback. [Cloud Run secret volumes](https://cloud.google.com/run/docs/configuring/services/secrets#limitations) · [SecretVolumeSource](https://cloud.google.com/run/docs/reference/rest/v2/Volume#secretvolumesource)
 
 The config hash is a deployment integrity pin, **not** an authorization token or
 proof of appropriate IAM. Review the root certificates independently before a
