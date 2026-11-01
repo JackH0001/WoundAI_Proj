@@ -138,6 +138,130 @@ class RecordsTests(TestCase):
             research_associations(spec, native_audit=self.native_store, research_state=self.native_store)
 
 
+class MultipleDeviceTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        native_tests.legacy.LinksTests.setUpClass()
+
+    @classmethod
+    def tearDownClass(cls):
+        native_tests.legacy.LinksTests.tearDownClass()
+
+    def setUp(self):
+        self.x = issuer_tests.IssuanceTests()
+        self.x.setUp()
+        self.addCleanup(self.x.doCleanups)
+        self.others = [f"{i:032x}" for i in range(10, 15)]
+        for device in self.others:
+            self.x.f.f.login(device)
+        self.x.begin()
+        self.resolver = Reconsent(self.x.privacy)
+        self.links = StoredResearchAssociations(*self.x.pub, native_audit=self.x.f.d.audit,
+                                               research_state=self.x.privacy.manifest.store)
+
+    def worker(self):
+        return AccountResearchClosure(deletion=self.x.f.d, research=self.resolver,
+            store=self.x.f.store("multi-closure"), audit_store=self.x.f.store("multi-audit"), associations=self.links)
+
+    def confirm(self):
+        reply = self.x.research.post(ACCEPT, ticket=self.x.ticket())
+        self.assertEqual(reply.status_code, 200, reply.json)
+
+    def test_other_unconfirmed_devices_do_not_keep_verified_requester_writable(self):
+        self.confirm()
+        for _ in range(2*(len(self.others)+1)):
+            w = self.worker()
+            with patch.object(w, "_node", wraps=w._node) as attempts:
+                result = w.advance(self.x.f.person, limit=1)
+            self.assertLessEqual(attempts.call_count, 1)
+            self.assertEqual(result["research_admission"], "pending")
+            if self.resolver.retirement(self.x.research.owner):
+                break
+        else:
+            self.fail("a verified withdrawal remained writable")
+        self.assertEqual(result["examined_grants"], 0)
+        self.assertTrue(self.resolver.privacy.is_withdrawn(self.x.research.owner))
+        self.assertTrue(all(self.resolver.retirement(owner) is None for owner in self.others))
+
+    def test_repeated_scans_detect_proof_arriving_after_previous_full_pass(self):
+        for _ in range(5):
+            self.worker().advance(self.x.f.person, limit=4)
+        self.assertIsNone(self.resolver.retirement(self.x.research.owner))
+        self.confirm()
+        for _ in range(5):
+            self.worker().advance(self.x.f.person, limit=4)
+        self.assertIsNotNone(self.resolver.retirement(self.x.research.owner))
+        self.assertFalse(self.worker().status(self.x.f.person)["scan_finished"])
+
+    def test_late_evidence_for_all_devices_counts_each_grant_exactly_once(self):
+        self.confirm()
+        for _ in range(3):
+            self.worker().advance(self.x.f.person, limit=4)
+        # Other devices' independent issuer signatures are generated only for
+        # this private-worker fixture; the phone test covers the actual requester.
+        for i, device in enumerate(self.others):
+            target = f"{i+100:032x}"
+            pair = dict(action="withdraw-linked-research/1", scope=self.x.f.d.scope, bucket=self.x.bucket.name,
+                        person=self.x.f.person, native=device, research=target, operation=self.x.operation,
+                        registration=self.x.f.d.bridge.registry.registration(device)["proof"])
+            proof = dict(pair=pair)
+            for role, seed in zip(("native","research"),self.x.seeds):
+                proof[role] = base64.b64encode(seed.sign(self.links.message(role,pair))).decode()
+            native_key = object_key("native", [pair[k] for k in ("scope","person","native","operation")])
+            research_key = object_key("research", [pair[k] for k in ("scope","bucket","research")])
+            self.assertTrue(self.x.f.d.audit.compare_exchange(native_key,0,{k:proof[k] for k in ("pair","native")}))
+            self.assertTrue(self.x.privacy.manifest.store.compare_exchange(research_key,0,proof))
+        for _ in range(12):
+            result = self.worker().advance(self.x.f.person, limit=1)
+            if result["scan_finished"]:
+                break
+        self.assertEqual(result["linked_grants"], len(self.others)+1, result)
+        self.assertEqual(result["research_admission"], "linked_installations_closed")
+        self.assertEqual(self.worker().advance(self.x.f.person), result)
+
+    def test_repeated_unresolved_cycles_do_not_append_unbounded_audit_records(self):
+        from test_lite_subscription_grace import rows
+        def passes():
+            for _ in range(8):
+                self.worker().advance(self.x.f.person, limit=5)
+        passes()
+        first = rows(self.worker().audit)
+        passes()
+        self.assertEqual(rows(self.worker().audit), first)
+        self.assertTrue(all(self.resolver.retirement(owner) is None for owner in self.others))
+
+    def test_corrupt_survey_state_stops_without_touching_unproven_account(self):
+        from lite_subscription_executor import key
+        from lite_usage_ledger import digest
+        w = self.worker()
+        w.advance(self.x.f.person, limit=2)
+        plan = w._plan(self.x.f.person)
+        identity = key("account-research-survey", digest(plan))
+        revision, state = w.store.load(identity)
+        self.assertTrue(w.store.compare_exchange(identity, revision, dict(state, cursor="0"*64)))
+        with self.assertRaises(StateUnavailable):
+            w.advance(self.x.f.person, limit=1)
+        self.assertIsNone(self.resolver.retirement(self.x.research.owner))
+
+    def test_replay_after_survey_checkpoint_ack_loss_does_not_skip_work(self):
+        from lite_subscription_executor import key
+        from lite_usage_ledger import digest
+        w = self.worker()
+        identity = key("account-research-survey", digest(w._plan(self.x.f.person)))
+        write = w.store.compare_exchange
+        def lose_response(item, revision, value):
+            done = write(item, revision, value)
+            if item == identity:
+                raise StateUnavailable("synthetic lost acknowledgement")
+            return done
+        self.confirm()
+        with patch.object(w.store, "compare_exchange", side_effect=lose_response):
+            for _ in range(6):
+                result = w.advance(self.x.f.person, limit=3)
+        self.assertIsNotNone(self.resolver.retirement(self.x.research.owner))
+        self.assertFalse(result["account_deleted"])
+
+
 class WorkerConfigTests(TestCase):
     @classmethod
     def setUpClass(cls):
