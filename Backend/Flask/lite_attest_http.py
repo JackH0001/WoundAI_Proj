@@ -116,7 +116,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
             link_path=ACCEPT
             app.register_blueprint(issuer_blueprint(link_signer,privacy=privacy))
     app.extensions['lite_attest_http'] = dict(service=service, budget=budget, privacy=privacy, commerce=commerce)
-    if commerce is not None:app.register_blueprint(commerce_blueprint(commerce))
+    if commerce is not None:app.register_blueprint(commerce_blueprint(commerce, balance_enabled=identity is not None))
     if purchases is not None:app.register_blueprint(purchase_blueprint(purchases))
     if identity is not None:app.register_blueprint(identity_blueprint(identity))
     if deletion is not None:app.register_blueprint(deletion_blueprint(deletion))
@@ -149,7 +149,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
                 raise AdmissionRejected('noncanonical request target or encoding')
             control = request.path in (CHALLENGE_PATH, REGISTER_PATH)
             service_only = (request.path in service_paths and configuration['commerce'] is not None
-                            and request.endpoint in {'lite_service_http.prepare','lite_service_http.run','lite_service_http.status','lite_service_http.recover','lite_service_http.resubmit'})
+                            and request.endpoint in {'lite_service_http.prepare','lite_service_http.run','lite_service_http.status','lite_service_http.recover','lite_service_http.resubmit','lite_service_http.balance'})
             purchase_only=(request.path in purchase_paths and request.endpoint in {'lite_native_purchase.context','lite_native_purchase.confirm'})
             account_only=(request.path in account_paths and request.endpoint in {'lite_account_identity.challenge','lite_account_identity.confirm','lite_account_identity.status','lite_account_identity.logout','lite_account_identity.renew'})
             deletion_only=(request.path in deletion_paths and request.endpoint in {'lite_account_deletion.request','lite_account_deletion.status','lite_account_deletion.reauth_challenge','lite_account_deletion.reauth_confirm'})

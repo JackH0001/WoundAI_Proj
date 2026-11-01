@@ -6,10 +6,10 @@ from lite_usage_ledger import UsageConflict,UsageLimit
 from lite_attest_state import StateUnavailable
 
 PREFIX='/api/v1/lite/service/'
-SERVICE_PATHS={PREFIX+'prepare',PREFIX+'status',PREFIX+'run',PREFIX+'recover',PREFIX+'resubmit'}
+SERVICE_PATHS={PREFIX+'prepare',PREFIX+'status',PREFIX+'run',PREFIX+'recover',PREFIX+'resubmit',PREFIX+'balance'}
 
 
-def blueprint(operations):
+def blueprint(operations, *, balance_enabled=False):
     if not isinstance(operations,ServiceOperations):raise ValueError('trusted operations required')
     bp=Blueprint('lite_service_http',__name__)
 
@@ -17,6 +17,13 @@ def blueprint(operations):
         try:
             admission=getattr(g,'lite_admission',None)
             if admission is None:return jsonify(error='lite_attestation_required'),401
+            if kind == 'balance':
+                if request.mimetype != 'application/json':
+                    raise UsageConflict('JSON balance request required')
+                body = loads_json_object_strict(request.get_data(cache=True).decode())
+                if set(body) != {'anon_id','account_sha256'} or body['anon_id'] != admission.installation:
+                    raise UsageConflict('exact balance request required')
+                return jsonify(operations.current_balance(admission.installation, body['account_sha256']))
             if kind=='run':
                 if (request.mimetype!='multipart/form-data' or set(request.form)!={'anon_id','operation'}
                         or set(request.files)!={'image'} or any(len(request.form.getlist(k))!=1 for k in request.form)
@@ -54,7 +61,8 @@ def blueprint(operations):
             response=jsonify(error='lite_operation_unconfirmed',retry_action='status',keep_local=True)
             response.headers['Retry-After']='5';return response,503
 
-    for kind in ('prepare','run','status','recover','resubmit'):
+    kinds = ('prepare','run','status','recover','resubmit') + (('balance',) if balance_enabled else ())
+    for kind in kinds:
         bp.add_url_rule(PREFIX+kind,kind,lambda kind=kind:action(kind),methods=['POST'])
     @bp.after_request
     def no_cache(response):

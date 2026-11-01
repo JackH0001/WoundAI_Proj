@@ -64,6 +64,31 @@ final class NativeEntryUITests: XCTestCase {
         #endif
     }
 
+    @MainActor func testPersonalQuotaHasItsOwnEntryWithoutResearchOrDeviceRegistration() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launch()
+        let gate=app.buttons["設定與資料撤回"]
+        let settings=gate.waitForExistence(timeout:3) ? gate : app.buttons["設定"].firstMatch
+        XCTAssertTrue(settings.waitForExistence(timeout:8))
+        settings.tap()
+        let link=app.buttons["查看個人帳號今日額度"]
+        #if LITE_QA_ORDINARY || LITE_QA_MISSING_BINDING
+        XCTAssertFalse(link.exists)
+        #else
+        for _ in 0..<5 where !link.isHittable { app.swipeUp() }
+        XCTAssertTrue(link.isHittable)
+        link.tap()
+        let query=app.buttons["personalQuotaCheck"]
+        XCTAssertTrue(query.waitForExistence(timeout:8))
+        XCTAssertTrue(app.staticTexts["登入個人帳號後，可核對今天還能辨識幾次。"].exists)
+        query.tap()
+        XCTAssertTrue(app.staticTexts["今日額度尚未確認。請先核對個人服務登入，或稍後再試。"].waitForExistence(timeout:8))
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format:"label CONTAINS %@", "研究辨識剩餘")).firstMatch.exists)
+        attach(app,"personal-quota-without-service-registration")
+        #endif
+    }
+
     @MainActor private func attach(_ app: XCUIApplication, _ name: String) {
         let item = XCTAttachment(screenshot: app.screenshot())
         item.name = name

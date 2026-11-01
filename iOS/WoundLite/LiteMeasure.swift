@@ -287,7 +287,7 @@ final class LiteMeasureVM: ObservableObject {
                                             depthConfPngBase64: payload.conf,
                                             cameraIntrinsics: payload.k, rawCapture: payload.raw,
                                             researchEpoch: researchEpoch)
-            LiteUsageState.shared.record(r.quota, server: server, anonId: anonId)
+            LiteUsageState.shared.record(r.quota, server: server, anonId: anonId, epoch: researchEpoch)
             if let m = r.userMessage { return .softFail(m) }
             guard acceptsCloudGeometry(r) else {
                 return .softFail("辨識回傳的影像尺寸或輪廓與原照片不符，未套用結果。請在原照片手動圈選；這不代表先前送出的影像已撤回。")
@@ -403,7 +403,7 @@ struct LiteMeasureView: View {
                         .font(.footnote).foregroundStyle(.secondary)
 
                     if LitePrefs.researchConsent == true {
-                        LiteQuotaView()
+                        LiteResearchQuotaView()
                     }
                     if vm.busy {
                         HStack(spacing: 8) { ProgressView(); Text(vm.busyHint).font(.footnote) }

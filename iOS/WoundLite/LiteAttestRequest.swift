@@ -25,7 +25,7 @@ enum LiteAttestRequest {
               keyID.count == 32, challenge.count == 32, body.count <= maxBodyBytes
         else { throw Failure.invalidBinding }
         let postPaths = ["/api/v1/lite/segment", "/api/v1/lite/annotation", "/api/v1/lite/annotation/revision", "/api/v1/lite/research/rejoin",
-                         "/api/v1/lite/service/prepare", "/api/v1/lite/service/run", "/api/v1/lite/service/status", "/api/v1/lite/service/recover", "/api/v1/lite/service/resubmit",
+                         "/api/v1/lite/service/prepare", "/api/v1/lite/service/run", "/api/v1/lite/service/status", "/api/v1/lite/service/recover", "/api/v1/lite/service/resubmit","/api/v1/lite/service/balance",
                          "/api/v1/lite/purchase/context", "/api/v1/lite/purchase/confirm",
                          "/api/v1/lite/account/challenge", "/api/v1/lite/account/confirm", "/api/v1/lite/account/status", "/api/v1/lite/account/logout", "/api/v1/lite/account/renew",
                          "/api/v1/lite/account/deletion/request", "/api/v1/lite/account/deletion/status", "/api/v1/lite/account/deletion/reauth/challenge", "/api/v1/lite/account/deletion/reauth/confirm", LiteResearchLinkPath.offer, LiteResearchLinkPath.accept]

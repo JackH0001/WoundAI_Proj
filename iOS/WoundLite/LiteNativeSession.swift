@@ -71,6 +71,7 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     let purchases: LiteNativePurchaseStore
     let service: LiteServiceClient
     let deletionService: LiteAccountDeletionHTTPService
+    private let balanceTransport: any LiteAuthenticatedTransport
     private var researchLink: LiteResearchDeletionLink?
     private let access: LiteSandboxAccess
     private let register: @Sendable () async throws -> String
@@ -119,6 +120,7 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
         service = try LiteServiceClient(origin: origin,
             transport: scoped("service", ["prepare", "run", "status", "recover", "resubmit"], ordinary: true),
             journal: storage("recognition"), now: now)
+        balanceTransport = scoped("service", ["balance"], ordinary: true)
         deletionService = try LiteAccountDeletionHTTPService(origin: origin,
             transport: scoped("account/deletion", ["request", "status", "reauth/challenge", "reauth/confirm"], ordinary: false))
     }
@@ -178,6 +180,16 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
             registration = .unreadable
             message = "裝置登記尚未確認。請先重讀原裝置登記，再決定是否續接。"
         }
+    }
+
+    func personalBalance() async throws -> LitePersonalBalance {
+        let generation = identity.generation
+        let context = try await identity.activeServiceContext()
+        let value = try await LitePersonalBalance.fetch(context: context, transport: balanceTransport, now: identity.now)
+        guard try await identity.activeServiceContext() == context, identity.generation == generation else {
+            throw LiteAccountFailure.conflict
+        }
+        return value
     }
 
     func accountView() throws -> LiteAccountManagementView {

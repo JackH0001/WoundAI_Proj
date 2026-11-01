@@ -218,7 +218,8 @@ struct LiteAccountCheckpoint:Codable,Equatable {
     @Published private(set) var message="服務帳號登入與研究同意分開處理。"
     @Published private(set) var busy=false
     let service:any LiteAccountIdentityService,provider:any LiteAppleIdentityProvider,journal:any LiteServiceJournal
-    private var blocked=false, generation=0
+    private var blocked=false
+    @Published private(set) var generation=0
     let now:()->Date
     init(service:any LiteAccountIdentityService,provider:any LiteAppleIdentityProvider,journal:any LiteServiceJournal,now:@escaping ()->Date=Date.init){
         self.service=service;self.provider=provider;self.journal=journal;self.now=now
@@ -227,10 +228,14 @@ struct LiteAccountCheckpoint:Codable,Equatable {
     private func hasDeletionIntent(_ owner:String)async throws->Bool {
         try await journal.load(LiteAccountDeletionCheckpoint.key(origin:service.origin.absoluteString,owner:owner)) != nil
     }
-    func deletionContext()async throws->LiteDeletionContext {
+    func deletionContext() async throws -> LiteDeletionContext {
+        try await activeServiceContext()
+    }
+    func activeServiceContext() async throws -> LiteDeletionContext {
+        let start = generation
         guard await canUseService() else{throw LiteAccountFailure.unavailable}
         let owner=try await service.installation();let(_,r)=try await read(owner)
-        guard let r,r.phase=="active",let account=r.session?.account_sha256 else{throw LiteAccountFailure.invalid}
+        guard generation == start, let r,r.phase=="active",let account=r.session?.account_sha256 else{throw LiteAccountFailure.invalid}
         return LiteDeletionContext(origin:service.origin.absoluteString,installation:owner,account:account)
     }
     func suspendForDeletion(_ context:LiteDeletionContext,operation:String)async throws {

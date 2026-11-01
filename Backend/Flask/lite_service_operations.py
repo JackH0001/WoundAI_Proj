@@ -278,6 +278,17 @@ class ServiceOperations:
                 raise StateUnavailable('existing service operation lacks verified catalog membership')
         return row
 
+    def current_balance(self, installation, expected_account):
+        _hex(expected_account)
+        account = self.accounts.resolve(installation)
+        subject = account['subject']
+        if digest(subject) != expected_account:
+            raise UsageConflict('service account differs')
+        grant = self.accounts.grant(account, self.now())
+        balance = self.ledger.current_balance(subject, grant)
+        self.accounts.require_active(account)
+        return balance
+
     def prepare(self,installation,operation,image_sha256):
         _hex(image_sha256);account=self.accounts.resolve(installation);subject=account['subject']
         grant=None

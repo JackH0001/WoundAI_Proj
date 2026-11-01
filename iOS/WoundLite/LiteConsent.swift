@@ -195,10 +195,15 @@ struct LiteSettingsView: View {
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
-                Section("個人雲端辨識") {
-                    LiteQuotaView()
-                    Text("免費額度用完仍可手動圈選、量測與保存本機紀錄。機構及多人個案管理請洽 WoundAI。")
-                        .font(.footnote).foregroundStyle(.secondary)
+                if consent && !withdrawal.blocksUploads && !LitePrefs.researchPausedForAccountDeletion {
+                    Section("研究辨識額度") { LiteResearchQuotaView() }
+                }
+                if let nativeSession {
+                    Section("個人雲端辨識") {
+                        NavigationLink("查看個人帳號今日額度") { LitePersonalBalanceView(session: nativeSession) }
+                        Text("免費每日最多 2 次；Plus 每日總計最多 10 次。可從紀錄選取照片進行個人辨識，本機手動圈選與保存不扣次數。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
                 Section("雲端連線核對") {
                     #if DEBUG
