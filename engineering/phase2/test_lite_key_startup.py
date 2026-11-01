@@ -131,7 +131,8 @@ class StartupTests(unittest.TestCase):
     def test_actual_service_identity_checked_before_state_writes(self):
         self.f.providers.wrong_identity=True
         with self.assertRaises(ValueError):self.f.build()
-        self.assertEqual(rows(self.f.stores['audit']),[]);self.assertNotIn('keyring-get',self.f.providers.calls)
+        self.assertEqual(rows(self.f.stores['audit']),[])
+        self.assertEqual(self.f.providers.calls,['identity'])
     def test_missing_keyring_never_created(self):
         self.f.providers.ring_missing=True
         with self.assertRaises(StateUnavailable):self.f.build()

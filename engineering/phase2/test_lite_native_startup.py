@@ -241,7 +241,7 @@ class StartupPreflightTests(unittest.TestCase):
     def test_identity_check_failure_is_read_only(self):
         with patch.object(self.h.providers,'identity_checked',side_effect=ValueError('identity')):
             self.rejected(lambda c:None,provider_calls=True)
-        self.assertNotIn('state',self.h.providers.calls)
+        self.assertEqual(self.h.providers.calls,['model'])  # No cloud client or bucket read.
     def test_missing_policy_never_activates_or_writes_markers(self):
         h=self.h;empty=SQLiteStateStore(h.secret_dir.parent/'empty-subscription.sqlite')
         h.all_stores['subscription']=empty
@@ -283,8 +283,12 @@ class StartupPreflightTests(unittest.TestCase):
         with (patch('google.auth.default',side_effect=AssertionError('no ADC scan')),
               patch('google.auth.compute_engine.Credentials',return_value=credentials) as create,
               patch('google.cloud.storage.Client') as client,
-              patch('google.auth.transport.requests.AuthorizedSession')):
-            p=startup.CloudProviders();p.connect(self.h.config);p.identity_checked(self.h.config)
+              patch('google.auth.transport.requests.AuthorizedSession'),
+              patch.object(startup,'verify_attached_identity') as check):
+            p=startup.CloudProviders()
+            p.identity_checked(self.h.config)
+            p.connect(self.h.config)
+        check.assert_called_once_with(self.h.config['deployment'])
         create.assert_called_once_with(service_account_email=credentials.service_account_email)
         client.assert_called_once_with(project='synthetic-only',credentials=credentials)
 

@@ -12,6 +12,7 @@ from audit_chain_contract import loads_json_object_strict
 from lite_account_lifecycle import AccountLifecycle
 from lite_attest_state import GCSStateStore, StateUnavailable
 from lite_bucket_policy import validate_bucket_policy
+from lite_run_identity import verify_attached_identity
 from lite_key_provisioning import AccountKeyProvisioner, CreateOnlyKeyProvider
 from lite_store_locations import LimitedStateStore, location, overlaps
 from lite_subscription_executor import key
@@ -114,8 +115,7 @@ class CloudProviders:
         self.kms = CreateOnlyKMSSession(AuthorizedSession(self.credentials), d['keyring'])
 
     def identity_checked(self, c):
-        if self.credentials.service_account_email != c['deployment']['service_account']:
-            raise ValueError('key worker runtime identity differs')
+        verify_attached_identity(c['deployment'])
 
     def bucket(self, name): return self.client.bucket(name)
     def state(self, bucket, prefix): return GCSStateStore(bucket, prefix=prefix)
@@ -126,6 +126,7 @@ def build_key_worker(raw, *, expected_config, expected_source, expected_image,
     c = preflight(raw, expected_config=expected_config, expected_source=expected_source, expected_image=expected_image)
     if not callable(clock) or type(clock()) is not int or clock() < 0: raise ValueError('trusted clock required')
     p = CloudProviders() if providers is None else providers
+    p.identity_checked(c)
     p.connect(c)
     buckets = {}
     for name, meta in c['buckets'].items():
@@ -134,7 +135,6 @@ def build_key_worker(raw, *, expected_config, expected_source, expected_image,
                                         role='security', location='ASIA-EAST1')
         if checked['metageneration'] != meta['metageneration']: raise ValueError('worker bucket policy changed')
         buckets[name] = b
-    p.identity_checked(c)
     provider = CreateOnlyKeyProvider(session=p.kms, keyring=c['deployment']['keyring'])
     status, ring = provider.call('GET', provider.keyring)
     if status != 200 or ring.get('name') != provider.keyring:

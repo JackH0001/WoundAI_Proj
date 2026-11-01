@@ -20,6 +20,7 @@ from lite_attest_enrollment import RegistrationService
 from lite_attest_state import GCSStateStore, StateUnavailable
 from lite_attest_budget import RequestBudget
 from lite_bucket_policy import validate_bucket_policy
+from lite_run_identity import verify_attached_identity
 from lite_privacy_state import PrivacyState
 from lite_apple_identity_provider import RefreshingAppleIdentityVerifier
 from lite_apple_oauth import AppleClientSecret, AppleOAuthProvider
@@ -190,8 +191,7 @@ class CloudProviders:
         self.kms=RuntimeKMSSession(AuthorizedSession(self.credentials))
     def bucket(self,name):return self.client.bucket(name)
     def identity_checked(self,c):
-        if self.credentials.service_account_email!=c['deployment']['service_account']:
-            raise ValueError('runtime service identity differs')
+        verify_attached_identity(c['deployment'])
     def state(self,bucket,prefix):return GCSStateStore(bucket,prefix=prefix)
     def apple(self,policy,roots,raw_key,c):
         from appstoreserverlibrary.api_client import AppStoreServerAPIClient
@@ -223,6 +223,7 @@ def build_native_runtime(raw, *, expected_config, expected_source, expected_imag
         expected_source=expected_source,expected_image=expected_image,secrets=secrets,clock=clock)
     p=CloudProviders() if providers is None else providers
     model=p.model(package,c['model']['preprocessing_sha256'])
+    p.identity_checked(c)
     p.connect(c)
     buckets={}
     for name,meta in c['buckets'].items():
@@ -230,7 +231,6 @@ def build_native_runtime(raw, *, expected_config, expected_source, expected_imag
         checked=validate_bucket_policy(b._properties,name=name,project_number=c['deployment']['project_number'],role='security',location='ASIA-EAST1')
         if checked['metageneration']!=meta['metageneration']:raise ValueError('bucket policy changed since review')
         buckets[name]=b
-    p.identity_checked(c)
     stores={k:p.state(buckets[v['bucket']],v['prefix']) for k,v in c['stores'].items()}
     verifier,client=p.apple(policy,roots,blobs['api'],c)
     authority=AppleSubscriptionAuthority(policy=policy,verifier=verifier,client=client,proof_store=stores['apple_proofs'],clock=clock)

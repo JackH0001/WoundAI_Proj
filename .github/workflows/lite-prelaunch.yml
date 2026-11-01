@@ -142,7 +142,7 @@ jobs:
           python -m unittest -v test_lite_key_startup test_lite_key_package > evidence/key-worker-startup-tests.log 2>&1
           python tools/lite_key_startup_probe.py --output evidence/key-worker-startup-probe.json
       - name: Pinned native startup and independent package (synthetic only)
-        run: python -m unittest -v test_lite_native_startup test_lite_native_package > evidence/native-startup-package-tests.log 2>&1
+        run: python -m unittest -v test_lite_native_startup test_lite_native_package test_lite_run_identity > evidence/native-startup-package-tests.log 2>&1
       - name: Composed native Sandbox backend through signed HTTP (synthetic only)
         run: |
           python -m unittest -v test_lite_native_backend > evidence/native-backend-tests.log 2>&1
