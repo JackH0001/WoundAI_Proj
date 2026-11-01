@@ -19,6 +19,7 @@ from lite_disposition_progress_probe import ProgressFixture
 from test_lite_subscription_grace import rows
 import test_lite_fenced_objects as objects
 import test_lite_native_purchase as native
+from research_pair_fixture import pairs
 
 
 class PageBucket(objects.Bucket):
@@ -39,7 +40,7 @@ class MediaFixture:
         self.f=ProgressFixture(host);self.owner='a'*32;self.f.f.login(self.owner)
         self.bucket=PageBucket();self.r=Reconsent(FencedPrivacy(self.f.store('research-media-source'),self.bucket))
         self.closure=AccountResearchClosure(deletion=self.f.d,research=self.r,
-            store=self.f.store('research-closure'),audit_store=self.f.store('research-closure-audit'))
+            store=self.f.store('research-closure'),audit_store=self.f.store('research-closure-audit'),associations=pairs(self.f,self.r,[(self.owner,self.owner)]))
         self.jobs,self.audit=self.f.store('media-jobs'),self.f.store('media-audit');self.w=self.worker()
     def worker(self):return ResearchMediaDisposition(closure=self.closure,store=self.jobs,audit_store=self.audit)
     def seed(self,count=7,ep='legacy',owner=None):
@@ -111,6 +112,7 @@ class MediaTests(unittest.TestCase):
         self.h.seed(65)
         owners=[f'{n+100:032x}' for n in range(12)]
         for owner in owners:self.h.f.f.login(owner);self.h.seed(1,owner=owner)
+        self.h.closure.associations=pairs(self.h.f,self.h.r,[(x,x) for x in [self.h.owner,*owners]])
         self.h.f.close();initial=copy.deepcopy(self.h.bucket.live)
         for _ in range(3):
             self.h.advance(limit=2)

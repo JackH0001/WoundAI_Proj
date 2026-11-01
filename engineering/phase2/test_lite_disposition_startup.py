@@ -91,6 +91,8 @@ class Fixture:
         # Existing test ring uses its own project, kept exact instead of renamed.
         project=p.cipher.provider.keyring.split('/')[1]
         self.c['deployment'].update(project=project,service_account='disposition@'+project+'.iam.gserviceaccount.com')
+        from research_pair_fixture import pair_config
+        self.c['research_associations']=pair_config(m.f,m.r,[(m.owner,m.owner)])
         self.providers=Providers(self)
     def build(self,**changes):
         kw=dict(expected_config=hashlib.sha256(raw(self.c)).hexdigest(),expected_source='a'*40,expected_image='b'*64,

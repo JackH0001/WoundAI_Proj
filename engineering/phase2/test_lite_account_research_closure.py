@@ -15,6 +15,7 @@ from lite_disposition_progress_probe import ProgressFixture
 from test_lite_subscription_grace import rows
 import test_lite_fenced_objects as objects
 import test_lite_native_purchase as native
+from research_pair_fixture import pairs
 import test_lite_reconsent as signed_fixture
 
 
@@ -25,8 +26,9 @@ class ClosureTests(unittest.TestCase):
         self.f=ProgressFixture(self);self.owner='a'*32;self.f.f.login(self.owner)
         self.bucket=objects.Bucket();self.r=Reconsent(FencedPrivacy(self.f.store('research'),self.bucket))
         self.jobs=self.f.store('research-closure');self.audit=self.f.store('research-closure-audit')
+        self.pair_owners=[self.owner]
         self.w=self.worker()
-    def worker(self):return AccountResearchClosure(deletion=self.f.d,research=self.r,store=self.jobs,audit_store=self.audit)
+    def worker(self):return AccountResearchClosure(deletion=self.f.d,research=self.r,store=self.jobs,audit_store=self.audit,associations=pairs(self.f,self.r,[(x,x) for x in self.pair_owners]))
     def advance(self,**kw):return self.w.advance(self.f.person,**kw)
     def rejoin(self,new='b'*32,previous='legacy'):
         return self.r.resume(self.owner,dict(anon_id=self.owner,research_consent=True,
@@ -136,7 +138,9 @@ class ClosureTests(unittest.TestCase):
         self.assertTrue(self.r.privacy.manifest._load(self.owner)[1]['writers'])
         self.assertFalse(self.w.status(self.f.person)['account_deleted'])
     def test_more_than_one_batch_survives_restart(self):
-        for n in range(11):self.f.f.login(f'{n+100:032x}')
+        for n in range(11):
+            native=f'{n+100:032x}';self.f.f.login(native);self.pair_owners.append(native)
+        self.w=self.worker()
         self.f.close();counts=[]
         while True:
             r=self.advance(limit=3);counts.append(r['examined_grants']);self.w=self.worker()
@@ -180,7 +184,7 @@ class ClosureTests(unittest.TestCase):
     def test_account_inventory_binds_retirement_proof_and_detects_later_drift(self):
         from lite_account_data_inventory import AccountDataInventory
         self.f.close();self.advance()
-        i=AccountDataInventory(deletion=self.f.d,research=self.r,audit_store=self.f.store('inventory-audit'))
+        i=AccountDataInventory(deletion=self.f.d,research=self.r,audit_store=self.f.store('inventory-audit'),associations=self.w.associations)
         report=i.inspect(self.f.person);h=self.r.store.load(self.r.key(self.owner))[1]['retirement_sha256']
         k=self.r.key(self.owner,'retired.'+h)
         self.assertTrue(any(x['key']==k.hex() for x in i.references(report['report_sha256'])))

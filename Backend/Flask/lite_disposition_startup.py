@@ -27,6 +27,7 @@ from lite_fenced_store import FencedPrivacy
 from lite_grant_key_custody import AccountGrantCipher, GoogleGrantKeyProvider
 from lite_reconsent import Reconsent
 from lite_research_media_disposition import ResearchMediaDisposition
+from lite_research_association import ResearchAssociations
 from lite_research_history import ResearchMediaHistory
 from lite_service_disposition import ServiceResultDisposition
 from lite_service_history import ServiceResultHistory
@@ -53,12 +54,24 @@ def text(v, pattern):
     return v
 
 
+def research_associations(spec):
+    exact(spec,'native_key research_key proofs')
+    try:
+        native=base64.b64decode(spec['native_key'],validate=True)
+        research=base64.b64decode(spec['research_key'],validate=True)
+        return ResearchAssociations(native,research,spec['proofs'])
+    except (TypeError,ValueError) as exc:
+        raise ValueError('invalid pinned cross-service association evidence') from exc
+
+
 def preflight(raw, *, expected_config, expected_source, expected_image, secrets, clock):
     _hex(expected_config); _hex(expected_source, 40); _hex(expected_image)
     if (type(raw) is not bytes or not 1 <= len(raw) <= 65536
             or hashlib.sha256(raw).hexdigest() != expected_config): raise ValueError('bounded pinned configuration required')
     c = loads_json_object_strict(raw.decode())
-    exact(c, 'schema enabled deployment binding buckets stores media policies manifest manifest_sha256 provider_budget bootstrap_budget signers apple')
+    expected = 'schema enabled deployment binding buckets stores media policies manifest manifest_sha256 provider_budget bootstrap_budget signers apple'
+    has_associations = 'research_associations' in c
+    exact(c, expected+' research_associations' if has_associations else expected)
     if c['schema'] != 'lite-disposition-startup/2' or c['enabled'] is not True:
         raise ValueError('explicit private disposition enablement required')
     d = exact(c['deployment'], 'source image project project_number service_account keyring')
@@ -86,6 +99,11 @@ def preflight(raw, *, expected_config, expected_source, expected_image, secrets,
             if len(keys[name]) != 32: raise ValueError('Ed25519 public key required')
         decoded.append(keys)
     if set(decoded[0].values()) & set(decoded[1].values()): raise ValueError('independent recovery signer required')
+    if has_associations:
+        spec=exact(c['research_associations'],'native_key research_key proofs')
+        issuers={base64.b64decode(spec[n],validate=True) for n in ('native_key','research_key')}
+        if issuers & (set(decoded[0].values()) | set(decoded[1].values())):
+            raise ValueError('research authorizations must use keys separate from operation signers')
     if type(c['buckets']) is not dict or not 2 <= len(c['buckets']) <= 4: raise ValueError('isolated explicit bucket inventory required')
     for name, meta in c['buckets'].items():
         text(name, r'[a-z0-9][a-z0-9-]{1,61}[a-z0-9]'); exact(meta, 'metadata_sha256'); _hex(meta['metadata_sha256'])
@@ -183,6 +201,7 @@ def build_disposition(raw, *, expected_config, expected_source, expected_image, 
                       clock=lambda:int(time.time())):
     c, signers, secret = preflight(raw, expected_config=expected_config, expected_source=expected_source,
         expected_image=expected_image, secrets=secrets, clock=clock)
+    bindings=research_associations(c['research_associations']) if 'research_associations' in c else None
     p = CloudProviders() if providers is None else providers
     try:
         p.connect(c, clock=clock)
@@ -243,7 +262,8 @@ def build_disposition(raw, *, expected_config, expected_source, expected_image, 
     progress = DispositionProgress(deletion=deletion,results=results,cipher=cipher,store=s['progress'],audit_store=s['progress_audit'])
     deletion.attach_disposition(progress)
     research = Reconsent(FencedPrivacy(s['research'],buckets[c['media']['bucket']]),clock=clock)
-    closure = AccountResearchClosure(deletion=deletion,research=research,store=s['research_closure'],audit_store=s['research_closure_audit'])
+    closure = AccountResearchClosure(deletion=deletion,research=research,store=s['research_closure'],
+        audit_store=s['research_closure_audit'],associations=bindings)
     media = ResearchMediaDisposition(closure=closure,store=s['research_media'],audit_store=s['research_media_audit'])
     rh = ResearchMediaHistory(media=media,store=s['research_history'],audit_store=s['research_history_audit'],policy=c['policies']['research'])
     sh = ServiceResultHistory(disposition=results,store=s['service_history'],audit_store=s['service_history_audit'],policy=c['policies']['service'])

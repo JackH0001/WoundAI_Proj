@@ -238,13 +238,15 @@ class ResearchMediaDisposition(ResearchDispositionLane):
         if closed is None or closed[1]['remaining']:
             # Close every verified installation before spending calls on large
             # media inventories. Do not let another device keep adding work.
-            self.c.advance(person,limit=5)
-            return self._public(j)
+            closure_step=self.c.advance(person,limit=5)
+            result=self._public(j)
+            if 'waiting_for' in closure_step:result['waiting_for']=closure_step['waiting_for']
+            return result
         n=self.d.lifecycle._node(person,j['cursor'])
         if n['position']!=j['remaining']:raise StateUnavailable('frozen grant order changed')
         outcome=self.c._node(p['closure'],n)
         linked=outcome['state']=='linked_admission_closed'
-        if linked and self._advance_owner(p,n['installation'],limit)['phase']!='done':return self._public(j)
+        if linked and self._advance_owner(p,outcome['research_owner'],limit)['phase']!='done':return self._public(j)
         value=dict(j,step=j['step']+1,cursor=n['previous'],remaining=j['remaining']-1,
             linked=j['linked']+int(linked),unresolved=j['unresolved']+int(not linked))
         saved=self._save('account',p,row,value);self._account(p)

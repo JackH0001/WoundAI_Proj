@@ -8,6 +8,7 @@ import re
 from lite_account_deletion import AccountDeletion
 from lite_account_identity import IdentityRejected
 from lite_attest_state import StateUnavailable
+from lite_research_association import ResearchAssociations, ResearchLinkPending
 from lite_reconsent import Reconsent
 from lite_store_locations import location, overlaps
 from lite_subscription_executor import key
@@ -18,9 +19,12 @@ from lite_usage_ledger import digest
 class AccountResearchClosure:
     immutable=staticmethod(SubscriptionRuntime.immutable)
 
-    def __init__(self, *, deletion, research, store, audit_store):
+    def __init__(self, *, deletion, research, store, audit_store, associations=None):
         if not isinstance(deletion,AccountDeletion) or not isinstance(research,Reconsent):
             raise ValueError('actual closed-account and independent research authorities required')
+        if associations is not None and not isinstance(associations,ResearchAssociations):
+            raise ValueError('verified cross-service research associations required')
+        self.associations=associations
         b=deletion.bridge
         peers=(deletion.store,deletion.audit,b.store,b.audit,b.lifecycle.store,b.lifecycle.audit,
             b.registry.store,b.grants.store,b.grants.audit,research.store)
@@ -30,9 +34,9 @@ class AccountResearchClosure:
                 overlaps(location(s),location(p)) for s in (store,audit_store) for p in peers):
             raise ValueError('separate research closure checkpoint and audit required')
         self.d,self.r,self.store,self.audit=deletion,research,store,audit_store
-        self.config=dict(v=1,scope=deletion.scope,research_bucket=research.privacy.objects.bucket.name,
+        self.config=dict(v=2,scope=deletion.scope,research_bucket=research.privacy.objects.bucket.name,
             action='retire_linked_research_admission',media_disposition='not_started')
-        self.immutable(store,key('account-research-config',deletion.scope),self.config)
+        self.immutable(store,key('account-research-config-v2',deletion.scope),self.config)
 
     def inventory_plan(self,person):
         # Read original closure evidence; do not repair a missing consent audit.
@@ -89,6 +93,8 @@ class AccountResearchClosure:
             raise StateUnavailable('frozen grant membership evidence missing')
         intent=dict(v=1,plan_sha256=digest(p),node_sha256=digest(n))
         self.immutable(self.audit,key('account-research-node-intent',digest(intent)),intent)
+        research_owner=None
+        proof=None
         if re.fullmatch(r'[0-9a-f]{32}',owner) is None:
             state='unresolved_installation_format';retirement=None
         elif b.registry.store.load(b.registry.key(owner)) is None:
@@ -102,14 +108,19 @@ class AccountResearchClosure:
                 raise StateUnavailable('research installation association differs')
             # Stable per-installation reference, not a login-specific grant: a
             # second historic login joins the same retirement, never another one.
-            retirement=self.r.retire(owner,closure_sha256=digest(p),
-                association_sha256=digest([self.d.scope,p['person'],owner,account['proof']]))
-            current=self.r.load(owner)[1]
+            if self.associations is None:
+                raise ResearchLinkPending('verified link between personal service and research is pending')
+            research_owner,proof=self.associations.resolve(self.d.scope,self.r.privacy.objects.bucket.name,
+                p['person'],owner,p['closure']['operation'],account['proof'])
+            self.immutable(self.audit,key('account-research-verified-pair',digest([p,owner])),
+                dict(research_owner=research_owner,association_sha256=proof))
+            retirement=self.r.retire(research_owner,closure_sha256=digest(p),association_sha256=proof)
+            current=self.r.load(research_owner)[1]
             fence=self.r.privacy.scoped(current).manifest
-            fence.withdraw(owner)  # close admission only; do NOT seal/delete media
-            if not fence.is_withdrawn(owner):raise StateUnavailable('research fence unconfirmed')
+            fence.withdraw(research_owner)
+            if not fence.is_withdrawn(research_owner):raise StateUnavailable('research fence unconfirmed')
             state='linked_admission_closed'
-        outcome=dict(v=1,intent_sha256=digest(intent),state=state,
+        outcome=dict(v=2,intent_sha256=digest(intent),state=state,research_owner=research_owner,association_sha256=proof,
             retirement_sha256=None if retirement is None else digest(retirement),
             media_disposition='not_started',account_deleted=False)
         self.immutable(self.audit,key('account-research-node-outcome',digest(intent)),outcome)
@@ -121,7 +132,8 @@ class AccountResearchClosure:
         return dict(v=1,closure_sha256=digest(p),total_grants=p['total'],
             examined_grants=p['total']-j['remaining'],linked_grants=j['linked'],
             unresolved_grants=j['unresolved'],scan_finished=j['remaining']==0,
-            research_admission='linked_installations_closed' if j['remaining']==0 and j['unresolved']==0 else 'pending',
+            research_admission=('no_verified_research_installations' if not p['total'] else
+                ('linked_installations_closed' if j['remaining']==0 and j['unresolved']==0 else 'pending')),
             media_disposition='not_started',historical_epochs_verified=False,
             original_media_preserved=True,account_deleted=False)
 
@@ -141,7 +153,12 @@ class AccountResearchClosure:
             if j['remaining']==0:break
             n=self.d.lifecycle._node(person,j['cursor'])
             if n['position']!=j['remaining']:raise StateUnavailable('research grant sequence differs')
-            outcome=self._node(p,n)
+            try:
+                outcome=self._node(p,n)
+            except ResearchLinkPending:
+                self.immutable(self.audit,key('account-research-awaiting-link',digest([p,n['grant_id']])),
+                    dict(closure_sha256=digest(p),grant=n['grant_id'],reason='verified_research_link_required'))
+                return dict(self._public(j),waiting_for='verified_research_link_required')
             linked=outcome['state']=='linked_admission_closed'
             next_j=dict(j,cursor=n['previous'],remaining=j['remaining']-1,
                 linked=j['linked']+int(linked),unresolved=j['unresolved']+int(not linked))
@@ -151,4 +168,12 @@ class AccountResearchClosure:
     def status(self,person):
         p=self._plan(person);row=self._read(p)
         if row is None:raise StateUnavailable('research closure has not started')
-        return self._public(row[1])
+        j=row[1];result=self._public(j)
+        if j['cursor'] is not None:
+            node=self.d.lifecycle._node(person,j['cursor'])
+            waiting=self.audit.load(key('account-research-awaiting-link',digest([p,node['grant_id']])))
+            if waiting is not None:
+                expected=dict(closure_sha256=digest(p),grant=node['grant_id'],reason='verified_research_link_required')
+                if waiting[1]!=expected:raise StateUnavailable('research link pause audit differs')
+                result['waiting_for']=expected['reason']
+        return result

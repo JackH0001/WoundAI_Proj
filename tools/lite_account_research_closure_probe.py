@@ -4,11 +4,20 @@ import copy
 import json
 from pathlib import Path
 import unittest
+import inspect
 from lite_disposition_progress_probe import ProgressFixture
 from lite_fenced_store import FencedPrivacy
 from lite_reconsent import Reconsent, ReconsentRejected, CONSENT, DISCLOSURE
 import test_lite_fenced_objects as objects
 import test_lite_native_purchase as native
+
+
+def pairing_args(worker, f, research, owner):
+    # The reference parent predates cross-origin receipts; replay its original API.
+    if 'associations' not in inspect.signature(worker).parameters:
+        return {}
+    from research_pair_fixture import pairs
+    return {'associations':pairs(f,research,[(owner,owner)])}
 
 
 def run():
@@ -42,7 +51,7 @@ def run():
             if case!='ordinary_rejoin':
                 if AccountResearchClosure is not None:
                     worker=AccountResearchClosure(deletion=f.d,research=research,
-                        store=f.store('research-closure'),audit_store=f.store('research-closure-audit'))
+                        store=f.store('research-closure'),audit_store=f.store('research-closure-audit'),**pairing_args(AccountResearchClosure,f,research,owner))
                     worker_result=worker.advance(f.person)
             if case.endswith('media'):
                 try:research.resolve(owner,epoch);accepted=True
