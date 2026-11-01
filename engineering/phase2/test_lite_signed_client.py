@@ -34,10 +34,12 @@ class SignedHTTPClient:
         response = self.client.post(CHALLENGE_PATH, json=dict(key_id=self.key, purpose=purpose))
         self.assertEqual(response.status_code, 200, response.json)
         challenge = response.json
+        audience = getattr(self, 'audience', 'lite-test')
+        self.assertEqual(challenge['audience'], audience)
         self.counter += 1
         rid = '11111111-1111-4111-8111-111111111111'
         data = client_data(
-            audience='lite-test', installation=self.owner, key_id=self.e.key_id,
+            audience=audience, installation=self.owner, key_id=self.e.key_id,
             challenge=base64.b64decode(challenge['challenge']), request_id=rid,
             method=method, path=path, content_type=content_type, body=raw)
         auth = hashlib.sha256(self.e.r.policy.app_id.encode()).digest() + b'\x80' + self.counter.to_bytes(4, 'big')

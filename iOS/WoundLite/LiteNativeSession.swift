@@ -71,6 +71,7 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     let purchases: LiteNativePurchaseStore
     let service: LiteServiceClient
     let deletionService: LiteAccountDeletionHTTPService
+    private var researchLink: LiteResearchDeletionLink?
     private let access: LiteSandboxAccess
     private let register: @Sendable () async throws -> String
     private let existing: @Sendable () async throws -> String?
@@ -129,11 +130,20 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     }
     static func sandbox(client: LiteAttestClient, window: @escaping () -> ASPresentationAnchor?, directory: URL) throws -> LiteNativeSession {
         let access = LiteSandboxAccess()
-        return try LiteNativeSession(origin: client.origin,
+        let session = try LiteNativeSession(origin: client.origin,
             transport: LiteSandboxSignedTransport(client: client, access: access),
             identityProvider: LiteAppleSignInProvider(window: window), purchaseProvider: LiteStoreKitPurchaseProvider(),
             journal: LiteServiceFileJournal(directory: directory), register: { try await client.registeredInstallation() },
             existing: { try await client.existingInstallation() }, access: access, now: { Date() })
+        // Create the transport lazily. Viewing account settings never registers
+        // an installation, re-enables research or sends an association request.
+        let configured = AppSettings.backendURL()
+        if configured == LiteBackendConfiguration.dedicatedOrigin, let original = URL(string: configured) {
+            session.researchLink = try LiteResearchDeletionLink(nativeOrigin: client.origin, researchOrigin: original,
+                native: LiteSandboxSignedTransport(client: client, access: access),
+                research: LiteExistingResearchTransport(origin: original), journal: session.identity.journal)
+        }
+        return session
     }
 
     /// A fresh installation is expected. Never turn a missing local identity into
@@ -171,7 +181,7 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     }
 
     func accountView() throws -> LiteAccountManagementView {
-        try LiteAccountManagementView(identity: identity, service: deletionService)
+        try LiteAccountManagementView(identity: identity, service: deletionService, researchLink: researchLink)
     }
     func deletion(pauseResearch: @escaping () throws -> Void = LitePrefs.pauseResearchForAccountDeletion) -> LiteAccountDeletionStore {
         LiteAccountDeletionStore(service: deletionService, identity: identity, journal: identity.journal, pauseResearch:pauseResearch, now: identity.now)

@@ -5,10 +5,12 @@ import SwiftUI
 struct LiteAccountManagementView:View {
     @ObservedObject var identity:LiteAccountIdentityStore
     @StateObject var deletion:LiteAccountDeletionStore
+    private let researchLink: LiteResearchDeletionLink?
     @State private var confirming=false
-    init(identity:LiteAccountIdentityStore,service:any LiteAccountDeletionService)throws {
+    init(identity:LiteAccountIdentityStore,service:any LiteAccountDeletionService, researchLink: LiteResearchDeletionLink? = nil)throws {
         guard identity.service.origin==service.origin else{throw LiteDeletionFailure.conflict}
         self.identity=identity
+        self.researchLink=researchLink
         // Construct both paths with the same durable journal; callers cannot
         // accidentally fence a different store than the service admission path.
         self._deletion=StateObject(wrappedValue:LiteAccountDeletionStore(service:service,identity:identity,journal:identity.journal,now:identity.now))
@@ -62,6 +64,9 @@ struct LiteAccountManagementView:View {
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             }
+            if let researchLink, let record = deletion.record, record.receipt?.research_withdrawal == "requested" {
+                LiteResearchLinkSection(link: researchLink, record: record)
+            }
             Section("保留與訂閱") {
                 Text("手機照片與紀錄保留。如果只想退出研究，可在「資料與撤回」單獨撤回並保留服務帳號。")
                 Text("刪除帳號不等於取消 Apple 訂閱。如有訂閱，請另至 Apple 訂閱管理確認。")
@@ -73,5 +78,29 @@ struct LiteAccountManagementView:View {
             Button("確認刪帳並撤回研究",role:.destructive){Task{await deletion.requestConfirmed()}}
             Button("取消",role:.cancel){}
         }message:{Text("確認後，這部手機會先暫停研究上傳，再提出刪帳與研究撤回。影像、深度、標註及封存副本依可確認的範圍清理。手機紀錄保留；如有 Apple 訂閱，請另行取消。")}
+    }
+}
+
+private struct LiteResearchLinkSection: View {
+    @ObservedObject var link: LiteResearchDeletionLink
+    let record: LiteAccountDeletionCheckpoint
+    @State private var confirming = false
+
+    var body: some View {
+        Section("核對本機研究登記") {
+            Text(link.message).accessibilityIdentifier("researchLinkProgress")
+            if !link.confirmed {
+                Button("核對這部手機的研究登記…") { confirming = true }
+                    .disabled(link.busy)
+                if link.busy { ProgressView("核對中…") }
+            }
+        }
+        .task(id: record.operation) { await link.reload(record) }
+        .alert("將本機原研究登記連結至這筆刪帳要求？", isPresented: $confirming) {
+            Button("確認連結並核對") { Task { await link.confirm(record) } }
+            Button("返回", role: .cancel) {}
+        } message: {
+            Text("兩個服務會各自核對這部手機原有的登記，讓這筆撤回能找到對應的研究資料。只傳核對所需的識別資料，手機照片與深度會保留。")
+        }
     }
 }

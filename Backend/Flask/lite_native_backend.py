@@ -53,12 +53,17 @@ class NativeBackend:
     deletion: AccountDeletion
     progress: DispositionProgress
 
-    def create_app(self):
+    def create_app(self, *, link_signer=None):
         app = Flask('woundailite-native-candidate', static_folder=None)
         # Reject unsupported research/admin routes BEFORE the general guard
         # can reserve capacity or create a research writer ticket.
         paths = {CHALLENGE_PATH, REGISTER_PATH, EVENT_PATH} | set(ACCOUNT_PATHS) | set(
             PURCHASE_PATHS) | set(SERVICE_PATHS) | set(DELETION_PATHS)
+
+        if link_signer is not None:
+            from lite_attest_request import RESEARCH_OFFER_PATH
+            if link_signer.role!='native':raise ValueError('native research issuer required')
+            paths.add(RESEARCH_OFFER_PATH)
 
         @app.before_request
         def service_routes_only():
@@ -71,7 +76,7 @@ class NativeBackend:
             return response
 
         install_lite_attest(app, service=self.security, budget=self.budget, privacy=self.privacy,
-            commerce=self.operations, purchases=self.purchases, identity=self.identity, deletion=self.deletion)
+            commerce=self.operations, purchases=self.purchases, identity=self.identity, deletion=self.deletion, link_signer=link_signer)
         return app
 
 

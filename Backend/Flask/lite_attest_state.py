@@ -19,7 +19,7 @@ from google.api_core.exceptions import NotFound, PreconditionFailed, TooManyRequ
 
 from audit_chain_contract import loads_json_object_strict
 from lite_attest_assertion import AssertionPolicy, AssertionRejected, verify_assertion
-from lite_attest_request import client_data
+from lite_attest_request import client_data, RESEARCH_OFFER_PATH, RESEARCH_ACCEPT_PATH
 
 MAX_STATE = 16384
 CHALLENGE_TTL = 120
@@ -288,7 +288,7 @@ class AssertionAdmission:
             if challenge is None or not challenge['issued_at'] <= now < challenge['expires_at']:
                 raise AdmissionRejected('challenge missing, consumed or expired')
             deletion_path = re.fullmatch(re.escape('/api/v1/lite/data/' + state['installation']) + r'(?:/[0-9a-f]{32})?', path) is not None
-            account_deletion = method == 'POST' and path in (
+            account_deletion = method == 'POST' and path in (RESEARCH_OFFER_PATH, RESEARCH_ACCEPT_PATH,
                 '/api/v1/lite/account/deletion/request', '/api/v1/lite/account/deletion/status', '/api/v1/lite/account/deletion/reauth/challenge', '/api/v1/lite/account/deletion/reauth/confirm')
             if account_deletion and challenge.get('purpose', 'assert') != 'withdraw':
                 raise AdmissionRejected('account deletion requires privacy challenge')

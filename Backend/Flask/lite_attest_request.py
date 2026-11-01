@@ -10,6 +10,8 @@ import re
 import struct
 
 DOMAIN = b'woundlite.appattest.request/1\x00'
+RESEARCH_OFFER_PATH = "/api/v1/lite/account/deletion/research-offer"
+RESEARCH_ACCEPT_PATH = "/api/v1/lite/research/deletion-proof"
 MAX_BODY = 32 * 1024 * 1024
 
 
@@ -27,7 +29,7 @@ def client_data(*, audience, installation, key_id, challenge, request_id,
                         '/api/v1/lite/service/prepare', '/api/v1/lite/service/run', '/api/v1/lite/service/status', '/api/v1/lite/service/recover', '/api/v1/lite/service/resubmit',
                         '/api/v1/lite/purchase/context','/api/v1/lite/purchase/confirm',
                         '/api/v1/lite/account/challenge','/api/v1/lite/account/confirm','/api/v1/lite/account/status','/api/v1/lite/account/logout','/api/v1/lite/account/renew',
-                        '/api/v1/lite/account/deletion/request','/api/v1/lite/account/deletion/status', '/api/v1/lite/account/deletion/reauth/challenge', '/api/v1/lite/account/deletion/reauth/confirm'},
+                        '/api/v1/lite/account/deletion/request','/api/v1/lite/account/deletion/status', '/api/v1/lite/account/deletion/reauth/challenge', '/api/v1/lite/account/deletion/reauth/confirm', RESEARCH_OFFER_PATH, RESEARCH_ACCEPT_PATH},
                'DELETE': {'/api/v1/lite/data/' + installation}}
     epoch_delete = (method == 'DELETE' and isinstance(path, str) and
                     re.fullmatch(re.escape('/api/v1/lite/data/' + installation) + r'/[0-9a-f]{32}', path) is not None)

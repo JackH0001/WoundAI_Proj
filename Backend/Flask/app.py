@@ -1494,7 +1494,11 @@ if LITE_API_ENABLED:
             # Fail closed without printing configuration, credentials or paths.
             _lite_security, _lite_budget, _lite_privacy = None, None, None
             BLUEPRINT_FAILURES.append(("lite_attest", "security configuration unavailable"))
-        install_lite_attest(app, service=_lite_security, budget=_lite_budget, privacy=_lite_privacy)
+        _link_signer = None
+        if LITE_SERVICE and ('LITE_RESEARCH_LINK_FILE' in os.environ or 'LITE_RESEARCH_LINK_SHA256' in os.environ):
+            from lite_research_issuer import settings as _issuer_settings
+            _link_signer = _issuer_settings(os.environ, 'research')
+        install_lite_attest(app, service=_lite_security, budget=_lite_budget, privacy=_lite_privacy, link_signer=_link_signer)
         from api_lite import lite_bp as _lite_bp, init_lite as _init_lite
         _init_lite(segment_for_lite)
         app.register_blueprint(_lite_bp)

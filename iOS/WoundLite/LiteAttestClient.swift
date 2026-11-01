@@ -299,10 +299,10 @@ actor LiteAttestClient {
               original.value(forHTTPHeaderField: "Authorization") == nil, original.value(forHTTPHeaderField: "Cookie") == nil,
               let method = original.httpMethod else { throw LiteAttestFailure.invalidRequest }
         let body = original.httpBody ?? Data(), type = original.value(forHTTPHeaderField: "Content-Type") ?? ""
-        // Only the two reviewed deletion POSTs share the privacy budget.
+        // Only reviewed account-deletion POSTs share the privacy budget.
         // Other POSTs must never bypass ordinary service admission.
         let privacy = method == "DELETE" || (method == "POST" &&
-            ["/api/v1/lite/account/deletion/request", "/api/v1/lite/account/deletion/status", "/api/v1/lite/account/deletion/reauth/challenge", "/api/v1/lite/account/deletion/reauth/confirm"].contains(url.path))
+            ["/api/v1/lite/account/deletion/request", "/api/v1/lite/account/deletion/status", "/api/v1/lite/account/deletion/reauth/challenge", "/api/v1/lite/account/deletion/reauth/confirm", LiteResearchLinkPath.offer, LiteResearchLinkPath.accept].contains(url.path))
         let c = try await challenge(key: value.key, purpose: privacy ? "withdraw" : "assert")
         let bytes = try LiteAttestRequest.clientData(audience: audience, installation: installation,
             keyID: keyData(value.key), challenge: Data(base64Encoded: c.challenge)!, requestID: requestID.uuidString.lowercased(),

@@ -64,7 +64,7 @@ def _json(raw):
         raise AdmissionRejected('invalid JSON') from exc
 
 
-def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerce=None, purchases=None, identity=None, deletion=None):
+def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerce=None, purchases=None, identity=None, deletion=None, link_signer=None):
     if 'lite_attest_http' in app.extensions:
         raise ValueError('Lite security gate already installed')
     if service is not None and not isinstance(service, RegistrationService):
@@ -101,6 +101,20 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
         if not isinstance(deletion, AccountDeletion) or identity is None or deletion.bridge is not identity:
             raise ValueError('matching trusted deletion/identity coordinator required')
         deletion_paths=frozenset(DELETION_PATHS)
+    link_path=None
+    if link_signer is not None:
+        from lite_research_issuer import ACCEPT, OFFER, LinkSigner, issuer_blueprint
+        if not isinstance(link_signer,LinkSigner) or service is None:
+            raise ValueError('reviewed signed research association route required')
+        if link_signer.role=='native':
+            if deletion is None or deletion.scope!=link_signer.scope:raise ValueError('native deletion binding differs')
+            link_path=OFFER
+            app.register_blueprint(issuer_blueprint(link_signer,deletion=deletion))
+        else:
+            if commerce is not None or not isinstance(privacy,FencedPrivacy) or privacy.objects.bucket.name!=link_signer.bucket:
+                raise ValueError('research-only issuer binding differs')
+            link_path=ACCEPT
+            app.register_blueprint(issuer_blueprint(link_signer,privacy=privacy))
     app.extensions['lite_attest_http'] = dict(service=service, budget=budget, privacy=privacy, commerce=commerce)
     if commerce is not None:app.register_blueprint(commerce_blueprint(commerce))
     if purchases is not None:app.register_blueprint(purchase_blueprint(purchases))
@@ -139,7 +153,8 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
             purchase_only=(request.path in purchase_paths and request.endpoint in {'lite_native_purchase.context','lite_native_purchase.confirm'})
             account_only=(request.path in account_paths and request.endpoint in {'lite_account_identity.challenge','lite_account_identity.confirm','lite_account_identity.status','lite_account_identity.logout','lite_account_identity.renew'})
             deletion_only=(request.path in deletion_paths and request.endpoint in {'lite_account_deletion.request','lite_account_deletion.status','lite_account_deletion.reauth_challenge','lite_account_deletion.reauth_confirm'})
-            account_only=account_only or deletion_only
+            link_only=link_path is not None and request.path==link_path and request.endpoint=='lite_research_issuer.issue'
+            account_only=account_only or deletion_only or link_only
             service_only=service_only or purchase_only or account_only
             if not ((request.method == 'POST' and (control or request.path in POST_PATHS or service_only)) or
                     (request.method == 'DELETE' and re.fullmatch(PREFIX+r'data/[A-Za-z0-9_-]{1,128}(?:/[0-9a-f]{32})?', request.path))):
@@ -156,7 +171,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
                 budget.reserve(scope='withdraw' if withdrawal else 'general')
                 g.lite_attest_control = data
                 return None
-            budget.reserve(scope='withdraw' if request.method == 'DELETE' or deletion_only else 'general')
+            budget.reserve(scope='withdraw' if request.method == 'DELETE' or deletion_only or link_only else 'general')
             limit = (20000 if (purchase_only or account_only) and request.path.endswith('/confirm') else
                 0 if request.method == 'DELETE' else 4096 if request.path == REJOIN_PATH or (service_only and not request.path.endswith('/run'))
                 else 96*1024 if request.path == REGISTER_PATH else MAX_BODY)

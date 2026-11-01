@@ -19,7 +19,7 @@ MODULES=tuple(('audit_chain_contract lite_account_deletion lite_account_identity
     'lite_attest_receipt lite_attest_registration lite_attest_request lite_attest_state '
     'lite_bucket_policy lite_deletion_identity lite_disposition_context lite_disposition_progress lite_fenced_manifest '
     'lite_fenced_objects lite_fenced_store lite_grant_key_custody lite_key_readiness lite_native_backend '
-    'lite_native_inference lite_native_purchase lite_native_startup lite_privacy_state '
+    'lite_native_inference lite_native_purchase lite_native_startup lite_privacy_state lite_research_association lite_research_issuer '
     'lite_raster_tools lite_reconsent lite_service_disposition lite_service_http lite_service_operations '
     'lite_service_recovery lite_service_release lite_service_subscription_links lite_subscription_authority '
     'lite_subscription_executor lite_subscription_migration lite_subscription_runtime '

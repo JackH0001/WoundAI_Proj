@@ -1,11 +1,28 @@
 """Read-only, operation-specific authority for disposing cross-service research data."""
 import base64
 import hashlib
+import json
 import re
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from lite_attest_state import StateUnavailable
-from lite_usage_ledger import digest
+
+
+def digest(value):
+    # Identical canonical digest to the private worker's ledger, also usable
+    # in the research-only image without importing any subscription modules.
+    raw = json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def validate_pair(pair):
+    if type(pair) is not dict or set(pair) != {'action','scope','bucket','person','native','research','operation','registration'}:
+        raise ValueError('invalid research association fields')
+    if pair['action'] != 'withdraw-linked-research/1' or type(pair['bucket']) is not str or not (1 <= len(pair['bucket']) <= 222):
+        raise ValueError('research association purpose or bucket differs')
+    for field, length in (('scope',64),('person',64),('native',32),('research',32),('operation',32),('registration',64)):
+        if type(pair[field]) is not str or not re.fullmatch('[0-9a-f]{%d}' % length,pair[field]):
+            raise ValueError('invalid research association identifier')
 
 
 class ResearchLinkPending(StateUnavailable):
@@ -35,13 +52,7 @@ class ResearchAssociations:
             if type(proof) is not dict or set(proof) != {'pair','native','research'}:
                 raise ValueError('both independent research association proofs required')
             pair = proof['pair']
-            if type(pair) is not dict or set(pair) != {'action','scope','bucket','person','native','research','operation','registration'}:
-                raise ValueError('invalid research association fields')
-            if pair['action'] != 'withdraw-linked-research/1' or not isinstance(pair['bucket'],str) or not (1 <= len(pair['bucket']) <= 222):
-                raise ValueError('research association purpose or bucket differs')
-            for field, length in (('scope',64),('person',64),('native',32),('research',32),('operation',32),('registration',64)):
-                if type(pair[field]) is not str or not re.fullmatch('[0-9a-f]{%d}' % length,pair[field]):
-                    raise ValueError('invalid research association identifier')
+            validate_pair(pair)
             for role, public_key in keys.items():
                 try:
                     signature = base64.b64decode(proof[role],validate=True)
