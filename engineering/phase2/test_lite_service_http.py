@@ -57,8 +57,20 @@ class ServiceHTTPTests(SignedServiceClient, unittest.TestCase):
         self.assertNotIn(self.f.jpeg,payload);self.assertNotIn(b'raw_depth',payload)
         self.assertEqual(self.quota()['used'],1)
 
+    def test_confirmed_mask_version_survives_receipt_replay(self):
+        contract = 'student-onnx-logits-sigmoid-before-resize/v1'
+        model = self.inference.model
+        with patch.object(self.inference, 'model', side_effect=lambda rgb: (
+                model(rgb), {'route': 'student', 'student_output_contract': contract})):
+            first = self.complete().json
+        self.assertEqual(first['result']['student_output_contract'], contract)
+        self.assertEqual(self.json_request('status').json, first)
+        self.assertEqual(self.model_calls, 1)
+        self.assertEqual(self.quota()['used'], 1)
+
     def test_completed_readback_needs_no_image_or_entitlement_query(self):
         first=self.complete()
+        self.assertNotIn('student_output_contract', first.json['result'])
         with patch.object(self.accounts,'grant',side_effect=AssertionError('do not reauthorize a receipt')):
             repeat=self.json_request('status');self.assertEqual(repeat.json,first.json)
             prepared=self.json_request('prepare');self.assertEqual(prepared.json,first.json)

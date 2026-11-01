@@ -30,6 +30,7 @@ final class LiteMeasureVM: ObservableObject {
     private(set) var cloudBinding: LiteCloudBinding?
     var hasManualContour: Bool { userEdited }
     /// 雲端當時有沒有給出輪廓（lay label 的 source 語意：有→edited、無→manual）。
+    private(set) var contourOrigin = LiteContourOrigin.manual
     private var cloudHadPolys = false
     /// 是否真的改過輪廓。AI 量測也可同步，但不可當成人工標註。
     private var userEdited = false
@@ -47,7 +48,7 @@ final class LiteMeasureVM: ObservableObject {
         imageW = 0; imageH = 0; estimate = nil
         busyHint = ""; note = nil; uploadMessage = nil; savedId = nil
         cloudImageId = nil; cloudBinding = nil; cloudHadPolys = false
-        userEdited = false; source = "manual"
+        userEdited = false; source = "manual"; contourOrigin = .manual
         return id
     }
 
@@ -85,6 +86,7 @@ final class LiteMeasureVM: ObservableObject {
         cloudImageId = nil
         cloudBinding = nil
         cloudHadPolys = false
+        source = "manual"; contourOrigin = .manual
         userEdited = false
         let capture = await Task.detached(priority: .userInitiated) {
             let image = Self.normalize(raw)
@@ -120,7 +122,7 @@ final class LiteMeasureVM: ObservableObject {
                 let picked = Self.centerWound(local, w: imageW, h: imageH)
                 if !picked.isEmpty {
                     polys = picked
-                    source = "local"
+                    source = "local"; contourOrigin = .local
                     note = "已由裝置端模型自動圈選（未連網）。可用「修正圈選」微調。"
                     await runEstimate()
                     return true
@@ -130,7 +132,7 @@ final class LiteMeasureVM: ObservableObject {
         if let researchScope, researchScope.permits(server: AppSettings.backendURL(), consent: LitePrefs.researchConsent == true) {
             busyHint = "雲端辨識中…（約數秒）"
             switch await liteCloudSegment(work, depth: dd, researchScope: researchScope) {
-            case .ok(let cloud, let stored, let route, let raw, let receipt):
+            case .ok(let cloud, let stored, let route, let contract, let raw, let receipt):
                 cloudHadPolys = !cloud.isEmpty
                 // Debug 組建把路由與輪廓數直接掛在畫面上：route 說出後端走哪條路、
                 // 「後端 N・解析 M」不一致＝客戶端解析問題——兩種病一眼分開。
@@ -142,6 +144,7 @@ final class LiteMeasureVM: ObservableObject {
                 if !picked.isEmpty {
                     polys = picked
                     source = "cloud"
+                    contourOrigin = .cloud(route: route, contract: contract)
                     var lines: [String] = []
                     if cloud.count > 1 {
                         lines.append("已自動取畫面中央的傷口（偵測到 \(cloud.count) 處，其餘忽略）。可用「修正圈選」微調。")
@@ -239,7 +242,7 @@ final class LiteMeasureVM: ObservableObject {
     }
 
     enum LiteCloudOutcome {
-        case ok([[[Int]]], stored: Bool, route: String?, raw: Int, receipt: LiteStorageReceipt?)
+        case ok([[[Int]]], stored: Bool, route: String?, contract: String?, raw: Int, receipt: LiteStorageReceipt?)
         case softFail(String)     // 429 配額／人臉退件：後端給的可讀訊息
         case hardFail
     }
@@ -297,7 +300,7 @@ final class LiteMeasureVM: ObservableObject {
                     storageReceipt: r.storageReceipt, researchEpoch: researchEpoch)
             }
             // Keep the original JPEG/depth coordinate binding unchanged.
-            return .ok(r.polygons, stored: r.stored, route: r.route, raw: r.rawPolyCount, receipt: r.storageReceipt)
+            return .ok(r.polygons, stored: r.stored, route: r.route, contract: r.studentOutputContract, raw: r.rawPolyCount, receipt: r.storageReceipt)
         } catch {
             if let message = (error as? LiteAttestFailure)?.captureFailureMessage {
                 return .softFail(message)
@@ -611,6 +614,7 @@ struct LiteMeasureView: View {
             depthName: depthName)
         rec.cloudSync = vm.cloudBinding.map { LiteCloudSyncState(binding: $0) }
         rec.measurementContext = LiteMeasurementContext(depth: depth, result: e, warnings: v.warnings)
+        rec.contourOrigin = vm.contourOrigin
         rec.manuallyConfirmed = vm.hasManualContour
         guard let saved = store.saveMeasurement(rec, selectedWoundID: target.woundID,
                                                 enteredLocation: target.location,

@@ -24,8 +24,18 @@ final class LitePDFReportTests: XCTestCase {
             polysJson: "[[[240,160],[560,160],[560,440],[240,440]]]", depthName: "private-depth-secret",
             woundID: "private-group-secret", woundName: "合成驗收紀錄",
             woundLocation: LiteWoundLocation(side: "right", site: "heel"),
-            measurementContext: LiteMeasurementContext(depth: d, result: r, warnings: []))
+            measurementContext: LiteMeasurementContext(depth: d, result: r, warnings: []), contourOrigin: .manual)
     }
+    func testSingleReportLabelsVerifiedAndHistoricalContourVersions() throws {
+        var row = record()
+        row.contourOrigin = .cloud(route: "student", contract: LiteContourOrigin.studentV1)
+        let current = try XCTUnwrap(PDFDocument(data: LitePDFReport.render(record: row, image: image()))?.string)
+        XCTAssertTrue(current.contains("Student 第 1 版"))
+        row.contourOrigin = nil
+        let historical = try XCTUnwrap(PDFDocument(data: LitePDFReport.render(record: row, image: image()))?.string)
+        XCTAssertTrue(historical.contains("圈選版本未確認"))
+    }
+
     func testOnePageChineseReportContainsCorrectSourcesWithoutInternalIdentifiersOrVolume() throws {
         let data = LitePDFReport.render(record: record(), image: image())
         let pdf = try XCTUnwrap(PDFDocument(data: data)); let text = try XCTUnwrap(pdf.string)

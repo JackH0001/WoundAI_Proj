@@ -6,7 +6,26 @@ final class LiteGroupingTests: XCTestCase {
         LiteRecord(id: id, dateISO: String(format: "2026-10-%02dT10:00:00Z", day),
                    surfaceCm2: area, projectedCm2: area, volumeMl: 1.2, maxDepthMm: 2.3,
                    quality: "ok", imageName: "synthetic-unused", source: "manual",
-                   woundID: wound, woundName: wound.map { "傷口 \($0)" })
+                   woundID: wound, woundName: wound.map { "傷口 \($0)" }, contourOrigin: .manual)
+    }
+
+    func testModelChangesAndMissingVersionsBreakTrendLinesAndPercentChanges() throws {
+        var rows = (1...6).map { record("r\($0)", day: $0, area: Double($0), wound: "w") }
+        let corrected = LiteContourOrigin.cloud(route: "student", contract: LiteContourOrigin.studentV1)
+        rows[0].contourOrigin = nil
+        rows[1].contourOrigin = corrected
+        rows[2].contourOrigin = corrected
+        rows[3].contourOrigin = .cloud(route: "student", contract: "unreviewed/v2")
+        rows[4].contourOrigin = corrected
+        rows[5].contourOrigin = .cloud(route: "cloud_escalated(AU)", contract: LiteContourOrigin.studentV1)
+        let ids = LiteWoundTrend.points(woundID: "w", records: rows.reversed()).map(\.lineGroup)
+        XCTAssertEqual(ids, [nil, "r2", "r2", nil, "r5", "r6"])
+        XCTAssertNil(LiteGrouping.changePercent(rows[1], in: rows))
+        XCTAssertEqual(LiteGrouping.changePercent(rows[2], in: rows), 50)
+        XCTAssertNil(LiteGrouping.changePercent(rows[4], in: rows))
+        XCTAssertNil(LiteGrouping.changePercent(rows[5], in: rows))
+        rows[2].source = "manual"
+        XCTAssertEqual(try JSONDecoder().decode([LiteRecord].self, from: JSONEncoder().encode(rows))[2].contourOrigin, corrected)
     }
 
     func testLegacyRecordsStayUngroupedAndRetainExistingMeasurements() throws {

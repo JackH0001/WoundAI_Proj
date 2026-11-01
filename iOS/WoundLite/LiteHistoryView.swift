@@ -665,10 +665,12 @@ struct LiteTrendChart: View {
                 Text("最近一次：\(latest.area, specifier: "%.2f") cm²")
                     .font(.headline)
                 Chart(points) { point in
-                    LineMark(x: .value("拍攝時間", point.date),
-                             y: .value("表面積", point.area))
-                        .foregroundStyle(Color.blue)
-                        .interpolationMethod(.linear)
+                    if let group = point.lineGroup {
+                        LineMark(x: .value("拍攝時間", point.date), y: .value("表面積", point.area),
+                                 series: .value("可比較的連續紀錄", group))
+                            .foregroundStyle(Color.blue)
+                            .interpolationMethod(.linear)
+                    }
                     PointMark(x: .value("拍攝時間", point.date),
                               y: .value("表面積", point.area))
                         .foregroundStyle(Color.blue)
@@ -686,6 +688,10 @@ struct LiteTrendChart: View {
                 .chartXAxisLabel("拍攝時間")
                 .chartYAxisLabel("cm²")
                 .frame(height: 190)
+                if points.contains(where: { $0.lineGroup == nil }) || Set(points.compactMap(\.lineGroup)).count > 1 {
+                    Text("圈選方式或版本不同時會分段顯示。版本未確認的紀錄只顯示單點。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if points.count == 1 {
                     Text("目前只有一筆紀錄；新增同一傷口的紀錄後即可比較變化。")
                         .font(.caption).foregroundStyle(.secondary)

@@ -532,7 +532,7 @@ class StagingTests(unittest.TestCase):
             token = create_access_token(identity=self.actor, additional_claims={"role": "physician", "org": self.org})
         h = {"Authorization": "Bearer " + token}
         with patch.object(backend, "_load_classify_mods", return_value=(lambda *a, **k: tissue, lambda *a: score, None)), \
-             patch.object(backend, "segment_wound_ai", side_effect=lambda img: (np.ones(img.shape[:2]), 1.0)):
+             patch.object(backend, "segment_wound_ai", side_effect=lambda img, **kw: (np.ones(img.shape[:2]), 1.0)):
             c = backend.app.test_client()
             before = sorted(str(p) for p in Path(self.tmp.name).rglob("*"))
             res = c.post("/api/v1/classify", data={"image": (io.BytesIO(jpeg()), "test.jpg"), "escalate": "off"}, headers=h)

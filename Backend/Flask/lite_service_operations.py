@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import math
+import re
 import secrets
 import time
 from lite_usage_ledger import UsageLedger, UsageConflict, UsageLimit, Ticket, free_grant, digest, _subject, _hex
@@ -143,13 +144,17 @@ class ServiceAccounts:
 
 
 def validate_result(result):
-    if (type(result) is not dict or set(result)!={'image_w','image_h','wound_polygons','confidence','route'}
+    if (type(result) is not dict or set(result) - {'student_output_contract'} != {'image_w','image_h','wound_polygons','confidence','route'}
             or any(type(result[k]) is not int or not 1<=result[k]<=8192 for k in ('image_w','image_h'))
             or result['image_w']*result['image_h']>16000000
             or type(result['confidence']) not in (int,float) or not math.isfinite(result['confidence'])
             or not 0<=result['confidence']<=1
             or type(result['route']) is not str or not 1<=len(result['route'])<=64):
         raise StateUnavailable('invalid bounded inference result')
+    if 'student_output_contract' in result:
+        version = result['student_output_contract']
+        if not isinstance(version, str) or not re.fullmatch(r'[a-z0-9][a-z0-9._/-]{0,127}', version):
+            raise StateUnavailable('invalid inference output version')
     polys=result['wound_polygons']
     if type(polys) is not list or len(polys)>32:raise StateUnavailable('polygon bound')
     total=0
@@ -199,8 +204,11 @@ class RasterInference:
             if a.shape!=(h,w) or not np.isfinite(a).all() or not np.isin(a,[0,1]).all():
                 raise StateUnavailable('model mask contract')
             polys=_polygons_from_mask(a);confidence=float(a.mean()) if polys else 0.
-        return validate_result(dict(image_w=w,image_h=h,wound_polygons=polys,
-                                    confidence=confidence,route=info.get('route') or 'student'))
+        result = dict(image_w=w, image_h=h, wound_polygons=polys, confidence=confidence,
+                      route=info.get('route') or 'student')
+        if info.get('student_output_contract') is not None:
+            result['student_output_contract'] = info['student_output_contract']
+        return validate_result(result)
 
 
 class ServiceOperations:

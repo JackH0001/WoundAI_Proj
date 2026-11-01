@@ -46,7 +46,10 @@ enum LiteGrouping {
                   candidateDate < date else { return nil }
             return (candidate, candidateDate)
         }.max { $0.1 < $1.1 }?.0
-        guard let previous = earlier?.surfaceCm2, previous.isFinite, previous > 0 else { return nil }
+        guard let earlier, let basis = record.contourOrigin, basis.supportsComparison,
+              earlier.contourOrigin == basis else { return nil }
+        let previous = earlier.surfaceCm2
+        guard previous.isFinite, previous > 0 else { return nil }
         return (record.surfaceCm2 - previous) / previous * 100
     }
 }
@@ -82,6 +85,7 @@ enum LiteWoundTrend {
         let id: String
         let date: Date
         let area: Double
+        let lineGroup: String?
     }
 
     static func points(woundID: String, records: [LiteRecord], series: LiteAreaSeries? = nil) -> [Point] {
@@ -94,12 +98,20 @@ enum LiteWoundTrend {
             return (record, date)
         }
         let chosen = series ?? valid.max { $0.1 < $1.1 }?.0.areaSeries
-        return records.compactMap { record -> Point? in
-            guard record.woundID == woundID, record.surfaceCm2.isFinite,
-                  let source = record.areaSeries, source == chosen,
-                  record.surfaceCm2 >= 0,
-                  let date = formatter.date(from: record.dateISO) else { return nil }
-            return Point(id: record.id, date: date, area: record.surfaceCm2)
-        }.sorted { $0.date == $1.date ? $0.id < $1.id : $0.date < $1.date }
+        let ordered = valid.filter { $0.0.areaSeries == chosen }.sorted {
+            $0.1 == $1.1 ? $0.0.id < $1.0.id : $0.1 < $1.1
+        }
+        var group: String?
+        var previous: LiteContourOrigin?
+        return ordered.map { record, date in
+            let basis = record.contourOrigin
+            if basis?.supportsComparison != true {
+                group = nil
+            } else if basis != previous || group == nil {
+                group = record.id
+            }
+            previous = basis
+            return Point(id: record.id, date: date, area: record.surfaceCm2, lineGroup: group)
+        }
     }
 }

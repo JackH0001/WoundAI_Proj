@@ -38,6 +38,36 @@ struct LiteMeasurementContext: Codable, Equatable {
     }
 }
 
+/// The initial contour persists even if the user subsequently edits its boundary.
+struct LiteContourOrigin: Codable, Equatable {
+    let method: String
+    var route: String? = nil
+    var outputContract: String? = nil
+
+    static let manual = Self(method: "manual")
+    static let local = Self(method: "local")
+    static let studentV1 = "student-onnx-logits-sigmoid-before-resize/v1"
+
+    static func cloud(route: String?, contract: String?) -> Self {
+        Self(method: "cloud", route: route.flatMap { $0.utf8.count <= 64 ? $0 : nil },
+             outputContract: contract.flatMap { $0.utf8.count <= 128 ? $0 : nil })
+    }
+
+    var label: String {
+        if self == .manual { return "手動圈選" }
+        if method == "cloud", outputContract == Self.studentV1 {
+            if route == "student" { return "雲端圈選（Student 第 1 版）" }
+            if route == "cloud_escalated(AU)" { return "雲端集成圈選（Student 第 1 版）" }
+        }
+        return "圈選版本未確認"
+    }
+
+    var supportsComparison: Bool {
+        self == .manual || (method == "cloud" && outputContract == Self.studentV1
+            && (route == "student" || route == "cloud_escalated(AU)"))
+    }
+}
+
 enum LiteAreaSeries: String, CaseIterable, Identifiable {
     case current = "本版 LiDAR 表面積"
     case legacy = "舊版 LiDAR 表面積"

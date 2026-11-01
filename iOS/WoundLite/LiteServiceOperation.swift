@@ -29,11 +29,17 @@ struct LiteServiceResult: Codable, Equatable, Sendable {
     let wound_polygons: [[[Double]]]
     let confidence: Double
     let route: String
+    var student_output_contract: String? = nil
     func validate() throws {
         guard (1...8192).contains(image_w), (1...8192).contains(image_h), image_w*image_h <= 16_000_000,
               confidence.isFinite, (0...1).contains(confidence), (1...64).contains(route.count),
               wound_polygons.count <= 32, wound_polygons.reduce(0, { $0+$1.count }) <= 512 else {
             throw LiteServiceFailure.invalidResponse
+        }
+        if let contract = student_output_contract {
+            guard (1...128).contains(contract.utf8.count),
+                  contract.range(of: #"\A[a-z0-9][a-z0-9._/-]*\z"#, options: .regularExpression) != nil
+            else { throw LiteServiceFailure.invalidResponse }
         }
         for polygon in wound_polygons {
             guard (3...512).contains(polygon.count) else { throw LiteServiceFailure.invalidResponse }

@@ -100,6 +100,7 @@ enum LitePDFReport {
                      ? "照片保留；圈選座標無法核對，未疊加輪廓。"
                      : "藍色輪廓為此筆已保存圈選；不是醫師確認或診斷。", size: 11)
             } else { text("本機照片已不存在或暫時無法讀取；未從雲端補下載。") }
+            text("原始圈選：" + (record.contourOrigin?.label ?? "圈選版本未確認"))
             for line in areaLines(record, image: image) { text(line) }
             text(disclaimer, size: 12)
             text("本報告只含所選單筆紀錄，不含深度／體積、帳號或雲端識別碼。分享由您自行選擇接收對象。", size: 10)

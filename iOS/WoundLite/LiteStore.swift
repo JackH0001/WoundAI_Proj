@@ -38,6 +38,7 @@ struct LiteRecord: Codable, Identifiable {
     var manuallyConfirmed: Bool? = nil
     /// Old values remain unchanged; missing provenance is not retroactively certified.
     var measurementContext: LiteMeasurementContext? = nil
+    var contourOrigin: LiteContourOrigin? = nil
 }
 
 @MainActor
