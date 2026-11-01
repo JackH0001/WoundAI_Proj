@@ -37,13 +37,53 @@ struct WoundLiteApp: App {
     }
 }
 
+/// Device-local pause only. It does not assert that an anonymous research
+/// installation belongs to a service account or that remote media was removed.
+struct LiteAccountResearchPause {
+    let directory: URL
+    static let standard = Self(directory: FileManager.default.urls(for:.applicationSupportDirectory,
+        in:.userDomainMask)[0].appendingPathComponent("lite-account-research-pause"))
+
+    private func file(for server: String) throws -> URL {
+        let origin = try LiteWithdrawalJournal.origin(server)
+        return directory.appendingPathComponent(LiteServiceBytes.hash(Data(origin.utf8)))
+    }
+
+    private func marker(_ server: String) throws -> Data? {
+        let file = try file(for:server)
+        do { return try Data(contentsOf:file) }
+        catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError { return nil }
+    }
+
+    func blocks(_ server: String) -> Bool {
+        do { return try marker(server) != nil }
+        catch { return true }
+    }
+
+    func pause(_ server: String) throws {
+        let value = Data("account-deletion-device-upload-pause-v1".utf8)
+        if let prior = try marker(server) {
+            guard prior == value else { throw LiteDeletionFailure.invalid }
+            return
+        }
+        try HealthDataFiles.write(value, to:file(for:server))
+        guard try marker(server) == value else { throw LiteDeletionFailure.invalid }
+    }
+}
+
 /// 民眾版偏好設定。獨立於醫療版（不同 bundle 沙盒，天然隔離）。
 enum LitePrefs {
     private static let d = UserDefaults.standard
     /// nil＝還沒問過（首啟要問）；true/false＝使用者的選擇，設定頁可改。
+    static var researchPausedForAccountDeletion: Bool {
+        LiteAccountResearchPause.standard.blocks(AppSettings.backendURL())
+    }
+    static func pauseResearchForAccountDeletion() throws {
+        try LiteAccountResearchPause.standard.pause(AppSettings.backendURL())
+    }
     static var researchConsent: Bool? {
         get {
-            guard !LiteWithdrawalJournal.standard.blocksUploads else { return false }
+            guard !researchPausedForAccountDeletion, !LiteWithdrawalJournal.standard.blocksUploads else { return false }
             // An old acceptance must not silently authorize the revised disclosure.
             return LiteBackendConfiguration.consentChoice(
                 d.object(forKey: "lite_research_consent") as? Bool,

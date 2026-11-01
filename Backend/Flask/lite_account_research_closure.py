@@ -34,7 +34,7 @@ class AccountResearchClosure:
             action='retire_linked_research_admission',media_disposition='not_started')
         self.immutable(store,key('account-research-config',deletion.scope),self.config)
 
-    def _plan(self,person):
+    def inventory_plan(self,person):
         # Read original closure evidence; do not repair a missing consent audit.
         life=self.d.lifecycle;row=life._read(person)
         if row is None or row[1]['phase']!='closing':raise IdentityRejected('saved account deletion required')
@@ -44,6 +44,13 @@ class AccountResearchClosure:
         proof=life.audit.load(key('account-closure-intent',digest([life.scope,person])))
         if proof is None or proof[1]!=expected:raise StateUnavailable('original account closure evidence missing')
         return dict(v=1,config=self.config,person=person,closure=d,head=c['head'],total=c['count'])
+
+    def _plan(self, person):
+        plan = self.inventory_plan(person)
+        request = plan['closure']
+        if not self.d.research_confirmation(person, request['requester'], request['operation']):
+            raise StateUnavailable('explicit linked research withdrawal not confirmed')
+        return plan
 
     def _key(self,p):return key('account-research-job',digest(p))
 

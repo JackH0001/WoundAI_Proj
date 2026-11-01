@@ -191,7 +191,9 @@ class DispositionProgress:
         # Detect a missing/corrupt prior observation before dispatching work.
         self._read(p)
         self.immutable(self.audit, key('disposition-progress-intent', digest(p)), p)
-        if self.research is not None:
+        request = p['deletion']
+        if self.research is not None and self.deletion.research_confirmation(
+                person, request['requester'], request['operation']):
             # A failure leaves the original research checkpoint resumable and
             # does not dispatch unbounded cleanup from a status request.
             self.research.advance(person,limit=min(limit,20),apply=True)

@@ -52,7 +52,7 @@ class AccountDispositionWorker:
         # Validate existing public observations before dispatch, never repair
         # missing evidence by fabricating a new progress intent.
         self.p._read(p)
-        return dict(v=1,progress=p,research=self.r.w.c._plan(person),
+        return dict(v=1,progress=p,research=self.r.w.c.inventory_plan(person),
                     research_config=self.r.w.config,service_policy=self.s.policy,research_policy=self.r.policy)
 
     @staticmethod

@@ -77,6 +77,7 @@ struct LiteDeletionReceipt: Codable, Equatable {
     let apple_revocation:String, data_disposition:String
     let account_deleted:Bool, subscription_cancelled:Bool, local_records_preserved:Bool
     var disposition:LiteDispositionProgress?=nil
+    var research_withdrawal:String?=nil
     func validate(owner:String,operation:String,previous:Self?=nil) throws {
         guard [1,2].contains(v),state=="account_deletion_pending",self.operation==operation,LiteServiceBytes.hex(operation,32),
               installation==owner,requested_at>=0,LiteServiceBytes.hex(inventory_sha256),
@@ -85,6 +86,12 @@ struct LiteDeletionReceipt: Codable, Equatable {
               ["not_started","in_progress","pending","confirmed"].contains(apple_revocation),
               !account_deleted,!subscription_cancelled,local_records_preserved
         else {throw LiteDeletionFailure.invalid}
+        if let state=research_withdrawal, !["requested","awaiting_confirmation"].contains(state) {
+            throw LiteDeletionFailure.invalid
+        }
+        if previous?.research_withdrawal == "requested" && research_withdrawal != "requested" {
+            throw LiteDeletionFailure.conflict
+        }
         if v==1 {
             guard data_disposition=="not_started",disposition==nil else{throw LiteDeletionFailure.invalid}
         } else {
@@ -156,7 +163,7 @@ struct LiteSignedDeletionTransport: LiteAuthenticatedTransport {
     private func send(_ kind:String,_ operation:String,_ owner:String)async throws->LiteDeletionReceipt {
         guard LiteServiceBytes.hex(operation,32),try await installation()==owner else{throw LiteDeletionFailure.conflict}
         var body=["anon_id":owner,"operation":operation]
-        if kind=="request" {body["confirmation"]="delete_account"}
+        if kind=="request" {body["confirmation"]=LiteAccountDeletionCheckpoint.confirmation}
         let data=try await post(kind,owner:owner,body:body,expected:202)
         let r=try JSONDecoder().decode(LiteDeletionReceipt.self,from:data);try r.validate(owner:owner,operation:operation);return r
     }
@@ -170,7 +177,7 @@ struct LiteSignedDeletionTransport: LiteAuthenticatedTransport {
         try challenge.validate(context,operation:challenge.operation,attempt:challenge.reauth_operation)
         guard context.origin==origin.absoluteString,(1...16000).contains(identityToken.utf8.count) else{throw LiteDeletionFailure.invalid}
         let data=try await post("reauth/confirm",owner:context.installation,body:["anon_id":context.installation,"operation":challenge.operation,
-            "reauth_operation":challenge.reauth_operation,"account_sha256":context.account,"state":challenge.state,"identity_token":identityToken],expected:202)
+            "reauth_operation":challenge.reauth_operation,"account_sha256":context.account,"state":challenge.state,"identity_token":identityToken,"research_confirmation":LiteAccountDeletionCheckpoint.confirmation],expected:202)
         let r=try JSONDecoder().decode(LiteDeletionReceipt.self,from:data);try r.validate(owner:context.installation,operation:challenge.operation);return r
     }
     private func post(_ kind:String,owner:String,body:[String:String],expected:Int)async throws->Data {
@@ -190,6 +197,8 @@ struct LiteAccountDeletionCheckpoint: Codable, Equatable {
     let version:Int,context:LiteDeletionContext,operation:String,createdAt:Int
     var receipt:LiteDeletionReceipt?
     var recovery:LiteDeletionRecovery?
+    var researchWithdrawalConfirmed:Bool? = nil
+    static let confirmation = "delete_account_and_withdraw_linked_research_v1"
     static func key(origin:String,owner:String)->String {
         String(LiteServiceBytes.hash(Data((origin+"\0"+owner+"\0account-deletion").utf8)).prefix(32))
     }
@@ -210,13 +219,14 @@ struct LiteAccountDeletionCheckpoint: Codable, Equatable {
 @MainActor final class LiteAccountDeletionStore: ObservableObject {
     @Published private(set) var record:LiteAccountDeletionCheckpoint?
     @Published private(set) var busy=false
-    @Published private(set) var message="刪除帳號、取消 Apple 訂閱及研究撤回會分別處理。"
+    @Published private(set) var message="刪除帳號也會撤回連結的研究參與。如有 Apple 訂閱，請另行取消。"
     @Published private(set) var needsReview=false
     @Published private(set) var identityRequired=false
     let service:any LiteAccountDeletionService,identity:any LiteDeletionIdentity,journal:any LiteServiceJournal
     let now:()->Date
-    init(service:any LiteAccountDeletionService,identity:any LiteDeletionIdentity,journal:any LiteServiceJournal,now:@escaping()->Date=Date.init){
-        self.service=service;self.identity=identity;self.journal=journal;self.now=now
+    let pauseResearch:() throws -> Void
+    init(service:any LiteAccountDeletionService,identity:any LiteDeletionIdentity,journal:any LiteServiceJournal,pauseResearch:@escaping() throws -> Void=LitePrefs.pauseResearchForAccountDeletion,now:@escaping()->Date=Date.init){
+        self.service=service;self.identity=identity;self.journal=journal;self.now=now;self.pauseResearch=pauseResearch
     }
     private func read(_ owner:String)async throws->(Data?,LiteAccountDeletionCheckpoint?) {
         let raw=try await journal.load(LiteAccountDeletionCheckpoint.key(origin:service.origin.absoluteString,owner:owner))
@@ -247,14 +257,30 @@ struct LiteAccountDeletionCheckpoint: Codable, Equatable {
                 guard create else{return}
                 let c=try await identity.deletionContext();try c.validate()
                 guard c.installation==owner,c.origin==service.origin.absoluteString else{throw LiteDeletionFailure.conflict}
-                let next=LiteAccountDeletionCheckpoint(version:1,context:c,operation:UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased(),createdAt:Int(now().timeIntervalSince1970))
+                let next=LiteAccountDeletionCheckpoint(version:1,context:c,operation:UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased(),createdAt:Int(now().timeIntervalSince1970),researchWithdrawalConfirmed:true)
+                try pauseResearch()
                 raw=try await save(owner,nil,next);r=next // Persist before closing local admission or transmitting.
             }
-            guard var current=r,let old=raw else{throw LiteDeletionFailure.invalid}
+            else if create || r?.researchWithdrawalConfirmed == true {
+                try pauseResearch()
+            }
+            guard var current=r,var old=raw else{throw LiteDeletionFailure.invalid}
+            if current.researchWithdrawalConfirmed != true {
+                if create {
+                    current.researchWithdrawalConfirmed = true
+                    old=try await save(owner,old,current)
+                } else if current.receipt == nil {
+                    record=current
+                    message="請先確認原刪帳要求也包含撤回研究，再繼續傳送。"
+                    return
+                }
+            }
             record=current
             try await identity.suspendForDeletion(current.context,operation:current.operation)
             let reply:LiteDeletionReceipt
-            if current.receipt==nil {reply=try await pendingReply(current)}
+            if current.receipt == nil || (current.researchWithdrawalConfirmed == true && current.receipt?.research_withdrawal != "requested") {
+                reply=try await pendingReply(current)
+            }
             else {reply=try await service.status(operation:current.operation,installation:owner)}
             try reply.validate(owner:owner,operation:current.operation,previous:current.receipt)
             guard reply.requested_at<=Int(now().timeIntervalSince1970)+60 else{throw LiteDeletionFailure.invalid}
@@ -284,6 +310,10 @@ struct LiteAccountDeletionCheckpoint: Codable, Equatable {
         do {
             let owner=try await service.installation();let(raw,r)=try await read(owner)
             guard var current=r,var old=raw,current.receipt==nil else{return}
+            guard current.researchWithdrawalConfirmed == true else {
+                message="請先確認原刪帳要求也包含撤回研究。";return
+            }
+            try pauseResearch()
             record=current;try await identity.suspendForDeletion(current.context,operation:current.operation)
             // A server may already have accepted the original request/proof.
             do {

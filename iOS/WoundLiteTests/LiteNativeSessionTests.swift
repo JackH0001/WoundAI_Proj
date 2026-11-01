@@ -107,11 +107,14 @@ private actor SessionWire: LiteAuthenticatedTransport {
             result = golden["completed"] as! [String: Any]
         case "service/status": result = golden["completed"] as! [String: Any]
         case "account/deletion/request", "account/deletion/status":
+            if path == "account/deletion/request" {
+                XCTAssertEqual(body["confirmation"] as? String, LiteAccountDeletionCheckpoint.confirmation)
+            }
             closed = true; code = 202
             result = ["v": 1, "state": "account_deletion_pending", "operation": operation, "installation": owner,
                 "requested_at": sessionTime, "inventory_sha256": sessionHash, "grant_total": 1, "revocation_scan": 1,
                 "grants_examined": 0, "grants_revoked": 0, "apple_revocation": "not_started", "data_disposition": "not_started",
-                "account_deleted": false, "subscription_cancelled": false, "local_records_preserved": true]
+                "account_deleted": false, "subscription_cancelled": false, "local_records_preserved": true, "research_withdrawal":"requested"]
         default: XCTFail("Unexpected route " + path); throw LiteAccountFailure.invalid
         }
         return (try JSONSerialization.data(withJSONObject: result), HTTPURLResponse(url: request.url!, statusCode: code, httpVersion: nil, headerFields: nil)!)
@@ -240,7 +243,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
     func testDeletionIntentFencesAllOrdinaryClientsAcrossRestartButProgressWorks() async throws {
         let wire = try SessionWire(), journal = SessionJournal(), kit = SessionStoreKit()
         let r = try runtime(wire, journal, storeKit: kit); await r.identity.signIn()
-        let d = r.deletion(); await d.requestConfirmed()
+        let d = r.deletion(pauseResearch:{}); await d.requestConfirmed()
         XCTAssertNotNil(d.record?.receipt); XCTAssertFalse(d.record?.receipt?.account_deleted ?? true)
         let operation = d.record?.operation
         let restarted = try runtime(wire, journal, storeKit: kit)
@@ -248,7 +251,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
         let id = await wire.capture(), image = await wire.image()
         _ = try await restarted.service.enqueue(captureID: id, jpeg: image)
         _ = try await restarted.service.resume(id) { _ in image }
-        let status = restarted.deletion(); await status.retry()
+        let status = restarted.deletion(pauseResearch:{}); await status.retry()
         XCTAssertEqual(status.record?.operation, operation); XCTAssertNotNil(status.record?.receipt)
         let counts = await wire.counts(); XCTAssertNil(counts["service/prepare"]); XCTAssertNil(counts["purchase/context"])
         XCTAssertEqual(counts["account/deletion/request"], 1); XCTAssertGreaterThan(counts["account/deletion/status"] ?? 0, 0)

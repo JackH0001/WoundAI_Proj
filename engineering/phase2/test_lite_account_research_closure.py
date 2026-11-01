@@ -229,8 +229,84 @@ class ClosureTests(unittest.TestCase):
         with patch.object(self.r.privacy,'scoped',return_value=p):
             with self.assertRaises(ReconsentRejected):self.rejoin()
 
+    def test_historical_service_only_intent_requires_confirmation_before_retirement(self):
+        self.put()
+        pending = self.f.d.begin('device-one', 'd'*32)
+        self.assertEqual(pending['research_withdrawal'], 'awaiting_confirmation')
+        previous = rows(self.r.store), rows(self.audit), rows(self.jobs)
+        with self.assertRaisesRegex(StateUnavailable, 'explicit linked research'):
+            self.advance()
+        self.assertEqual(previous, (rows(self.r.store), rows(self.audit), rows(self.jobs)))
+        self.assertIsNone(self.r.retirement(self.owner))
+        accepted = self.f.close()
+        self.assertEqual(accepted['operation'], pending['operation'])
+        self.assertEqual(accepted['research_withdrawal'], 'requested')
+        self.assertFalse(accepted['account_deleted'])
+        saved = rows(self.f.d.audit)
+        self.assertEqual(self.f.close(), accepted)
+        self.assertEqual(rows(self.f.d.audit), saved)
+        result = self.advance()
+        self.assertTrue(self.r.privacy.is_withdrawn(self.owner))
+        self.assertFalse(result['account_deleted'])
+        self.assertFalse(result['historical_epochs_verified'])
+
+    def test_uncertain_confirmation_does_not_authorize_research_cleanup(self):
+        self.f.d.begin('device-one', 'd'*32)
+        real = self.f.d.audit.compare_exchange
+        def unavailable(k, rev, value):
+            if value.get('confirmation'):
+                raise StateUnavailable('confirmation offline')
+            return real(k, rev, value)
+        with patch.object(self.f.d.audit, 'compare_exchange', side_effect=unavailable):
+            with self.assertRaises(StateUnavailable):
+                self.f.close()
+        with self.assertRaisesRegex(StateUnavailable, 'explicit linked research'):
+            self.advance()
+        self.assertIsNone(self.r.retirement(self.owner))
+        self.assertEqual(self.f.status()['research_withdrawal'], 'awaiting_confirmation')
+        self.assertEqual(self.f.close()['research_withdrawal'], 'requested')
+        self.advance()
+        self.assertTrue(self.r.privacy.is_withdrawn(self.owner))
+
+    def test_legacy_archive_needs_its_own_scope_evidence_and_cannot_resurrect_after_reconcile(self):
+        import json
+        from pathlib import Path
+        from lite_research_archive import archive, MEDIA, LEDGERS, RESERVE_FREE
+        from test_lite_research_archive import Source
+        source = Source()
+        vault = Path(self.f.root).resolve() / 'synthetic-old-vault'
+        legacy_owner, unrelated_owner = 'legacy-synthetic-owner', 'other-synthetic-owner'
+        iid = 'a'*16  # Deliberately identical across two owners.
+        for subject in (legacy_owner, unrelated_owner):
+            source.record(subject, iid)
+        def catalog():
+            result = archive(source, vault, free_bytes=RESERVE_FREE+10**8)
+            self.assertFalse(result['cloud_deletion_enabled'])
+            self.assertFalse(result['training_release_allowed'])
+            return {r['owner'] for r in json.loads((vault/'catalog.json').read_text())['records']}
+        self.assertEqual(catalog(), {legacy_owner, unrelated_owner})
+        self.f.close()
+        self.advance()
+        self.assertIsNotNone(self.r.retirement(self.owner))
+        self.assertFalse(self.f.status()['account_deleted'])
+        # A native account receipt alone is not an owner link for a different service.
+        self.assertEqual(catalog(), {legacy_owner, unrelated_owner})
+        # The fixture independently supplies the legacy service's scoped withdrawal.
+        # No real mapping or legacy ledger writer is implied by this rehearsal.
+        evidence = json.dumps(dict(action='withdrawal_requested', anon_id=legacy_owner)).encode()
+        source.put(LEDGERS[1]+'synthetic-receipt.jsonl', evidence)
+        self.assertEqual(catalog(), {unrelated_owner})
+        source.put(f'{MEDIA}{legacy_owner}/{iid}.jpg', b'late synthetic upload')
+        self.assertEqual(catalog(), {unrelated_owner})
+        self.assertEqual(source.data[LEDGERS[1]+'synthetic-receipt.jsonl'][0], evidence)
+        self.assertEqual(self.f.status()['research_withdrawal'], 'requested')
+        self.assertFalse(self.f.status()['account_deleted'])
+
     def test_zero_grant_account_does_not_claim_erasure(self):
         p='e'*64;self.f.f.lifecycle.initialize_new(p,existing_account=False);self.f.f.lifecycle.close(p,'empty','a'*32)
+        with self.assertRaisesRegex(StateUnavailable,'explicit linked research'):
+            self.w.advance(p)
+        self.f.d.research_confirmation(p,'empty','a'*32,write=True)
         r=self.w.advance(p);self.assertTrue(r['scan_finished']);self.assertEqual(r['total_grants'],0)
         self.assertFalse(r['account_deleted']);self.assertFalse(r['historical_epochs_verified'])
 

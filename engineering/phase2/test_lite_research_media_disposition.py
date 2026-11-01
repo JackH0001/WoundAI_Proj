@@ -300,6 +300,9 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(len(self.h.bucket.history),30)
     def test_zero_grant_account_does_not_claim_whole_account_deleted(self):
         p='e'*64;self.h.f.f.lifecycle.initialize_new(p,existing_account=False);self.h.f.f.lifecycle.close(p,'empty','a'*32)
+        with self.assertRaisesRegex(StateUnavailable, 'explicit linked research'):
+            self.h.w.advance(p,apply=True)
+        self.h.f.d.research_confirmation(p,'empty','a'*32,write=True)
         r=self.h.w.advance(p,apply=True);self.assertEqual(r['total_grants'],0);self.assertTrue(r['scan_finished'])
         self.assertFalse(r['account_deleted'])
     def test_bound_limits_and_store_isolation(self):

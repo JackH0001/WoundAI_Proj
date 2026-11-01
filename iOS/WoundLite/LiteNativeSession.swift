@@ -173,8 +173,8 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     func accountView() throws -> LiteAccountManagementView {
         try LiteAccountManagementView(identity: identity, service: deletionService)
     }
-    func deletion() -> LiteAccountDeletionStore {
-        LiteAccountDeletionStore(service: deletionService, identity: identity, journal: identity.journal, now: identity.now)
+    func deletion(pauseResearch: @escaping () throws -> Void = LitePrefs.pauseResearchForAccountDeletion) -> LiteAccountDeletionStore {
+        LiteAccountDeletionStore(service: deletionService, identity: identity, journal: identity.journal, pauseResearch:pauseResearch, now: identity.now)
     }
 
     static func captureID(recordID: String) throws -> String {

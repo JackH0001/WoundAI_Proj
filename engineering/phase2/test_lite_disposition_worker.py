@@ -38,6 +38,25 @@ class WorkerTests(unittest.TestCase):
         self.ready();r=self.work(max_steps=1,limit=1)
         self.assertEqual(r['dispatches'],1);self.assertEqual(r['states']['service_current'],'observed')
         self.assertEqual(r['states']['apple_revocation'],'not_started');self.assertEqual(self.f.f.f.g.calls.count(REVOKE_URL),0)
+    def test_legacy_closure_can_revoke_apple_while_both_research_lanes_wait(self):
+        f = self.f.f
+        f.complete()
+        self.f.h.seed(3)
+        f.d.begin('device-one','d'*32)
+        original = copy.deepcopy(self.f.h.bucket.history)
+        progress = self.work(max_steps=20)
+        self.assertEqual(progress['states']['service_current'], 'observed')
+        self.assertEqual(progress['states']['apple_revocation'], 'observed')
+        for lane in ('research_current', 'research_history'):
+            self.assertEqual(progress['states'][lane], 'blocked')
+        self.assertEqual(original, self.f.h.bucket.history)
+        original_plan = progress['plan_sha256']
+        f.close()
+        final, _ = self.f.finish()
+        self.assertEqual(final['plan_sha256'], original_plan)
+        self.assertEqual(final['states']['research_current'], 'observed')
+        self.assertEqual(final['states']['research_history'], 'observed')
+        self.assertFalse(final['account_deleted'])
     def test_research_failure_does_not_prevent_apple_results_or_keys(self):
         self.ready()
         with patch.object(self.f.h.m.w,'advance',side_effect=StateUnavailable('private media unavailable')):

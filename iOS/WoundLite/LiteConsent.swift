@@ -43,6 +43,10 @@ struct LiteConsentView: View {
                         "之後可在設定重新選擇；若已撤回並清除雲端資料，須另行閱讀並完成重新同意。",
                     ])
 
+                    if LiteNativeBuild.includesService {
+                        Text("您可單獨撤回研究並保留服務帳號。若確認刪除服務帳號，會同時提出與該帳號連結的研究撤回；清理進度須另外核對。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
                     Text(LiteNativeBuild.includesService ? "這項選擇只決定研究上傳。個人服務另行登入，您可在紀錄中自行選擇是否送出照片。" : "兩種方式的量測數學完全相同；差別只在輪廓怎麼來、資料去不去雲端。")
                         .font(.footnote).foregroundStyle(.secondary)
 
@@ -176,14 +180,17 @@ struct LiteSettingsView: View {
                 }
                 #endif
                 Section("研究上傳") {
-                    Toggle("上傳去識別資料供研究（啟用自動辨識）", isOn: $consent)
+                    Toggle("上傳去識別資料供研究（啟用自動辨識）", isOn: Binding(get:{ consent && !LitePrefs.researchPausedForAccountDeletion }, set:{ consent = $0 }))
                         .onChange(of: consent) { _, v in LitePrefs.researchConsent = v }
-                        .disabled(withdrawal.blocksUploads || withdrawal.busy)
-                    Text(consent
+                        .disabled(LitePrefs.researchPausedForAccountDeletion || withdrawal.blocksUploads || withdrawal.busy)
+                    Text(consent && !LitePrefs.researchPausedForAccountDeletion
                          ? "拍攝影像、深度、修正輪廓、量測估算與傷口側別部位會上傳供辨識與研究；紀錄修改也會同步。可隨時關閉。"
                          : LiteNativeBuild.includesService ? "拍攝時採本機圈選。個人雲端辨識需另從紀錄選擇照片並送出。" : "完全離線：照片與深度只留在手機，輪廓手動圈選。")
                         .font(.footnote).foregroundStyle(.secondary)
-                    if withdrawal.blocksUploads {
+                    if LitePrefs.researchPausedForAccountDeletion {
+                        Text("因刪帳要求，這部手機已暫停研究上傳。請至帳號刪除頁核對已連結資料的撤回進度。")
+                            .font(.footnote)
+                    } else if withdrawal.blocksUploads {
                         Text("研究上傳已因撤回停用。請查看下方「資料與撤回」狀態；重試查核不會重新開啟研究上傳。")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
@@ -201,11 +208,11 @@ struct LiteSettingsView: View {
                     Button(checkingConnection ? "核對中…" : "核對裝置登記（不傳照片）") {
                         Task { await checkConnection() }
                     }
-                    .disabled(checkingConnection || !consent || withdrawal.blocksUploads || withdrawal.busy)
+                    .disabled(checkingConnection || LitePrefs.researchConsent != true || withdrawal.blocksUploads || withdrawal.busy)
                     if let connectionMessage { Text(connectionMessage).font(.footnote) }
                     if mayRepairRegistration {
                         Button("修復尚未完成的裝置登記") { confirmRegistrationRepair = true }
-                            .disabled(checkingConnection || !consent || withdrawal.blocksUploads || withdrawal.busy)
+                            .disabled(checkingConnection || LitePrefs.researchConsent != true || withdrawal.blocksUploads || withdrawal.busy)
                             .confirmationDialog("核對並修復未完成的登記？", isPresented: $confirmRegistrationRepair,
                                                 titleVisibility: .visible) {
                                 Button("核對並修復") { Task { await checkConnection(repair: true) } }
