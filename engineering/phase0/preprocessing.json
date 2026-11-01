@@ -70,7 +70,8 @@
       "channel_order": "RGB",
       "normalize": "imagenet",
       "threshold": 0.4,
-      "output": "sigmoid_mask"
+      "output": "logits_mask",
+      "output_note": "ONNX activation=None；推論端先 sigmoid 再 resize；CoreML 已內含 sigmoid，不可重複轉換。"
     }
   },
   "calibration": {

@@ -28,6 +28,8 @@
 	<string>$(WOUNDLITE_BACKEND_URL)</string>
 	<key>LiteAttestAudience</key>
 	<string>woundlite-research-v1</string>
+	<key>LiteNativeSandboxOrigin</key>
+	<string>$(WOUNDLITE_NATIVE_SANDBOX_ORIGIN)</string>
 	<key>CFBundleDisplayName</key>
 	<string>WoundAILite</string>
 
@@ -51,7 +53,7 @@
 	</array>
 
 	<key>NSCameraUsageDescription</key>
-	<string>拍攝傷口影像與 LiDAR 深度以進行面積量測。未同意研究上傳時，影像只留在您的手機。</string>
+	<string>拍攝照片與 LiDAR 深度以圈選和估算面積。研究上傳須另行同意。</string>
 
 	<!-- 民眾版不開放相簿來源：相簿照片沒有配對的 LiDAR 深度，免貼紙量測無從取得尺度。 -->
 

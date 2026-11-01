@@ -325,7 +325,7 @@ struct LiteVerdict {
 func liteVerdict(_ e: DepthAreaResult) -> LiteVerdict {
     guard [e.surfaceAreaCm2, e.projectedAreaCm2, e.coverage, e.medianDistanceM].allSatisfy(\.isFinite),
           e.surfaceAreaCm2 > 0, e.projectedAreaCm2 > 0, (0...1).contains(e.coverage),
-          e.medianDistanceM > 0,
+          e.medianDistanceM > 0, e.medianDistanceM < 5, // Upper bound of captured samples used by DepthAreaEstimator.
           e.tiltDeg.map({ $0.isFinite && (0...90).contains($0) }) ?? true else {
         return LiteVerdict(usable: false, blocker: "量測資料不完整，無法提供面積。請保留原紀錄並重新拍攝。", warnings: [])
     }

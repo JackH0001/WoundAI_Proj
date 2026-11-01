@@ -1,0 +1,440 @@
+"""Opt-in, short-session Apple identity bridge. No discovery or startup activation.
+
+App Attest must bind every HTTP request to its installation. Apple ID-token
+verification supplies the human subject; neither email nor client account IDs do.
+Public-key snapshots and identity namespace/key are supplied by trusted startup.
+Apple grant exchange is separately injected and default-off. No Apple settings,
+research writes, quota resets or session extension occur here.
+"""
+import base64
+import hashlib
+import hmac
+import secrets
+import uuid
+import jwt
+from flask import Blueprint, g, jsonify, request
+from audit_chain_contract import loads_json_object_strict
+from lite_attest_state import StateUnavailable, CAS_ATTEMPTS
+from lite_usage_ledger import UsageConflict, digest, _hex, _subject
+from lite_subscription_runtime import SubscriptionRuntime
+from lite_subscription_executor import key
+
+PREFIX = '/api/v1/lite/account/'
+ACCOUNT_PATHS = {PREFIX + p for p in ('challenge', 'confirm', 'status', 'logout', 'renew')}
+
+
+class IdentityRejected(ValueError): pass
+
+
+def identity_header(signed):
+    """Parse only enough untrusted data to select a key; never accepts key URLs."""
+    try:
+        if type(signed) is not str or not 1 <= len(signed) <= 16000: raise ValueError()
+        parts = signed.split('.')
+        if len(parts) != 3: raise ValueError()
+        header = loads_json_object_strict(base64.b64decode(parts[0] + '=' * (-len(parts[0]) % 4), altchars=b'-_', validate=True).decode())
+        if (set(header) - {'alg', 'kid', 'typ'} or header.get('typ', 'JWT') != 'JWT'
+                or header.get('alg') not in ('RS256', 'ES256')
+                or type(header.get('kid')) is not str or not 1 <= len(header['kid']) <= 128): raise ValueError()
+        return header
+    except Exception as exc:
+        raise IdentityRejected('bounded signed Apple token required') from exc
+
+
+class AppleIdentityVerifier:
+    """Bounded trusted JWKS snapshot; never follows a JWT-provided URL/key."""
+    issuer = 'https://appleid.apple.com'
+
+    def __init__(self, *, audience, jwks, fetched_at, expires_at, clock):
+        if (type(audience) is not str or not 1 <= len(audience) <= 128
+                or type(jwks) is not dict or set(jwks) != {'keys'}
+                or type(jwks['keys']) is not list or not 1 <= len(jwks['keys']) <= 8
+                or type(fetched_at) is not int or type(expires_at) is not int
+                or not 0 < expires_at - fetched_at <= 3600):
+            raise ValueError('trusted bounded identity configuration required')
+        self.audience, self.clock = audience, clock
+        self.fetched_at, self.expires_at, self.keys = fetched_at, expires_at, {}
+        for item in jwks['keys']:
+            if type(item) is not dict: raise ValueError('invalid identity key')
+            alg, kid = item.get('alg'), item.get('kid')
+            if (alg not in ('RS256', 'ES256') or type(kid) is not str or not 1 <= len(kid) <= 128
+                    or kid in self.keys or item.get('use') != 'sig'
+                    or ('d' in item) or (alg == 'RS256' and item.get('kty') != 'RSA')
+                    or (alg == 'ES256' and (item.get('kty') != 'EC' or item.get('crv') != 'P-256'))):
+                raise ValueError('unsupported identity signing key')
+            k = jwt.PyJWK.from_dict(item, algorithm=alg).key
+            if alg == 'RS256' and k.key_size < 2048: raise ValueError('weak identity key')
+            self.keys[kid] = (alg, k)
+
+    def _claims(self, signed, required):
+        now = self.clock()
+        if type(now) is not int or not self.fetched_at <= now < self.expires_at:
+            raise StateUnavailable('fresh trusted Apple signing keys required')
+        try:
+            header = identity_header(signed)
+            parts = signed.split('.')
+            raw = loads_json_object_strict(base64.b64decode(parts[1] + '=' * (-len(parts[1]) % 4), altchars=b'-_', validate=True).decode())
+            alg, public = self.keys[header['kid']]
+            if header['alg'] != alg: raise ValueError()
+            claims = jwt.decode(signed, public, algorithms=[alg], audience=self.audience,
+                issuer=self.issuer, options={'verify_exp': False, 'verify_iat': False,
+                    'verify_nbf': False, 'require': required})
+            if claims != raw or claims['aud'] != self.audience: raise ValueError()
+            return claims
+        except Exception as exc:
+            raise IdentityRejected('Apple signature or claims rejected') from exc
+
+    def verify(self, signed, nonce):
+        claims = self._claims(signed, ['iss', 'aud', 'sub', 'iat', 'exp', 'nonce'])
+        now = self.clock()
+        try:
+            if (claims['nonce'] != nonce
+                    or type(claims['sub']) is not str or not 1 <= len(claims['sub']) <= 255
+                    or not claims['sub'].isascii() or not claims['sub'].isprintable()
+                    or any(type(claims[x]) is not int for x in ('iat', 'exp'))
+                    or not 0 <= claims['iat'] <= now + 30 or not now < claims['exp']
+                    or not 0 < claims['exp'] - claims['iat'] <= 86400
+                    or ('nbf' in claims and (type(claims['nbf']) is not int or claims['nbf'] > now))):
+                raise ValueError()
+            return dict(sub=claims['sub'], expires=claims['exp'], issued=claims['iat'])
+        except Exception as exc:
+            raise IdentityRejected('Apple identity, signature or nonce rejected') from exc
+
+    def verify_refresh(self, signed, nonce, original_issued):
+        c=self._claims(signed,['iss','aud','sub','iat','exp']);now=self.clock()
+        if (type(original_issued) is not int or type(c['sub']) is not str or not 1<=len(c['sub'])<=255
+                or not c['sub'].isascii() or not c['sub'].isprintable()
+                or any(type(c[f]) is not int for f in ('iat','exp'))
+                or not original_issued-30<=c['iat']<=now+30 or not now<c['exp']
+                or not 0<c['exp']-c['iat']<=86400
+                or ('nonce' in c and c['nonce']!=nonce)
+                or ('nbf' in c and (type(c['nbf']) is not int or c['nbf']>now))):
+            raise IdentityRejected('Apple refresh identity rejected')
+        return dict(sub=c['sub'],issued=c['iat'],expires=c['exp'])
+
+    def event(self, signed):
+        """Apple account notifications have no required nonce/exp. Not ID tokens.
+
+        Seven-day replay acceptance is an engineering bound, not an Apple SLA;
+        durable jti deduplication and event-time fencing are handled separately.
+        """
+        c = self._claims(signed, ['iss', 'aud', 'iat', 'jti', 'events'])
+        try:
+            e = c['events']
+            if type(e) is str: e = loads_json_object_strict(e)
+            now = self.clock()
+            if (type(c['iat']) is not int or not now-7*86400 <= c['iat'] <= now+30
+                    or type(c['jti']) is not str or not 1 <= len(c['jti']) <= 255
+                    or not c['jti'].isascii() or not c['jti'].isprintable()
+                    or type(e) is not dict or not {'type','sub','event_time'} <= set(e)
+                    or set(e) - {'type','sub','event_time','email','is_private_email'}
+                    or e['type'] not in ('email-enabled','email-disabled','consent-revoked','account-deleted')
+                    or type(e['sub']) is not str or not 1 <= len(e['sub']) <= 255
+                    or not e['sub'].isascii() or not e['sub'].isprintable()
+                    or type(e['event_time']) is not int or not 0 <= e['event_time'] <= min(c['iat']+30,now+30)
+                    or ('nbf' in c and (type(c['nbf']) is not int or c['nbf'] > now))
+                    or ('exp' in c and (type(c['exp']) is not int or c['exp'] <= now))): raise ValueError()
+            return dict(jti=c['jti'], issued=c['iat'], type=e['type'], sub=e['sub'], event_time=e['event_time'])
+        except Exception as exc:
+            raise IdentityRejected('Apple account event rejected') from exc
+
+
+class AccountIdentityBridge:
+    """Immutable human/device association; CAS sessions prevent late reactivation.
+
+    Existing installations cannot silently switch people. A separate reviewed
+    unlink/account-deletion procedure is required; logout never erases research.
+    """
+    def __init__(self, *, runtime, verifier, store, audit_store, namespace, identity_key, events=None, grants=None, renewal=False, lifecycle=None):
+        if not isinstance(runtime, SubscriptionRuntime) or not isinstance(verifier, AppleIdentityVerifier):
+            raise ValueError('trusted runtime and Apple verifier required')
+        _subject(namespace)
+        if type(identity_key) is not bytes or len(identity_key) != 32: raise ValueError('32-byte identity key required')
+        self.runtime, self.registry, self.verifier = runtime, runtime.registry, verifier
+        self.store, self.audit, self.namespace, self.secret = store, audit_store, namespace, identity_key
+        self.config = dict(v=1, namespace=namespace, issuer=verifier.issuer, audience=verifier.audience,
+            identity_key_sha256=hashlib.sha256(identity_key).hexdigest(), session_seconds=900)
+        self.immutable(store, key('human-identity-config', namespace), self.config)
+        self.events = events
+        mode_key=key('human-events-required',namespace)
+        if events is not None:
+            from lite_apple_account_events import AppleAccountEvents
+            if not isinstance(events, AppleAccountEvents) or events.binding != {k:self.config[k] for k in ('namespace','issuer','audience','identity_key_sha256')}:
+                raise ValueError('matching Apple event authority required')
+            self.immutable(store,mode_key,dict(v=1,binding=events.binding))
+        elif store.load(mode_key) is not None:
+            raise StateUnavailable('Apple event protection cannot be silently disabled')
+        self.grants = grants
+        grant_key = key('human-grants-required', namespace)
+        if grants is not None:
+            from lite_apple_grants import AppleGrantAuthority
+            if (not isinstance(grants, AppleGrantAuthority) or grants.verifier is not verifier
+                    or grants.binding != {k:self.config[k] for k in ('namespace','issuer','audience','identity_key_sha256')}):
+                raise ValueError('matching Apple grant authority required')
+            self.immutable(store, grant_key, dict(v=1, binding=grants.binding))
+        elif store.load(grant_key) is not None:
+            raise StateUnavailable('Apple grant custody cannot be silently disabled')
+        self.lifecycle = lifecycle
+        lifecycle_key = key('human-lifecycle-required',namespace)
+        if lifecycle is not None:
+            from lite_account_lifecycle import AccountLifecycle
+            if (not isinstance(lifecycle,AccountLifecycle) or grants is None
+                    or grants.lifecycle is not lifecycle or lifecycle.binding != grants.binding):
+                raise ValueError('matching grant inventory and lifecycle required')
+            self.immutable(store,lifecycle_key,dict(v=1,binding=lifecycle.binding))
+            self.registry.attach_lifecycle(lifecycle)
+        elif store.load(lifecycle_key) is not None:
+            raise StateUnavailable('account lifecycle cannot be silently disabled')
+        if type(renewal) is not bool: raise ValueError('explicit renewal policy required')
+        self.renewals = None
+        renewal_key = key('human-renewal-required', namespace)
+        if renewal:
+            if grants is None or events is None: raise ValueError('renewal requires grant custody and Apple events')
+            from lite_account_sessions import SessionRenewals
+            self.renewals = SessionRenewals(self)
+            self.immutable(store, renewal_key, self.renewals.policy)
+        elif store.load(renewal_key) is not None:
+            raise StateUnavailable('session renewal protection cannot be silently disabled')
+
+    def _authorization_key(self, installation, operation):
+        return key('human-authorization', digest([self.namespace,installation,operation]))
+
+    def now(self):
+        n = self.verifier.clock()
+        if type(n) is not int or n < 0: raise StateUnavailable('invalid identity clock')
+        return n
+
+    immutable = staticmethod(SubscriptionRuntime.immutable)
+
+    def _key(self, installation):
+        return key('human-session', digest([self.namespace, _subject(installation)]))
+
+    def _read(self, installation):
+        row = self.store.load(self._key(installation))
+        if row is None: return None
+        c = row[1]
+        try:
+            if (set(c) != {'v','installation_hash','operation','nonce','state','created_at','expires_at','phase','account','token_sha256','session_expires_at'}
+                    or type(c['v']) is not int or c['v'] != 1 or c['installation_hash'] != digest(installation)
+                    or c['phase'] not in ('challenge','verified','active','ended')
+                    or any(type(c[x]) is not int for x in ('created_at','expires_at','session_expires_at'))
+                    or not 0 <= c['created_at'] <= self.now() or c['expires_at'] != c['created_at'] + 300): raise ValueError()
+            _hex(c['operation'],32); _hex(c['nonce']); _hex(c['state'])
+            if c['account'] is not None:
+                if set(c['account']) != {'v','subject','token','identity_sha256'} or c['account']['v'] != 1: raise ValueError()
+                _hex(c['account']['identity_sha256']); _subject(c['account']['subject'])
+                if str(uuid.UUID(c['account']['token'])) != c['account']['token']: raise ValueError()
+                _hex(c['token_sha256'])
+                if not c['created_at'] < c['session_expires_at'] <= c['expires_at'] + 900: raise ValueError()
+            elif c['phase'] in ('verified','active') or c['token_sha256'] is not None or c['session_expires_at'] != 0: raise ValueError()
+        except (ValueError, TypeError, KeyError) as exc: raise StateUnavailable('identity state corrupt; never reset') from exc
+        return row
+
+    def challenge(self, installation, operation):
+        _hex(operation,32)
+        self._lifecycle_required()
+        if self.lifecycle is not None and self.registry.store.load(self.registry.key(installation)) is not None:
+            a = self.registry.registration(installation)
+            if not a['subject'].startswith('apple-'): raise IdentityRejected('verified Apple account required')
+            self.lifecycle.require_active(a['subject'][6:])
+        for _ in range(CAS_ATTEMPTS):
+            old = self._read(installation)
+            if old and old[1]['operation'] == operation:
+                c=old[1]
+                if c['phase'] != 'challenge' or self.now() >= c['expires_at']: raise IdentityRejected('start a new explicit sign-in')
+                self.immutable(self.audit,key('human-operation',digest([self.namespace,installation,operation])),dict(v=1,challenge_sha256=digest(c)))
+                return self._public(c, installation)
+            # Old operation IDs cannot recreate a session after logout/restart.
+            opkey=key('human-operation',digest([self.namespace,installation,operation]))
+            if self.audit.load(opkey) is not None or self.audit.load(key('human-logout',digest([self.namespace,installation,operation]))) is not None: raise IdentityRejected('old sign-in operation')
+            n=self.now()
+            c=dict(v=1,installation_hash=digest(installation),operation=operation,nonce=secrets.token_hex(32),
+                state=secrets.token_hex(32),created_at=n,expires_at=n+300,phase='challenge',account=None,
+                token_sha256=None,session_expires_at=0)
+            if self.store.compare_exchange(self._key(installation),old[0] if old else 0,c):
+                self.immutable(self.audit,opkey,dict(v=1,challenge_sha256=digest(c)))
+                return self._public(c,installation)
+        raise StateUnavailable('sign-in concurrent change')
+
+    def _public(self,c,installation):
+        result = dict(v=1,installation=installation,operation=c['operation'],nonce=c['nonce'],state=c['state'],
+                    created_at=c['created_at'],expires_at=c['expires_at'],audience=self.verifier.audience)
+        if self.grants is not None: result['authorization_code_required'] = True
+        return result
+
+    def confirm(self, installation, operation, signed, state, authorization_code=None):
+        _hex(operation,32)
+        self._lifecycle_required()
+        if type(signed) is not str or not 1 <= len(signed) <= 16000: raise IdentityRejected('bounded identity required')
+        for _ in range(CAS_ATTEMPTS):
+            row=self._read(installation)
+            if row is None or row[1]['operation'] != operation: raise IdentityRejected('current saved challenge required')
+            rev,c=row
+            if (c['state'] != state or c['phase'] == 'ended' or
+                    self.audit.load(key('human-logout',digest([self.namespace,installation,operation]))) is not None): raise IdentityRejected('sign-in state rejected')
+            token_hash=digest(signed)
+            if c['phase'] == 'challenge':
+                if self.now() >= c['expires_at']: raise IdentityRejected('sign-in expired')
+                claims=self.verifier.verify(signed,c['nonce'])
+                if claims['issued'] < c['created_at']-30: raise IdentityRejected('token predates challenge')
+                identity=hmac.new(self.secret, (self.namespace+'\0'+self.verifier.issuer+'\0'+claims['sub']).encode(),hashlib.sha256).hexdigest()
+                if self.lifecycle is not None:
+                    self.lifecycle.initialize_new(identity,existing_account=self.store.load(key('human-account',identity)) is not None)
+                if self.events is not None:
+                    self.events.require_identity(identity, claims['issued'])
+                    self.immutable(self.audit, self._authorization_key(installation,operation),
+                        dict(v=1,identity_sha256=identity,issued_at=claims['issued']))
+                if self.grants is not None:
+                    self.grants.capture(installation, operation, c['nonce'], signed, authorization_code)
+                k=key('human-account',identity);account=self.store.load(k)
+                if account is None:
+                    a=dict(v=1,identity_sha256=identity,subject='apple-'+identity,token=str(uuid.uuid4()))
+                    self.store.compare_exchange(k,0,a);account=self.store.load(k)
+                if account is None: raise StateUnavailable('account creation unconfirmed')
+                a=account[1]
+                if set(a)!={'v','identity_sha256','subject','token'} or a['v']!=1 or a['identity_sha256']!=identity or a['subject']!='apple-'+identity:
+                    raise StateUnavailable('account identity corrupt')
+                if str(uuid.UUID(a['token']))!=a['token']: raise StateUnavailable('account token corrupt')
+                updated=dict(c,phase='verified',account=a,token_sha256=token_hash,
+                             session_expires_at=min(claims['expires'],self.now()+900))
+                if not self.store.compare_exchange(self._key(installation),rev,updated): continue
+                continue
+            if c['token_sha256'] != token_hash or self.now() >= c['session_expires_at']:
+                raise IdentityRejected('saved sign-in differs or expired')
+            if self.lifecycle is not None: self.lifecycle.require_active(c['account']['identity_sha256'])
+            if self.grants is not None:
+                self.grants.capture(installation, operation, c['nonce'], signed, authorization_code)
+            a=c['account'];proof=digest(['apple-device-binding/1',self.namespace,installation,a])
+            registration=self.registry.store.load(self.registry.key(installation))
+            if registration is not None:
+                existing=self.registry.registration(installation)
+                if existing['subject']!=a['subject'] or existing['token']!=a['token']:
+                    raise IdentityRejected('installation belongs to another account; no implicit switch')
+                proof=existing['proof']
+            evidence=dict(v=1,installation_hash=digest(installation),operation=operation,account_sha256=digest(a['subject']),
+                app_account_token=a['token'],identity_token_sha256=token_hash,registration_proof=proof,
+                session_expires_at=c['session_expires_at'])
+            self.immutable(self.audit,key('human-verified',digest([self.namespace,installation,operation])),evidence)
+            self.registry.provision(installation,a['subject'],a['token'],None,proof)
+            # Logout/new challenge may race with provisioning. The immutable
+            # mapping may remain, but it cannot authorize an ended session.
+            if c['phase']=='verified':
+                if not self.store.compare_exchange(self._key(installation),rev,dict(c,phase='active')): continue
+            self.require_session(installation)
+            if self._read(installation)[1]['operation']!=operation: raise IdentityRejected('session changed')
+            return self.status(installation)
+        raise StateUnavailable('sign-in confirmation raced; keep local evidence')
+
+    def _lifecycle_required(self):
+        if self.lifecycle is None and self.store.load(key('human-lifecycle-required',self.namespace)) is not None:
+            raise StateUnavailable('account lifecycle required by durable policy')
+
+    def begin_account_closure(self, installation, operation):
+        """Coordinator primitive; not exposed as completed deletion in the App."""
+        if self.lifecycle is None: raise IdentityRejected('account lifecycle unavailable')
+        a = self.registry.registration(installation)
+        person = a['subject'][6:] if a['subject'].startswith('apple-') else ''
+        row = self.lifecycle._read(person)
+        if row is not None and row[1]['phase'] == 'closing':
+            return self.lifecycle.progress(person,installation,operation)
+        c = self.require_session(installation)
+        return self.lifecycle.close(c['account']['identity_sha256'],installation,operation)
+
+    def _live_session(self, installation):
+        self._lifecycle_required()
+        if self.grants is None and self.store.load(key('human-grants-required',self.namespace)) is not None:
+            raise StateUnavailable('Apple grant authority required by durable policy')
+        if self.events is None and self.store.load(key('human-events-required',self.namespace)) is not None:
+            raise StateUnavailable('Apple account event authority required by durable policy')
+        row=self._read(installation)
+        if row is None or row[1]['phase']!='active':
+            raise IdentityRejected('sign-in required')
+        c=row[1]
+        if self.lifecycle is not None: self.lifecycle.require_active(c['account']['identity_sha256'])
+        if self.grants is not None:
+            self.grants.require(installation, c['operation'], c['account']['identity_sha256'])
+        if self.events is not None:
+            proof=self.audit.load(self._authorization_key(installation,c['operation']))
+            if proof is None: raise IdentityRejected('explicit sign-in required for account event protection')
+            p=proof[1]
+            if set(p)!={'v','identity_sha256','issued_at'} or type(p['v']) is not int or p['v']!=1 or p['identity_sha256']!=c['account']['identity_sha256']:
+                raise StateUnavailable('identity authorization proof corrupt')
+            self.events.require_identity(p['identity_sha256'],p['issued_at'])
+        if self.audit.load(key('human-logout',digest([self.namespace,installation,c['operation']]))) is not None:
+            raise IdentityRejected('session signed out')
+        a=self.registry.registration(installation)
+        if a['subject']!=c['account']['subject'] or a['token']!=c['account']['token']:
+            raise IdentityRejected('account mapping differs')
+        return c
+
+    def require_session(self, installation):
+        c = self._live_session(installation)
+        if self.renewals is None and self.store.load(key('human-renewal-required',self.namespace)) is not None:
+            raise StateUnavailable('durable session renewal policy required')
+        if self.renewals is not None: c = self.renewals.effective(installation,c)
+        if self.now() >= c['session_expires_at']: raise IdentityRejected('sign-in required')
+        return c
+
+    def renew(self, installation, operation, renewal_operation, expected_generation):
+        if self.renewals is None: raise IdentityRejected('renewal is not enabled')
+        return self.renewals.renew(installation,operation,renewal_operation,expected_generation)
+
+    def status(self, installation):
+        c=self.require_session(installation)
+        result = dict(v=1,state='signed_in',installation=installation,operation=c['operation'],
+            account_sha256=digest(c['account']['subject']),app_account_token=c['account']['token'],
+            expires_at=c['session_expires_at'])
+        if self.renewals is not None:
+            result.update({f:c[f] for f in ('renewal_generation','renewed_at','family_expires_at')})
+        return result
+
+    def logout(self, installation, operation):
+        _hex(operation,32)
+        receipt=dict(v=1,state='signed_out',installation=installation,operation=operation)
+        self.immutable(self.audit,key('human-logout',digest([self.namespace,installation,operation])),receipt)
+        for _ in range(CAS_ATTEMPTS):
+            row=self._read(installation)
+            if row is None or row[1]['operation']!=operation or row[1]['phase']=='ended': return receipt
+            if self.store.compare_exchange(self._key(installation),row[0],dict(row[1],phase='ended')): return receipt
+        raise StateUnavailable('logout unconfirmed')
+
+
+def blueprint(bridge):
+    if not isinstance(bridge,AccountIdentityBridge): raise ValueError('trusted identity bridge required')
+    bp=Blueprint('lite_account_identity',__name__)
+    def action(kind):
+        try:
+            admission=getattr(g,'lite_admission',None)
+            if admission is None:return jsonify(error='lite_attestation_required'),401
+            body=loads_json_object_strict(request.get_data().decode())
+            fields={'anon_id'} | ({'operation'} if kind!='status' else set()) | ({'identity_token','state'} if kind=='confirm' else set())
+            if kind == 'confirm' and bridge.grants is not None: fields.add('authorization_code')
+            if kind == 'renew': fields |= {'renewal_operation','expected_generation'}
+            if request.mimetype!='application/json' or set(body)!=fields: raise IdentityRejected('exact account fields required')
+            if body['anon_id']!=admission.installation:return jsonify(error='lite_owner_mismatch'),403
+            if kind=='confirm':result=bridge.confirm(admission.installation,body['operation'],body['identity_token'],body['state'],body.get('authorization_code'))
+            elif kind=='renew':result=bridge.renew(admission.installation,body['operation'],body['renewal_operation'],body['expected_generation'])
+            elif kind=='status':result=bridge.status(admission.installation)
+            else:result=getattr(bridge,kind)(admission.installation,body['operation'])
+            return jsonify(result)
+        except IdentityRejected as exc:
+            if bridge.grants is not None:
+                from lite_apple_oauth import GrantRejected
+                if isinstance(exc, GrantRejected):
+                    return jsonify(error='lite_apple_grant_recovery_required',keep_local=True,
+                        explicit_sign_in_required=True,retry_saved_code=False),409
+            return jsonify(error='lite_sign_in_required',keep_local=True),401
+        except (ValueError,TypeError,KeyError,UsageConflict):return jsonify(error='lite_account_conflict',keep_local=True),409
+        except StateUnavailable as exc:
+            if bridge.grants is not None:
+                from lite_apple_oauth import GrantUncertain
+                if isinstance(exc, GrantUncertain):
+                    return jsonify(error='lite_apple_grant_recovery_required',keep_local=True,
+                        explicit_sign_in_required=True,retry_saved_code=False),409
+            return jsonify(error='lite_account_unconfirmed',keep_local=True),503
+        except Exception:return jsonify(error='lite_account_unconfirmed',keep_local=True),503
+    for kind in ('challenge','confirm','status','logout','renew'):
+        bp.add_url_rule(PREFIX+kind,kind,lambda kind=kind:action(kind),methods=['POST'])
+    @bp.after_request
+    def no_cache(r):r.headers['Cache-Control']='no-store';return r
+    return bp

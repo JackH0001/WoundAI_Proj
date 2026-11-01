@@ -131,6 +131,39 @@ class FencedObjects:
         except Exception as exc:
             raise StateUnavailable('complete fenced inventory unavailable') from exc
 
+    def page_refs(self, owner, *, token=None, after=None, limit=20):
+        """One provider page, only after admission and pending plans are sealed.
+
+        Sealing retains every name, so saved page tokens do not skip removed
+        names. Short/empty pages with a continuation are NOT completion.
+        """
+        prefix = self.name(ObjectRef(owner, 'image', '0'*32)).rsplit('/',2)[0]+'/'
+        if type(limit) is not int or not 1<=limit<=20: raise ValueError('bounded object page required')
+        if token is not None and (type(token) is not str or not 1<=len(token)<=8192):
+            raise StateUnavailable('invalid saved page token')
+        if after is not None and (type(after) is not str or not after.startswith(prefix)):
+            raise StateUnavailable('page cursor outside owner scope')
+        try:
+            iterator=self.bucket.list_blobs(prefix=prefix,page_token=token,page_size=limit,
+                max_results=limit,timeout=10,retry=None)
+            page=next(iter(iterator.pages),None);refs=[];last=after
+            for blob in (() if page is None else page):
+                name=blob.name
+                if type(name) is not str or not name.startswith(prefix) or (last is not None and name<=last):
+                    raise StateUnavailable('unordered or out-of-scope research page')
+                parts=name[len(prefix):].split('/')
+                if len(parts)!=2:raise StateUnavailable('invalid research page path')
+                ref=ObjectRef(owner,*parts)
+                if self.name(ref)!=name:raise StateUnavailable('research page reference mismatch')
+                refs.append(ref);last=name
+                if len(refs)>limit:raise StateUnavailable('provider exceeded page bound')
+            following=iterator.next_page_token
+            if following is not None and (type(following) is not str or not 1<=len(following)<=8192
+                    or following==token):raise StateUnavailable('invalid research continuation')
+            return refs,following,last
+        except StateUnavailable:raise
+        except Exception as exc:raise StateUnavailable('bounded research inventory unavailable') from exc
+
     def pin(self, ref):
         """Read a generation BEFORE journal admission; this is not authorization."""
         snapshot = self._snapshot(ref)

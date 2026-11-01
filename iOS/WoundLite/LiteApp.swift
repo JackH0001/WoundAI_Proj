@@ -24,8 +24,16 @@ import AVFoundation
  */
 @main
 struct WoundLiteApp: App {
+    private static let preparePDFSharing: Void = { LitePDFShare.purgeAfterLaunch() }()
+    init() { _ = Self.preparePDFSharing }
     var body: some Scene {
-        WindowGroup { LiteRootView() }
+        WindowGroup {
+            #if WOUND_LITE_NATIVE_SANDBOX
+            LiteNativeCandidateRoot()
+            #else
+            LiteRootView()
+            #endif
+        }
     }
 }
 
@@ -85,10 +93,19 @@ struct LiteRootView: View {
     @State private var savedRecordToOpen: String?
     /// Hardware gates new capture only; records and privacy controls stay accessible.
     let lidarOK: Bool
+    let accountManagement:LiteAccountManagementView?
+    let nativeSession:LiteNativeSession?
+    let nativeSetupNotice: LiteNativeSetupNotice?
 
     init(lidarAvailable: Bool = AVCaptureDevice.default(.builtInLiDARDepthCamera,
-                                                       for: .video, position: .back) != nil) {
+                                                       for: .video, position: .back) != nil,
+         accountManagement:LiteAccountManagementView?=nil,
+         nativeSession:LiteNativeSession?=nil,
+         nativeSetupNotice: LiteNativeSetupNotice? = nil) {
         lidarOK = lidarAvailable
+        self.accountManagement=accountManagement
+        self.nativeSession=nativeSession
+        self.nativeSetupNotice=nativeSetupNotice
     }
 
     var body: some View {
@@ -104,10 +121,11 @@ struct LiteRootView: View {
             }
             .tag(LiteRootTab.measure)
             .tabItem { Label("量測", systemImage: "camera.metering.center.weighted") }
-            LiteHistoryView(store: store, recordToOpen: $savedRecordToOpen)
+            LiteHistoryView(store: store, recordToOpen: $savedRecordToOpen, nativeSession:nativeSession)
                 .tag(LiteRootTab.history)
                 .tabItem { Label("紀錄", systemImage: "chart.line.uptrend.xyaxis") }
-            LiteSettingsView()
+            LiteSettingsView(accountManagement:accountManagement,nativeSession:nativeSession,
+                             nativeSetupNotice:nativeSetupNotice)
                 .tag(LiteRootTab.settings)
                 .tabItem { Label("設定", systemImage: "gearshape") }
         }

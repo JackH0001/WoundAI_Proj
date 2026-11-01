@@ -33,7 +33,7 @@ def inventory(store, iid, *, soft_deleted=False):
             base=Path(store._p(folder))
             if base.exists():
                 for p in base.rglob('*'):
-                    key=str(p.relative_to(store.root))
+                    key=p.relative_to(store.root).as_posix()
                     if p.is_file() and media_key(key,iid):
                         if p.is_symlink(): raise ValueError('media symlink is not an approved purge target')
                         raw=p.read_bytes()

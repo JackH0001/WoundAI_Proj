@@ -48,6 +48,9 @@ final class LiteStore: ObservableObject {
     let images = LocalImageStore()
     @Published var syncingRecordIDs: Set<String> = []
     private let storageURL: URL?
+    private let clock: () -> Date
+    private let writeIndex: (Data, URL) throws -> Void
+    var revisionNow: Date { clock() }
     // A failed read is not an empty library. Keep the last verified bytes so a stale
     // store cannot silently overwrite a later save by another store in this process.
     private var loadedIndex: Data?
@@ -84,7 +87,10 @@ final class LiteStore: ObservableObject {
         return base.appendingPathComponent("lite_records.json")
     }
 
-    init(fileURL: URL? = nil) { storageURL = fileURL; reload() }
+    init(fileURL: URL? = nil, now: @escaping () -> Date = { Date() },
+         writeIndex: @escaping (Data, URL) throws -> Void = { try HealthDataFiles.write($0, to: $1) }) {
+        storageURL = fileURL; clock = now; self.writeIndex = writeIndex; reload()
+    }
 
     @discardableResult
     func add(_ r: LiteRecord) -> Bool {
@@ -207,6 +213,22 @@ final class LiteStore: ObservableObject {
             loadedIndex = data
             needsReload = false
             storageError = nil
+            var repaired = rows
+            var changed = false
+            let now = revisionNow
+            for i in repaired.indices {
+                guard var sync = repaired[i].cloudSync,
+                      sync.boundPersistedCapacityWait(now: now) else { continue }
+                repaired[i].cloudSync = sync
+                changed = true
+            }
+            if changed, !persist(repaired) {
+                // Keep the last verified rows visible, but do not send using a
+                // deadline that was never saved (disk full, lock, stale writer).
+                needsReload = true
+                storageError = "等待期限修復尚未保存；原紀錄與修訂已保留，暫停同步。請確認儲存空間、解鎖裝置後重新讀取紀錄。"
+                return false
+            }
             return true
         } catch {
             needsReload = true
@@ -222,7 +244,7 @@ final class LiteStore: ObservableObject {
             try validateIDs(next)
             guard try readIndex() == loadedIndex else { throw IndexFailure.changed }
             let d = try JSONEncoder().encode(next)
-            try HealthDataFiles.write(d, to: fileURL)
+            try writeIndex(d, fileURL)
             loadedIndex = d
             records = next
             storageError = nil

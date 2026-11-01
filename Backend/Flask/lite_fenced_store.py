@@ -9,7 +9,7 @@ import secrets
 from lite_attest_state import StateUnavailable
 from lite_fenced_objects import FencedObjects, ObjectRef, ObjectSealed, GenerationConflict
 from lite_fenced_manifest import FencedManifest
-from store import ImmutableConflict
+from store_errors import ImmutableConflict
 
 LEDGERS = {'lite_index.jsonl': 'index', 'lite_labels.jsonl': 'label'}
 EXTENSIONS = {'jpg': 'image', 'json': 'metadata', 'depth.png': 'depth', 'conf.png': 'confidence'}

@@ -6,7 +6,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]/'Backend/Flask'))
 from store import LocalStore, ImmutableConflict
@@ -43,6 +43,25 @@ class Migration(unittest.TestCase):
     def test_dry_plan_does_not_write_or_modify_originals(self):
         before = raw_snapshot(self.st); p = plan_migration(self.o)
         self.assertTrue(p['apply_allowed']); self.assertEqual(before, raw_snapshot(self.st))
+    def test_windows_relative_keys_produce_same_plan_and_preserve_originals(self):
+        # Real files/store reads, with only the platform's relative-path spelling
+        # substituted. Preserve the concrete class before patching Path (3.11).
+        host_path = type(Path(self.st.root))
+        class WindowsSpelling:
+            def __init__(self, value): self.path = host_path(value)
+            def __getattr__(self, key): return getattr(self.path, key)
+            def __lt__(self, other): return self.path < other.path
+            def rglob(self, pattern):
+                return (WindowsSpelling(p) for p in self.path.rglob(pattern))
+            def relative_to(self, root):
+                return PureWindowsPath(*self.path.relative_to(root).parts)
+        expected = plan_migration(self.o); before = raw_snapshot(self.st)
+        with patch('pathlib.Path', side_effect=WindowsSpelling):
+            actual = plan_migration(self.o)
+            self.assertEqual(actual, expected)
+            result = self.apply(actual)
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(before, {k: raw_snapshot(self.st)[k] for k in before})
     def test_apply_additive_marker_last_originals_preserved_replay_identical(self):
         before = raw_snapshot(self.st); p = plan_migration(self.o); writes = []
         original = self.st.put_json_immutable

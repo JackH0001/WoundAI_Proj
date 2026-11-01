@@ -25,7 +25,7 @@ def leaves(store, prefix):
         paths = sorted(base.rglob('*'))
         if any(p.is_symlink() for p in paths):
             raise ValueError('migration source symlink refused')
-        return [str(p.relative_to(store.root)) for p in paths if p.is_file()
+        return [p.relative_to(store.root).as_posix() for p in paths if p.is_file()
                 and not p.name.startswith('.immutable-')]
     return sorted(store.list_keys(prefix))
 

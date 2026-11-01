@@ -1,0 +1,88 @@
+name: Lite commerce lab (manual)
+
+# Local/synthetic StoreKit only; no deployments, store credentials or patient data.
+# Manual to avoid adding recurring macOS runner cost to unrelated changes.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-commerce:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          cd iOS
+          xcodegen generate
+      - name: Select simulator
+        run: |
+          xcrun simctl list devices available --json > /tmp/lite-simulators.json
+          python3 - <<'PY'
+          import json, os, re
+          devices = json.load(open('/tmp/lite-simulators.json'))['devices']
+          choices = [(tuple(map(int, re.findall(r'\d+', runtime))), d['udid'])
+                     for runtime, rows in devices.items() if '.iOS-' in runtime
+                     for d in rows if d['name'].startswith('iPhone')]
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write('LITE_SIMULATOR=' + max(choices)[1] + '\n')
+          PY
+      - name: Exercise local commerce and future cohort options
+        working-directory: iOS
+        run: |
+          set -euo pipefail
+          xcodebuild test -project WoundMeasurementApp.xcodeproj -scheme WoundLiteCommerceLab \
+            -configuration Debug -destination "platform=iOS Simulator,id=$LITE_SIMULATOR" \
+            -derivedDataPath "$RUNNER_TEMP/LiteCommerceBuild" \
+            -test-timeouts-enabled YES -maximum-test-execution-time-allowance 60 \
+            -only-testing:WoundLiteTests/LiteCommercePolicyTests \
+            -only-testing:WoundLiteTests/LiteCommerceStoreTests \
+            -only-testing:WoundLiteTests/LiteNativeStoreKitTests \
+            -only-testing:WoundLiteTests/LitePurchaseBridgeTests \
+            -only-testing:WoundLiteTests/LitePurchaseHTTPTests \
+            -only-testing:WoundLiteTests/LiteServiceOperationTests \
+            -only-testing:WoundLiteTests/LiteAttestRequestTests \
+            -only-testing:WoundLiteTests/LiteAttestClientTests \
+            -only-testing:WoundLiteTests/LiteSignedBusinessTests \
+            -resultBundlePath CommerceTests.xcresult CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- \
+            2>&1 | tee commerce-tests.log
+          xcrun xcresulttool get test-results summary --path CommerceTests.xcresult > commerce-summary.json
+          xcrun xcresulttool get test-results tests --path CommerceTests.xcresult > commerce-tree.json
+          python3 ../tools/verify_xctest_results.py commerce-summary.json commerce-tree.json
+      - name: Verify native service recovery in Release
+        working-directory: iOS
+        run: |
+          set -euo pipefail
+          xcodebuild test -project WoundMeasurementApp.xcodeproj -scheme WoundLite \
+            -configuration Release -destination "platform=iOS Simulator,id=$LITE_SIMULATOR" \
+            -derivedDataPath "$RUNNER_TEMP/LiteCommerceBuild" \
+            -test-timeouts-enabled YES -maximum-test-execution-time-allowance 60 \
+            -only-testing:WoundLiteTests/LiteServiceOperationTests \
+            -only-testing:WoundLiteTests/LiteAttestRequestTests \
+            -only-testing:WoundLiteTests/LiteAttestClientTests \
+            -only-testing:WoundLiteTests/LiteSignedBusinessTests \
+            -only-testing:WoundLiteTests/LitePurchaseBridgeTests \
+            -only-testing:WoundLiteTests/LitePurchaseHTTPTests \
+            -resultBundlePath ServiceReleaseTests.xcresult \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- ENABLE_TESTABILITY=YES \
+            2>&1 | tee service-release-tests.log
+          xcrun xcresulttool get test-results summary --path ServiceReleaseTests.xcresult > service-release-summary.json
+          xcrun xcresulttool get test-results tests --path ServiceReleaseTests.xcresult > service-release-tree.json
+          python3 ../tools/verify_xctest_results.py service-release-summary.json service-release-tree.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lite-commerce-local-results
+          path: |
+            iOS/CommerceTests.xcresult
+            iOS/commerce-tests.log
+            iOS/commerce-summary.json
+            iOS/commerce-tree.json
+            iOS/ServiceReleaseTests.xcresult
+            iOS/service-release-tests.log
+            iOS/service-release-summary.json
+            iOS/service-release-tree.json

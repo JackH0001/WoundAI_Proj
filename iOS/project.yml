@@ -50,6 +50,12 @@ settings:
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     SWIFT_STRICT_CONCURRENCY: minimal
 
+targetTemplates:
+  LitePrivacyManifest:
+    sources:
+      - path: ${privacyDirectory}/PrivacyInfo.xcprivacy
+        buildPhase: resources
+
 targets:
 
   WoundMeasurementApp:
@@ -99,6 +105,10 @@ targets:
   WoundLite:
     type: application
     platform: iOS
+    templates:
+      - LitePrivacyManifest
+    templateAttributes:
+      privacyDirectory: WoundLite
     sources:
       - path: WoundMeasurementApp/Generated
       - path: WoundMeasurementApp/Core
@@ -133,8 +143,6 @@ targets:
       - path: WoundLite/Assets.xcassets
         type: folder.assetcatalog
         buildPhase: resources
-      - path: WoundLite/PrivacyInfo.xcprivacy
-        buildPhase: resources
       - path: WoundLite/Info.plist
         buildPhase: none
     settings:
@@ -142,6 +150,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.woundai.lite
         CURRENT_PROJECT_VERSION: "38"
         WOUNDLITE_BACKEND_URL: "https://woundai-lite-candidate-421209514056.asia-east1.run.app"
+        WOUNDLITE_NATIVE_SANDBOX_ORIGIN: ""
         CODE_SIGN_ENTITLEMENTS: WoundLite/WoundLite.entitlements
         INFOPLIST_FILE: WoundLite/Info.plist
         GENERATE_INFOPLIST_FILE: NO
@@ -155,6 +164,8 @@ targets:
     platform: iOS
     sources:
       - path: WoundLiteTests
+      - path: WoundLiteCommerce.storekit
+        buildPhase: resources
     dependencies:
       - target: WoundLite
     settings:
@@ -192,6 +203,25 @@ targets:
 ## 自動產生 scheme（除非在 target 下寫 `scheme:`），少了這一段，BUILD_RELEASE.md 的
 ## 指令會以 "scheme not found" 直接失敗——而那看起來像環境問題，不像設定漏了。
 schemes:
+  # Local simulator only. The commerce code is absent from device and Release builds.
+  WoundLiteCommerceLab:
+    build:
+      targets:
+        WoundLite: all
+        WoundLiteTests: [test]
+    run:
+      config: Debug
+      storeKitConfiguration: WoundLiteCommerce.storekit
+      commandLineArguments:
+        "-lite-commerce-lab": true
+    test:
+      config: Debug
+      testPlans:
+        - path: WoundLiteCommerce.xctestplan
+          defaultPlan: true
+    archive:
+      config: Release
+
   WoundMeasurementApp:
     build:
       targets:

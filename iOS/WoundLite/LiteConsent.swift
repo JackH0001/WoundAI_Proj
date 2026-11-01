@@ -37,13 +37,13 @@ struct LiteConsentView: View {
                         "可在設定關閉未來上傳；另可要求撤回研究並清除本安裝目前可見的雲端影像與深度。本機紀錄保留；備份、歷史版本、研究標註與既有模型的刪除仍待驗證。",
                     ])
 
-                    box(title: "📴 不同意（完全離線）", tint: .green, lines: [
-                        "照片與深度資料全部只留在您的手機（加密儲存）。",
+                    box(title: LiteNativeBuild.includesService ? "不同意研究上傳（本機手動圈選）" : "📴 不同意（完全離線）", tint: .green, lines: [
+                        LiteNativeBuild.includesService ? "拍攝後以加密方式存於本機。若您另從紀錄選擇個人雲端辨識，僅選取的照片會送往服務，深度留在本機。" : "照片與深度資料全部只留在您的手機（加密儲存）。",
                         "傷口輪廓改由您手動圈選，量測計算全在裝置上完成。",
                         "之後可在設定重新選擇；若已撤回並清除雲端資料，須另行閱讀並完成重新同意。",
                     ])
 
-                    Text("兩種方式的量測數學完全相同；差別只在輪廓怎麼來、資料去不去雲端。")
+                    Text(LiteNativeBuild.includesService ? "這項選擇只決定研究上傳。個人服務另行登入，您可在紀錄中自行選擇是否送出照片。" : "兩種方式的量測數學完全相同；差別只在輪廓怎麼來、資料去不去雲端。")
                         .font(.footnote).foregroundStyle(.secondary)
 
                     Button {
@@ -57,7 +57,7 @@ struct LiteConsentView: View {
                     Button {
                         onChoose(false)
                     } label: {
-                        Text(renewingCompletedWithdrawal ? "暫不開啟上傳，繼續離線使用" : renewingUnsentWithdrawal ? "保留撤回，繼續離線使用" : "不同意，完全離線手動圈選")
+                        Text(renewingCompletedWithdrawal ? "暫不開啟上傳，繼續離線使用" : renewingUnsentWithdrawal ? "保留撤回，繼續離線使用" : LiteNativeBuild.includesService ? "不同意研究上傳，使用本機圈選" : "不同意，完全離線手動圈選")
                             .frame(maxWidth: .infinity).padding(.vertical, 6)
                     }
                     .buttonStyle(.bordered)
@@ -86,6 +86,10 @@ struct LiteConsentView: View {
 /// 2026-08-19 移除「進階（開發測試）」帳密區——雲端辨識已切換到匿名
 /// `lite/segment` 端點，民眾版不再有任何帳號概念（交辦清單第 5 項）。
 struct LiteSettingsView: View {
+    /// Explicit candidate composition; ordinary shipping startup leaves this nil.
+    var accountManagement:LiteAccountManagementView?=nil
+    var nativeSession:LiteNativeSession?=nil
+    var nativeSetupNotice: LiteNativeSetupNotice? = nil
     private var installedVersion: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "未知"
@@ -144,13 +148,40 @@ struct LiteSettingsView: View {
                     LabeledContent("版本（建置號）", value: installedVersion)
                         .textSelection(.enabled)
                 }
+                if let accountManagement {
+                    Section("服務帳號") {
+                        NavigationLink("帳號與刪除") {accountManagement}
+                    }
+                }
+                if let nativeSession {
+                    Section("候選版內部驗收") {
+                        NavigationLink("服務登入、訂閱與刪帳") { LiteNativeSessionView(session:nativeSession) }
+                    }
+                } else if let nativeSetupNotice {
+                    Section("候選版內部驗收") {
+                        switch nativeSetupNotice {
+                        case .missingConfiguration:
+                            Text("此測試版本的服務網址尚未設定完成。您仍可使用本機紀錄。")
+                        case .storageUnavailable(let retry):
+                            Text("服務資料暫時無法讀取。請解鎖裝置後再試。")
+                            Button("重新準備服務入口", action: retry)
+                        }
+                    }
+                }
+                #if DEBUG && targetEnvironment(simulator)
+                if ProcessInfo.processInfo.arguments.contains("-lite-commerce-lab") {
+                    Section("內部驗證") {
+                        NavigationLink("訂閱、廣告與固定收案（合成）") { LiteCommerceLab() }
+                    }
+                }
+                #endif
                 Section("研究上傳") {
                     Toggle("上傳去識別資料供研究（啟用自動辨識）", isOn: $consent)
                         .onChange(of: consent) { _, v in LitePrefs.researchConsent = v }
                         .disabled(withdrawal.blocksUploads || withdrawal.busy)
                     Text(consent
                          ? "拍攝影像、深度、修正輪廓、量測估算與傷口側別部位會上傳供辨識與研究；紀錄修改也會同步。可隨時關閉。"
-                         : "完全離線：照片與深度只留在手機，輪廓手動圈選。")
+                         : LiteNativeBuild.includesService ? "拍攝時採本機圈選。個人雲端辨識需另從紀錄選擇照片並送出。" : "完全離線：照片與深度只留在手機，輪廓手動圈選。")
                         .font(.footnote).foregroundStyle(.secondary)
                     if withdrawal.blocksUploads {
                         Text("研究上傳已因撤回停用。請查看下方「資料與撤回」狀態；重試查核不會重新開啟研究上傳。")

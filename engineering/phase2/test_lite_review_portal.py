@@ -380,6 +380,10 @@ class Rollout(unittest.TestCase):
         self.assertIn('--require-hashes',text);self.assertIn('USER 65532:65532',text)
 
 class RealSDKRead(unittest.TestCase):
+    # New SDKs can asynchronously GET bucket metadata for tracing. Keep this
+    # object-read contract deterministic without granting extra IAM or changing
+    # the deployed client's configuration; both object GETs still use real SDK.
+    @patch.dict('os.environ', {'DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA':'true'})
     def test_sdk_get_has_precondition_but_no_historical_generation_selector(self):
         from urllib.parse import urlparse,parse_qs
         from requests import Response,Request

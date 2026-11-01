@@ -7,6 +7,22 @@ import json
 import math
 from pathlib import Path
 
+STUDENT_OUTPUT_CONTRACT = 'student-onnx-logits-sigmoid-before-resize/v1'
+
+
+def student_logits_probability(logits):
+    """Student ONNX exports raw logits; CoreML already embeds this sigmoid.
+
+    Convert exactly once BEFORE spatial interpolation, as Android does. Never
+    guess from min/max: valid logits can all lie between zero and one. Other
+    model families and CoreML probabilities must not use this conversion.
+    """
+    import numpy as np
+    values = np.asarray(logits, dtype=np.float32)
+    if values.ndim != 2 or not values.size or not np.isfinite(values).all():
+        raise ValueError('finite 2D student logits required')
+    return 1.0 / (1.0 + np.exp(-np.clip(values, -88.0, 88.0)))
+
 
 def _unique(pairs):
     result = {}
