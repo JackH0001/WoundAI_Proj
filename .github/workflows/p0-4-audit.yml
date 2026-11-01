@@ -18,6 +18,7 @@ on:
       - 'engineering/phase2/test_runtime_golden_contract.py'
       - 'engineering/phase2/test_store_abstraction.py'
       - 'engineering/phase2/test_lite_segment.py'
+      - 'engineering/phase2/test_threshold_parity.py'
       - 'engineering/phase2/test_lite_quota.py'
       - 'engineering/phase2/test_lite_revision.py'
       - 'engineering/phase2/test_lite_storage_receipt.py'
@@ -159,6 +160,7 @@ on:
       - 'engineering/phase2/test_runtime_golden_contract.py'
       - 'engineering/phase2/test_store_abstraction.py'
       - 'engineering/phase2/test_lite_segment.py'
+      - 'engineering/phase2/test_threshold_parity.py'
       - 'engineering/phase2/test_lite_quota.py'
       - 'engineering/phase2/test_lite_revision.py'
       - 'engineering/phase2/test_lite_storage_receipt.py'
@@ -344,6 +346,7 @@ jobs:
           python -B engineering/phase2/test_demo_deploy_isolation.py
           python -B engineering/phase2/test_demo_deploy_checks.py
           python -B engineering/phase2/test_store_abstraction.py
+          python -B engineering/phase2/test_threshold_parity.py
           python -B engineering/phase2/test_lite_segment.py
           python -B engineering/phase2/test_lite_quota.py
           python -B engineering/phase2/test_lite_revision.py
