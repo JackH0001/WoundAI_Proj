@@ -97,3 +97,14 @@ counts are not additive; the two original run logs are retained.
   research data subject to the same consent, access, retention and withdrawal
   controls, not as anonymous analytics. Sealing currently visible test objects
   does not establish erasure of all historical generations or backups.
+
+### Candidate route acceptance
+
+Run `test_lite_research_ingest_flow`, `test_lite_research_issuer` and
+`test_lite_service_profile` together. The research fixtures install the same
+first request hook as the Lite service. On the research origin, a canonical
+POST to the configured capture, receipt lookup or deletion-proof endpoint must
+reach device authentication. Check for 401 on unsigned input and a matching
+receipt on a valid signed request. Disabled endpoints, wrong methods, query
+strings and native-only paths must return 404. Checking only `/api/health` or
+testing a blueprint without the first request hook can miss a broken upload.

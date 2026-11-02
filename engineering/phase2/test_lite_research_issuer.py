@@ -27,6 +27,7 @@ from lite_privacy_state import PrivacyState
 from lite_reconsent import Reconsent, ReconsentRejected
 from lite_research_association import ResearchAssociations
 from lite_research_issuer import ACCEPT, CONFIRM, OFFER, TTL, LinkSigner, object_key, settings
+from lite_service_profile import install_lite_perimeter
 
 
 class Phone(SignedHTTPClient):
@@ -75,6 +76,8 @@ class IssuanceTests(unittest.TestCase):
                                 native_key=self.pub[0], research_key=self.pub[1],
                                 private_key=self.seeds[idx].private_bytes_raw(), clock=lambda: self.now)
             app = Flask(role, static_folder=None)
+            if role == 'research':
+                install_lite_perimeter(app)
             budget = RequestBudget(self.f.store(role + "-budget"), minute_limit=500, day_limit=5000)
             extras = (dict(commerce=self.f.ops, identity=self.f.f.b, deletion=self.f.d,
                            privacy=PrivacyState(self.f.store("native-privacy"))) if role == "native"
@@ -84,6 +87,11 @@ class IssuanceTests(unittest.TestCase):
 
     def begin(self):
         self.f.d.begin(self.native.owner, self.operation, withdraw_research=True)
+
+    def test_proof_requires_signature_and_does_not_enable_capture(self):
+        self.assertEqual(self.research.client.post(ACCEPT, json={}).status_code, 401)
+        for path in (OFFER, '/api/v1/lite/research/capture', '/api/v1/lite/research/capture/status'):
+            self.assertEqual(self.research.client.post(path, json={}).status_code, 404)
 
     def offer(self, **changes):
         fields = dict(operation=self.operation, research=self.research.owner)

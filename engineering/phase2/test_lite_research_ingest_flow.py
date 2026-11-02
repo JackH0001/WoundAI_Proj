@@ -10,6 +10,7 @@ from lite_attest_state import SQLiteStateStore
 from lite_fenced_store import FencedPrivacy
 from lite_research_issuer import LinkSigner
 from lite_research_capture import configured_receiver, PATH
+from lite_service_profile import install_lite_perimeter
 from lite_raw_depth_store import pack, unpack
 from werkzeug.test import EnvironBuilder
 import test_lite_native_backend as native_fixture
@@ -32,6 +33,7 @@ class ResearchIngestFlowTests(unittest.TestCase):
         self.n.client=self.n.backend.create_app(link_signer=self.signers[0],research_source_enabled=True).test_client()
         self.r=raw_fixture.RawDepthHTTPTests()
         def install(app,**kw):
+            install_lite_perimeter(app)
             self.privacy=FencedPrivacy(SQLiteStateStore(self.n.h.release.n.f.root/'research-flow.sqlite'),self.bucket)
             kw['budget'].clock=self.n.h.clock
             self.receiver=configured_receiver({'LITE_RESEARCH_CAPTURE_ENABLED':'1'},signer=self.signers[1],
@@ -74,6 +76,10 @@ class ResearchIngestFlowTests(unittest.TestCase):
         self.assertEqual(ticket.status_code,200,ticket.json)
         first=self.upload(ticket.json); self.assertEqual(first.status_code,200,first.json)
         before=dict(self.bucket.live)
+        lookup, body=self.receipt_request(ticket.json)
+        self.assertEqual(lookup.status_code,200,lookup.json)
+        self.assertEqual(lookup.json,first.json)
+        self.assertNotIn(self.n.f.jpeg,body); self.assertNotIn(self.r.f.raw,body)
         again=self.upload(ticket.json); self.assertEqual(first.json,again.json); self.assertEqual(before,self.bucket.live)
         store=self.privacy.media(self.r.h.owner); iid=first.json['image_id']
         packet=unpack(store.get_blob('lite_raw/'+self.r.h.owner+'/'+iid+'.rgbd'))
@@ -85,6 +91,21 @@ class ResearchIngestFlowTests(unittest.TestCase):
         self.assertEqual(self.upload(ticket.json).status_code,410)
         self.assertEqual(self.n.json_request('status').json,original.json)
         self.assertEqual(self.n.quota(),quota); self.assertEqual(self.n.h.model_calls,1)
+
+    def test_only_registered_research_posts_reach_device_authentication(self):
+        client = self.r.h.client
+        for path in (PATH, PATH+'/status'):
+            with self.subTest(path=path):
+                unsigned = client.post(path, json={})
+                self.assertEqual(unsigned.status_code, 401, unsigned.json)
+                self.assertEqual(unsigned.json['error'], 'lite_attestation_required')
+                for response in (client.get(path), client.post(path+'?x=1'), client.post(path+'/')):
+                    self.assertEqual(response.status_code, 404)
+                    self.assertEqual(response.json['error'], 'lite_route_not_supported')
+        for path in ('/api/v1/lite/service/research-source', '/api/v1/lite/account/deletion/research-offer',
+                     '/api/v1/lite/research/deletion-proof'):
+            self.assertEqual(client.post(path, json={}).status_code, 404)
+        self.assertEqual(self.bucket.live, {})
 
     def test_default_off_and_wrong_configurations_fail_closed(self):
         self.assertIsNone(configured_receiver({},signer=None,privacy=None,request_budget=None))
