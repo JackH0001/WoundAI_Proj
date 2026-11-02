@@ -62,9 +62,37 @@ final class LiteStore: ObservableObject {
     // A failed read is not an empty library. Keep the last verified bytes so a stale
     // store cannot silently overwrite a later save by another store in this process.
     private var loadedIndex: Data?
+    private var latestTrackingRead = UUID()
     private enum IndexFailure: Error { case invalidIDs, changed }
 
     var wounds: [LiteWoundGroup] { LiteGrouping.groups(records) }
+
+    func refreshTracking(from session: LiteNativeSession?) async throws -> LiteWoundRoster? {
+        let request = UUID()
+        latestTrackingRead = request
+        guard let session else { return nil }
+        let index = loadedIndex
+        let generation = session.identity.generation
+        let roster = try await session.woundList()
+        guard latestTrackingRead == request, generation == session.identity.generation,
+              !needsReload, index == loadedIndex else { throw LiteWoundTrackingError.changed }
+        guard let roster else { return nil }
+
+        // All active slots, including those paused by a downgrade, retain their histories.
+        let active = Set(roster.active)
+        var next = records
+        var changed = false
+        for i in next.indices where next[i].woundAccount == roster.account_sha256 {
+            guard let id = next[i].woundID else { continue }
+            let ended = !active.contains(try LiteWoundRoster.wireID(id))
+            if (next[i].woundEnded == true) != ended {
+                next[i].woundEnded = ended
+                changed = true
+            }
+        }
+        if changed && !persist(next) { throw LiteWoundTrackingError.unavailable }
+        return roster
+    }
 
     func newWound(id: String = UUID().uuidString) -> LiteWoundGroup {
         let last = wounds.compactMap { Int($0.name.replacingOccurrences(of: "傷口 ", with: "")) }.max() ?? 0

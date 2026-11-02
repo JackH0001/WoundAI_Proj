@@ -74,6 +74,15 @@ struct LiteWoundRoster: Decodable {
         id: id, name: "帳戶傷口", account: account_sha256)
     }
   }
+
+  func selectableGroups(in local: [LiteWoundGroup]) -> [LiteWoundGroup] {
+    let permitted = Set(active.prefix(limit))
+    return (local + remoteGroups(excluding: local)).filter { group in
+      if group.account == nil { return !group.ended }
+      guard group.account == account_sha256, let wire = try? Self.wireID(group.id) else { return false }
+      return permitted.contains(wire)
+    }
+  }
 }
 
 extension LiteNativeSession {

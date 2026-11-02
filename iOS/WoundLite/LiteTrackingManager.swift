@@ -74,7 +74,7 @@ struct LiteTrackingManager: View {
     busy = true
     defer { busy = false }
     do {
-      roster = try await session?.woundList()
+      roster = try await store.refreshTracking(from: session)
       loaded = true
       notice = nil
     } catch {
@@ -109,7 +109,7 @@ struct LiteTrackingManager: View {
           throw LiteWoundTrackingError.unavailable
         }
       }
-      roster = try await session?.woundList()
+      roster = try await store.refreshTracking(from: session)
       notice = finish ? "已結束追蹤，原時間軸仍可查看、匯出。" : "已開始追蹤，可在量測時選擇這處傷口。"
     } catch {
       loaded = false

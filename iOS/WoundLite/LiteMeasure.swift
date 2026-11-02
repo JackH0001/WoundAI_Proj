@@ -669,7 +669,7 @@ struct LiteMeasureView: View {
 
     private var availableGroups: [LiteWoundGroup] {
         let local = store.wounds
-        return local.filter { !$0.ended } + (roster?.remoteGroups(excluding: local) ?? [])
+        return roster?.selectableGroups(in: local) ?? local.filter { !$0.ended }
     }
 
     var body: some View {
@@ -916,7 +916,7 @@ struct LiteMeasureView: View {
                     Task { @MainActor in
                         defer { checkingWound = false }
                         do {
-                            roster = try await nativeSession.woundList()
+                            roster = try await store.refreshTracking(from: nativeSession)
                             saveNotice = roster?.summary
                                 ?? "目前使用本機免費追蹤。"
                         } catch { roster = nil; saveNotice = LiteWoundTrackingError.unavailable.localizedDescription }

@@ -57,6 +57,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
     var production = false, lostConfirmation = false, lostRun = false
     var afterContext: (@Sendable () async -> Void)?
     var activeWounds = [String](), woundRevision = 0
+    var afterWoundSnapshot: (@Sendable () async -> Void)?
     let golden: [String: Any]
     init() throws {
         let file = try XCTUnwrap(Bundle(for: LiteNativeSessionTests.self).url(forResource: "lite_service_operation", withExtension: "json"))
@@ -71,6 +72,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
     func loseConfirmation() { lostConfirmation = true }
     func loseRun() { lostRun = true }
     func onContext(_ closure: @escaping @Sendable () async -> Void) { afterContext = closure }
+    func onWoundRead(_ closure: @escaping @Sendable () async -> Void) { afterWoundSnapshot = closure }
     func changeOwner() { owner = "other-installation" }
     func send(_ request: URLRequest, installation: String) async throws -> (Data, HTTPURLResponse) {
         XCTAssertEqual(installation, owner)
@@ -107,6 +109,10 @@ private actor SessionWire: LiteAuthenticatedTransport {
             result = ["schema":"lite.wounds/1", "account_sha256":sessionHash,"revision":woundRevision,
                       "limit":5,"active":activeWounds]
             if let decision { result["decision"] = decision }
+            if action == "status", let callback = afterWoundSnapshot {
+                afterWoundSnapshot = nil
+                await callback()
+            }
         case "purchase/context":
             result = ["v": 1, "operation": operation, "installation": owner, "account_sha256": sessionHash,
                 "app_account_token": sessionToken, "registration_sha256": sessionHash, "scope_sha256": sessionHash,
@@ -204,6 +210,100 @@ private actor SessionWire: LiteAuthenticatedTransport {
         let counts = await wire.counts()
         XCTAssertNil(counts["service/run"])
         XCTAssertNil(counts["purchase/confirm"])
+    }
+
+    func testFinishAndResumeOnAnotherDeviceRetainOneLocalTimeline() async throws {
+        let session = try runtime(SessionWire(), SessionJournal())
+        await session.identity.signIn()
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let index = dir.appendingPathComponent("records.json")
+        let store = LiteStore(fileURL: index)
+        let id = UUID().uuidString
+        let location = LiteWoundLocation(side: "right", site: "heel")
+        let permit = try await session.woundPermit(id: id, owner: nil)
+        var original = LiteRecord(id: "first", dateISO: "2026-10-30T00:00:00Z",
+            surfaceCm2: 4, projectedCm2: 3.9, quality: "ok", imageName: "synthetic-original", source: "manual")
+        original.depthName = "synthetic-sidecar"
+        original.polysJson = "[[[0,0],[10,0],[10,10]]]"
+        let first = try XCTUnwrap(store.saveMeasurement(original, selectedWoundID: "", enteredLocation: location, permit: permit))
+        let group = try XCTUnwrap(store.wounds.first)
+        var other = original
+        other.id = "other-account"
+        other.woundID = UUID().uuidString
+        other.woundAccount = String(repeating: "b", count: 64)
+        other.woundEnded = false
+        XCTAssertTrue(store.add(other))
+
+        // Change the shared roster without updating this device's local index.
+        _ = try await session.finishTracking(group)
+        _ = try await store.refreshTracking(from: session)
+        XCTAssertEqual(store.wounds.first(where: { $0.id == id })?.ended, true)
+        XCTAssertEqual(store.records.first(where: { $0.id == other.id })?.woundEnded, false)
+        XCTAssertFalse(store.maySave(to: id, permit: permit))
+        let ended = try LiteTimelineSelection(group: group, records: store.records)
+        XCTAssertEqual(ended.rows.map(\.id), [first.id])
+        let pdf = try LiteTimelinePDF.export(ended, photos: false, image: { _ in nil }, directory: dir)
+        XCTAssertNotNil(PDFDocument(url: pdf.url))
+        pdf.remove()
+
+        let resumedPermit = try await session.woundPermit(id: id, owner: sessionHash, resume: true)
+        _ = try await store.refreshTracking(from: session)
+        XCTAssertEqual(store.wounds.first(where: { $0.id == id })?.ended, false)
+        var second = original
+        second.id = "second"
+        second.dateISO = "2026-11-01T00:00:00Z"
+        XCTAssertNotNil(store.saveMeasurement(second, selectedWoundID: id, enteredLocation: location, permit: resumedPermit))
+        let reopened = LiteStore(fileURL: index)
+        let selection = try LiteTimelineSelection(group: group, records: reopened.records)
+        XCTAssertEqual(selection.rows.map(\.id), [first.id, second.id])
+        let retained = try XCTUnwrap(selection.rows.first)
+        XCTAssertEqual(retained.imageName, first.imageName)
+        XCTAssertEqual(retained.depthName, first.depthName)
+        XCTAssertEqual(retained.polysJson, first.polysJson)
+        XCTAssertEqual(retained.surfaceCm2, first.surfaceCm2)
+    }
+
+    func testLateRosterResponseDoesNotOverwriteNewerLocalTrackingChange() async throws {
+        let wire = try SessionWire(), session = try runtime(wire, SessionJournal())
+        await session.identity.signIn()
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = LiteStore(fileURL: dir.appendingPathComponent("records.json"))
+        let id = UUID().uuidString
+        let permit = try await session.woundPermit(id: id, owner: nil)
+        let row = LiteRecord(id: "race", dateISO: "2026-11-01T00:00:00Z", surfaceCm2: 1,
+            projectedCm2: 1, quality: "ok", imageName: "synthetic", source: "manual")
+        XCTAssertNotNil(store.saveMeasurement(row, selectedWoundID: id,
+            enteredLocation: LiteWoundLocation(side: "right", site: "heel"), permit: permit))
+        await wire.onWoundRead {
+            await MainActor.run { XCTAssertTrue(store.finishWound(id, account: sessionHash)) }
+        }
+        do {
+            _ = try await store.refreshTracking(from: session)
+            XCTFail("A stale roster must not undo a newer local finish")
+        } catch LiteWoundTrackingError.changed {}
+        XCTAssertEqual(store.wounds.first?.ended, true)
+        XCTAssertEqual(store.records.map(\.id), ["race"])
+    }
+
+    func testDowngradedPickerShowsOnlyTheContinuableSlotAndKeepsOtherTimelines() throws {
+        let ids = (0..<6).map { _ in UUID().uuidString }
+        let wire = try ids.map(LiteWoundRoster.wireID)
+        let local = [
+            LiteWoundGroup(id: ids[0], name: "heel", account: sessionHash),
+            LiteWoundGroup(id: ids[1], name: "ankle", account: sessionHash),
+            LiteWoundGroup(id: ids[5], name: "other", account: String(repeating: "b", count: 64)),
+        ]
+        let active = Array(wire.prefix(5))
+        for limit in [1, 5] {
+            let roster = LiteWoundRoster(schema:"lite.wounds/1", account_sha256:sessionHash,
+                revision:5, active:active, limit:limit, decision:nil)
+            XCTAssertEqual(roster.selectableGroups(in: local).map(\.id), Array(ids.prefix(limit)))
+            XCTAssertEqual(roster.active, active)
+        }
     }
 
     func testLegacyGroupRetainsItsTimelineIDWithoutDuplicatingRemoteFolder() throws {
