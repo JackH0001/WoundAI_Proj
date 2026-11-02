@@ -165,7 +165,7 @@ jobs:
           python tools/lite_usage_recovery_probe.py --output evidence/usage-recovery-probe.json
       - name: Cross-day authorization and cutover failure containment (synthetic only)
         run: |
-          python -m unittest -v test_lite_service_recovery test_lite_usage_rollout test_lite_cross_day_fixture > evidence/g3-cutover-tests.log 2>&1
+          python -m unittest -v test_lite_service_recovery test_lite_usage_rollout test_lite_cross_day_fixture test_lite_first_install_quota > evidence/g3-cutover-tests.log 2>&1
           python tools/lite_cross_day_fixture.py --report evidence/g3-cutover-probe.json
       - name: Opt-in authenticated service-only coordinator and real loopback
         # New opt-in retry/rollout behavior is tested separately from legacy gaps.

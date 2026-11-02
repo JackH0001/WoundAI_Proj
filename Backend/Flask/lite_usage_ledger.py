@@ -131,10 +131,12 @@ class UsageLedger:
             if _integer(b['attempts']) < _integer(b['successes']):
                 raise ValueError('baseline counters')
             _hex(b['manifest'])
+            if value['v']==1 and self.cutover is not None and self.cutover.first_install:
+                raise ValueError('legacy row contradicts signed first-install inventory')
             if value['v'] == 2:
                 if self.cutover is None: raise ValueError('v2 requires pinned cutover')
                 policy = self.cutover.read(self.namespace, self.now())
-                if (value['policy'] != self._policy_fields(policy) or day <= policy['day']
+                if (value['policy'] != self._policy_fields(policy) or not self._zero_day(day,policy)
                         or b != self._zero_baseline(subject, day, policy)):
                     raise ValueError('day policy/baseline mismatch')
                 fences = value['fences']
@@ -197,15 +199,20 @@ class UsageLedger:
         return dict(sha256=digest(policy), reservation_seconds=policy['reservation_seconds'])
 
     @staticmethod
+    def _zero_day(day, policy):
+        return day>policy['day'] or (day==policy['day'] and 'fresh_inventory_sha256' in policy)
+
+    @staticmethod
     def _zero_baseline(subject, day, policy):
-        return dict(successes=0, attempts=0, manifest=digest(['verified-post-cutover-day/1',
+        basis='verified-first-install-day/1' if day==policy['day'] else 'verified-post-cutover-day/1'
+        return dict(successes=0, attempts=0, manifest=digest([basis,
                     digest(policy), subject, day]))
 
     def _ensure_current_day(self, subject, day):
         """Called only after trusted service-account/grant resolution, never by HTTP input."""
         if self.cutover is None or self.store.load(self.key(subject, day)) is not None: return
         now = self.now(); policy = self.cutover.read(self.namespace, now, admission=True)
-        if day != now//86400 or day <= policy['day']:
+        if day != now//86400 or not self._zero_day(day,policy):
             raise StateUnavailable('verified cutover-day baseline required')
         value = dict(v=2, subject_hash=digest(subject), day=day,
             baseline=self._zero_baseline(subject, day, policy), entries={}, updated=now,
@@ -276,6 +283,8 @@ class UsageLedger:
         The caller must pause legacy writers and verify their baseline, even if
         zero. Existing rows are never replaced, and old days cannot be created.
         """
+        if self.cutover is not None and self.cutover.first_install:
+            raise UsageConflict('cannot seed legacy rows for a first installation')
         now = self.now(); _integer(day)
         if day != now // 86400 or _integer(baseline_attempts) < _integer(baseline_successes):
             raise UsageConflict('invalid current-day migration baseline')
