@@ -6,6 +6,7 @@ remain exactly the bytes signed; only verified ownership reaches business code.
 """
 import base64
 import re
+from contextlib import contextmanager
 from flask import Blueprint, current_app, g, jsonify, request
 from werkzeug.exceptions import BadRequest, RequestEntityTooLarge
 from audit_chain_contract import loads_json_object_strict
@@ -42,6 +43,40 @@ def _challenge_limit_response(exc):
     response = jsonify(error='lite_challenge_limit', retry_after=exc.retry_after)
     response.headers['Retry-After'] = str(exc.retry_after)
     return response, 429
+
+
+def _budget_limit_response(exc):
+    response = jsonify(error='lite_service_budget', retry_after=exc.retry_after)
+    response.headers['Retry-After'] = str(exc.retry_after)
+    return response, 429
+
+
+@contextmanager
+def _privacy_capacity(budget):
+    """Reserve once, directly before changing verified device state."""
+    budget.check_available(scope='withdraw')
+    reserved = False
+
+    def claim():
+        nonlocal reserved
+        if not reserved:
+            budget.reserve(scope='withdraw')
+            reserved = True
+
+    try:
+        yield claim
+    except (AdmissionRejected, AssertionRejected):
+        if not reserved:
+            try:
+                budget.reserve()
+            except BudgetExceeded:
+                # Already refused. Keep the authentication error (or the
+                # per-key challenge cooldown), rather than inviting a replay.
+                pass
+        raise
+    else:
+        if not reserved:
+            raise StateUnavailable('privacy capacity not confirmed')
 
 
 def _body(maximum):
@@ -208,7 +243,8 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
                 except (AdmissionRejected, RequestEntityTooLarge, BadRequest):
                     budget.reserve()
                     raise
-                budget.reserve(scope='withdraw' if withdrawal else 'general')
+                if not withdrawal:
+                    budget.reserve()
                 g.lite_attest_control = data
                 return None
             limit = (20000 if (purchase_only or account_only) and request.path.endswith('/confirm') else
@@ -224,7 +260,6 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
                 except (AdmissionRejected, RequestEntityTooLarge, BadRequest):
                     budget.reserve()
                     raise
-                budget.reserve(scope='withdraw')
             else:
                 budget.reserve()
                 raw = _body(limit)
@@ -232,9 +267,13 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
                 g.lite_attest_control = _json(raw)
                 return None
             key_id, challenge_id, assertion, operation = signed if privacy_lane else _signed_headers()
-            admitted = service.admission.admit(key_id, challenge_id, assertion,
-                request_id=operation, method=request.method, path=request.path,
-                content_type=request.headers.get('Content-Type', ''), body=raw)
+            binding = dict(request_id=operation, method=request.method, path=request.path,
+                           content_type=request.headers.get('Content-Type', ''), body=raw)
+            if privacy_lane:
+                with _privacy_capacity(budget) as claim:
+                    admitted = service.admission.admit(key_id, challenge_id, assertion, before_commit=claim, **binding)
+            else:
+                admitted = service.admission.admit(key_id, challenge_id, assertion, **binding)
             if request.method == 'DELETE':
                 # client_data also binds the DELETE path to this installation.
                 parts = request.path.removeprefix(PREFIX+'data/').split('/')
@@ -291,9 +330,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
         except (RequestEntityTooLarge, BadRequest) as exc:
             return jsonify(error='lite_request_too_large' if isinstance(exc, RequestEntityTooLarge) else 'lite_bad_request'), exc.code
         except BudgetExceeded as exc:
-            response = jsonify(error='lite_service_budget', retry_after=exc.retry_after)
-            response.headers['Retry-After'] = str(exc.retry_after)
-            return response, 429
+            return _budget_limit_response(exc)
         except OwnerWithdrawn:
             return jsonify(error='withdrawn'), 410
         except ReconsentRejected:
@@ -322,14 +359,21 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
                 if set(data) != {'key_id', 'purpose'} or data['purpose'] not in ('register', 'assert', 'withdraw'):
                     raise AdmissionRejected('invalid challenge request')
                 key = _b64(data['key_id'], 32, 32)
-                challenge = (service.issue_challenge(key) if data['purpose'] == 'register'
-                             else service.admission.issue_challenge(key, purpose=data['purpose']))
+                if data['purpose'] == 'withdraw':
+                    with _privacy_capacity(current_app.extensions['lite_attest_http']['budget']) as claim:
+                        challenge = service.admission.issue_challenge(key, purpose='withdraw', before_commit=claim)
+                elif data['purpose'] == 'register':
+                    challenge = service.issue_challenge(key)
+                else:
+                    challenge = service.admission.issue_challenge(key)
                 return jsonify(challenge_id=challenge.identifier, challenge=base64.b64encode(challenge.nonce).decode('ascii'),
                                expires_at=challenge.expires_at, audience=service.admission.audience)
             if set(data) != {'key_id', 'challenge_id', 'attestation'}:
                 raise AdmissionRejected('invalid registration request')
             result = service.register(_b64(data['key_id'], 32, 32), data['challenge_id'], _b64(data['attestation'], 65536))
             return jsonify(installation=result.installation, key_id=base64.b64encode(result.key_id).decode('ascii'))
+        except BudgetExceeded as exc:
+            return _budget_limit_response(exc)
         except ChallengeLimit as exc:
             return _challenge_limit_response(exc)
         except (AdmissionRejected, AssertionRejected, ValueError):

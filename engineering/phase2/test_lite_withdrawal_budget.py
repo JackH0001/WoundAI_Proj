@@ -1,6 +1,8 @@
 """Synthetic signed HTTP: research withdrawal must not share inference capacity."""
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+import base64
+import hashlib
 import sys
 import unittest
 from unittest.mock import patch
@@ -103,6 +105,85 @@ class WithdrawalBudgetTests(unittest.TestCase):
         self.assertEqual(h.client.delete(self.path,headers=headers,data=b'X').status_code,413)
         self.assertEqual(h.budget.store.load(h.budget.key)[1]['day_used'],before+1)
         self.assertEqual(h.client.delete(self.path,headers=headers).status_code,200)
+
+    def _privacy_count(self):
+        key=hashlib.sha256(b'woundlite/withdrawal-budget/1').digest()
+        row=self.h.budget.store.load(key)
+        return row[1]['day_used'] if row else 0
+
+    def test_unregistered_key_cannot_exhaust_privacy_even_when_general_is_full(self):
+        h=self.h
+        h.budget.minute_limit=6
+        invalid=base64.b64encode(b'x'*32).decode()
+        self.assertNotEqual(invalid,h.key)
+        for _ in range(12):
+            code=h.client.post(CHALLENGE_PATH,json={'key_id':invalid,'purpose':'withdraw'}).status_code
+            self.assertIn(code,(401,429))
+        self.assertEqual(self._privacy_count(),0)
+        valid=h.headers(self.path,b'','',method='DELETE',purpose='withdraw')
+        self.assertEqual(h.client.delete(self.path,headers=valid).status_code,200)
+        self.assertEqual(self._privacy_count(),2)
+
+    def test_forged_assertion_missing_challenge_and_replay_use_no_privacy_slot(self):
+        h=self.h
+        valid=h.headers(self.path,b'','',method='DELETE',purpose='withdraw')
+        proof=bytearray(base64.b64decode(valid['X-Lite-Assertion']))
+        proof[-1]^=1
+        for wrong in ({'X-Lite-Assertion':base64.b64encode(proof).decode()},
+                      {'X-Lite-Challenge-ID':'0'*32}):
+            self.assertEqual(h.client.delete(self.path,headers={**valid,**wrong}).status_code,401)
+        self.assertEqual(self._privacy_count(),1)
+        self.assertFalse(h.privacy.is_withdrawn(h.owner))
+        self.assertEqual(h.client.delete(self.path,headers=valid).status_code,200)
+        self.assertEqual(h.client.delete(self.path,headers=valid).status_code,401)
+        self.assertEqual(self._privacy_count(),2)
+
+    def test_challenge_and_assertion_state_contention_each_charge_once(self):
+        h=self.h
+        real_cas=h.e.store.compare_exchange
+        def lose_once():
+            attempts=[]
+            def competing(*args):
+                attempts.append(True)
+                return False if len(attempts)==1 else real_cas(*args)
+            return competing
+        with patch.object(h.e.store,'compare_exchange',side_effect=lose_once()) as cas:
+            valid=h.headers(self.path,b'','',method='DELETE',purpose='withdraw')
+            self.assertEqual(cas.call_count,2)
+        with patch.object(h.e.store,'compare_exchange',side_effect=lose_once()) as cas:
+            self.assertEqual(h.client.delete(self.path,headers=valid).status_code,200)
+            self.assertEqual(cas.call_count,2)
+        self.assertEqual(self._privacy_count(),2)
+
+    def test_full_protected_budget_never_verifies_or_changes_device_state(self):
+        h=self.h
+        h.budget.minute_limit=1
+        valid=h.headers(self.path,b'','',method='DELETE',purpose='withdraw')
+        with (patch.object(h.e.service.admission,'admit',side_effect=AssertionError('full lane')),
+              patch.object(h.e.service.admission,'issue_challenge',side_effect=AssertionError('full lane'))):
+            self.assertEqual(h.client.delete(self.path,headers=valid).status_code,429)
+            self.assertEqual(h.client.post(CHALLENGE_PATH,json={'key_id':h.key,'purpose':'withdraw'}).status_code,429)
+        self.assertFalse(h.privacy.is_withdrawn(h.owner))
+        h.e.now+=60
+        self.assertEqual(h.client.delete(self.path,headers=valid).status_code,200)
+
+    def test_last_slot_lost_after_precheck_preserves_counter_and_challenge(self):
+        h=self.h
+        h.budget.minute_limit=2
+        valid=h.headers(self.path,b'','',method='DELETE',purpose='withdraw')
+        before=h.e.store.load(h.e.key_id)
+        check=h.budget.check_available
+        def another_request_wins(*,scope):
+            check(scope=scope)
+            h.budget.reserve(scope=scope)
+        with patch.object(h.budget,'check_available',side_effect=another_request_wins):
+            blocked=h.client.delete(self.path,headers=valid)
+        self.assertEqual(blocked.status_code,429)
+        self.assertGreater(int(blocked.headers['Retry-After']),0)
+        self.assertEqual(h.e.store.load(h.e.key_id),before)
+        self.assertFalse(h.privacy.is_withdrawn(h.owner))
+        h.e.now+=60
+        self.assertEqual(h.client.delete(self.path,headers=valid).status_code,200)
     def test_malformed_control_and_nonempty_delete_fail_closed(self):
         h=self.h;before=h.budget.store.load(h.budget.key)[1]['day_used']
         self.assertEqual(h.client.post(CHALLENGE_PATH,data=b'{',content_type='application/json').status_code,401)

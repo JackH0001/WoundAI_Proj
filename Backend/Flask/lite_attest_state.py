@@ -260,7 +260,7 @@ class AssertionAdmission:
             raise AdmissionRejected('revoked key')
         return generation, state, point
 
-    def issue_challenge(self, key_id, *, purpose='assert'):
+    def issue_challenge(self, key_id, *, purpose='assert', before_commit=None):
         if purpose not in ('assert', 'withdraw'):
             raise AdmissionRejected('unsupported challenge purpose')
         for _ in range(CAS_ATTEMPTS):
@@ -277,13 +277,16 @@ class AssertionAdmission:
             identifier, nonce = secrets.token_hex(16), secrets.token_bytes(32)
             if identifier in state['challenges']:
                 continue
+            if before_commit is not None:
+                before_commit()
             state['challenges'][identifier] = {'nonce': base64.b64encode(nonce).decode('ascii'),
                                               'issued_at': now, 'expires_at': now + CHALLENGE_TTL, 'purpose': purpose}
             if self.store.compare_exchange(key_id, generation, state):
                 return Challenge(identifier, nonce, now + CHALLENGE_TTL)
         raise StateUnavailable('challenge update contention')
 
-    def admit(self, key_id, challenge_id, assertion, *, request_id, method, path, content_type, body):
+    def admit(self, key_id, challenge_id, assertion, *, request_id, method, path, content_type, body,
+              before_commit=None):
         if type(challenge_id) is not str or re.fullmatch(r'[0-9a-f]{32}', challenge_id) is None:
             raise AdmissionRejected('invalid challenge identifier')
         for _ in range(CAS_ATTEMPTS):
@@ -307,6 +310,8 @@ class AssertionAdmission:
                                             client_data=data, previous_counter=state['counter'], policy=self.policy)
             except (ValueError, AssertionRejected) as exc:
                 raise AdmissionRejected('assertion not valid for this request') from exc
+            if before_commit is not None:
+                before_commit()
             state['counter'] = verified.counter
             del state['challenges'][challenge_id]
             if not challenge['issued_at'] <= self._now() < challenge['expires_at']:
