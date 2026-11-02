@@ -296,6 +296,60 @@ class CustodyTests(unittest.TestCase):
             value=real(*args);self.erase();return value
         with patch.object(self.f.provider,'unwrap',side_effect=race),self.assertRaises(StateUnavailable):
             self.cipher.open(self.envelope,self.context)
+    def race_destruction_intent_with_unwrap(self):
+        unwrap = self.f.provider.unwrap
+        def lose_checkpoint(version, wrapped, aad):
+            dek = unwrap(version, wrapped, aad)
+            # Simulate a worker stopping after its immutable audit write,
+            # before its mutable key-row checkpoint or any KMS destruction.
+            with patch.object(self.f.key_store, 'compare_exchange', return_value=False), self.assertRaises(StateUnavailable):
+                self.erase()
+            self.assertIsNotNone(self.f.key_audit.load(key('account-grant-key-destroy-intent',
+                digest([self.cipher.scope, self.person]))))
+            self.assertEqual(self.cipher._read(self.person)[1]['phase'], 'ready')
+            self.assertEqual(self.f.kms.states[version], 'ENABLED')
+            return dek
+        return patch.object(self.f.provider, 'unwrap', side_effect=lose_checkpoint)
+
+    def test_durable_intent_alone_stops_an_inflight_open(self):
+        self.f.close_revoke()
+        with self.race_destruction_intent_with_unwrap(), self.assertRaises(StateUnavailable):
+            self.cipher.open(self.envelope, self.context)
+
+    def test_durable_intent_alone_stops_an_inflight_seal(self):
+        self.f.close_revoke()
+        with self.race_destruction_intent_with_unwrap(), self.assertRaises(StateUnavailable):
+            self.cipher.seal({'refresh_token':'synthetic-late-token'}, self.context)
+
+    def test_new_code_preparation_stops_if_deletion_fences_the_existing_key_mid_prepare(self):
+        unwrap = self.f.provider.unwrap
+        def close_after_decrypt(version, wrapped, aad):
+            plain = unwrap(version, wrapped, aad)
+            with patch.object(self.f.provider, 'unwrap', side_effect=unwrap):
+                self.f.close_revoke()
+                with patch.object(self.f.key_store, 'compare_exchange', return_value=False), self.assertRaises(StateUnavailable):
+                    self.erase()
+            return plain
+        with patch.object(self.f.provider, 'unwrap', side_effect=close_after_decrypt), self.assertRaises(StateUnavailable):
+            self.cipher.prepare(self.context)
+
+    def test_interrupted_key_fence_survives_vault_restart_without_blocking_other_account(self):
+        backup = copy.deepcopy(self.cipher._read(self.person)[1])
+        self.f.login('device-other','apple-human-2')
+        other, context = self.f.snapshot()
+        self.f.close_revoke()
+        with patch.object(self.f.key_store, 'compare_exchange', return_value=False), self.assertRaises(StateUnavailable):
+            self.erase()
+        restarted = self.f.make_cipher()
+        with self.assertRaises(StateUnavailable): restarted.open(self.envelope, self.context)
+        self.assertEqual(restarted.open(other, context)['refresh_token'], 'private-refresh-token')
+        # Raw backup is still cryptographically usable at the provider.
+        self.assertEqual(len(self.f.provider.unwrap(self.version, backup['wrapped_dek'], self.cipher._aad(self.person))), 32)
+        receipt = self.erase()
+        self.assertEqual(receipt['kms_state'], 'DESTROY_SCHEDULED')
+        self.assertFalse(receipt['grant_key_unrecoverable'])
+        self.assertFalse(receipt['physical_backup_deletion_confirmed'])
+        self.assertEqual(restarted.open(other, context)['refresh_token'], 'private-refresh-token')
     def test_corrupt_key_row_is_never_reset(self):
         k=self.cipher._key(self.person);rev,c=self.f.key_store.load(k)
         self.f.key_store.compare_exchange(k,rev,dict(c,person='0'*64))
