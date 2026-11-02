@@ -62,10 +62,10 @@ final class LitePDFReportTests: XCTestCase {
         let file = try LiteTimelinePDF.export(selection,photos:true) { _ in img }
         defer { file.remove() }
         let data = try Data(contentsOf:file.url), pdf = try XCTUnwrap(PDFDocument(data:data))
-        XCTAssertEqual(pdf.pageCount,2)
+        XCTAssertEqual(pdf.pageCount,entries.count+1)
         let text = try XCTUnwrap(pdf.string)
         for value in ["10.08","9.91","8.50","未提供面積","免貼紙","合成標靶 A","2026/10/24",
-                      "表面積趨勢","可繪 3 / 4 筆","舊版 LiDAR 表面積：7.25","青色區域為已存傷口圈選"] {
+                      "表面積趨勢","可繪 3 / 4 筆","舊版 LiDAR 表面積：7.25","青色細線標示已存傷口輪廓"] {
             XCTAssertTrue(text.contains(value),value)
         }
         for value in ["123.45","678.91","private-","9.87","6.54"] { XCTAssertFalse(text.contains(value),value) }
@@ -160,7 +160,7 @@ final class LitePDFReportTests: XCTestCase {
         row.measurementContext?.coverage = 0.1
         let rejected = try exportText(photos: true)
         XCTAssertTrue(rejected.contains("可繪 0 / 1 筆"))
-        XCTAssertTrue(rejected.contains("青色區域為已存傷口圈選"))
+        XCTAssertTrue(rejected.contains("青色細線標示已存傷口輪廓"))
         XCTAssertFalse(rejected.contains("10.08"))
     }
     func testInvalidDepthNumbersAndInsufficientCoverageAreNotPublished() {
@@ -247,7 +247,7 @@ final class LitePDFReportTests: XCTestCase {
         XCTAssertNil(LitePDFReport.polygons(record(), image: rotated))
         XCTAssertFalse(LitePDFReport.areaLines(record(), image: rotated).joined().contains("10.08"))
     }
-    func testSavedMaskFillsOnlyItsRegisteredPhotoRegionInThePDF() throws {
+    func testSavedOutlinePreservesInteriorColourAndRemainsThinAtItsRegisteredEdge() throws {
         let row = record()
         let pageSize = CGSize(width: 595.28, height: 841.89)
         let photo = image()
@@ -256,25 +256,93 @@ final class LitePDFReportTests: XCTestCase {
         let file = try LiteTimelinePDF.export(selection, photos:true) { _ in photo }
         defer { file.remove() }
         let page = try XCTUnwrap(PDFDocument(url:file.url)?.page(at:0))
-        let thumb = page.thumbnail(of:pageSize, for:.mediaBox)
-        func pixel(_ x: CGFloat, _ y: CGFloat) throws -> [UInt8] {
+        let scale: CGFloat = 4
+        let raster = CGSize(width:pageSize.width * scale,height:pageSize.height * scale)
+        let thumb = page.thumbnail(of:raster, for:.mediaBox)
+        func pixel(_ image: UIImage, _ x: CGFloat, _ y: CGFloat, size: CGSize) throws -> [UInt8] {
             var bytes = [UInt8](repeating:0, count:4)
             try bytes.withUnsafeMutableBytes { raw in
                 let ctx = try XCTUnwrap(CGContext(data:raw.baseAddress, width:1, height:1, bitsPerComponent:8,
                     bytesPerRow:4, space:CGColorSpaceCreateDeviceRGB(),
                     bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue))
-                ctx.draw(try XCTUnwrap(thumb.cgImage), in:CGRect(x:-x, y:y-pageSize.height,
-                                                                 width:pageSize.width, height:pageSize.height))
+                ctx.draw(try XCTUnwrap(image.cgImage), in:CGRect(x:-x, y:y-size.height,
+                                                                 width:size.width, height:size.height))
             }
             return bytes
         }
-        // Inside the pink fixture the translucent teal fill visibly reduces the red channel.
-        let fill = try pixel(118, 480), outside = try pixel(50, 435)
-        XCTAssertLessThan(fill[0], 223)
-        XCTAssertGreaterThan(fill[1], 60)
-        XCTAssertGreaterThan(outside[0], 228)
-        XCTAssertLessThan(abs(Int(outside[0]) - Int(outside[1])), 5)
+        let inside = try pixel(thumb,297 * scale,504 * scale,size:raster)
+        let original = try pixel(photo,400,300,size:photo.size)
+        for channel in 0..<3 {
+            XCTAssertLessThanOrEqual(abs(Int(inside[channel]) - Int(original[channel])),12)
+        }
+        let outside = try pixel(thumb,163 * scale,405 * scale,size:raster)
+        XCTAssertGreaterThan(outside[0],228)
+        XCTAssertLessThan(abs(Int(outside[0]) - Int(outside[1])),5)
+        // At four rendered pixels per printed point, the left edge of this
+        // 800 × 600 fixture is near x=232 pt. The outline must not fill the box.
+        let samples = try (912...946).map { try pixel(thumb,CGFloat($0),504 * scale,size:raster) }
+        let teal = samples.filter { Int($0[1]) - Int($0[0]) > 40 && Int($0[2]) - Int($0[0]) > 40 }
+        XCTAssertGreaterThanOrEqual(teal.count,1)
+        XCTAssertLessThanOrEqual(teal.count,5)
     }
+    func testReportPhotoUsesSourcePixelsAndBoundsLargePhotographs() throws {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 3
+        let portrait = UIGraphicsImageRenderer(size: CGSize(width:240,height:640), format:format).image { c in
+            UIColor.darkGray.setFill()
+            c.fill(CGRect(x:0,y:0,width:240,height:640))
+        }
+        let raster = try XCTUnwrap(LitePDFReport.reportPhoto(portrait).cgImage)
+        XCTAssertEqual(raster.width,600)
+        XCTAssertEqual(raster.height,1600)
+        let small = try XCTUnwrap(LitePDFReport.reportPhoto(image()).cgImage)
+        XCTAssertEqual(small.width,800)
+        XCTAssertEqual(small.height,600)
+    }
+
+    func testDetailReportKeepsEachDatedPhotoOnItsOwnPage() throws {
+        func target(dark: Bool) -> UIImage {
+            let f = UIGraphicsImageRendererFormat()
+            f.scale = 1
+            return UIGraphicsImageRenderer(size: CGSize(width:800,height:600),format:f).image { painter in
+                UIColor(white:dark ? 0.16 : 0.95,alpha:1).setFill()
+                painter.fill(CGRect(x:0,y:0,width:800,height:600))
+                let box = CGRect(x:240,y:160,width:320,height:280)
+                UIColor(red:0.62,green:0.22,blue:0.27,alpha:1).setFill()
+                painter.fill(box)
+                painter.cgContext.saveGState()
+                painter.cgContext.clip(to:box)
+                for i in 0..<95 {
+                    let x = 240 + (i * 71) % 320, y = 160 + (i * 37) % 280
+                    UIColor(red:0.84,green:0.43,blue:0.45,alpha:0.85).setFill()
+                    painter.cgContext.fillEllipse(in:CGRect(x:x,y:y,width:6+i%9,height:3+i%5))
+                }
+                painter.cgContext.restoreGState()
+                let ink = dark ? UIColor.white : UIColor.black
+                ("合成材質標靶  |  SYNTHETIC" as NSString).draw(at:CGPoint(x:70,y:502),
+                    withAttributes:[.font:UIFont.systemFont(ofSize:22),.foregroundColor:ink])
+            }
+        }
+        var first=record(), last=record()
+        first.id="detail-A"; first.dateISO="2026-10-21T01:00:00Z"
+        last.id="detail-B"; last.dateISO="2026-10-22T01:00:00Z"
+        last.surfaceCm2=8.25; last.projectedCm2=8.02
+        let group=LiteWoundGroup(id:try XCTUnwrap(first.woundID),name:"合成材質標靶",location:first.woundLocation)
+        let selection=try LiteTimelineSelection(group:group,records:[last,first])
+        let photos=[first.id:target(dark:false),last.id:target(dark:true)]
+        let copy=try LiteTimelinePDF.export(selection,photos:true) { photos[$0.id] }
+        defer { copy.remove() }
+        let doc=try XCTUnwrap(PDFDocument(url:copy.url))
+        XCTAssertEqual(doc.pageCount,3)
+        XCTAssertTrue(try XCTUnwrap(doc.page(at:0)?.string).contains("觀察紀錄索引"))
+        XCTAssertTrue(try XCTUnwrap(doc.page(at:1)?.string).contains("10.08"))
+        XCTAssertTrue(try XCTUnwrap(doc.page(at:2)?.string).contains("8.25"))
+        let attachment=XCTAttachment(data:try Data(contentsOf:copy.url),uniformTypeIdentifier:"com.adobe.pdf")
+        attachment.name="WoundAILite-timeline-photo-detail.pdf"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     func testMalformedAndOutOfBoundsContoursAreRejectedWithoutInventingAnotherMask() {
         for json in ["[[[240],[560,160],[560,440]]]", "[[[240,160],[800,160],[560,440]]]", "[]", "broken"] {
             var r = record(); r.polysJson = json

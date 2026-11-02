@@ -92,9 +92,13 @@ enum LiteTimelinePDF {
           LitePDFReport.polygons(record, image: image(record)))
       }
     }
-    let firstCount = min(2, selection.rows.count)
-    let ranges = [0..<firstCount] + stride(from: firstCount, to: selection.rows.count, by: 3).map {
-      $0..<min($0 + 3, selection.rows.count)
+    let firstCount = min(photos ? 1 : 2, selection.rows.count)
+    let perPage = photos ? 1 : 3
+    let photoIndex = photos && selection.rows.count > 1
+    // Keep the printed photo frame identical across dates. The first photo
+    // must not look smaller than later photos simply because it shares a chart.
+    let ranges = (photoIndex ? [0..<0] : []) + [0..<firstCount] + stride(from: firstCount, to: selection.rows.count, by: perPage).map {
+      $0..<min($0 + perPage, selection.rows.count)
     }
     let ink = UIColor(red: 0.08, green: 0.18, blue: 0.21, alpha: 1)
     func text(
@@ -116,26 +120,52 @@ enum LiteTimelinePDF {
           context.beginPage()
           UIColor.white.setFill()
           context.cgContext.fill(page)
-          text("WoundAILite   /   個人觀察紀錄", CGRect(x: 36, y: 32, width: 510, height: 20), size: 12)
-          text("傷口時間軸", CGRect(x: 36, y: 58, width: 520, height: 40), size: 28, bold: true)
+          text("WoundAILite   /   個人觀察紀錄", CGRect(x: 36, y: photos ? 24 : 32, width: 510, height: 20), size: 12)
+          text("傷口時間軸", CGRect(x: 36, y: photos ? 46 : 58, width: 520, height: 40), size: 28, bold: true)
           text(
-            selection.group.displayName, CGRect(x: 36, y: 107, width: 525, height: 27), size: 17,
+            selection.group.displayName, CGRect(x: 36, y: photos ? 85 : 107, width: 525, height: 27), size: 17,
             bold: true)
           text(
             "\(selection.period)     ·     共 \(selection.rows.count) 筆",
-            CGRect(x: 36, y: 140, width: 525, height: 22), size: 13)
+            CGRect(x: 36, y: photos ? 111 : 140, width: 525, height: 22), size: 13)
           let stamp =
             selection.missingDates > 0
             ? "有 \(selection.missingDates) 筆日期待確認；自訂期間只列日期可核對的紀錄。" : "依拍攝時間排列，面積為個人紀錄參考值。"
-          text(stamp, CGRect(x: 36, y: 168, width: 525, height: 24), size: 11)
-          if number == 0 { drawTrend(selection, eligible: eligible, ctx: context.cgContext) }
+          text(stamp, CGRect(x: 36, y: photos ? 136 : 168, width: 525, height: 24), size: 11)
+          if number == 0 {
+            context.cgContext.saveGState()
+            if photos { context.cgContext.translateBy(x: 0, y: -36) }
+            drawTrend(selection, eligible: eligible, ctx: context.cgContext)
+            context.cgContext.restoreGState()
+            if photoIndex {
+              text("觀察紀錄索引", CGRect(x:36,y:356,width:523,height:26),size:17,bold:true)
+              text("拍攝時間", CGRect(x:36,y:396,width:192,height:18),size:12)
+              text("LiDAR 表面積估算", CGRect(x:255,y:396,width:184,height:18),size:12)
+              text("照片頁", CGRect(x:496,y:396,width:62,height:18),size:12)
+              let entries = selection.rows.prefix(8)
+              for (index, record) in entries.enumerated() {
+                let y = CGFloat(430 + index * 31)
+                let area = eligible[record.id].map { basis in
+                  (basis == .legacy ? "舊版 " : "") + String(format:"%.2f cm²",record.surfaceCm2)
+                } ?? "未提供面積"
+                text(selection.displayDate(record.dateISO),CGRect(x:36,y:y,width:198,height:20),size:13)
+                text(area,CGRect(x:255,y:y,width:215,height:20),size:13)
+                text("第 \(index+2) 頁",CGRect(x:496,y:y,width:70,height:20),size:12)
+              }
+              let note = selection.rows.count > entries.count
+                ? "另有 \(selection.rows.count-entries.count) 筆；全部照片皆依日期逐頁列出。"
+                : "照片依比例呈現；拍攝距離可能不同，觀察面積變化請參照趨勢與各筆數值。"
+              text(note, CGRect(x:36,y:CGFloat(445 + entries.count * 31),width:523,height:36),size:11)
+            }
+          }
           for (local, index) in range.enumerated() {
             autoreleasepool {
               let record = selection.rows[index]
               let img = image(record)
               let polygons = LitePDFReport.polygons(record, image: img)
               if LitePDFReport.areaSeries(record, polygons: polygons) != eligible[record.id] { sourceChanged = true }
-              let top = CGFloat((number == 0 ? 380 : 202) + local * 180)
+              let top = photos ? CGFloat(number == 0 ? 344 : 164)
+                               : CGFloat((number == 0 ? 380 : 202) + local * 180)
               UIColor(white: 0.82, alpha: 1).setStroke()
               context.cgContext.move(to: CGPoint(x: 36, y: top))
               context.cgContext.addLine(to: CGPoint(x: 559, y: top))
@@ -143,9 +173,9 @@ enum LiteTimelinePDF {
               text(
                 "\(index+1)    \(selection.displayDate(record.dateISO))",
                 CGRect(x: 36, y: top + 10, width: 525, height: 23), size: 13, bold: true)
-              let x: CGFloat = photos ? 215 : 36
               if photos {
-                let frame = CGRect(x: 36, y: top + 38, width: 164, height: 123)
+                // Use the page width and keep the entire exposure visible, including portrait photos.
+                let frame = CGRect(x: 36, y: top + 38, width: 523, height: 626 - (top + 38))
                 if let img, img.size.width > 0, img.size.height > 0 {
                   let factor = min(frame.width / img.size.width, frame.height / img.size.height)
                   let size = CGSize(
@@ -153,13 +183,7 @@ enum LiteTimelinePDF {
                   let rect = CGRect(
                     x: frame.midX - size.width / 2, y: frame.midY - size.height / 2,
                     width: size.width, height: size.height)
-                  let opts = UIGraphicsImageRendererFormat()
-                  opts.scale = 2
-                  opts.opaque = true
-                  let thumb = UIGraphicsImageRenderer(size: size, format: opts).image { _ in
-                    img.draw(in: CGRect(origin: .zero, size: size))
-                  }
-                  thumb.draw(in: rect)
+                  LitePDFReport.reportPhoto(img).draw(in: rect)
                   if let polygons, let cg = img.cgImage {
                     LitePDFReport.drawMask(polygons, pixels: cg, in: rect, context: context.cgContext)
                   }
@@ -167,17 +191,18 @@ enum LiteTimelinePDF {
                   text("本機照片無法讀取", frame, size: 12)
                 }
               }
+              let areaTop: CGFloat = photos ? 634 : top + 40
               let area = LitePDFReport.areaLines(record, polygons: polygons)
               text(
-                area[0], CGRect(x: x, y: top + 40, width: 559 - x, height: 47), size: 14, bold: true
+                area[0], CGRect(x: 36, y: areaTop, width: 523, height: photos ? 32 : 47), size: 14, bold: true
               )
               if area.count > 1 {
-                text(area[1], CGRect(x: x, y: top + 86, width: 559 - x, height: 24), size: 12)
+                text(area[1], CGRect(x: 36, y: photos ? 662 : top + 86, width: 523, height: 28), size: 12)
               }
               let mask = !photos ? "照片與圈選依選項省略" : polygons == nil
-                ? "無可核對的圈選，未疊圖" : "青色區域為已存傷口圈選"
+                ? "無可核對的圈選，未疊圖" : "青色細線標示已存傷口輪廓"
               text(mask + " · " + (record.contourOrigin?.label ?? "圈選版本未確認"),
-                   CGRect(x: x, y: top + 112, width: 559 - x, height: 28), size: 11)
+                   CGRect(x: 36, y: photos ? 693 : top + 112, width: 523, height: 24), size: 11)
               let quality: String
               switch record.savedArea {
               case .unavailable: quality = "本筆面積未通過檢查。"
@@ -188,7 +213,7 @@ enum LiteTimelinePDF {
               }
               text(
                 "拍攝品質  " + quality,
-                CGRect(x: x, y: top + 143, width: 559 - x, height: 30), size: 11
+                CGRect(x: 36, y: photos ? 718 : top + 143, width: 523, height: 28), size: 11
               )
             }
           }

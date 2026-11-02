@@ -75,15 +75,33 @@ enum LitePDFReport {
             path.closeSubpath()
         }
         let teal = UIColor(red: 0, green: 0.58, blue: 0.66, alpha: 1)
+        // An unfilled outline keeps the original tissue colour visible. A
+        // narrow white edge separates the line from both dark and teal pixels.
         context.addPath(path)
-        context.setFillColor(teal.withAlphaComponent(0.26).cgColor)
-        context.setStrokeColor(UIColor.white.cgColor)
-        context.setLineWidth(3.2)
-        context.drawPath(using: .fillStroke)
+        context.setStrokeColor(UIColor.white.withAlphaComponent(0.9).cgColor)
+        context.setLineWidth(1.2)
+        context.strokePath()
         context.addPath(path)
         context.setStrokeColor(teal.cgColor)
-        context.setLineWidth(1.6)
+        context.setLineWidth(0.65)
         context.strokePath()
+    }
+
+    /// Render only pixels into the PDF, at a resolution independent of the printed frame.
+    static func reportPhoto(_ image: UIImage) -> UIImage {
+        let width = image.size.width * image.scale
+        let height = image.size.height * image.scale
+        let factor = min(1, 1_600 / max(width, height))
+        let size = CGSize(width: max(1, (width * factor).rounded()), height: max(1, (height * factor).rounded()))
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        format.preferredRange = .standard
+        return UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
     }
 
     static func render(record: LiteRecord, image: UIImage?) -> Data {
@@ -123,23 +141,14 @@ enum LitePDFReport {
                 let scale = min(523 / image.size.width, 330 / image.size.height)
                 let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
                 let frame = CGRect(x: 36 + (523-size.width)/2, y: y, width: size.width, height: size.height)
-                // Render pixels, never embed original JPEG/EXIF or raw depth as PDF attachments.
-                let rasterFormat = UIGraphicsImageRendererFormat(); rasterFormat.scale = 1
-                rasterFormat.opaque = true; rasterFormat.preferredRange = .standard
-                let factor = min(1, 1600 / max(image.size.width, image.size.height))
-                let rasterSize = CGSize(width: image.size.width * factor, height: image.size.height * factor)
-                let raster = UIGraphicsImageRenderer(size: rasterSize, format: rasterFormat).image { r in
-                    UIColor.white.setFill(); r.fill(CGRect(origin: .zero, size: rasterSize))
-                    image.draw(in: CGRect(origin: .zero, size: rasterSize))
-                }
-                raster.draw(in: frame)
+                reportPhoto(image).draw(in: frame)
                 if let ps = polygons(record, image: image), let cg = image.cgImage {
                     drawMask(ps, pixels: cg, in: frame, context: ctx.cgContext)
                 }
                 y += size.height + 12
                 text(polygons(record, image: image) == nil
                      ? "照片保留；圈選座標無法核對，未疊加輪廓。"
-                     : "青色覆蓋區為本筆保存的傷口圈選。", size: 11)
+                     : "青色細線標示本筆保存的傷口輪廓。", size: 11)
             } else { text("本機照片已不存在或暫時無法讀取；未從雲端補下載。") }
             text("原始圈選：" + (record.contourOrigin?.label ?? "圈選版本未確認"))
             for line in areaLines(record, image: image) { text(line) }
