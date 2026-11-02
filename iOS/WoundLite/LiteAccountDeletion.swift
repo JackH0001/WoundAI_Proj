@@ -61,12 +61,14 @@ struct LiteDispositionProgress: Codable, Equatable {
         }
     }
     var serviceText:String {
-        service_state=="current_sealed" ? "目前結果已封存（\(service_sealed)/\(service_total)）" :
-        service_state=="not_started" ? "尚未開始" : "處理中（\(service_sealed)/\(service_total)）"
+        if service_state=="current_sealed" { return "目前結果已封存（\(service_sealed)/\(service_total)）" }
+        if blocked_lanes.contains("service_results") { return "服務結果暫待核對（已確認 \(service_sealed)/\(service_total)）" }
+        return service_state=="not_started" ? "尚未開始" : "處理中（\(service_sealed)/\(service_total)）"
     }
     var keyText:String {
-        grant_key_state=="unrecoverable" ? "已確認無法解密" :
-        grant_key_state=="destroy_scheduled" ? "已排程，等待銷毀確認" : "尚未開始"
+        if grant_key_state=="unrecoverable" { return "已確認無法解密" }
+        if grant_key_state=="destroy_scheduled" { return "已排程，等待銷毀確認" }
+        return blocked_lanes.contains("grant_key") ? "金鑰處理暫待核對，可稍後查看原進度" : "尚未開始"
     }
 }
 

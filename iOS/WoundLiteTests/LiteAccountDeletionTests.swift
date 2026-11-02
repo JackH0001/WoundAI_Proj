@@ -483,6 +483,17 @@ private actor DeletionJournal:LiteServiceJournal {
         await next.retry();XCTAssertTrue(next.message.contains("已確認無法解密"))
         XCTAssertTrue(next.message.contains("尚未完成刪除"));XCTAssertEqual(s.requests.count,1);XCTAssertEqual(i.authCalls,0)
     }
+    func testBlockedStepsShowPendingConfirmationAndRetainLastConfirmedCounts()throws {
+        let waiting=try receipt(progress:["grant_key_state":"not_started","service_state":"pending",
+            "service_sealed":1,"blocked_lanes":["grant_key","service_results"]])
+        try waiting.validate(owner:deletionOwner,operation:op)
+        XCTAssertEqual(waiting.disposition?.keyText,"金鑰處理暫待核對，可稍後查看原進度")
+        XCTAssertEqual(waiting.disposition?.serviceText,"服務結果暫待核對（已確認 1/2）")
+        let scheduled=try receipt(progress:["revision":2,"blocked_lanes":["grant_key"]])
+        try scheduled.validate(owner:deletionOwner,operation:op,previous:waiting)
+        XCTAssertEqual(scheduled.disposition?.keyText,"已排程，等待銷毀確認")
+        XCTAssertFalse(scheduled.account_deleted)
+    }
     func testLateOldStatusCannotReplaceSavedProgress()async throws {
         let s=DeletionService(),i=DeletionIdentity(),j=DeletionJournal()
         let m=LiteAccountDeletionStore(service:s,identity:i,journal:j,pauseResearch:{});await m.requestConfirmed()

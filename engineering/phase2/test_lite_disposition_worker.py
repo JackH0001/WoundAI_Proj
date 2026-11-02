@@ -77,6 +77,81 @@ class WorkerTests(unittest.TestCase):
         with patch.object(self.f.h.m.w,'advance',side_effect=StateUnavailable('offline')) as call:
             self.work(max_steps=40)
         self.assertEqual(call.call_count,1)
+
+    def test_public_receipt_preserves_blocked_lane_when_another_lane_succeeds(self):
+        self.ready()
+        with patch.object(self.f.f.results, 'advance', side_effect=StateUnavailable('temporary')):
+            self.work(max_steps=1)
+        self.assertEqual(self.f.f.status()['disposition']['blocked_lanes'],['service_results'])
+        self.work(max_steps=1,limit=20)
+        self.assertEqual(self.f.f.status()['apple_revocation'],'confirmed')
+        self.assertEqual(self.f.f.status()['disposition']['blocked_lanes'],['service_results'])
+        with patch.object(self.f.f.f.provider,'describe',side_effect=StateUnavailable('temporary')):
+            self.work(max_steps=1)
+        before=self.f.f.status()
+        self.assertEqual(before['disposition']['blocked_lanes'],['grant_key','service_results'])
+        self.f.finish()
+        after=self.f.f.status()
+        self.assertEqual(after['operation'],before['operation'])
+        self.assertEqual(after['disposition']['blocked_lanes'],[])
+        self.assertEqual(after['disposition']['grant_key_state'],'unrecoverable')
+        self.assertFalse(after['account_deleted'])
+
+    def test_restart_publishes_saved_checkpoint_without_rerunning_provider(self):
+        self.ready()
+        with patch.object(self.w,'_publish_progress',side_effect=StateUnavailable('lost publication')):
+            with self.assertRaisesRegex(StateUnavailable,'lost publication'):
+                self.work(max_steps=1)
+        self.assertEqual(self.w.status(self.person)['states']['service_current'],'observed')
+        self.assertEqual(self.f.f.status()['disposition']['service_state'],'not_started')
+        self.w=self.f.worker()
+        self.w.set_paused(self.person,paused=True,expected_revision=0)
+        provider_calls=self.f.f.f.kms.calls.copy(),self.f.f.f.g.calls.copy()
+        result=self.work(max_steps=1)
+        self.assertEqual(result['dispatches'],0)
+        self.assertEqual(self.f.f.status()['disposition']['service_state'],'current_sealed')
+        revision=self.f.f.status()['disposition']['revision']
+        self.work(max_steps=1)
+        self.assertEqual(self.f.f.status()['disposition']['revision'],revision)
+        self.assertEqual(provider_calls,(self.f.f.f.kms.calls,self.f.f.f.g.calls))
+
+    def test_late_publisher_cannot_reinstate_a_cleared_block(self):
+        self.ready()
+        with patch.object(self.w,'_publish_progress'), patch.object(self.f.f.results,'advance',
+                side_effect=StateUnavailable('temporary')):
+            self.work(max_steps=1)
+        public=self.f.f.progress.store
+        compare_exchange=public.compare_exchange
+        competed=False
+        def compete(key,revision,value):
+            nonlocal competed
+            if not competed:
+                competed=True
+                self.f.finish()
+            return compare_exchange(key,revision,value)
+        with patch.object(public,'compare_exchange',side_effect=compete):
+            self.w._publish_progress(self.w._plan(self.person))
+        self.assertTrue(competed)
+        final=self.f.f.status()['disposition']
+        self.assertEqual(final['blocked_lanes'],[])
+        self.assertEqual(final['service_state'],'current_sealed')
+        self.assertEqual(final['grant_key_state'],'unrecoverable')
+
+    def test_shared_key_in_dedicated_row_is_blocked_without_key_destruction(self):
+        self.ready()
+        self.work(max_steps=2,limit=20)
+        cipher=self.f.f.f.cipher
+        key=cipher._key(self.person)
+        generation,row=cipher.store.load(key)
+        shared=cipher.provider.keyring+'/cryptoKeys/shared/cryptoKeyVersions/1'
+        self.assertTrue(cipher.store.compare_exchange(key,generation,dict(row,version=shared)))
+        before=self.f.f.f.kms.calls.copy()
+        self.work(max_steps=1)
+        public=self.f.f.status()
+        self.assertEqual(public['apple_revocation'],'confirmed')
+        self.assertEqual(public['disposition']['blocked_lanes'],['grant_key'])
+        self.assertFalse(public['account_deleted'])
+        self.assertEqual(before,self.f.f.f.kms.calls)
     def test_service_history_outage_preserves_research_progress(self):
         self.ready()
         with patch.object(self.f.service,'advance_account',side_effect=StateUnavailable('offline')):

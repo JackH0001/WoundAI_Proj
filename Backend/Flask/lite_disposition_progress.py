@@ -137,15 +137,20 @@ class DispositionProgress:
         return row
 
     def _record(self, p, service, grant_key, blocked):
-        if service is not None: self._validate_service(p, service)
-        if grant_key is not None: self._validate_key(p, grant_key)
-        if type(blocked) is not list or any(type(x) is not str or x not in
-                ('apple_revocation','service_results','grant_key') for x in blocked):
-            raise StateUnavailable('unknown blocked disposition lane')
+        self._record_observation(p, lambda old: (service, grant_key, blocked))
+
+    def _record_observation(self, p, observe):
         for _ in range(CAS_ATTEMPTS):
             row = self._read(p)
             old = None if row is None else row[1]
-            s, k = service, grant_key
+            # Read the worker checkpoint after the public revision on every CAS
+            # attempt. A stale publisher must re-read a competing worker's outcome.
+            s, k, blocked = observe(old)
+            if s is not None: self._validate_service(p, s)
+            if k is not None: self._validate_key(p, k)
+            if type(blocked) is not list or any(type(x) is not str or x not in
+                    ('apple_revocation','service_results','grant_key') for x in blocked):
+                raise StateUnavailable('unknown blocked disposition lane')
             if old:
                 if old['service'] is not None and (s is None or s['sealed'] <= old['service']['sealed']): s = old['service']
                 if old['grant_key'] is not None and (k is None or old['grant_key']['kms_state']=='DESTROYED'): k = old['grant_key']
