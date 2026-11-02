@@ -8,6 +8,12 @@
 
 付款前重新比對商品顯示名稱、價格、幣別及商店。報價不一致時先顯示新價格並等待再次點選。交易由 Apple 確認，帳號與可用額度由後端核對。購買頁另提供 Apple 訂閱管理連結。提交外部測試與公開上市前，需依核准的正式內容完成 App 內及商店頁的使用條款、隱私政策連結與雙語揭露核對。專案的隱私政策仍是供審閱的草稿。[Apple 訂閱說明](https://developer.apple.com/app-store/subscriptions/) · [隱私說明草稿](../site/privacy/woundlite.html)
 
+### 11 月 2 日外測準備
+
+App Store Connect 的 WoundAILite「App 資訊」顯示 Apple 標準許可協議。下一版從設定和訂閱頁可開啟該協議及離線雙語隱私說明，首次研究選擇畫面也可先閱讀隱私說明。閱讀頁不會登記裝置、購買或改寫同意。兩種 iOS 組態都把同一份 `site/privacy/woundlite.html` 加入 App；以 Git 檔案快照建置時，須同時包含 `iOS/` 與該 HTML。這些修改在已簽署的 build 40 之後。
+
+正式送件前仍須由負責方核定內容並發布最新公開 URL，讀回繁中與英文內容，再核對 Apple 的隱私問卷及 TestFlight 資料。當日唯讀核對顯示，繁中 App 隱私權政策 URL 尚未填寫，既有公開頁仍是 8 月版。Plus 商品顯示「準備提交」，尚須用實際 Sandbox 裝置向 StoreKit 取得商品，才能確認測試者能讀取當地價格。不得以價格表、離線政策頁或模擬交易代替該項驗收。[Apple 測試資訊](https://developer.apple.com/help/app-store-connect/test-a-beta-version/provide-test-information/) · [Sandbox 商品疑難排解](https://developer.apple.com/documentation/technotes/tn3186-troubleshooting-in-app-purchases-availability-in-the-sandbox)
+
 ## 重試與帳號歸屬
 
 * 使用者再次按訂閱時，程式先查 StoreKit 的既有權益及未完成交易。如果找到既有交易，沿用原交易核對。只有明確按恢復才呼叫 `AppStore.sync()`。

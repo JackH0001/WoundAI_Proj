@@ -28,8 +28,8 @@ struct LiteConsentView: View {
                             .font(.footnote)
                     }
 
-                    box(title: "🔬 同意研究上傳（啟用自動辨識）", tint: .blue, lines: [
-                        "拍攝後由雲端 AI 自動圈出傷口，再由您確認或修改。",
+                    box(title: LiteNativeBuild.includesService ? "同意研究上傳" : "🔬 同意研究上傳（啟用自動辨識）", tint: .blue, lines: [
+                        LiteNativeBuild.includesService ? "您可自行圈選，或登入個人服務後明確送出照片供辨識。同意研究上傳會讓符合研究條件的新紀錄進入研究送件流程。" : "拍攝後由雲端 AI 自動圈出傷口，再由您確認或修改。",
                         "上傳傷口影像、LiDAR 深度圖與相機參數，以及您修改的輪廓、量測估算、傷口分組與側別部位。隨機安裝代碼會串聯同一安裝的資料；請勿拍入臉部、姓名或證件。",
                         "已上傳影像的紀錄修正圈選後，會同步修訂輪廓與量測資料；不重傳照片。舊紀錄若無雲端識別碼則只更新本機。",
                         "用途：改進傷口辨識與 3D 量測精度的研究與模型訓練。",
@@ -38,7 +38,7 @@ struct LiteConsentView: View {
                     ])
 
                     box(title: LiteNativeBuild.includesService ? "不同意研究上傳（本機手動圈選）" : "📴 不同意（完全離線）", tint: .green, lines: [
-                        LiteNativeBuild.includesService ? "拍攝後以加密方式存於本機。若您另從紀錄選擇個人雲端辨識，僅選取的照片會送往服務，深度留在本機。" : "照片與深度資料全部只留在您的手機（加密儲存）。",
+                        LiteNativeBuild.includesService ? "拍攝後，照片及深度加密存於本機。若您在量測頁選擇個人雲端辨識，僅選取的照片會送往服務，深度留在本機。" : "照片與深度資料全部只留在您的手機（加密儲存）。",
                         "傷口輪廓改由您手動圈選，量測計算全在裝置上完成。",
                         "之後可在設定重新選擇；若已撤回並清除雲端資料，須另行閱讀並完成重新同意。",
                     ])
@@ -47,13 +47,15 @@ struct LiteConsentView: View {
                         Text("您可單獨撤回研究並保留服務帳號。若確認刪除服務帳號，會同時提出與該帳號連結的研究撤回；清理進度須另外核對。")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
-                    Text(LiteNativeBuild.includesService ? "這項選擇只決定研究上傳。個人服務另行登入，您可在紀錄中自行選擇是否送出照片。" : "兩種方式的量測數學完全相同；差別只在輪廓怎麼來、資料去不去雲端。")
+                    Text(LiteNativeBuild.includesService ? "這項選擇只決定研究上傳。個人雲端辨識另行登入，由您決定是否送出照片。" : "兩種方式的量測數學完全相同；差別只在輪廓怎麼來、資料去不去雲端。")
                         .font(.footnote).foregroundStyle(.secondary)
+
+                    LitePrivacyLink()
 
                     Button {
                         onChoose(true)
                     } label: {
-                        Text(renewingCompletedWithdrawal ? "重新同意：只啟用之後的新上傳" : renewingUnsentWithdrawal ? "重新同意並取消尚未送出的撤回" : "同意研究上傳，使用自動辨識")
+                        Text(renewingCompletedWithdrawal ? "重新同意：只啟用之後的新上傳" : renewingUnsentWithdrawal ? "重新同意並取消尚未送出的撤回" : LiteNativeBuild.includesService ? "同意研究上傳" : "同意研究上傳，使用自動辨識")
                             .frame(maxWidth: .infinity).padding(.vertical, 6)
                     }
                     .buttonStyle(.borderedProminent)
@@ -151,6 +153,8 @@ struct LiteSettingsView: View {
                     LabeledContent("App", value: "WoundAILite")
                     LabeledContent("版本（建置號）", value: installedVersion)
                         .textSelection(.enabled)
+                    LitePrivacyLink()
+                    LiteTermsLink()
                 }
                 if let accountManagement {
                     Section("服務帳號") {
@@ -180,12 +184,12 @@ struct LiteSettingsView: View {
                 }
                 #endif
                 Section("研究上傳") {
-                    Toggle("上傳去識別資料供研究（啟用自動辨識）", isOn: Binding(get:{ consent && !LitePrefs.researchPausedForAccountDeletion }, set:{ consent = $0 }))
+                    Toggle(LiteNativeBuild.includesService ? "上傳資料供研究" : "上傳去識別資料供研究（啟用自動辨識）", isOn: Binding(get:{ consent && !LitePrefs.researchPausedForAccountDeletion }, set:{ consent = $0 }))
                         .onChange(of: consent) { _, v in LitePrefs.researchConsent = v }
                         .disabled(LitePrefs.researchPausedForAccountDeletion || withdrawal.blocksUploads || withdrawal.busy)
                     Text(consent && !LitePrefs.researchPausedForAccountDeletion
                          ? "拍攝影像、深度、修正輪廓、量測估算與傷口側別部位會上傳供辨識與研究；紀錄修改也會同步。可隨時關閉。"
-                         : LiteNativeBuild.includesService ? "拍攝時採本機圈選。個人雲端辨識需另從紀錄選擇照片並送出。" : "完全離線：照片與深度只留在手機，輪廓手動圈選。")
+                         : LiteNativeBuild.includesService ? "可在本機圈選，或登入後從量測頁選擇個人雲端辨識。個人服務和研究使用分開決定。" : "完全離線：照片與深度只留在手機，輪廓手動圈選。")
                         .font(.footnote).foregroundStyle(.secondary)
                     if LitePrefs.researchPausedForAccountDeletion {
                         Text("因刪帳要求，這部手機已暫停研究上傳。請至帳號刪除頁核對已連結資料的撤回進度。")

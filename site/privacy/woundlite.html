@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WoundAILite 隱私政策草稿 / Privacy draft</title><style>
+<html lang="zh-Hant"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WoundAILite 隱私政策草稿 / Privacy draft</title><style>
   :root { color-scheme: light dark; }
   body { max-width: 44rem; margin: 0 auto; padding: 2rem 1.25rem 5rem;
          font: 16px/1.75 -apple-system, "Segoe UI", "Noto Sans TC", sans-serif; }
@@ -22,7 +22,7 @@
 <p class="sub">2026-11-02 修訂。研究同意文案版本為 2026-10-16.1，本稿另說明個人服務的追蹤名額及時間軸分享。</p>
 <h2>1. 離線使用與雲端選擇</h2>
 <p>WoundAILite 提供個人傷口照片紀錄、圈選與 LiDAR 輔助表面積估算。估算供紀錄參考，不提供診斷或治療建議；此說明不是醫療器材法規分類結論。</p>
-<p>只在本機拍攝、圈選、保存或分享單筆 PDF，無須登入服務帳號。一般版的雲端研究功能需另行同意。內部測試版另提供個人雲端辨識，由您登入服務帳號、從紀錄選擇照片並確認送出。這項操作只上傳選取的 JPEG，深度留在手機。使用個人服務或恢復購買都不會開啟研究上傳。</p>
+<p>本機拍攝、圈選、保存及分享單筆或同一處傷口的時間軸 PDF，無須登入服務帳號。一般版的雲端研究功能需另行同意。內部測試版另提供個人雲端辨識，由您登入服務帳號，在量測頁選擇當次拍攝或已保存的拍攝草稿，並確認送出。這項操作只上傳選取的 JPEG，深度留在手機。使用個人服務或恢復購買都不會開啟研究上傳。</p>
 <h2>2. 手機上的資料</h2>
 <p>照片與深度側檔以 AES-GCM 加密，金鑰保存在裝置 Keychain。量測值、日期、分組、位置與輪廓存於 App 沙箱 JSON，並非另以 AES 加密。刪除本機紀錄會處理該筆的本機媒體，不代表雲端副本也已刪除。移除 App 或遺失原安裝身分可能使舊資料無法由 App 自助撤回；請先聯絡支援。</p>
 <p>候選 App 對上述量測索引、照片及深度檔案設定排除系統備份，原子更新後亦保留該設定；此旗標不能保證所有備份均排除，也不清除過去已有的備份。換機、移除 App 或遺失裝置可能無法復原本機紀錄；研究上傳不是個人備份服務。</p>
@@ -59,7 +59,7 @@
 <h1>WoundAILite Privacy Policy — Draft</h1>
 <p class="sub">Revised November 2, 2026. Research consent version 2026-10-16.1. This unpublished draft describes personal tracking slots and optional timeline sharing in the candidate.</p>
 <h2>1. Offline use and cloud choice</h2>
-<p>WoundAILite supports on-device photos, outlines, reference area estimates and single-record PDF sharing without a service account. Area estimates are for personal records and sharing with a clinician. The app does not diagnose conditions or recommend treatments. The ordinary build offers cloud research features with separate consent. In the internal candidate, you can also sign in and explicitly send a selected JPEG from a saved record for personal recognition. Its depth remains on the phone for this action. Using personal recognition or restoring a purchase does not enable research upload.</p>
+<p>WoundAILite supports on-device photos, outlines, reference area estimates and sharing of single-record or selected-wound timeline PDFs without a service account. Area estimates are for personal records and sharing with a clinician. The app does not diagnose conditions or recommend treatments. The ordinary build offers cloud research features with separate consent. In the internal candidate, you can also sign in and explicitly send a selected JPEG from a new capture or a saved capture draft for personal recognition. Its depth remains on the phone for this action. Using personal recognition or restoring a purchase does not enable research upload.</p>
 <h2>2. On-device records</h2>
 <p>Photographs and depth sidecars use AES-GCM with a device Keychain key. Measurements, dates, grouping, location and outlines are sandboxed JSON, not separately AES-encrypted. Local deletion does not delete cloud copies. Removing the app or losing its original installation identity may prevent self-service withdrawal of older data; contact support first.</p>
 <p>The candidate app requests exclusion of its measurement index, photographs and depth files from system backups, including after atomic updates. This flag does not guarantee exclusion from every backup or remove previous backups. Local records may be unrecoverable after a device change, app removal or device loss; research uploads are not a personal backup service.</p>

@@ -1,7 +1,6 @@
 import SwiftUI
 
-/// Sandbox composition view only. Requires an explicitly injected trusted bridge;
-/// the production tab hierarchy does not instantiate this view.
+/// The candidate injects a trusted service bridge. Reading the disclosures needs no service access.
 struct LiteNativePurchaseView: View {
     @ObservedObject var store: LiteNativePurchaseStore
     var body: some View {
@@ -29,6 +28,10 @@ struct LiteNativePurchaseView: View {
                     Button("重新讀取 Apple 商品") { Task { await store.loadOffer() } }
                 }
             }.disabled(store.busy)
+            Section("訂閱前可先閱讀") {
+                LitePrivacyLink()
+                LiteTermsLink()
+            }
             Section("既有訂閱") {
                 Button("恢復購買") { Task { await store.restore() } }
                 Button("核對未完成購買") { Task { await store.reconcile() } }

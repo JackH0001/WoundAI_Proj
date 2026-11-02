@@ -1,6 +1,27 @@
 import XCTest
 
 final class NativeEntryUITests: XCTestCase {
+    @MainActor func testPrivacyPolicyOpensFromSettingsWithoutRegistrationAndReturns() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launch()
+        let gate = app.buttons["設定與資料撤回"]
+        let settings = gate.waitForExistence(timeout: 3) ? gate : app.buttons["設定"].firstMatch
+        XCTAssertTrue(settings.waitForExistence(timeout: 8))
+        settings.tap()
+        let terms = app.descendants(matching: .any)["lite.legal.terms"].firstMatch
+        XCTAssertTrue(terms.waitForExistence(timeout: 5))
+        let privacy = app.buttons["lite.legal.privacy"]
+        XCTAssertTrue(privacy.isHittable)
+        privacy.tap()
+        XCTAssertTrue(app.navigationBars["隱私權政策"].waitForExistence(timeout: 5))
+        let heading = app.webViews.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "WoundAILite 民眾版隱私權政策草稿")).firstMatch
+        XCTAssertTrue(heading.waitForExistence(timeout: 10))
+        attach(app, "offline-privacy-policy")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(privacy.waitForExistence(timeout: 5))
+    }
     #if LITE_QA_SAVED_FIXTURE || LITE_QA_EXTERNAL_FIXTURE
     @MainActor func testSelectedWoundTimelineOffersDateRangePhotosAndSystemSharing() throws {
         continueAfterFailure = false
