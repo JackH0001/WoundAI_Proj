@@ -1,12 +1,6 @@
 import SwiftUI
 
-/**
- 研究上傳同意（首啟必問；設定頁可改）。
-
- 同意 ↔ 功能的對價要說清楚：同意＝啟用雲端自動辨識，代價是去識別資料上傳；
- 不同意＝完全離線手動圈選。兩條路都是完整功能，不是「不同意就不能用」——
- App Store 審查（5.1.1 資料收集與儲存）也要求非必要資料收集不得綁架核心功能。
- */
+/// Optional research consent. Personal service recognition has its own explicit send action.
 struct LiteConsentView: View {
     let onChoose: (Bool) -> Void
     var renewingUnsentWithdrawal = false
@@ -16,7 +10,7 @@ struct LiteConsentView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text("選擇您的量測方式").font(.title2).bold()
+                    Text(LiteNativeBuild.includesService ? "是否同意上傳研究資料？" : "選擇您的量測方式").font(.title2).bold()
                     if renewingUnsentWithdrawal {
                         Text("您正在重新同意研究上傳。僅在確認撤回尚未送出、此服務沒有已登記身分或綁定紀錄後，才會取消這次未送出的撤回。原撤回與本次選擇會保留；舊服務紀錄不會移轉或重傳。")
                             .font(.subheadline)
@@ -37,9 +31,9 @@ struct LiteConsentView: View {
                         "可在設定關閉未來上傳；另可要求撤回研究並清除本安裝目前可見的雲端影像與深度。本機紀錄保留；備份、歷史版本、研究標註與既有模型的刪除仍待驗證。",
                     ])
 
-                    box(title: LiteNativeBuild.includesService ? "不同意研究上傳（本機手動圈選）" : "📴 不同意（完全離線）", tint: .green, lines: [
+                    box(title: LiteNativeBuild.includesService ? "不同意研究上傳" : "📴 不同意（完全離線）", tint: .green, lines: [
                         LiteNativeBuild.includesService ? "拍攝後，照片及深度加密存於本機。若您在量測頁選擇個人雲端辨識，僅選取的照片會送往服務，深度留在本機。" : "照片與深度資料全部只留在您的手機（加密儲存）。",
-                        "傷口輪廓改由您手動圈選，量測計算全在裝置上完成。",
+                        LiteNativeBuild.includesService ? "您仍可保存傷口紀錄與分享時間軸 PDF。面積估算在裝置上完成。" : "傷口輪廓改由您手動圈選，量測計算全在裝置上完成。",
                         "之後可在設定重新選擇；若已撤回並清除雲端資料，須另行閱讀並完成重新同意。",
                     ])
 
@@ -63,7 +57,7 @@ struct LiteConsentView: View {
                     Button {
                         onChoose(false)
                     } label: {
-                        Text(renewingCompletedWithdrawal ? "暫不開啟上傳，繼續離線使用" : renewingUnsentWithdrawal ? "保留撤回，繼續離線使用" : LiteNativeBuild.includesService ? "不同意研究上傳，使用本機圈選" : "不同意，完全離線手動圈選")
+                        Text(declineTitle)
                             .frame(maxWidth: .infinity).padding(.vertical, 6)
                     }
                     .buttonStyle(.bordered)
@@ -72,6 +66,16 @@ struct LiteConsentView: View {
             }
             .navigationTitle("WoundAILite")
         }
+    }
+
+    private var declineTitle: String {
+        if renewingCompletedWithdrawal {
+            return LiteNativeBuild.includesService ? "維持研究撤回" : "暫不開啟上傳，繼續離線使用"
+        }
+        if renewingUnsentWithdrawal {
+            return LiteNativeBuild.includesService ? "保留研究撤回要求" : "保留撤回，繼續離線使用"
+        }
+        return LiteNativeBuild.includesService ? "不同意研究上傳，繼續使用" : "不同意，完全離線手動圈選"
     }
 
     private func box(title: String, tint: Color, lines: [String]) -> some View {
@@ -199,7 +203,7 @@ struct LiteSettingsView: View {
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
-                if consent && !withdrawal.blocksUploads && !LitePrefs.researchPausedForAccountDeletion {
+                if !LiteNativeBuild.includesService && consent && !withdrawal.blocksUploads && !LitePrefs.researchPausedForAccountDeletion {
                     Section("研究辨識額度") { LiteResearchQuotaView() }
                 }
                 if let nativeSession {

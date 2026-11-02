@@ -1,4 +1,6 @@
 import XCTest
+import SwiftUI
+import PDFKit
 @testable import WoundLite
 
 private let sessionTime = 1_800_000_000
@@ -447,10 +449,128 @@ private actor SessionWire: LiteAuthenticatedTransport {
 
 
 extension LiteNativeSessionTests {
+    /// As in the candidate root, SwiftUI retains the measurement tab while the
+    /// service session changes from nil to ready. Observe recovery on disk.
+    func testMountedMeasurementAttachesLateSessionAndRecoversCommittedDraft() async throws {
+        final class Entry: ObservableObject { @Published var session: LiteNativeSession? }
+        struct Screen: View {
+            @ObservedObject var entry: Entry
+            let store: LiteStore
+            let mounted: XCTestExpectation
+            var body: some View {
+                LiteMeasureView(store: store, nativeSession: entry.session)
+                    .onAppear { mounted.fulfill() }
+            }
+        }
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let files = LiteCaptureDraftStore(directory: path), wire = try SessionWire()
+        let session = try runtime(wire, SessionJournal(), captures: files)
+        let draft = try await captureFixture(wire, in: files)
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        let original = LiteMeasureVM(native: session)
+        await original.restoreDraft(draft.id, in: store)
+        await original.applyManual([[[5,5],[5,55],[55,55],[55,5]]], correctionIoU: 0.7)
+        let record = try XCTUnwrap(original.saveCapture(in: store, selectedWoundID: "",
+            location: .init(side: "right", site: "heel")))
+        defer { store.images.delete(record.imageName); if let d = record.depthName { store.images.delete(d) } }
+        let committed = Set([record.id]), entry = Entry()
+        let mounted = expectation(description: "Measurement mounted before the session is ready")
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 430, height: 932))
+        let host = UIHostingController(rootView: Screen(entry: entry, store: store, mounted: mounted))
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        await fulfillment(of: [mounted], timeout: 5)
+        let before = try await files.unfinalized(savedIDs: committed)
+        XCTAssertEqual(before.map(\.id), [record.id])
+        entry.session = session
+        var pending = before
+        for _ in 0..<50 {
+            pending = try await files.unfinalized(savedIDs: committed)
+            if pending.isEmpty { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertTrue(pending.isEmpty, "The already-mounted tab must resume its original draft after setup")
+        XCTAssertEqual(store.images.rawBytes(record.imageName), draft.jpeg)
+        XCTAssertEqual(store.records.map(\.id), [record.id])
+        let counts = await wire.counts()
+        XCTAssertEqual(counts, ["registration":0])
+    }
+
     private func captureDepth() -> DepthCapture {
         DepthCapture(map: Array(repeating: 0.3, count: 64), width: 8, height: 8,
             fx: 50, fy: 50, cx: 32, cy: 32, refWidth: 64, refHeight: 64,
             accuracy: "absolute", filtered: false, rgbWidth: 64, rgbHeight: 64, sourceExifOrientation: 1)
+    }
+    func testLateSessionPreservesOfflineEditsAndAppliesToTheNextCapture() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let files = LiteCaptureDraftStore(directory: path), wire = try SessionWire()
+        let session = try runtime(wire, SessionJournal(), captures: files)
+        let vm = LiteMeasureVM(captureParticipation: { nil })
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        let photoBytes = await wire.image(), photo = try XCTUnwrap(UIImage(data: photoBytes))
+        _ = await vm.ingest(photo, depth: captureDepth())
+        let jpeg = try XCTUnwrap(vm.captureJPEG)
+        vm.attachNativeSession(session)
+        XCTAssertFalse(vm.usesServiceDraft)
+        let contour = [[[5,5],[5,55],[55,55],[55,5]]]
+        await vm.applyManual(contour, correctionIoU: 0.7)
+        XCTAssertEqual(vm.polys, contour)
+        let saved = try XCTUnwrap(vm.saveCapture(in: store, selectedWoundID: "",
+            location: .init(side: "right", site: "heel")))
+        defer { store.images.delete(saved.imageName); if let d = saved.depthName { store.images.delete(d) } }
+        XCTAssertEqual(store.images.rawBytes(saved.imageName), jpeg)
+        XCTAssertNil(saved.cloudSync); XCTAssertNil(saved.researchCapture)
+        XCTAssertEqual(vm.finishSavedCapture(in: store), saved.id)
+        _ = await vm.ingest(photo, depth: captureDepth())
+        let next = try XCTUnwrap(vm.draft)
+        XCTAssertTrue(vm.usesServiceDraft); XCTAssertNil(next.researchPin)
+        XCTAssertEqual(next.jpeg, jpeg)
+        XCTAssertEqual(store.records.map(\.id), [saved.id])
+        let counts = await wire.counts()
+        XCTAssertEqual(counts, ["registration":0])
+    }
+
+    func testPersonalRecognitionWithoutResearchKeepsTwoSeparateLocalTimelines() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let files = LiteCaptureDraftStore(directory: path), wire = try SessionWire()
+        let session = try runtime(wire, SessionJournal(), captures: files)
+        await session.identity.signIn()
+        let vm = LiteMeasureVM(native: session, captureParticipation: { nil })
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        defer { for row in store.records {
+            store.images.delete(row.imageName); if let d = row.depthName { store.images.delete(d) }
+        } }
+        let firstDraft = try await captureFixture(wire, in: files)
+        await vm.restoreDraft(firstDraft.id, in: store)
+        await vm.recognizeNative()
+        XCTAssertEqual(vm.serviceResult?.note, "confirmed")
+        let firstPermit = try await session.woundPermit(id: LiteWoundRoster.newID(for: firstDraft.id), owner: nil)
+        let first = try XCTUnwrap(vm.saveCapture(in: store, selectedWoundID: "",
+            location: .init(side: "right", site: "heel"), permit: firstPermit))
+        XCTAssertEqual(vm.finishSavedCapture(in: store), first.id)
+        _ = await vm.ingest(try XCTUnwrap(UIImage(data: firstDraft.jpeg)), depth: captureDepth())
+        let secondDraft = try XCTUnwrap(vm.draft)
+        await vm.applyManual([[[5,5],[5,55],[55,55],[55,5]]], correctionIoU: 0.7)
+        let secondPermit = try await session.woundPermit(id: LiteWoundRoster.newID(for: secondDraft.id), owner: nil)
+        let second = try XCTUnwrap(vm.saveCapture(in: store, selectedWoundID: "",
+            location: .init(side: "left", site: "palm"), permit: secondPermit))
+        XCTAssertNotEqual(first.woundID, second.woundID)
+        let counts = await wire.counts()
+        let group = try XCTUnwrap(store.wounds.first { $0.id == first.woundID })
+        let selection = try LiteTimelineSelection(group: group, records: store.records)
+        let pdf = try LiteTimelinePDF.export(selection, photos: true, image: { row in
+            XCTAssertEqual(row.id, first.id)
+            return store.images.rawBytes(row.imageName).flatMap { UIImage(data: $0) }
+        }, directory: path.appendingPathComponent("share"))
+        defer { pdf.remove() }
+        let text = try XCTUnwrap(PDFDocument(url: pdf.url)?.string)
+        XCTAssertTrue(text.contains("足跟")); XCTAssertFalse(text.contains("手掌"))
+        XCTAssertEqual(selection.rows.map(\.id), [first.id])
+        XCTAssertTrue(store.records.allSatisfy { $0.researchCapture == nil && $0.cloudSync == nil })
+        XCTAssertEqual(counts["service/run"], 1); XCTAssertEqual(counts["service/prepare"], 1)
+        XCTAssertFalse(counts.keys.contains { $0.contains("research") || $0 == "segment" })
+        let after = await wire.counts()
+        XCTAssertEqual(counts, after)
     }
     private func captureFiles() -> URL {
         FileManager.default.temporaryDirectory.appendingPathComponent("capture-test-" + UUID().uuidString)

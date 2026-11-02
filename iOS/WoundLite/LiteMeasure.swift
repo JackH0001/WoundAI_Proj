@@ -10,7 +10,7 @@ import UIKit
  */
 @MainActor
 final class LiteMeasureVM: ObservableObject {
-    let native: LiteNativeSession?
+    private(set) var native: LiteNativeSession?
     private let captureParticipation: @MainActor () -> LiteCaptureResearchScope?
     init(native: LiteNativeSession? = nil, captureParticipation: @escaping @MainActor () -> LiteCaptureResearchScope? = {
         try? LiteCaptureResearchScope.capture(server: AppSettings.backendURL(), consent: LitePrefs.researchConsent == true)
@@ -18,6 +18,12 @@ final class LiteMeasureVM: ObservableObject {
         self.native = native
         self.captureParticipation = captureParticipation
     }
+    /// Candidate startup prepares one session per scene. A photo already in
+    /// progress keeps the workflow selected at capture, even if setup finishes.
+    func attachNativeSession(_ session: LiteNativeSession?) {
+        if native == nil { native = session }
+    }
+    var usesServiceDraft: Bool { draftIdentity != nil }
     @Published private(set) var draft: LiteCaptureDraft?
     @Published private(set) var pendingCaptures: [LiteCaptureDraftSummary] = []
     @Published private(set) var serviceResult: LiteServiceRecord?
@@ -95,6 +101,7 @@ final class LiteMeasureVM: ObservableObject {
     /// - Returns: false＝立即開手動圈選；true＝留在量測頁選擇下一步。
     func ingest(_ raw: UIImage, depth d: DepthCapture?) async -> Bool {
         guard !busy else { return true }
+        let native = self.native
         let researchScope = captureParticipation()
         gen += 1
         busy = true
@@ -356,7 +363,7 @@ final class LiteMeasureVM: ObservableObject {
                      location: LiteWoundLocation, permit: LiteWoundPermit? = nil) -> LiteRecord? {
         recordStore = store
         guard savedId == nil, !busy, !store.needsReload,
-              native == nil || draft != nil,
+              !usesServiceDraft || draft != nil,
               let e = estimate, liteVerdict(e).usable, let jpeg = captureJPEG, let depth else { return nil }
         guard draft.map({ store.captureCanResume($0.id) }) != false else {
             note = "這次拍攝已捨棄或紀錄尚待核對，未重新存入。"; return nil
@@ -395,7 +402,7 @@ final class LiteMeasureVM: ObservableObject {
             }
         }
         guard let saved = store.saveMeasurement(record, selectedWoundID: selectedWoundID,
-            enteredLocation: location, queueResearchSync: native == nil ? LitePrefs.researchConsent == true : record.researchCapture != nil,
+            enteredLocation: location, queueResearchSync: usesServiceDraft ? record.researchCapture != nil : LitePrefs.researchConsent == true,
             permit: permit) else {
             let message = store.storageError
             // A write may have committed before reporting an error. Read back
@@ -442,7 +449,7 @@ final class LiteMeasureVM: ObservableObject {
         guard !busy else { return }
         busy = true; busyHint = "正在保存圈選…"; defer { busy = false }
         let picked = Self.centerWound(traced, w: imageW, h: imageH)
-        if let native {
+        if usesServiceDraft, let native {
             guard let draft else { note = "請先完成照片與深度的本機保存，再修正圈選。"; return }
             var next = draft; next.polygons = picked; next.source = "manual"; next.manuallyEdited = true
             do { self.draft = try await native.captures.update(next, previous: draft) }
@@ -699,7 +706,7 @@ struct LiteMeasureView: View {
                             Text(notice).font(.footnote).foregroundStyle(.orange)
                             Button("重新核對本機拍攝") { Task { await vm.reloadDrafts(in: store) } }.disabled(vm.busy)
                         }
-                    } else if LitePrefs.researchConsent == true {
+                    } else if !LiteNativeBuild.includesService, LitePrefs.researchConsent == true {
                         LiteResearchQuotaView()
                     }
                     if vm.busy {
@@ -714,11 +721,11 @@ struct LiteMeasureView: View {
                     if let img = vm.image {
                         LitePreview(image: img, polys: vm.polys,
                                     imageW: vm.imageW, imageH: vm.imageH)
-                        if nativeSession != nil { nativeRecognition }
+                        if vm.usesServiceDraft { nativeRecognition }
                         if vm.depth != nil {
                             Button(vm.polys.isEmpty ? "圈選傷口" : "修正圈選") { showTrace = true }
                                 .buttonStyle(.bordered)
-                                .disabled(vm.busy || (nativeSession != nil && vm.draft == nil))
+                                .disabled(vm.busy || (vm.usesServiceDraft && vm.draft == nil))
                         }
                     }
 
@@ -738,7 +745,10 @@ struct LiteMeasureView: View {
                 Text("目前量測尚未存入紀錄。拍下新照片後會取代這個畫面；已存入的紀錄不受影響。取消相機可回到目前量測。")
             }
             .onAppear { if vm.image == nil { selectLastWound() } }
-            .task { await vm.reloadDrafts(in: store) }
+            .task(id: nativeSession.map(ObjectIdentifier.init)) {
+                vm.attachNativeSession(nativeSession)
+                await vm.reloadDrafts(in: store)
+            }
             .confirmationDialog("捨棄尚未存入的拍攝？", isPresented: Binding(
                 get: { discardCaptureID != nil }, set: { if !$0 { discardCaptureID = nil } }), titleVisibility: .visible) {
                 Button("捨棄草稿照片與深度", role: .destructive) {
@@ -749,7 +759,7 @@ struct LiteMeasureView: View {
             } message: {
                 Text("此操作無法復原，不退還已使用的辨識額度，也不會撤回已傳送的研究資料。服務回執仍保留供核對。")
             }
-            .task(id: scenePhase == .active) {
+            .task(id: nativeSession != nil && scenePhase == .active) {
                 guard nativeSession != nil, scenePhase == .active else { return }
                 while !Task.isCancelled {
                     do { try await Task.sleep(nanoseconds: 5_000_000_000) } catch { return }
@@ -778,6 +788,7 @@ struct LiteMeasureView: View {
                         showCamera = false
                         selectLastWound()
                         Task {
+                            vm.attachNativeSession(nativeSession)
                             let done = await vm.ingest(img, depth: dep)
                             if !done { showTrace = true }
                             await vm.reloadDrafts(in: store)
