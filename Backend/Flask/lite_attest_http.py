@@ -70,6 +70,17 @@ def _json(raw):
         raise AdmissionRejected('invalid JSON') from exc
 
 
+def _signed_headers():
+    key = _b64(request.headers.get('X-Lite-Key-ID'), 32, 32)
+    assertion = _b64(request.headers.get('X-Lite-Assertion'), 4096)
+    challenge = request.headers.get('X-Lite-Challenge-ID', '')
+    operation = request.headers.get('X-Lite-Request-ID', '')
+    if (not re.fullmatch(r'[0-9a-f]{32}', challenge) or
+            not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', operation)):
+        raise AdmissionRejected('invalid signed request identifiers')
+    return key, challenge, assertion, operation
+
+
 def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerce=None, purchases=None, identity=None, deletion=None, link_signer=None, research_capture=None, research_source=None):
     if 'lite_attest_http' in app.extensions:
         raise ValueError('Lite security gate already installed')
@@ -191,25 +202,38 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
             if request.path == CHALLENGE_PATH:
                 try:
                     data = _json(_body(4096))
+                    withdrawal = set(data) == {'key_id', 'purpose'} and data.get('purpose') == 'withdraw'
+                    if withdrawal:
+                        _b64(data['key_id'], 32, 32)
                 except (AdmissionRejected, RequestEntityTooLarge, BadRequest):
                     budget.reserve()
                     raise
-                withdrawal = set(data) == {'key_id', 'purpose'} and data.get('purpose') == 'withdraw'
                 budget.reserve(scope='withdraw' if withdrawal else 'general')
                 g.lite_attest_control = data
                 return None
-            budget.reserve(scope='withdraw' if request.method == 'DELETE' or deletion_only or link_only else 'general')
             limit = (20000 if (purchase_only or account_only) and request.path.endswith('/confirm') else
                 0 if request.method == 'DELETE' else 32768 if capture_lookup else 4096 if request.path == REJOIN_PATH or (service_only and not request.path.endswith('/run'))
                 else 96*1024 if request.path == REGISTER_PATH else MAX_BODY)
-            raw = _body(limit)
+            privacy_lane = request.method == 'DELETE' or deletion_only or link_only
+            if privacy_lane:
+                # Only bounded privacy bodies reach this branch. Reject malformed
+                # envelopes against the general budget, before reading any key state.
+                try:
+                    raw = _body(limit)
+                    signed = _signed_headers()
+                except (AdmissionRejected, RequestEntityTooLarge, BadRequest):
+                    budget.reserve()
+                    raise
+                budget.reserve(scope='withdraw')
+            else:
+                budget.reserve()
+                raw = _body(limit)
             if control:
                 g.lite_attest_control = _json(raw)
                 return None
-            key_id = _b64(request.headers.get('X-Lite-Key-ID'), 32, 32)
-            assertion = _b64(request.headers.get('X-Lite-Assertion'), 4096)
-            admitted = service.admission.admit(key_id, request.headers.get('X-Lite-Challenge-ID'), assertion,
-                request_id=request.headers.get('X-Lite-Request-ID'), method=request.method, path=request.path,
+            key_id, challenge_id, assertion, operation = signed if privacy_lane else _signed_headers()
+            admitted = service.admission.admit(key_id, challenge_id, assertion,
+                request_id=operation, method=request.method, path=request.path,
                 content_type=request.headers.get('Content-Type', ''), body=raw)
             if request.method == 'DELETE':
                 # client_data also binds the DELETE path to this installation.

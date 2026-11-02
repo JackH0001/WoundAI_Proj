@@ -1,5 +1,6 @@
 """Synthetic signed HTTP: research withdrawal must not share inference capacity."""
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 import sys
 import unittest
 from unittest.mock import patch
@@ -66,6 +67,42 @@ class WithdrawalBudgetTests(unittest.TestCase):
         with patch.object(h.budget.store,'load',side_effect=StateUnavailable('private')):
             result=h.client.post(CHALLENGE_PATH,json=dict(key_id=h.key,purpose='withdraw'))
             self.assertEqual(result.status_code,503);self.assertNotIn(b'private',result.data)
+    def test_malformed_privacy_traffic_leaves_room_for_a_real_withdrawal(self):
+        h=self.h
+        h.budget.minute_limit=6
+        def malformed(n):
+            with h.app.test_client() as client:
+                if n % 2:
+                    return client.delete(self.path).status_code
+                return client.post(CHALLENGE_PATH,json={'key_id':'bad','purpose':'withdraw'}).status_code
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            codes=list(pool.map(malformed,range(6)))
+        self.assertEqual(sorted(codes),[401]*4+[429]*2)
+        headers=h.headers(self.path,b'','',method='DELETE',purpose='withdraw')
+        self.assertEqual(h.client.delete(self.path,headers=headers).status_code,200)
+        self.assertTrue(h.privacy.is_withdrawn(h.owner))
+
+    def test_missing_or_malformed_signed_headers_never_touch_admission_or_privacy(self):
+        h=self.h
+        headers=h.headers(self.path,b'','',method='DELETE',purpose='withdraw')
+        rev,state=h.budget.store.load(h.budget.key)
+        with patch.object(h.e.service.admission,'admit',side_effect=AssertionError('parsed invalid request')), \
+                patch.object(h.privacy,'withdraw',side_effect=AssertionError('unverified withdrawal')):
+            for field,bad in [('X-Lite-Key-ID','a'),('X-Lite-Assertion','?'),
+                              ('X-Lite-Challenge-ID','0'),('X-Lite-Request-ID','bad')]:
+                with self.subTest(field=field):
+                    wrong=dict(headers);wrong[field]=bad
+                    self.assertEqual(h.client.delete(self.path,headers=wrong).status_code,401)
+        self.assertEqual(h.budget.store.load(h.budget.key)[1]['day_used'],state['day_used']+4)
+        self.assertEqual(h.client.delete(self.path,headers=headers).status_code,200)
+
+    def test_oversize_withdrawal_is_charged_to_general_without_consuming_signed_challenge(self):
+        h=self.h
+        headers=h.headers(self.path,b'','',method='DELETE',purpose='withdraw')
+        before=h.budget.store.load(h.budget.key)[1]['day_used']
+        self.assertEqual(h.client.delete(self.path,headers=headers,data=b'X').status_code,413)
+        self.assertEqual(h.budget.store.load(h.budget.key)[1]['day_used'],before+1)
+        self.assertEqual(h.client.delete(self.path,headers=headers).status_code,200)
     def test_malformed_control_and_nonempty_delete_fail_closed(self):
         h=self.h;before=h.budget.store.load(h.budget.key)[1]['day_used']
         self.assertEqual(h.client.post(CHALLENGE_PATH,data=b'{',content_type='application/json').status_code,401)
