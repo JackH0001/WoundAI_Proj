@@ -191,6 +191,27 @@ class ServiceHTTPTests(SignedServiceClient, unittest.TestCase):
         self.assertEqual(self.run_request(2).json['receipt']['outcome'], 'succeeded')
         self.assertEqual((self.quota()['used'], self.model_calls), (1, 1))
 
+    def test_settlement_between_operation_and_receipt_reads_returns_original_result(self):
+        self.json_request('prepare')
+        operation=f'{1:032x}'
+        earlier=self.ops._require(self.subject,operation)
+        result=self.run_request().json
+        latest=self.ops._require(self.subject,operation)
+        with patch.object(self.ops,'_require',side_effect=[earlier,latest]) as read:
+            self.assertEqual(self.json_request('status').json,result)
+            self.assertEqual(read.call_count,2)
+        self.assertEqual((self.model_calls,self.quota()['used']),(1,1))
+
+    def test_terminal_receipt_alone_cannot_recreate_an_unavailable_result(self):
+        self.json_request('prepare')
+        earlier=self.ops._require(self.subject,f'{1:032x}')
+        self.run_request()
+        with patch.object(self.ops,'_require',return_value=earlier):
+            response=self.json_request('status')
+            self.assertEqual(response.status_code,503)
+            self.assertEqual(response.json['error'],'lite_operation_unconfirmed')
+        self.assertEqual((self.model_calls,self.quota()['used']),(1,1))
+
     def test_unprovisioned_authenticated_device_cannot_choose_account(self):
         self.ops.accounts=ServiceAccounts(SQLiteStateStore(self.root/'empty-accounts.sqlite'))
         r=self.json_request('prepare');self.assertEqual(r.status_code,503);self.assertEqual(self.model_calls,0)

@@ -360,11 +360,16 @@ class ServiceOperations:
             if self.recovery is not None and v['day'] < self.now()//86400:
                 return self.recovery.offer(subject,v)
             return dict(state='awaiting_reservation',operation=operation,day=v['day'],retry_action='prepare',research_stored=False)
+        if v['result'] is None and receipt['outcome'] in ('succeeded','empty','failed'):
+            # The worker writes its result before settling the separate usage
+            # ledger. Settlement can land between our two reads.
+            _,latest=self._require(subject,operation)
+            if latest['result'] is None or self.ticket(subject,latest)!=ticket or latest['worker']!=v['worker']:
+                raise StateUnavailable('result receipt mismatch')
+            v=latest
         if v['result'] is not None:
             outcome='succeeded' if v['result']['wound_polygons'] else 'empty'
             receipt=self.ledger.settle(ticket,v['worker'],outcome,v['result_sha256'])
-        elif receipt['outcome'] in ('succeeded','empty','failed'):
-            raise StateUnavailable('result receipt mismatch')
         state={'reserved':'ready','running':'pending','succeeded':'completed','empty':'completed','cancelled':'cancelled'}[receipt['outcome']]
         reply = dict(state=state,operation=operation,day=v['day'],receipt=receipt,result=v['result'],
                     result_json=None if v['result'] is None else json.dumps(v['result'],sort_keys=True,separators=(',', ':'),allow_nan=False),
