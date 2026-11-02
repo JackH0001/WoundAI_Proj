@@ -18,7 +18,7 @@ from werkzeug.test import EnvironBuilder
 from lite_attest_http import install_lite_attest
 from lite_attest_state import SQLiteStateStore, StateUnavailable
 from lite_fenced_store import FencedPrivacy, FencedMedia
-from lite_raw_depth_store import unpack
+from lite_raw_depth_store import pack, unpack
 from lite_research_capture import ResearchCaptureReceiver, CaptureAdmissionBudget, PATH
 from lite_research_source import TTL, sha
 from lite_research_source_issuer import ResearchSourceIssuer
@@ -81,6 +81,67 @@ class ResearchCaptureTests(unittest.TestCase):
     def unchanged_usage(self):
         self.assertEqual(self.native.model_calls,1)
         self.assertEqual(self.native.quota(),self.quota)
+
+    def lookup(self, **changes):
+        bundle = pack(json.dumps(self.metadata).encode(), self.depth, self.jpeg)
+        fields = dict(anon_id=self.h.owner, consent_epoch='legacy', consent_version='2026-10-16.1',
+                      research_consent=True, image_bytes=len(self.jpeg), source_ticket=json.dumps(self.ticket),
+                      bundle_sha256=hashlib.sha256(bundle).hexdigest())
+        return self.h.post_signed(PATH+'/status', json.dumps(fields | changes).encode())
+
+    def test_lookup_after_lost_receipt_works_without_media_model_or_writer_even_after_expiry(self):
+        with patch.object(FencedPrivacy, 'begin_write', side_effect=AssertionError('lookup started a write')):
+            missing = self.lookup()
+        self.assertEqual(missing.status_code, 200, missing.json)
+        self.assertEqual(missing.json['status'], 'upload_required')
+        self.assertEqual(self.bucket.live, {})
+        first = self.upload()
+        frozen = copy.deepcopy((self.bucket.live,self.bucket.history))
+        self.native.e.now += TTL+1
+        with patch.object(FencedPrivacy, 'begin_write', side_effect=AssertionError('lookup wrote')), \
+             patch.object(FencedMedia, 'get_blob', autospec=True, side_effect=FencedMedia.get_blob) as reads:
+            receipt = self.lookup()
+        self.assertEqual(receipt.status_code, 200, receipt.json)
+        self.assertEqual(receipt.json, first.json)
+        self.assertTrue(all(args.args[1].endswith('.json') for args in reads.call_args_list))
+        self.assertEqual((self.bucket.live,self.bucket.history), frozen)
+        self.unchanged_usage()
+
+    def test_lookup_conflicting_depth_and_corrupt_publication_never_instruct_upload(self):
+        self.assertEqual(self.upload().status_code, 200)
+        self.assertEqual(self.lookup(bundle_sha256='f'*64).status_code, 409)
+        self.assertEqual(self.lookup(image_bytes=len(self.jpeg)+1).status_code, 409)
+        with patch.object(FencedMedia, 'capture_intent', return_value=None):
+            self.assertEqual(self.lookup().status_code, 503)
+        with patch.object(FencedMedia, 'capture_index', side_effect=StateUnavailable('unavailable')):
+            self.assertEqual(self.lookup().status_code, 503)
+        with patch.object(FencedMedia, 'capture_index', return_value={}):
+            self.assertEqual(self.lookup().status_code, 503)
+        self.unchanged_usage()
+
+    def test_missing_capture_with_expired_proof_requests_renewal_before_any_media(self):
+        self.native.e.now += TTL+1
+        expired = self.lookup()
+        self.assertEqual(expired.status_code, 409)
+        self.assertIs(expired.json['renew_source_only'], True)
+        fresh = self.proof()
+        self.assertEqual(fresh['signature'], self.ticket['signature'])
+        self.assertEqual(self.lookup(source_ticket=json.dumps(fresh)).json['status'], 'upload_required')
+        self.assertFalse(self.bucket.live)
+        self.unchanged_usage()
+
+    def test_lookup_needs_owner_epoch_consent_and_signature_and_stops_after_withdrawal(self):
+        self.assertEqual(self.lookup(anon_id='f'*32).status_code, 403)
+        self.assertEqual(self.lookup(consent_epoch='e'*32).status_code, 409)
+        self.assertEqual(self.lookup(research_consent=False).status_code, 400)
+        bad = copy.deepcopy(self.ticket)
+        bad['claim']['operation'] = '1'*32
+        self.assertEqual(self.lookup(source_ticket=json.dumps(bad)).status_code, 403)
+        self.assertEqual(self.h.client.post(PATH+'/status',json={}).status_code, 401)
+        self.assertEqual(self.upload().status_code, 200)
+        self.assertEqual(self.f.delete().status_code, 200)
+        self.assertEqual(self.lookup().status_code, 410)
+        self.unchanged_usage()
 
     def test_complete_exact_rgbd_and_provenance_without_model_or_personal_quota(self):
         with patch.object(raw_fixture.http_fixture.media_fixture.lite,'_SEGMENT',side_effect=AssertionError('no inference')):

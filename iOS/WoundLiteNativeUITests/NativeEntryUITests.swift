@@ -1,7 +1,7 @@
 import XCTest
 
 final class NativeEntryUITests: XCTestCase {
-    #if LITE_QA_SAVED_FIXTURE
+    #if LITE_QA_SAVED_FIXTURE || LITE_QA_EXTERNAL_FIXTURE
     /// The history/PDF fixture has an existing synthetic 10.08 cm² record.
     /// This run uses a simulator without a registered Sandbox installation.
     @MainActor func testSavedRecordCanBeReadBeforeServiceRegistration() throws {
@@ -17,6 +17,13 @@ final class NativeEntryUITests: XCTestCase {
         XCTAssertTrue(saved.isHittable)
         saved.tap()
         let service = app.buttons["此筆服務辨識驗收（內部）"]
+        #if LITE_QA_EXTERNAL_FIXTURE
+        let share = app.buttons["lite.report.share"]
+        for _ in 0..<5 where !share.isHittable { app.swipeUp() }
+        XCTAssertTrue(share.isHittable)
+        XCTAssertFalse(service.exists)
+        attach(app, "external-history-without-internal-entry")
+        #else
         for _ in 0..<5 where !service.isHittable { app.swipeUp() }
         XCTAssertTrue(service.isHittable)
         service.tap()
@@ -29,6 +36,7 @@ final class NativeEntryUITests: XCTestCase {
         XCTAssertTrue(send.exists)
         XCTAssertFalse(send.isEnabled)
         attach(app, "saved-record-before-registration")
+        #endif
     }
     #endif
 

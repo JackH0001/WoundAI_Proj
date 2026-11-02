@@ -28,6 +28,7 @@ from lite_research_source import ResearchSourceVerifier, SourceRejected, SourceE
 from store_errors import ImmutableConflict
 
 PATH = '/api/v1/lite/research/capture'
+STATUS_PATH = PATH + '/status'
 
 
 class CapturePrivacyRejected(ValueError): pass
@@ -80,6 +81,72 @@ class ResearchCaptureReceiver:
             raise ValueError('pinned provenance verifier and durable budget required')
         self.verifier, self.budget = verifier, budget
 
+    def lookup(self, privacy, owner, body):
+        """Read the published receipt for an exact submission. Never start a write."""
+        fields = {'anon_id', 'consent_epoch', 'consent_version', 'research_consent',
+                  'source_ticket', 'image_bytes', 'bundle_sha256'}
+        if (set(body) != fields or body['research_consent'] is not True or body['anon_id'] != owner
+                or type(body['source_ticket']) is not str or len(body['source_ticket'].encode()) > 16384
+                or type(body['image_bytes']) is not int or not 1 <= body['image_bytes'] <= MAX_JPEG_BYTES):
+            raise ValueError('invalid capture lookup')
+        if body['bundle_sha256'] is not None:
+            hexid(body['bundle_sha256'], 64)
+        if privacy.objects.bucket.name != self.verifier.bucket:
+            raise StateUnavailable('research destination differs')
+        if privacy.is_withdrawn(owner):
+            raise OwnerWithdrawn()
+        ticket = loads_json_object_strict(body['source_ticket'])
+        claim = self.verifier.verify(ticket, owner=owner, consent_epoch=privacy.manifest.epoch, allow_expired=True)
+        if claim['consent_version'] != body['consent_version']:
+            raise SourceRejected('consent version differs')
+        identifier = capture_identifier(owner, privacy.manifest.epoch, claim['capture_id'])
+        intent = dict(source=claim, signature=ticket['signature'], image_bytes=body['image_bytes'],
+                      bundle_sha256=body['bundle_sha256'])
+        media = privacy.media(owner)
+        # Index is published last. A missing index is a possible interrupted
+        # write; the matching intent allows the same bytes to resume safely.
+        try:
+            index = media.capture_index(identifier)
+            original = media.capture_intent(identifier)
+        except (UnicodeError, ValueError) as exc:
+            raise StateUnavailable('unreadable capture evidence') from exc
+        if ((index is not None and type(index) is not dict)
+                or (original is not None and type(original) is not dict)):
+            raise StateUnavailable('invalid capture evidence')
+        if original is not None and (original.get('source_provenance') != intent
+                                     or original.get('capture_intent_sha256') != sha(intent)):
+            raise ImmutableConflict('capture content differs')
+        if index is None:
+            # A complete historical receipt is recoverable after expiry. For
+            # missing or partial data, renew the ticket before sending media.
+            self.verifier.verify(ticket, owner=owner, consent_epoch=privacy.manifest.epoch)
+            reply = dict(schema='lite.research-capture.lookup/1', status='upload_required',
+                         capture_id=claim['capture_id'], image_sha256=claim['image_sha256'],
+                         bundle_sha256=body['bundle_sha256'])
+        else:
+            try:
+                metadata = media.get_json('lite/'+owner+'/'+identifier+'.json')
+            except (UnicodeError, ValueError) as exc:
+                raise StateUnavailable('unreadable published metadata') from exc
+            receipt = index.get('capture_receipt')
+            if (type(original) is not dict or type(metadata) is not dict or type(receipt) is not dict
+                    or index.get('anon_id') != owner or index.get('image_id') != identifier
+                    or index.get('raw_depth_receipt') != receipt.get('raw_depth_receipt')
+                    or metadata != dict(original, capture_receipt=receipt, raw_depth_receipt=receipt.get('raw_depth_receipt'))
+                    or receipt.get('schema') != 'lite.research-capture.receipt/1' or receipt.get('status') != 'stored'
+                    or receipt.get('capture_id') != claim['capture_id'] or receipt.get('image_id') != identifier
+                    or receipt.get('image_sha256') != claim['image_sha256']
+                    or receipt.get('capture_intent_sha256') != sha(intent)):
+                raise StateUnavailable('publication evidence differs')
+            raw = receipt.get('raw_depth_receipt')
+            if ((raw is None) != (body['bundle_sha256'] is None) or (raw is not None and
+                    (type(raw) is not dict or raw.get('bundle_sha256') != body['bundle_sha256']))):
+                raise StateUnavailable('published depth evidence differs')
+            reply = receipt
+        if privacy.is_withdrawn(owner):
+            raise OwnerWithdrawn()
+        return reply
+
     def receive(self, *, privacy, writer, owner, consent_version, ticket, jpeg, metadata=None, depth=None):
         if (not isinstance(privacy, FencedPrivacy) or privacy.objects.bucket.name != self.verifier.bucket
                 or writer is None or writer.owner != owner):
@@ -106,7 +173,7 @@ class ResearchCaptureReceiver:
             if raw['metadata']['schema'] != 'lite.rgbd/2' or raw['metadata']['capture_id'] != claim['capture_id']:
                 raise SourceRejected('RGB-D capture identity differs')
             bundle = pack(metadata, depth, jpeg)
-        identifier = sha(['lite.research-capture/1', owner, privacy.manifest.epoch, claim['capture_id']])[:16]
+        identifier = capture_identifier(owner, privacy.manifest.epoch, claim['capture_id'])
         intent = dict(source=claim, signature=ticket['signature'], image_bytes=len(jpeg),
                       bundle_sha256=None if bundle is None else digest(bundle))
         intent_hash = sha(intent)
@@ -189,8 +256,30 @@ class ResearchCaptureReceiver:
         return receipt
 
 
+def capture_identifier(owner, epoch, capture_id):
+    return sha(['lite.research-capture/1', owner, epoch, capture_id])[:16]
+
+
 def blueprint(receiver):
     bp = Blueprint('lite_research_capture', __name__)
+
+    @bp.post(STATUS_PATH)
+    def status():
+        try:
+            body = loads_json_object_strict(request.get_data(cache=True).decode())
+            return jsonify(receiver.lookup(g.lite_privacy, g.lite_admission.installation, body))
+        except SourceExpired:
+            return jsonify(error='research_source_expired', renew_source_only=True, keep_local=True), 409
+        except (SourceRejected, InvalidSignature):
+            return jsonify(error='research_source_mismatch', keep_local=True), 403
+        except ImmutableConflict:
+            return jsonify(error='research_capture_conflict', keep_local=True), 409
+        except OwnerWithdrawn:
+            return jsonify(error='withdrawn', keep_local=True), 410
+        except (StateUnavailable, OSError):
+            return jsonify(error='research_capture_unconfirmed', keep_local=True), 503
+        except (ValueError, TypeError, RecursionError):
+            return jsonify(error='invalid_research_lookup', keep_local=True), 400
 
     @bp.post(PATH)
     def capture():

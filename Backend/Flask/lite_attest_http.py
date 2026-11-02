@@ -172,10 +172,12 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
             deletion_only=(request.path in deletion_paths and request.endpoint in {'lite_account_deletion.request','lite_account_deletion.status','lite_account_deletion.reauth_challenge','lite_account_deletion.reauth_confirm'})
             link_only=link_path is not None and request.path==link_path and request.endpoint=='lite_research_issuer.issue'
             capture_only=capture_path is not None and request.path==capture_path and request.endpoint=='lite_research_capture.capture'
+            capture_lookup=(capture_path is not None and request.path==capture_path+'/status'
+                            and request.endpoint=='lite_research_capture.status')
             source_only=source_path is not None and request.path==source_path and request.endpoint=='lite_research_source.issue'
             account_only=account_only or deletion_only or link_only
             service_only=service_only or purchase_only or account_only or source_only
-            if not ((request.method == 'POST' and (control or request.path in POST_PATHS or service_only or capture_only)) or
+            if not ((request.method == 'POST' and (control or request.path in POST_PATHS or service_only or capture_only or capture_lookup)) or
                     (request.method == 'DELETE' and re.fullmatch(PREFIX+r'data/[A-Za-z0-9_-]{1,128}(?:/[0-9a-f]{32})?', request.path))):
                 return jsonify(error='lite_route_not_supported'), 404
             # A bounded 4 KiB challenge body selects the privacy lane. Media
@@ -192,7 +194,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
                 return None
             budget.reserve(scope='withdraw' if request.method == 'DELETE' or deletion_only or link_only else 'general')
             limit = (20000 if (purchase_only or account_only) and request.path.endswith('/confirm') else
-                0 if request.method == 'DELETE' else 4096 if request.path == REJOIN_PATH or (service_only and not request.path.endswith('/run'))
+                0 if request.method == 'DELETE' else 32768 if capture_lookup else 4096 if request.path == REJOIN_PATH or (service_only and not request.path.endswith('/run'))
                 else 96*1024 if request.path == REGISTER_PATH else MAX_BODY)
             raw = _body(limit)
             if control:
@@ -254,7 +256,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
                     request.environ['woundlite.write_fence'] = 'gcs-generation-v1'
                 else:
                     request.environ['woundlite.writers_drained'] = True
-            else:
+            elif not capture_lookup:
                 request.environ['woundlite.writer_ticket'] = privacy.begin_write(owner)
         except (RequestEntityTooLarge, BadRequest) as exc:
             return jsonify(error='lite_request_too_large' if isinstance(exc, RequestEntityTooLarge) else 'lite_bad_request'), exc.code

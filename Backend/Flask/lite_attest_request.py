@@ -25,7 +25,7 @@ def client_data(*, audience, installation, key_id, challenge, request_id,
     owner = token(installation, r'[A-Za-z0-9_-]{1,128}')
     rid = token(request_id, r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
     allowed = {'POST': {'/api/v1/lite/segment', '/api/v1/lite/annotation',
-                        '/api/v1/lite/research/capture', '/api/v1/lite/service/research-source',
+                        '/api/v1/lite/research/capture', '/api/v1/lite/research/capture/status', '/api/v1/lite/service/research-source',
                         '/api/v1/lite/annotation/revision', '/api/v1/lite/research/rejoin',
                         '/api/v1/lite/service/prepare', '/api/v1/lite/service/run', '/api/v1/lite/service/status', '/api/v1/lite/service/recover', '/api/v1/lite/service/resubmit','/api/v1/lite/service/balance',
                         '/api/v1/lite/purchase/context','/api/v1/lite/purchase/confirm',

@@ -30,6 +30,10 @@
 	<string>woundlite-research-v1</string>
 	<key>LiteNativeSandboxOrigin</key>
 	<string>$(WOUNDLITE_NATIVE_SANDBOX_ORIGIN)</string>
+	<key>LiteResearchCaptureEnabled</key>
+	<string>$(WOUNDLITE_RESEARCH_CAPTURE)</string>
+	<key>LiteSavedRecordTestEnabled</key>
+	<string>$(WOUNDLITE_SAVED_RECORD_TEST)</string>
 	<key>CFBundleDisplayName</key>
 	<string>WoundAILite</string>
 

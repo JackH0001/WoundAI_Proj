@@ -286,7 +286,7 @@ struct LiteRecordDetailView: View {
                                         imageH: img.cgImage?.height ?? 1)
                         }
                         detailCard(r)
-                        if let nativeSession {
+                        if LiteNativeBuild.showsSavedRecordTest, let nativeSession {
                             NavigationLink("此筆服務辨識驗收（內部）") {
                                 LiteSavedServiceView(recordID:r.id,records:store,session:nativeSession)
                             }
@@ -338,18 +338,25 @@ struct LiteRecordDetailView: View {
                             syncing: store.syncingRecordIDs.contains(recordId),
                             consent: LitePrefs.researchConsent == true,
                             withdrawalBlocked: withdrawal.blocksUploads,
-                            retiredResearch: r.cloudSync.map { !withdrawal.blocksUploads && !LiteWithdrawalJournal.standard.permits($0.binding) } ?? false),
+                            retiredResearch: r.cloudSync.map { !withdrawal.blocksUploads && !LiteWithdrawalJournal.standard.permits($0.binding) }
+                                ?? r.researchCapture.map { nativeSession?.researchDelivery?.permits($0.pin.scope) != true } ?? false),
                         calculating: busy, change: changeSummary,
                         note: note, noteIsInformational: noteIsInformational,
                         canEdit: r.depthName != nil && image != nil,
-                        syncAllowed: r.cloudSync.map { LiteWithdrawalJournal.standard.permits($0.binding) } == true && LitePrefs.researchConsent == true,
+                        syncAllowed: LitePrefs.researchConsent == true && (r.cloudSync.map { LiteWithdrawalJournal.standard.permits($0.binding) }
+                            ?? r.researchCapture.map { nativeSession?.researchDelivery?.permits($0.pin.scope) == true } ?? false),
                         onEdit: {
                             note = nil; noteIsInformational = false; changeSummary = nil
                             editFlow.begin(record: r, fallback: polys)
                         },
                         onRetry: {
                             note = nil
-                            Task { await store.syncRevision(recordID: recordId) }
+                            Task {
+                                if r.cloudSync == nil, r.researchCapture != nil {
+                                    await nativeSession?.researchDelivery?.resume(recordId, store: store, explicit: true)
+                                }
+                                await store.syncRevision(recordID: recordId)
+                            }
                         })
                         .disabled(pdfBusy)
                 }

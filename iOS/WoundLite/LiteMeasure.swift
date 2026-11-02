@@ -11,13 +11,20 @@ import UIKit
 @MainActor
 final class LiteMeasureVM: ObservableObject {
     let native: LiteNativeSession?
-    init(native: LiteNativeSession? = nil) { self.native = native }
+    private let captureParticipation: @MainActor () -> LiteCaptureResearchScope?
+    init(native: LiteNativeSession? = nil, captureParticipation: @escaping @MainActor () -> LiteCaptureResearchScope? = {
+        try? LiteCaptureResearchScope.capture(server: AppSettings.backendURL(), consent: LitePrefs.researchConsent == true)
+    }) {
+        self.native = native
+        self.captureParticipation = captureParticipation
+    }
     @Published private(set) var draft: LiteCaptureDraft?
     @Published private(set) var pendingCaptures: [LiteCaptureDraftSummary] = []
     @Published private(set) var serviceResult: LiteServiceRecord?
     @Published private(set) var draftNotice: String?
     @Published private(set) var serviceUnreadable = false
     private var draftIdentity: (UUID, Date)?
+    private var draftResearchPin: LiteResearchCapturePin?
     private weak var recordStore: LiteStore?
     @Published var image: UIImage?
     /// The exact normalized JPEG used by the cloud and the local RGB-D sidecar.
@@ -63,6 +70,7 @@ final class LiteMeasureVM: ObservableObject {
         busyHint = ""; note = nil; uploadMessage = nil; savedId = nil
         cloudImageId = nil; cloudBinding = nil; cloudHadPolys = false
         draft = nil; serviceResult = nil; draftIdentity = nil; serviceUnreadable = false
+        draftResearchPin = nil
         userEdited = false; source = "manual"; contourOrigin = .manual
     }
 
@@ -87,8 +95,7 @@ final class LiteMeasureVM: ObservableObject {
     /// - Returns: false＝立即開手動圈選；true＝留在量測頁選擇下一步。
     func ingest(_ raw: UIImage, depth d: DepthCapture?) async -> Bool {
         guard !busy else { return true }
-        let researchScope = try? LiteCaptureResearchScope.capture(server: AppSettings.backendURL(),
-            consent: LitePrefs.researchConsent == true)
+        let researchScope = captureParticipation()
         gen += 1
         busy = true
         busyHint = "影像處理中…"
@@ -96,6 +103,10 @@ final class LiteMeasureVM: ObservableObject {
         savedId = nil
         draft = nil; serviceResult = nil; draftNotice = nil; serviceUnreadable = false
         draftIdentity = native == nil ? nil : (UUID(), Date())
+        draftResearchPin = nil
+        if let researchScope, let delivery = native?.researchDelivery {
+            draftResearchPin = await delivery.pin(researchScope)
+        }
         uploadMessage = nil
         note = nil
         estimate = nil
@@ -134,7 +145,7 @@ final class LiteMeasureVM: ObservableObject {
         if let native {
             do {
                 guard let jpeg = captureJPEG, let (id, date) = draftIdentity else { throw LiteServiceFailure.missingImage }
-                draft = try await native.captures.create(jpeg: jpeg, depth: dd, id: id, now: date)
+                draft = try await native.captures.create(jpeg: jpeg, depth: dd, id: id, now: date, researchPin: draftResearchPin)
                 note = "照片與原始深度已保存在手機，尚未傳送。可選擇個人雲端辨識，或自行圈選後存入紀錄。"
             } catch {
                 note = "照片與深度尚未完整保存，未送出辨識。請保留此畫面並重試保存。"
@@ -159,7 +170,8 @@ final class LiteMeasureVM: ObservableObject {
                 }
             }
         }
-        if let researchScope, researchScope.permits(server: AppSettings.backendURL(), consent: LitePrefs.researchConsent == true) {
+        if !LiteNativeBuild.includesService, let researchScope,
+           researchScope.permits(server: AppSettings.backendURL(), consent: LitePrefs.researchConsent == true) {
             busyHint = "雲端辨識中…（約數秒）"
             switch await liteCloudSegment(work, depth: dd, researchScope: researchScope) {
             case .ok(let cloud, let stored, let route, let contract, let raw, let receipt):
@@ -231,7 +243,7 @@ final class LiteMeasureVM: ObservableObject {
               let (id, date) = draftIdentity else { return }
         busy = true; busyHint = "正在保存照片與深度…"; defer { busy = false }
         do {
-            draft = try await native.captures.create(jpeg: jpeg, depth: depth, id: id, now: date)
+            draft = try await native.captures.create(jpeg: jpeg, depth: depth, id: id, now: date, researchPin: draftResearchPin)
             note = "照片與原始深度已保存在手機，尚未傳送。"
         } catch { note = "仍未完成本機保存，未送出照片。請保留此畫面。" }
     }
@@ -369,8 +381,21 @@ final class LiteMeasureVM: ObservableObject {
         record.cloudSync = cloudBinding.map { LiteCloudSyncState(binding: $0) }
         record.measurementContext = LiteMeasurementContext(depth: depth, result: e, warnings: v.warnings)
         record.contourOrigin = contourOrigin; record.manuallyConfirmed = hasManualContour
+        if let pin = draft?.researchPin, pin.scope == captureParticipation(), native?.researchDelivery?.permits(pin.scope) == true,
+           let cameraID = depth.captureProvenance?.id.uuidString.lowercased(), !serviceUnreadable {
+            let result = serviceResult
+            let hash = LiteServiceBytes.hash(jpeg)
+            let recognized = result?.note == "confirmed" && result?.reply?.result != nil
+                && result?.reply?.receipt?.result_sha256 != nil && result?.imageSHA256 == hash
+                && result?.installation == pin.account.installation && result?.origin == pin.account.origin
+            if recognized || (result == nil && source == "manual" && hasManualContour) {
+                record.researchCapture = LitePendingResearchCapture(pin: pin, captureID: cameraID,
+                    imageHash: hash, operation: recognized ? result?.operation : nil,
+                    resultHash: recognized ? result?.reply?.receipt?.result_sha256 : nil, width: imageW, height: imageH)
+            }
+        }
         guard let saved = store.saveMeasurement(record, selectedWoundID: selectedWoundID,
-            enteredLocation: location, queueResearchSync: LitePrefs.researchConsent == true) else {
+            enteredLocation: location, queueResearchSync: native == nil ? LitePrefs.researchConsent == true : record.researchCapture != nil) else {
             let message = store.storageError
             // A write may have committed before reporting an error. Read back
             // this exact newly allocated pair instead of deleting referenced data.

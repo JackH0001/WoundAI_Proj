@@ -15,7 +15,7 @@
 1. 在一般版及指定網址的內部版各執行一次 Release 的 `WoundLiteTests`。其中的服務往返使用合成回覆，記錄模型執行、購買、恢復及研究路徑的呼叫次數。
 2. 在全新模擬器狀態執行 `WoundLiteNativeEntry` scheme，確認進入設定後顯示裝置登記。原本會把尚未登記誤當成需要查核刪帳，現在可先完成登記。模擬器無法證明實機 App Attest 登記成功。
 3. 清空測試組態的網址並設定 `WOUNDLITE_UI_EXPECTATION=LITE_QA_MISSING_BINDING`，確認設定頁顯示缺少設定。本機量測紀錄仍可查看。一般組態可將同一 UI 測試目標加入獨立測試專案，測試執行器設定 `LITE_QA_ORDINARY`，確認提供候選網址也不顯示入口。
-4. 如已在專用模擬器建立歷史面積驗收所用的三筆合成紀錄，可加上測試執行器參數 `WOUNDLITE_UI_EXPECTATION=LITE_QA_SAVED_FIXTURE`，從原紀錄確認登記前可查看本機資料，送出按鈕停用。該參數只選擇測試案例。
+4. 如專用模擬器已有歷史驗收的三筆合成紀錄，可用 `WOUNDLITE_UI_EXPECTATION=LITE_QA_EXTERNAL_FIXTURE` 核對預設畫面能分享 PDF，且看不到內部驗收入口。內部人員的候選建置另行設定 `WOUNDLITE_SAVED_RECORD_TEST=YES`，並以 `WOUNDLITE_UI_EXPECTATION=LITE_QA_SAVED_FIXTURE` 測試進入後仍需明確送出。一般版一律隱藏此入口。
 
 ## 簽署與實機門檻
 

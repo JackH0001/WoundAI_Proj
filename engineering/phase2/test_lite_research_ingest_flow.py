@@ -10,7 +10,7 @@ from lite_attest_state import SQLiteStateStore
 from lite_fenced_store import FencedPrivacy
 from lite_research_issuer import LinkSigner
 from lite_research_capture import configured_receiver, PATH
-from lite_raw_depth_store import unpack
+from lite_raw_depth_store import pack, unpack
 from werkzeug.test import EnvironBuilder
 import test_lite_native_backend as native_fixture
 import test_lite_raw_depth_http as raw_fixture
@@ -43,13 +43,22 @@ class ResearchIngestFlowTests(unittest.TestCase):
         self.fields=dict(research=self.r.h.owner,consent_epoch='legacy',consent_version='2026-10-16.1',
             capture_id=self.capture,image_sha256=self.n.image_hash,operation=f'{1:032x}')
 
-    def upload(self,ticket):
-        metadata=dict(self.r.f.m,schema='lite.rgbd/2',capture_time='host_wall_clock',capture_id=self.capture,
+    def metadata(self):
+        return dict(self.r.f.m,schema='lite.rgbd/2',capture_time='host_wall_clock',capture_id=self.capture,
             rgb_sha256=self.n.image_hash,captured_at='2023-11-14T22:13:20.000Z',
             capture_time_source='photo_callback_wall_clock')
+
+    def receipt_request(self, ticket):
+        packet = pack(json.dumps(self.metadata()).encode(), self.r.f.raw, self.n.f.jpeg)
+        body = json.dumps(dict(anon_id=self.r.h.owner,consent_epoch='legacy',consent_version='2026-10-16.1',
+            research_consent=True, source_ticket=json.dumps(ticket), image_bytes=len(self.n.f.jpeg),
+            bundle_sha256=hashlib.sha256(packet).hexdigest())).encode()
+        return self.r.h.post_signed(PATH+'/status', body), body
+
+    def upload(self,ticket):
         builder=EnvironBuilder(method='POST',data=dict(anon_id=self.r.h.owner,research_consent='true',
             consent_version='2026-10-16.1',consent_epoch='legacy',source_ticket=json.dumps(ticket),
-            raw_depth_metadata=json.dumps(metadata),image=(io.BytesIO(self.n.f.jpeg),'capture.jpg'),
+            raw_depth_metadata=json.dumps(self.metadata()),image=(io.BytesIO(self.n.f.jpeg),'capture.jpg'),
             raw_depth=(io.BytesIO(self.r.f.raw),'depth.f32')))
         try:
             env=builder.get_environ(); return self.r.h.post_signed(PATH,env['wsgi.input'].read(),env['CONTENT_TYPE'])

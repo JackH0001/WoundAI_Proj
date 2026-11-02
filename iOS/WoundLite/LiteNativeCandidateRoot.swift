@@ -7,6 +7,9 @@ enum LiteNativeBuild {
     #else
     static let includesService = false
     #endif
+    static var showsSavedRecordTest: Bool {
+        includesService && Bundle.main.object(forInfoDictionaryKey: "LiteSavedRecordTestEnabled") as? String == "YES"
+    }
 }
 
 enum LiteNativeSetupNotice {

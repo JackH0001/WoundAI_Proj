@@ -14,6 +14,7 @@ struct LiteCaptureDraft: Codable, Equatable, Identifiable, Sendable {
     var origin = LiteContourOrigin.manual
     var manuallyEdited = false
     var savedRecordID: String?
+    var researchPin: LiteResearchCapturePin?
 
     func depth() throws -> DepthCapture {
         guard version == 1, UUID(uuidString: id) != nil, createdAt.timeIntervalSince1970.isFinite,
@@ -99,9 +100,10 @@ actor LiteCaptureDraftStore {
         }
         return result
     }
-    func create(jpeg: Data, depth: DepthCapture, id: UUID = UUID(), now: Date = Date()) throws -> LiteCaptureDraft {
+    func create(jpeg: Data, depth: DepthCapture, id: UUID = UUID(), now: Date = Date(),
+                researchPin: LiteResearchCapturePin? = nil) throws -> LiteCaptureDraft {
         let value = LiteCaptureDraft(id: id.uuidString, createdAt: now, jpeg: jpeg,
-                                    encodedDepth: try LiteDepthCodec.encode(depth, matchingJPEG: jpeg))
+                                    encodedDepth: try LiteDepthCodec.encode(depth, matchingJPEG: jpeg), researchPin: researchPin)
         _ = try value.depth()
         if FileManager.default.fileExists(atPath: try file(value.id).path) {
             guard try load(value.id) == value else { throw LiteServiceFailure.conflict }
@@ -114,7 +116,7 @@ actor LiteCaptureDraftStore {
     /// stale editor cannot replace a later contour or re-open a committed draft.
     func update(_ value: LiteCaptureDraft, previous: LiteCaptureDraft) throws -> LiteCaptureDraft {
         guard value.id == previous.id, value.jpeg == previous.jpeg, value.encodedDepth == previous.encodedDepth,
-              value.createdAt == previous.createdAt, previous.savedRecordID == nil,
+              value.createdAt == previous.createdAt, value.researchPin == previous.researchPin, previous.savedRecordID == nil,
               value.revision == previous.revision, try load(value.id) == previous else { throw LiteServiceFailure.conflict }
         var next = value; next.revision += 1
         _ = try next.depth()

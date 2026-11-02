@@ -817,3 +817,318 @@ extension LiteNativeSessionTests {
         let counts = await wire.counts(); XCTAssertEqual(counts, ["registration": 0])
     }
 }
+
+/// Drops the response after accepting the single media POST. Status can then
+/// return that receipt to a fresh LiteStore, using a small JSON request.
+private actor CaptureWire: LiteAuthenticatedTransport {
+    let job: LitePendingResearchCapture, packet: LiteRawDepthPacket
+    let badLookup: Bool, wrongDepth: Bool, expireFirstLookup: Bool
+    var mediaPosts = 0, statusPosts = 0, sourcePosts = 0
+    init(_ job: LitePendingResearchCapture, _ packet: LiteRawDepthPacket, badLookup: Bool = false,
+         wrongDepth: Bool = false, expireFirstLookup: Bool = false) {
+        self.job = job; self.packet = packet; self.badLookup = badLookup; self.wrongDepth = wrongDepth
+        self.expireFirstLookup = expireFirstLookup
+    }
+    func installation() async throws -> String { job.pin.owner }
+    func counts() -> [Int] { [sourcePosts, statusPosts, mediaPosts] }
+    func send(_ request: URLRequest, installation: String) async throws -> (Data, HTTPURLResponse) {
+        let url = try XCTUnwrap(request.url)
+        let data = try XCTUnwrap(request.httpBody)
+        var response: [String: Any]
+        switch url.path {
+        case "/api/v1/lite/service/research-source":
+            XCTAssertEqual(installation, job.pin.account.installation)
+            sourcePosts += 1
+            let args = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            XCTAssertEqual(args["capture_id"] as? String, job.captureID)
+            let claim: [String: Any] = ["schema":"lite.research-source/1","native_installation":installation,
+                "account_sha256":job.pin.account.account,"research_installation":job.pin.owner,
+                "consent_epoch":job.pin.epoch,"consent_version":job.pin.consentVersion,"capture_id":job.captureID,
+                "image_sha256":job.imageHash,"source":"manual","operation":NSNull(),"result_sha256":NSNull()]
+            response = ["claim":claim,"signature":Data(repeating: 97, count: 64).base64EncodedString()]
+        case "/api/v1/lite/research/capture/status":
+            XCTAssertEqual(installation, job.pin.owner)
+            statusPosts += 1
+            let args = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            XCTAssertEqual(args["bundle_sha256"] as? String, packet.bundleDigest)
+            XCTAssertNil(data.range(of: packet.jpeg))
+            if expireFirstLookup && statusPosts == 1 {
+                return (Data(#"{"error":"research_source_expired","renew_source_only":true}"#.utf8),
+                        HTTPURLResponse(url:url,statusCode:409,httpVersion:nil,headerFields:nil)!)
+            }
+            if mediaPosts > 0 {
+                let idJSON = try JSONSerialization.data(withJSONObject: ["lite.research-capture/1",job.pin.owner,job.pin.epoch,job.captureID],options:.withoutEscapingSlashes)
+                let imageID = String(LiteServiceBytes.hash(idJSON).prefix(16))
+                let raw: [String: Any] = ["schema":"lite.rgbd.receipt/1","status":"stored","registration":"not_verified",
+                    "training_admission":"not_evaluated","installation_id":job.pin.owner,"capture_id":imageID,
+                    "bundle_bytes":16 + packet.metadata.count + packet.jpeg.count + packet.rawDepth.count,
+                    "metadata_sha256":LiteServiceBytes.hash(packet.metadata),"rgb_sha256":job.imageHash,
+                    "depth_sha256":wrongDepth ? String(repeating:"0",count:64) : LiteServiceBytes.hash(packet.rawDepth),
+                    "bundle_sha256":packet.bundleDigest]
+                response = ["schema":"lite.research-capture.receipt/1","status":"stored","image_id":imageID,
+                    "image_sha256":job.imageHash,"capture_id":job.captureID,"consent_epoch":job.pin.epoch,
+                    "capture_intent_sha256":sessionHash,"raw_depth_receipt":raw,"annotation_status":"not_confirmed",
+                    "registration":"not_verified","training_admission":"not_evaluated"]
+            } else {
+                response = ["schema":"lite.research-capture.lookup/1","status":badLookup ? "unknown" : "upload_required",
+                    "capture_id":job.captureID,"image_sha256":job.imageHash,"consent_epoch":job.pin.epoch,"bundle_sha256":packet.bundleDigest]
+            }
+        case "/api/v1/lite/research/capture":
+            XCTAssertEqual(installation, job.pin.owner)
+            XCTAssertNotNil(data.range(of: packet.jpeg))
+            XCTAssertNotNil(data.range(of: packet.rawDepth))
+            mediaPosts += 1
+            throw URLError(.networkConnectionLost)
+        default: throw LiteServiceFailure.invalidState
+        }
+        return (try JSONSerialization.data(withJSONObject: response),
+                HTTPURLResponse(url: url,statusCode: 200,httpVersion: nil,headerFields: nil)!)
+    }
+}
+
+extension LiteNativeSessionTests {
+    private func researchFixture() async throws -> (URL, LiteStore, LiteRecord, LiteRawDepthPacket) {
+        let path = captureFiles(), clock = { Date(timeIntervalSince1970: 1_800_010_000) }
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"), now: clock)
+        let image = await (try SessionWire()).image()
+        var depth = captureDepth()
+        depth.captureProvenance = .init(id: UUID(), observedAt: clock())
+        let packet = try LiteRawDepthPacket.make(depth: depth, jpeg: image)
+        let pin = LiteResearchCapturePin(scope: .init(origin: "https://study.example", epoch: nil),
+            account: .init(origin:"https://native.example",installation:String(repeating:"b",count:32),account:sessionHash),
+            owner:String(repeating:"a",count:32),consentVersion:LitePrefs.consentVersion)
+        let job = LitePendingResearchCapture(pin:pin,captureID:depth.captureProvenance!.id.uuidString.lowercased(),
+            imageHash:LiteServiceBytes.hash(image),operation:nil,resultHash:nil,width:64,height:64)
+        let record = LiteRecord(id:UUID().uuidString,dateISO:"2027-01-01T00:00:00Z",surfaceCm2:4,projectedCm2:4,
+            quality:"ok",imageName:try XCTUnwrap(store.images.save(jpeg:image)),source:"manual",
+            polysJson:"[[[5,5],[5,50],[50,50]]]",depthName:try XCTUnwrap(store.saveDepth(depth,matchingJPEG:image)),
+            researchCapture:job, manuallyConfirmed:true)
+        let saved = try XCTUnwrap(store.saveMeasurement(record,selectedWoundID:"",enteredLocation:.init(side:"right",site:"heel"),queueResearchSync:true))
+        return (path, store, saved, packet)
+    }
+    private func cleanCapture(_ path:URL, _ store: LiteStore, _ record:LiteRecord) {
+        store.images.delete(record.imageName)
+        if let depth = record.depthName { store.images.delete(depth) }
+        try? FileManager.default.removeItem(at:path)
+    }
+    private func delivery(_ job: LitePendingResearchCapture, wire: CaptureWire,
+                          consent: @escaping () -> Bool = { true }) -> LiteResearchCaptureDelivery {
+        LiteResearchCaptureDelivery(source: wire, currentAccount: { job.pin.account },
+            researchOwner: { _ in job.pin.owner }, permits: { _ in consent() }, researchTransport: { _,_ in wire })
+    }
+
+    func testResearchLostReplyRestartGetsReceiptWithoutReuploadAndOrdersFirstAndEditedRevisions() async throws {
+        let (path,store,saved,packet) = try await researchFixture()
+        defer { cleanCapture(path,store,saved) }
+        let frozen = try XCTUnwrap(saved.researchCapture)
+        XCTAssertNotEqual(frozen.captureID, saved.id.lowercased())
+        let wire = CaptureWire(frozen,packet)
+        await delivery(frozen,wire:wire).resume(saved.id,store:store)
+        XCTAssertNil(store.records.first?.cloudSync)
+        XCTAssertNotNil(store.records.first?.researchCapture?.encryptedTicket)
+        var edit = try XCTUnwrap(store.records.first)
+        edit.surfaceCm2 = 5
+        edit.polysJson = "[[[5,5],[6,45],[50,49]]]"
+        XCTAssertTrue(store.update(edit))
+        let reopened = LiteStore(fileURL:path.appendingPathComponent("index.json"),now:{ store.revisionNow.addingTimeInterval(65) })
+        await delivery(frozen,wire:wire).resume(saved.id,store:reopened)
+        let sync = try XCTUnwrap(reopened.records.first?.cloudSync)
+        XCTAssertEqual(sync.pending?.payloadJSON,frozen.firstRevision)
+        XCTAssertEqual(sync.binding.storageReceipt?.rawDepthReceipt?.depth_sha256,LiteServiceBytes.hash(packet.rawDepth))
+        let evidence = try XCTUnwrap(reopened.records.first?.researchCapture?.encryptedReceipt)
+        let confirmed = try XCTUnwrap(PhiCrypto.decryptBytes(evidence))
+        XCTAssertEqual((try JSONSerialization.jsonObject(with:confirmed) as? [String:Any])?["image_id"] as? String,sync.binding.imageID)
+        var revisions: [LitePendingRevision] = []
+        await reopened.syncRevision(recordID:saved.id,consent:{true},bindingAllowed:{_ in true},send:{ _,revision in revisions.append(revision) })
+        XCTAssertEqual(revisions.map(\.revision),[1,2])
+        XCTAssertEqual(revisions.first?.payloadJSON,frozen.firstRevision)
+        XCTAssertNotEqual(revisions.first?.digest,revisions.last?.digest)
+        let latest = try JSONDecoder().decode(LiteRevisionPayload.self,from:Data(try XCTUnwrap(revisions.last).payloadJSON.utf8))
+        XCTAssertEqual(latest.polygons,[[[5,5],[6,45],[50,49]]])
+        let counts = await wire.counts()
+        XCTAssertEqual(counts,[1,2,1])
+        XCTAssertEqual(store.images.rawBytes(saved.imageName),packet.jpeg)
+    }
+
+    func testResearchUnknownLookupNeverSendsMediaAndWrongDepthReceiptNeverCreatesBinding() async throws {
+        for bad in [true,false] {
+            let (path,store,saved,packet) = try await researchFixture()
+            defer { cleanCapture(path,store,saved) }
+            let job = try XCTUnwrap(saved.researchCapture), wire = CaptureWire(job,packet,badLookup:bad,wrongDepth:true)
+            let client = delivery(job,wire:wire)
+            await client.resume(saved.id,store:store)
+            let later = LiteStore(fileURL:path.appendingPathComponent("index.json"),now:{ store.revisionNow.addingTimeInterval(180) })
+            await client.resume(saved.id,store:later,explicit:true)
+            let counts = await wire.counts()
+            XCTAssertEqual(counts,[1,2,bad ? 0 : 1])
+            XCTAssertNil(later.records.first?.cloudSync)
+            XCTAssertNotNil(later.records.first?.researchCapture?.notice)
+        }
+    }
+
+    func testResearchWithdrawalAndDifferentAccountNeverDispatchOrRebind() async throws {
+        let (path,store,saved,packet) = try await researchFixture()
+        defer { cleanCapture(path,store,saved) }
+        let job = try XCTUnwrap(saved.researchCapture), wire = CaptureWire(job,packet)
+        await delivery(job,wire:wire,consent:{false}).resume(saved.id,store:store,explicit:true)
+        let other = LiteResearchCaptureDelivery(source:wire,currentAccount:{
+            .init(origin:job.pin.account.origin,installation:job.pin.account.installation,account:String(repeating:"f",count:64))
+        },researchOwner:{ _ in job.pin.owner },permits:{ _ in true },researchTransport:{ _,_ in wire })
+        await other.resume(saved.id,store:store,explicit:true)
+        let counts = await wire.counts()
+        XCTAssertEqual(counts,[0,0,0])
+        XCTAssertNil(store.records.first?.cloudSync)
+        XCTAssertEqual(store.records.first?.researchCapture?.firstRevision,job.firstRevision)
+    }
+
+    func testExpiredSourceRenewsBeforeSendingAnyImageBytes() async throws {
+        let (path,store,saved,packet) = try await researchFixture()
+        defer { cleanCapture(path,store,saved) }
+        let job = try XCTUnwrap(saved.researchCapture)
+        let wire = CaptureWire(job,packet,expireFirstLookup:true)
+        await delivery(job,wire:wire).resume(saved.id,store:store)
+        let first = await wire.counts()
+        XCTAssertEqual(first,[1,1,0])
+        XCTAssertNil(store.records.first?.researchCapture?.encryptedTicket)
+        XCTAssertNotNil(store.records.first?.researchCapture?.signature)
+        for offset in [65.0,130.0] {
+            let reopened = LiteStore(fileURL:path.appendingPathComponent("index.json"),now:{ store.revisionNow.addingTimeInterval(offset) })
+            await delivery(job,wire:wire).resume(saved.id,store:reopened)
+        }
+        let final = await wire.counts()
+        XCTAssertEqual(final,[2,3,1])
+        XCTAssertTrue(store.reload())
+        XCTAssertNotNil(store.records.first?.cloudSync)
+    }
+}
+
+extension LiteNativeSessionTests {
+    func testCameraPinsResearchConsentAndUsesDepthCallbackIdentityForFirstSavedAnnotation() async throws {
+        let path = captureFiles()
+        defer { try? FileManager.default.removeItem(at:path) }
+        let files = LiteCaptureDraftStore(directory:path), wire = try SessionWire()
+        let session = try runtime(wire, SessionJournal(), captures:files)
+        let owner = String(repeating:"a", count:32)
+        let person = LiteDeletionContext(origin:origin.absoluteString,installation:String(repeating:"b",count:32),account:sessionHash)
+        var consenting = false
+        let researchOrigin = "https://study.example"
+        let journal = LiteWithdrawalJournal(url:path.appendingPathComponent("withdrawal.json"))
+        let participation = {
+            try? LiteCaptureResearchScope.capture(server:researchOrigin,consent:consenting,journal:journal)
+        }
+        session.researchDelivery = LiteResearchCaptureDelivery(source:wire,currentAccount:{person},researchOwner:{_ in owner},
+            permits:{ $0.permits(server:researchOrigin,consent:consenting,journal:journal) },
+            researchTransport:{ _,_ in wire })
+        var depth = captureDepth()
+        depth.captureProvenance = .init(observedAt:Date(timeIntervalSince1970:1_800_000_000))
+        let imageBytes = await wire.image()
+        let image = try XCTUnwrap(UIImage(data:imageBytes))
+        let store = LiteStore(fileURL:path.appendingPathComponent("index.json"))
+        for consentAtCapture in [false, true] {
+            consenting = consentAtCapture
+            let vm = LiteMeasureVM(native:session,captureParticipation:participation)
+            _ = await vm.ingest(image,depth:depth)
+            let draft = try XCTUnwrap(vm.draft)
+            XCTAssertEqual(draft.researchPin?.owner, consentAtCapture ? owner : nil)
+            // A later opt-in must never admit a photo made before consent.
+            consenting = true
+            await vm.applyManual([[[5,5],[5,55],[55,55],[55,5]]], correctionIoU:0.7)
+            let saved = try XCTUnwrap(vm.saveCapture(in:store,selectedWoundID:"",location:.init(side:"right",site:"heel")))
+            defer { store.images.delete(saved.imageName); if let d = saved.depthName { store.images.delete(d) } }
+            XCTAssertEqual(saved.researchCapture?.captureID, consentAtCapture ? depth.captureProvenance?.id.uuidString.lowercased() : nil)
+            XCTAssertEqual(saved.researchCapture?.firstRevision != nil, consentAtCapture)
+            XCTAssertNotEqual(saved.id.lowercased(), saved.researchCapture?.captureID)
+        }
+        let counts = await wire.counts()
+        XCTAssertEqual(counts, ["registration":0])
+    }
+}
+
+private struct AttestedSessionServer: LiteAttestTransport {
+    let registration: AttestHTTPDouble
+    let business: SessionWire
+    func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        if request.url?.path.contains("/attest/") == true { return try await registration.send(request) }
+        XCTAssertNotNil(request.value(forHTTPHeaderField:"X-Lite-Assertion"))
+        return try await business.send(request, installation:registration.owner)
+    }
+}
+
+extension LiteNativeSessionTests {
+    func testRealSigningLaneCanCompleteRecognitionAndStopsAfterLogout() async throws {
+        let api = try SessionWire(), control = AttestHTTPDouble()
+        await api.useRegistration(control.owner)
+        let client = try LiteAttestClient(origin: origin, audience:"lite-test",device:AttestDeviceDouble(),
+            persistence:AttestMemory(),transport:AttestedSessionServer(registration:control,business:api),
+            now:{ Date(timeIntervalSince1970:1000) })
+        _ = try await client.registeredInstallation()
+        let access = LiteSandboxAccess()
+        let signed = LiteSandboxSignedTransport(client:client,access:access)
+        let session = try LiteNativeSession(origin:origin,transport:signed,identityProvider:SessionApple(),
+            purchaseProvider:SessionStoreKit(),journal:SessionJournal(),register:{try await client.registeredInstallation()},
+            now:{ Date(timeIntervalSince1970:Double(sessionTime)) })
+        access.identity = session.identity
+        let completed = expectation(description:"signed service request left the signing lane")
+        Task { @MainActor in
+            defer { completed.fulfill() }
+            do {
+                await session.identity.signIn()
+                let id = await api.capture(), image = await api.image()
+                _ = try await session.service.enqueue(captureID:id,jpeg:image)
+                let done = try await session.service.resume(id) { _ in image }
+                XCTAssertEqual(done.note,"confirmed")
+                await session.identity.signOut()
+                var req = URLRequest(url:origin.appendingPathComponent("api/v1/lite/service/balance"))
+                req.httpMethod = "POST"; req.httpBody = Data("{}".utf8)
+                do { _ = try await signed.send(req,installation:control.owner); XCTFail("logged out request dispatched") } catch {}
+                let calls = await api.counts()
+                XCTAssertEqual(calls["service/run"],1)
+                XCTAssertNil(calls["service/balance"])
+            } catch { XCTFail("signing flow: \(error)") }
+        }
+        await fulfillment(of:[completed],timeout:5)
+    }
+}
+
+private extension SessionWire {
+    func useRegistration(_ id:String) { owner = id }
+}
+
+private struct AttestedCaptureServer: LiteAttestTransport {
+    let registration: AttestHTTPDouble
+    let capture: CaptureWire
+    func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        if request.url?.path.contains("/attest/") == true { return try await registration.send(request) }
+        XCTAssertNotNil(request.value(forHTTPHeaderField:"X-Lite-Assertion"))
+        return try await capture.send(request,installation:registration.owner)
+    }
+}
+
+extension LiteNativeSessionTests {
+    func testResearchSigningChecksOriginalOwnerWithoutWaitingOnItsOwnLane() async throws {
+        let (path,store,saved,packet) = try await researchFixture()
+        defer { cleanCapture(path,store,saved) }
+        let job = try XCTUnwrap(saved.researchCapture), wire = CaptureWire(job,packet)
+        let client = try LiteAttestClient(origin:try XCTUnwrap(URL(string:job.pin.scope.origin)),audience:"lite-test",
+            device:AttestDeviceDouble(),persistence:AttestMemory(),
+            transport:AttestedCaptureServer(registration:AttestHTTPDouble(),capture:wire),
+            now:{Date(timeIntervalSince1970:1000)})
+        let registration = try await client.registeredInstallation()
+        XCTAssertEqual(registration,job.pin.owner)
+        let delivery = LiteResearchCaptureDelivery(source:wire,currentAccount:{job.pin.account},researchOwner:{ _ in
+            guard let owner = try await client.existingInstallation() else { throw LiteServiceFailure.conflict }
+            return owner
+        },permits:{ _ in true },researchTransport:{ _,scope in LiteSignedCloudTransport(client:client,consent:scope) })
+        let completed = expectation(description:"signed recovery leaves original research lane")
+        Task { @MainActor in
+            defer { completed.fulfill() }
+            await delivery.resume(saved.id,store:store)
+            let reopened = LiteStore(fileURL:path.appendingPathComponent("index.json"),now:{ store.revisionNow.addingTimeInterval(65) })
+            await delivery.resume(saved.id,store:reopened)
+            XCTAssertNotNil(reopened.records.first?.cloudSync)
+            let counts = await wire.counts()
+            XCTAssertEqual(counts,[1,2,1])
+        }
+        await fulfillment(of:[completed],timeout:5)
+    }
+}

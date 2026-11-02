@@ -32,11 +32,13 @@ def run():
         usage=n.quota(); assert usage['used']==1
         ticket=n.post('service/research-source',**f.fields); assert ticket.status_code==200
         first=f.upload(ticket.json); assert first.status_code==200
-        frozen=dict(f.bucket.live); again=f.upload(ticket.json)
+        frozen=dict(f.bucket.live); again,lookup_body=f.receipt_request(ticket.json)
+        assert again.status_code == 200 and n.f.jpeg not in lookup_body and r.f.raw not in lookup_body
         assert first.json==again.json and frozen==f.bucket.live
         iid=first.json['image_id']; receipts=[]
+        contours={1:[[[2,2],[20,2],[20,20]]],2:[[[2,2],[24,2],[20,20]]]}
         for revision,area in [(1,4),(1,4),(2,5),(2,5)]:
-            payload=dict(polygons=[[[2,2],[20,2],[20,20]]],image_w=64,image_h=64,
+            payload=dict(polygons=contours[revision],image_w=64,image_h=64,
                 surface_cm2=area,projected_cm2=area,source='manual',consent_version='2026-10-16.1')
             body=dict(anon_id=r.h.owner,consent_epoch='legacy',research_consent=True,
                 image_id=iid,revision=revision,payload_json=json.dumps(payload))
@@ -44,8 +46,14 @@ def run():
             assert reply.status_code==200, reply.json
             receipts.append(reply.json)
         media=f.privacy.media(r.h.owner)
+        labels = [json.loads(line) for line in media.read_lines_fresh('lite_labels.jsonl')]
+        assert len(labels) == 2 and all(row['polygons'] == contours[row['revision']] for row in labels)
+        original_polys = media.get_json(f'lite/{r.h.owner}/{iid}.json')['ai_polygons']
+        assert original_polys == original.json['result']['wound_polygons']
         packet=unpack(media.get_blob('lite_raw/'+r.h.owner+'/'+iid+'.rgbd'))
         after=dict(native_model_calls=n.h.model_calls, personal_used=n.quota()['used'],
+            receipt_lookup_body_bytes=len(lookup_body), retry_media_bytes=0,
+            original_ai_contours_preserved=True, revised_contours_readback=contours,
             research_index_rows=len(media.read_lines_fresh('lite_index.jsonl')),
             annotation_rows=len(media.read_lines_fresh('lite_labels.jsonl')),
             revisions=[x['revision'] for x in receipts],same_revision_receipts=receipts[0]==receipts[1] and receipts[2]==receipts[3],

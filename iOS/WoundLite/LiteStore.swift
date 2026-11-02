@@ -35,6 +35,7 @@ struct LiteRecord: Codable, Identifiable {
     var woundName: String? = nil
     var woundLocation: LiteWoundLocation? = nil
     var cloudSync: LiteCloudSyncState? = nil
+    var researchCapture: LitePendingResearchCapture? = nil
     var manuallyConfirmed: Bool? = nil
     /// Old values remain unchanged; missing provenance is not retroactively certified.
     var measurementContext: LiteMeasurementContext? = nil
@@ -128,6 +129,11 @@ final class LiteStore: ObservableObject {
         saved.woundID = wound.id
         saved.woundName = wound.name
         saved.woundLocation = location
+        if var job = saved.researchCapture {
+            // Freeze the first annotation before the measurement leaves the screen.
+            job.firstRevision = try? saved.revisionJSON(width: job.width, height: job.height)
+            saved.researchCapture = queueResearchSync && job.firstRevision != nil ? job : nil
+        }
         // Persist the first exact revision with the local record before the UI
         // clears its capture. An interrupted first send can then resume safely.
         if queueResearchSync, var sync = saved.cloudSync, sync.pending == nil,

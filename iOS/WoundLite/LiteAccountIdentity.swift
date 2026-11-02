@@ -238,6 +238,37 @@ struct LiteAccountCheckpoint:Codable,Equatable {
         guard generation == start, let r,r.phase=="active",let account=r.session?.account_sha256 else{throw LiteAccountFailure.invalid}
         return LiteDeletionContext(origin:service.origin.absoluteString,installation:owner,account:account)
     }
+
+    /// Pin the signed-in account at capture time without an Apple or service request.
+    /// Transport authorization is checked again immediately before later dispatch.
+    func savedResearchContext() async throws -> LiteDeletionContext {
+        let start = generation
+        let owner = try await service.installation()
+        guard !blocked, try await !hasDeletionIntent(owner),
+              let checkpoint = try await read(owner).1, ["active", "renew"].contains(checkpoint.phase),
+              let account = checkpoint.session?.account_sha256, start == generation else {
+            throw LiteAccountFailure.unavailable
+        }
+        return LiteDeletionContext(origin: service.origin.absoluteString, installation: owner, account: account)
+    }
+
+    /// Check a known installation while its App Attest signing lane is occupied.
+    /// This operation may read the identity journal, but must never request a
+    /// device registration, renew a session, or send an account HTTP request.
+    func dispatchSession(for owner: String) async -> LiteAccountSession? {
+        let start = generation
+        do {
+            guard !busy, !blocked, try await !hasDeletionIntent(owner),
+                  let record = try await read(owner).1, record.phase == "active",
+                  let session = record.session, session.installation == owner,
+                  session.expires_at > Int(now().timeIntervalSince1970),
+                  let credential = record.credential,
+                  try await provider.authorized(user: credential.user),
+                  try await !hasDeletionIntent(owner), start == generation, !busy, !blocked
+            else { return nil }
+            return session
+        } catch { return nil }
+    }
     func suspendForDeletion(_ context:LiteDeletionContext,operation:String)async throws {
         try context.validate();guard context.origin==service.origin.absoluteString,LiteServiceBytes.hex(operation,32),
             try await service.installation()==context.installation else{throw LiteAccountFailure.conflict}

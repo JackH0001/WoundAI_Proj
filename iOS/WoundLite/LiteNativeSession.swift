@@ -5,7 +5,7 @@ import AuthenticationServices
 
 /// One explicit Sandbox composition. Ordinary startup does not construct this.
 /// Account/revocation requests remain usable when ordinary service is fenced.
-@MainActor private final class LiteSandboxAccess {
+@MainActor final class LiteSandboxAccess {
     weak var identity: LiteAccountIdentityStore?
     func permits(_ ordinary: Bool) async -> Bool {
         if !ordinary { return true }
@@ -48,7 +48,7 @@ private struct LiteSandboxJournal: LiteServiceJournal {
     }
 }
 
-private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
+struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     let client: LiteAttestClient
     let access: LiteSandboxAccess
     func installation() async throws -> String {
@@ -58,9 +58,16 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     func send(_ request: URLRequest, installation: String) async throws -> (Data, HTTPURLResponse) {
         let path = request.url?.path ?? ""
         let ordinary = path.hasPrefix("/api/v1/lite/service/") || path.hasPrefix("/api/v1/lite/purchase/")
-        // Recheck after assertion preparation, immediately before media dispatch.
+        // Session renewal runs before signing. Inside the signing lane, only
+        // validate the captured session and deletion journal using the supplied
+        // owner. Asking this same client for its installation here would deadlock.
+        let permit = ordinary ? await access.identity?.dispatchSession(for: installation) : nil
+        guard !ordinary || permit != nil else { throw LiteAccountFailure.unavailable }
         return try await client.send(request, installation: installation, requestID: UUID(),
-                                     allowSending: { await access.permits(ordinary) })
+            allowSending: {
+                if !ordinary { return true }
+                return await access.identity?.dispatchSession(for: installation) == permit
+            })
     }
 }
 
@@ -71,6 +78,7 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     let purchases: LiteNativePurchaseStore
     let service: LiteServiceClient
     let captures: LiteCaptureDraftStore
+    var researchDelivery: LiteResearchCaptureDelivery?
     let deletionService: LiteAccountDeletionHTTPService
     private let balanceTransport: any LiteAuthenticatedTransport
     private var researchLink: LiteResearchDeletionLink?
@@ -152,6 +160,21 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
             session.researchLink = try LiteResearchDeletionLink(nativeOrigin: client.origin, researchOrigin: original,
                 native: LiteSandboxSignedTransport(client: client, access: access),
                 research: LiteExistingResearchTransport(origin: original), journal: session.identity.journal)
+            if Bundle.main.object(forInfoDictionaryKey: "LiteResearchCaptureEnabled") as? String == "YES" {
+                let native = LiteSandboxScopeTransport(origin: client.origin,
+                    base: LiteSandboxSignedTransport(client: client, access: access),
+                    paths: ["/api/v1/lite/service/research-source"], permits: { await access.permits(true) })
+                session.researchDelivery = LiteResearchCaptureDelivery(source: native,
+                    currentAccount: { [identity = session.identity] in try await identity.savedResearchContext() },
+                    researchOwner: { server in
+                        guard server == original.absoluteString else { throw LiteAttestFailure.serviceChanged }
+                        return try await LiteExistingResearchTransport(origin: original).installation()
+                    },
+                    permits: { $0.permits(server: AppSettings.backendURL(), consent: LitePrefs.researchConsent == true) },
+                    researchTransport: { pin, guardScope in
+                        LiteSignedCloudTransport(baseURL: pin.scope.origin, scopeGuard: guardScope)
+                    })
+            }
         }
         return session
     }

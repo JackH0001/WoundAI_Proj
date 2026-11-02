@@ -126,6 +126,12 @@ struct LiteRootView: View {
            let due = record.retryAt, due <= Date() {
             await withdrawal.request(server: record.server)
         }
+        if let delivery = nativeSession?.researchDelivery, LitePrefs.researchConsent == true {
+            let due = store.records.filter {
+                $0.cloudSync == nil && ($0.researchCapture?.retryAt.map { $0 <= store.revisionNow } ?? false)
+            }
+            for record in due { await delivery.resume(record.id, store: store) }
+        }
         await store.resumePendingRevisions()
     }
     @State private var askConsent = false
