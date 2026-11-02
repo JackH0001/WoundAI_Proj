@@ -10,6 +10,8 @@ struct LiteTimelineSelection {
   let period: String
   let missingDates: Int
   private let calendar: Calendar
+  private let datedRows: [String: Date]
+  func date(of record: LiteRecord) -> Date? { datedRows[record.id] }
 
   func displayDate(_ iso: String) -> String {
     let precise = ISO8601DateFormatter()
@@ -55,6 +57,8 @@ struct LiteTimelineSelection {
     let series = records.filter { $0.woundID == group.id }.map {
       ($0, iso.date(from: $0.dateISO) ?? precise.date(from: $0.dateISO))
     }
+    datedRows = Dictionary(series.compactMap { record, date in date.map { (record.id, $0) } },
+                           uniquingKeysWith: { first, _ in first })
     missingDates = series.filter { $0.1 == nil }.count
     rows = series.filter { _, date in
       guard let lower, let upper else { return true }
@@ -80,8 +84,18 @@ enum LiteTimelinePDF {
       kCGPDFContextCreator as String: "WoundAILite",
     ]
     let renderer = UIGraphicsPDFRenderer(bounds: page, format: format)
-    let perPage = 3
-    let pages = (selection.rows.count + perPage - 1) / perPage
+    // Keep only eligibility for the first-page chart. Full resolution photos are loaded one at a time.
+    var eligible: [String: LiteAreaSeries] = [:]
+    for record in selection.rows where record.areaSeries != nil {
+      autoreleasepool {
+        eligible[record.id] = LitePDFReport.areaSeries(record, polygons:
+          LitePDFReport.polygons(record, image: image(record)))
+      }
+    }
+    let firstCount = min(2, selection.rows.count)
+    let ranges = [0..<firstCount] + stride(from: firstCount, to: selection.rows.count, by: 3).map {
+      $0..<min($0 + 3, selection.rows.count)
+    }
     let ink = UIColor(red: 0.08, green: 0.18, blue: 0.21, alpha: 1)
     func text(
       _ value: String, _ rect: CGRect, size: CGFloat, bold: Bool = false, color: UIColor? = nil
@@ -96,8 +110,9 @@ enum LiteTimelinePDF {
         ])
     }
     return try LitePDFShare(directory: directory) { output in
+      var sourceChanged = false
       try renderer.writePDF(to: output) { context in
-        for number in 0..<pages {
+        for (number, range) in ranges.enumerated() {
           context.beginPage()
           UIColor.white.setFill()
           context.cgContext.fill(page)
@@ -113,13 +128,14 @@ enum LiteTimelinePDF {
             selection.missingDates > 0
             ? "有 \(selection.missingDates) 筆日期待確認；自訂期間只列日期可核對的紀錄。" : "依拍攝時間排列，面積為個人紀錄參考值。"
           text(stamp, CGRect(x: 36, y: 168, width: 525, height: 24), size: 11)
-          for local in 0..<perPage {
-            let index = number * perPage + local
-            guard index < selection.rows.count else { break }
+          if number == 0 { drawTrend(selection, eligible: eligible, ctx: context.cgContext) }
+          for (local, index) in range.enumerated() {
             autoreleasepool {
               let record = selection.rows[index]
               let img = image(record)
-              let top = CGFloat(202 + local * 180)
+              let polygons = LitePDFReport.polygons(record, image: img)
+              if LitePDFReport.areaSeries(record, polygons: polygons) != eligible[record.id] { sourceChanged = true }
+              let top = CGFloat((number == 0 ? 380 : 202) + local * 180)
               UIColor(white: 0.82, alpha: 1).setStroke()
               context.cgContext.move(to: CGPoint(x: 36, y: top))
               context.cgContext.addLine(to: CGPoint(x: 559, y: top))
@@ -144,42 +160,35 @@ enum LiteTimelinePDF {
                     img.draw(in: CGRect(origin: .zero, size: size))
                   }
                   thumb.draw(in: rect)
-                  if let polygons = LitePDFReport.polygons(record, image: img), let cg = img.cgImage
-                  {
-                    let ctx = context.cgContext
-                    ctx.saveGState()
-                    ctx.clip(to: rect)
-                    ctx.setLineWidth(1.2)
-                    ctx.setStrokeColor(UIColor.systemTeal.cgColor)
-                    for poly in polygons {
-                      let points = poly.map {
-                        CGPoint(
-                          x: rect.minX + CGFloat($0[0]) / CGFloat(cg.width) * rect.width,
-                          y: rect.minY + CGFloat($0[1]) / CGFloat(cg.height) * rect.height)
-                      }
-                      ctx.addLines(between: points)
-                      ctx.closePath()
-                      ctx.strokePath()
-                    }
-                    ctx.restoreGState()
+                  if let polygons, let cg = img.cgImage {
+                    LitePDFReport.drawMask(polygons, pixels: cg, in: rect, context: context.cgContext)
                   }
                 } else {
                   text("本機照片無法讀取", frame, size: 12)
                 }
               }
-              let area = LitePDFReport.areaLines(record, image: img)
+              let area = LitePDFReport.areaLines(record, polygons: polygons)
               text(
                 area[0], CGRect(x: x, y: top + 40, width: 559 - x, height: 47), size: 14, bold: true
               )
               if area.count > 1 {
                 text(area[1], CGRect(x: x, y: top + 86, width: 559 - x, height: 24), size: 12)
               }
+              let mask = !photos ? "照片與圈選依選項省略" : polygons == nil
+                ? "無可核對的圈選，未疊圖" : "青色區域為已存傷口圈選"
+              text(mask + " · " + (record.contourOrigin?.label ?? "圈選版本未確認"),
+                   CGRect(x: x, y: top + 112, width: 559 - x, height: 28), size: 11)
+              let quality: String
+              switch record.savedArea {
+              case .unavailable: quality = "本筆面積未通過檢查。"
+              case .legacy: quality = "舊版紀錄，完整拍攝品質未保存。"
+              case .current(let verdict):
+                quality = (record.measurementContext?.warnings.first ?? verdict.warnings.first)
+                  ?? (record.quality == "ok" ? "未記錄警示" : record.quality)
+              }
               text(
-                "圈選來源  " + (record.contourOrigin?.label ?? "來源未確認"),
-                CGRect(x: x, y: top + 112, width: 559 - x, height: 28), size: 11)
-              let quality = record.quality == "ok" ? "未記錄警示" : record.quality
-              text(
-                "拍攝品質  " + quality, CGRect(x: x, y: top + 143, width: 559 - x, height: 24), size: 11
+                "拍攝品質  " + quality,
+                CGRect(x: x, y: top + 143, width: 559 - x, height: 30), size: 11
               )
             }
           }
@@ -188,11 +197,90 @@ enum LiteTimelinePDF {
             size: 10)
           text(LitePDFReport.disclaimer, CGRect(x: 36, y: 770, width: 522, height: 30), size: 10)
           text(
-            "WoundAILite                                  第 \(number+1) / \(pages) 頁",
+            "WoundAILite                                  第 \(number+1) / \(ranges.count) 頁",
             CGRect(x: 36, y: 803, width: 525, height: 18), size: 10)
         }
       }
+      if sourceChanged { throw LiteTimelineError.invalidSelection }
     }
+  }
+}
+
+extension LiteTimelinePDF {
+  /// All timestamps come from the selected rows. No interpolation across missing values or source changes.
+  private static func drawTrend(_ selection: LiteTimelineSelection, eligible: [String: LiteAreaSeries],
+                                ctx: CGContext) {
+    let teal = UIColor(red: 0.03, green: 0.39, blue: 0.46, alpha: 1)
+    let ochre = UIColor(red: 0.56, green: 0.32, blue: 0.10, alpha: 1)
+    let muted = UIColor(white: 0.34, alpha: 1)
+    let panel = CGRect(x: 36, y: 198, width: 523, height: 170)
+    let plot = CGRect(x: 86, y: 244, width: 449, height: 66)
+    func label(_ value: String, x: CGFloat, y: CGFloat, width: CGFloat,
+               size: CGFloat = 10, bold: Bool = false, color: UIColor = .black) {
+      (value as NSString).draw(in: CGRect(x: x, y: y, width: width, height: 22), withAttributes: [
+        .font: bold ? UIFont.boldSystemFont(ofSize: size) : UIFont.systemFont(ofSize: size),
+        .foregroundColor: color])
+    }
+    ctx.saveGState()
+    defer { ctx.restoreGState() }
+    ctx.setFillColor(UIColor(white: 0.965, alpha: 1).cgColor)
+    ctx.fill(panel)
+    label("LiDAR 表面積趨勢（cm²）", x: 48, y: 208, width: 241, size: 15, bold: true)
+    let series = LiteAreaSeries.allCases.map { basis in
+      LiteWoundTrend.points(woundID: selection.group.id, records: selection.rows, series: basis,
+                            include: { eligible[$0.id] == basis })
+    }
+    let points = series.flatMap { $0 }
+    let plotted = Set(points.map(\.id))
+    label("可繪 \(plotted.count) / \(selection.rows.count) 筆", x: 443, y: 209, width: 111, color: muted)
+    let dated = selection.rows.compactMap { row in selection.date(of: row).map { (row, $0) } }
+    guard let first = dated.first, let last = dated.last else {
+      label("沒有可核對的拍攝日期。", x: 49, y: 266, width: 475, size: 12)
+      return
+    }
+    func x(_ date: Date) -> CGFloat {
+      let span = last.1.timeIntervalSince(first.1)
+      return span == 0 ? plot.midX : plot.minX + plot.width * date.timeIntervalSince(first.1) / span
+    }
+    let upper = max(1, ceil(points.map(\.area).max() ?? 0))
+    if !points.isEmpty {
+      for fraction in [0.0, 0.5, 1.0] {
+        let y = plot.maxY - plot.height * fraction
+        ctx.setStrokeColor(UIColor(white: 0.80, alpha: 1).cgColor)
+        ctx.setLineWidth(0.6)
+        ctx.move(to: CGPoint(x: plot.minX, y: y)); ctx.addLine(to: CGPoint(x: plot.maxX, y: y)); ctx.strokePath()
+        label(String(format: "%.3g", upper * fraction), x: 48, y: y-6, width: 38, color: muted)
+      }
+      for (basis, group) in zip(LiteAreaSeries.allCases, series) {
+        let color = basis == .current ? teal : ochre
+        var previous: (LiteWoundTrend.Point, CGPoint)?
+        for point in group {
+          let pos = CGPoint(x: x(point.date), y: plot.maxY - CGFloat(point.area / upper) * plot.height)
+          ctx.setStrokeColor(color.cgColor)
+          ctx.setLineWidth(1.5)
+          if let (prior, origin) = previous, let key = prior.lineGroup, key == point.lineGroup, prior.date < point.date {
+            ctx.move(to: origin); ctx.addLine(to: pos); ctx.strokePath()
+          }
+          let dot = CGRect(x: pos.x-3, y: pos.y-3, width: 6, height: 6)
+          ctx.setFillColor((basis == .current ? color : .white).cgColor)
+          ctx.fillEllipse(in: dot); ctx.strokeEllipse(in: dot)
+          previous = (point, pos)
+        }
+      }
+    } else {
+      label("此期間沒有可繪製的面積。", x: 49, y: 263, width: 475, size: 12)
+    }
+    // Ticks beneath the plot mean an observation without a plottable area, never a measured zero.
+    ctx.setFillColor(muted.cgColor)
+    for (row, date) in dated where !plotted.contains(row.id) {
+      ctx.fill(CGRect(x: x(date)-0.6, y: plot.maxY+4, width: 1.2, height: 5))
+    }
+    label(selection.displayDate(first.0.dateISO), x: 48, y: 322, width: 170, color: muted)
+    if first.1 != last.1 {
+      label(selection.displayDate(last.0.dateISO), x: 447, y: 322, width: 106, color: muted)
+    }
+    label("● 本版    ○ 舊版留存值    | 無可繪面積    同一圈選方式及版本才連線。", x: 48, y: 345,
+          width: 500, color: muted)
   }
 }
 

@@ -16,15 +16,37 @@ enum LitePDFReport {
               } }) else { return nil }
         if let c = record.measurementContext,
            c.imageWidth != cg.width || c.imageHeight != cg.height { return nil }
+        if let binding = record.cloudSync?.binding,
+           binding.imageW != cg.width || binding.imageH != cg.height { return nil }
         return ps
     }
 
+    static func areaSeries(_ record: LiteRecord, polygons: [[[Int]]]?) -> LiteAreaSeries? {
+        guard polygons != nil else { return nil }
+        if record.areaSeries == .legacy {
+            guard record.surfaceCm2 > 0, record.projectedCm2 > 0,
+                  record.depthName?.isEmpty == false || record.cloudSync?.binding != nil else { return nil }
+        }
+        return record.areaSeries
+    }
+
     static func areaLines(_ record: LiteRecord, image: UIImage?) -> [String] {
+        areaLines(record, polygons: polygons(record, image: image))
+    }
+
+    static func areaLines(_ record: LiteRecord, polygons: [[[Int]]]?) -> [String] {
         let area = record.savedArea
         if case .unavailable(let reason) = area { return ["未提供面積：" + reason] }
-        guard case .current(let verdict) = area, let c = record.measurementContext,
-              polygons(record, image: image) != nil else {
-            return ["未提供面積：本筆的尺度、影像或圈選來源無法完整核對；原紀錄保留於 App。"]
+        guard let series = areaSeries(record, polygons: polygons) else {
+            return ["未提供面積：本筆的尺度、影像或圈選資料無法核對。"]
+        }
+        if series == .legacy {
+            return [String(format: "舊版 LiDAR 表面積：%.2f cm²", record.surfaceCm2),
+                    String(format: "舊版相機方向投影：%.2f cm²", record.projectedCm2),
+                    "沿用拍攝時保存的數值，舊版拍攝品質資料不完整。"]
+        }
+        guard case .current(let verdict) = area, let c = record.measurementContext else {
+            return ["未提供面積：保存的面積來源無法核對。"]
         }
         var lines = [String(format: "LiDAR 表面積估算：%.2f cm²", record.surfaceCm2),
                      String(format: "相機方向投影估算：%.2f cm²", record.projectedCm2),
@@ -35,6 +57,33 @@ enum LitePDFReport {
             lines.append("原紀錄有拍攝品質注意事項，請回 App 查看。")
         }
         return lines
+    }
+
+    /// Draw the saved wound region in the photo's pixel coordinate system.
+    static func drawMask(_ polygons: [[[Int]]], pixels: CGImage, in rect: CGRect, context: CGContext) {
+        context.saveGState()
+        defer { context.restoreGState() }
+        context.clip(to: rect)
+        context.setLineJoin(.round)
+        let path = CGMutablePath()
+        for polygon in polygons {
+            let points = polygon.map {
+                CGPoint(x: rect.minX + CGFloat($0[0]) / CGFloat(pixels.width) * rect.width,
+                        y: rect.minY + CGFloat($0[1]) / CGFloat(pixels.height) * rect.height)
+            }
+            path.addLines(between: points)
+            path.closeSubpath()
+        }
+        let teal = UIColor(red: 0, green: 0.58, blue: 0.66, alpha: 1)
+        context.addPath(path)
+        context.setFillColor(teal.withAlphaComponent(0.26).cgColor)
+        context.setStrokeColor(UIColor.white.cgColor)
+        context.setLineWidth(3.2)
+        context.drawPath(using: .fillStroke)
+        context.addPath(path)
+        context.setStrokeColor(teal.cgColor)
+        context.setLineWidth(1.6)
+        context.strokePath()
     }
 
     static func render(record: LiteRecord, image: UIImage?) -> Data {
@@ -85,20 +134,12 @@ enum LitePDFReport {
                 }
                 raster.draw(in: frame)
                 if let ps = polygons(record, image: image), let cg = image.cgImage {
-                    ctx.cgContext.saveGState(); ctx.cgContext.clip(to: frame)
-                    ctx.cgContext.setStrokeColor(UIColor(red: 0, green: 0.65, blue: 0.8, alpha: 1).cgColor)
-                    ctx.cgContext.setLineWidth(1.5)
-                    for p in ps {
-                        let points = p.map { CGPoint(x: frame.minX + CGFloat($0[0])/CGFloat(cg.width)*frame.width,
-                                                     y: frame.minY + CGFloat($0[1])/CGFloat(cg.height)*frame.height) }
-                        ctx.cgContext.addLines(between: points); ctx.cgContext.closePath(); ctx.cgContext.strokePath()
-                    }
-                    ctx.cgContext.restoreGState()
+                    drawMask(ps, pixels: cg, in: frame, context: ctx.cgContext)
                 }
                 y += size.height + 12
                 text(polygons(record, image: image) == nil
                      ? "照片保留；圈選座標無法核對，未疊加輪廓。"
-                     : "藍色輪廓為此筆已保存圈選；不是醫師確認或診斷。", size: 11)
+                     : "青色覆蓋區為本筆保存的傷口圈選。", size: 11)
             } else { text("本機照片已不存在或暫時無法讀取；未從雲端補下載。") }
             text("原始圈選：" + (record.contourOrigin?.label ?? "圈選版本未確認"))
             for line in areaLines(record, image: image) { text(line) }

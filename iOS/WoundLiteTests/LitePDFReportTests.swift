@@ -45,8 +45,14 @@ final class LitePDFReportTests: XCTestCase {
             row.dateISO = "2026-10-2\(day)T01:00:00Z"
             return row
         }
-        entries[2].measurementContext = nil
+        entries[1].surfaceCm2 = 8.50
+        entries[1].projectedCm2 = 8.30
+        entries[2].measurementContext?.coverage = 0.1
         entries[2].surfaceCm2 = 123.45
+        entries[3].measurementContext = nil
+        entries[3].surfaceCm2 = 7.25
+        entries[3].projectedCm2 = 7.03
+        entries[3].contourOrigin = nil
         var foreign = record()
         foreign.woundID = "B"
         foreign.surfaceCm2 = 678.91
@@ -58,7 +64,8 @@ final class LitePDFReportTests: XCTestCase {
         let data = try Data(contentsOf:file.url), pdf = try XCTUnwrap(PDFDocument(data:data))
         XCTAssertEqual(pdf.pageCount,2)
         let text = try XCTUnwrap(pdf.string)
-        for value in ["10.08","9.91","未提供面積","免貼紙","合成標靶 A","2026/10/24"] {
+        for value in ["10.08","9.91","8.50","未提供面積","免貼紙","合成標靶 A","2026/10/24",
+                      "表面積趨勢","可繪 3 / 4 筆","舊版 LiDAR 表面積：7.25","青色區域為已存傷口圈選"] {
             XCTAssertTrue(text.contains(value),value)
         }
         for value in ["123.45","678.91","private-","9.87","6.54"] { XCTAssertFalse(text.contains(value),value) }
@@ -101,11 +108,60 @@ final class LitePDFReportTests: XCTestCase {
         attachment.name = "WoundAILite-synthetic-single-record.pdf"; attachment.lifetime = .keepAlways; add(attachment)
     }
     func testLegacyOrUnknownScaleDoesNotExportAnUnverifiedNumber() {
-        var r = record(); r.measurementContext = nil
+        var r = record(); r.measurementContext = nil; r.depthName = nil
         XCTAssertTrue(LitePDFReport.areaLines(r, image: image()).joined().contains("未提供面積"))
         r = record(); r.measurementContext?.areaSource = "sticker_plane"
         XCTAssertFalse(LitePDFReport.areaLines(r, image: image()).joined().contains("10.08"))
         XCTAssertEqual(r.surfaceCm2, 10.08)
+    }
+    func testLegacyReportUsesOriginalNumbersWithAnExplicitHistoryLabel() throws {
+        var r = record(); r.measurementContext = nil; r.contourOrigin = nil
+        let original = r.polysJson
+        let img = image()
+        r.cloudSync = LiteCloudSyncState(binding: .init(server:"fixture", anonID:"fixture", imageID:"fixture",
+                                                        imageW:800, imageH:600))
+        let lines = LitePDFReport.areaLines(r, image: img)
+        XCTAssertTrue(lines.contains("舊版 LiDAR 表面積：10.08 cm²"))
+        XCTAssertTrue(lines.contains("舊版相機方向投影：9.91 cm²"))
+        XCTAssertEqual(LitePDFReport.polygons(r, image: img)?.first?.count, 4)
+        r.cloudSync?.binding.imageW = 801
+        XCTAssertNil(LitePDFReport.polygons(r, image: img))
+        XCTAssertFalse(LitePDFReport.areaLines(r, image: img).joined().contains("10.08"))
+        XCTAssertEqual(r.polysJson, original)
+    }
+
+    func testChartBreaksAtMissingDataAndKeepsLegacySeparate() throws {
+        var rows = (0...5).map { i in
+            var r = record(); r.id = "r\(i)"; r.dateISO = "2026-10-2\(i)T01:02:03.500Z"; return r
+        }
+        rows[4].measurementContext = nil
+        rows[5].contourOrigin = nil
+        let wound = try XCTUnwrap(rows[0].woundID)
+        let current = LiteWoundTrend.points(woundID: wound, records: rows, series: .current,
+                                            include: { $0.id != "r2" })
+        XCTAssertEqual(current.map(\.id), ["r0","r1","r3","r5"])
+        XCTAssertEqual(current.map(\.lineGroup), ["r0","r0","r3",nil])
+        XCTAssertEqual(LiteWoundTrend.points(woundID: wound, records: rows, series: .legacy).map(\.id), ["r4"])
+    }
+
+    func testUnknownAreaKeepsMaskAndSinglePointIsNotLostWhenPhotosHidden() throws {
+        var row = record()
+        let img = image(), group = LiteWoundGroup(id:try XCTUnwrap(row.woundID), name:"合成標靶")
+        func exportText(photos: Bool) throws -> String {
+            let selection = try LiteTimelineSelection(group: group, records: [row])
+            let file = try LiteTimelinePDF.export(selection, photos: photos) { _ in img }
+            defer { file.remove() }
+            return try XCTUnwrap(PDFDocument(url: file.url)?.string)
+        }
+        let value = try exportText(photos: false)
+        XCTAssertTrue(value.contains("可繪 1 / 1 筆"))
+        XCTAssertTrue(value.contains("10.08"))
+        XCTAssertTrue(value.contains("照片與圈選依選項省略"))
+        row.measurementContext?.coverage = 0.1
+        let rejected = try exportText(photos: true)
+        XCTAssertTrue(rejected.contains("可繪 0 / 1 筆"))
+        XCTAssertTrue(rejected.contains("青色區域為已存傷口圈選"))
+        XCTAssertFalse(rejected.contains("10.08"))
     }
     func testInvalidDepthNumbersAndInsufficientCoverageAreNotPublished() {
         var r = record(); r.measurementContext?.coverage = 0.1
@@ -190,6 +246,34 @@ final class LitePDFReportTests: XCTestCase {
         let rotated = UIImage(cgImage: image().cgImage!, scale: 1, orientation: .right)
         XCTAssertNil(LitePDFReport.polygons(record(), image: rotated))
         XCTAssertFalse(LitePDFReport.areaLines(record(), image: rotated).joined().contains("10.08"))
+    }
+    func testSavedMaskFillsOnlyItsRegisteredPhotoRegionInThePDF() throws {
+        let row = record()
+        let pageSize = CGSize(width: 595.28, height: 841.89)
+        let photo = image()
+        let selection = try LiteTimelineSelection(group:.init(id:try XCTUnwrap(row.woundID), name:"TEST"),
+                                                  records:[row])
+        let file = try LiteTimelinePDF.export(selection, photos:true) { _ in photo }
+        defer { file.remove() }
+        let page = try XCTUnwrap(PDFDocument(url:file.url)?.page(at:0))
+        let thumb = page.thumbnail(of:pageSize, for:.mediaBox)
+        func pixel(_ x: CGFloat, _ y: CGFloat) throws -> [UInt8] {
+            var bytes = [UInt8](repeating:0, count:4)
+            try bytes.withUnsafeMutableBytes { raw in
+                let ctx = try XCTUnwrap(CGContext(data:raw.baseAddress, width:1, height:1, bitsPerComponent:8,
+                    bytesPerRow:4, space:CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue))
+                ctx.draw(try XCTUnwrap(thumb.cgImage), in:CGRect(x:-x, y:y-pageSize.height,
+                                                                 width:pageSize.width, height:pageSize.height))
+            }
+            return bytes
+        }
+        // Inside the pink fixture the translucent teal fill visibly reduces the red channel.
+        let fill = try pixel(118, 480), outside = try pixel(50, 435)
+        XCTAssertLessThan(fill[0], 223)
+        XCTAssertGreaterThan(fill[1], 60)
+        XCTAssertGreaterThan(outside[0], 228)
+        XCTAssertLessThan(abs(Int(outside[0]) - Int(outside[1])), 5)
     }
     func testMalformedAndOutOfBoundsContoursAreRejectedWithoutInventingAnotherMask() {
         for json in ["[[[240],[560,160],[560,440]]]", "[[[240,160],[800,160],[560,440]]]", "[]", "broken"] {

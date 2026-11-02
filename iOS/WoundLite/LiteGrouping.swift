@@ -98,22 +98,28 @@ enum LiteWoundTrend {
         let lineGroup: String?
     }
 
-    static func points(woundID: String, records: [LiteRecord], series: LiteAreaSeries? = nil) -> [Point] {
+    static func points(woundID: String, records: [LiteRecord], series: LiteAreaSeries? = nil,
+                       include: (LiteRecord) -> Bool = { _ in true }) -> [Point] {
         guard !woundID.isEmpty else { return [] }
         let formatter = ISO8601DateFormatter()
-        let valid = records.compactMap { record -> (LiteRecord, Date)? in
-            guard record.woundID == woundID, record.surfaceCm2.isFinite,
-                  record.surfaceCm2 >= 0, record.areaSeries != nil,
-                  let date = formatter.date(from: record.dateISO) else { return nil }
+        let precise = ISO8601DateFormatter()
+        precise.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let ordered = records.compactMap { record -> (LiteRecord, Date)? in
+            guard record.woundID == woundID,
+                  let date = formatter.date(from: record.dateISO) ?? precise.date(from: record.dateISO) else { return nil }
             return (record, date)
-        }
-        let chosen = series ?? valid.max { $0.1 < $1.1 }?.0.areaSeries
-        let ordered = valid.filter { $0.0.areaSeries == chosen }.sorted {
+        }.sorted {
             $0.1 == $1.1 ? $0.0.id < $1.0.id : $0.1 < $1.1
         }
+        guard let chosen = series ?? ordered.last(where: { $0.0.areaSeries != nil && include($0.0) })?.0.areaSeries
+        else { return [] }
         var group: String?
         var previous: LiteContourOrigin?
-        return ordered.map { record, date in
+        return ordered.compactMap { record, date in
+            guard record.areaSeries == chosen, include(record) else {
+                group = nil; previous = nil
+                return nil
+            }
             let basis = record.contourOrigin
             if basis?.supportsComparison != true {
                 group = nil
