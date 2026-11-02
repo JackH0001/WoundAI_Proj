@@ -477,6 +477,33 @@ final class LiteServiceOperationTests: XCTestCase {
         let r=try await c.resume(f.capture_id) { _ in nil }
         XCTAssertEqual(r.note,"capacity");XCTAssertEqual(r.retryAt,1005)
     }
+    func testBusyRunKeepsOriginalWorkAndQueriesStatusBeforeResendingPhoto() async throws {
+        let (fixture, wire, journal, service) = try await setup()
+        let jpeg = fixture.image
+        await wire.plan([
+            ServiceStep(action: "prepare", data: try fixture.bytes(fixture.prepare)),
+            ServiceStep(action: "run", data: error("lite_model_busy"), code: 429, wait: "5")
+        ])
+        let waiting = try await service.resume(fixture.capture_id) { _ in jpeg }
+        XCTAssertEqual(waiting.note, "capacity")
+        XCTAssertTrue(waiting.message.contains("不需重新拍攝"))
+        XCTAssertEqual(waiting.next, "status")
+        let beforeDue = try await client(wire, journal, 1004).resume(fixture.capture_id) { _ in
+            XCTFail("照片在等待期間不應重送"); return nil
+        }
+        XCTAssertEqual(beforeDue, waiting)
+        await wire.plan([
+            ServiceStep(action: "status", data: try fixture.bytes(fixture.prepare)),
+            ServiceStep(action: "run", data: try fixture.bytes(fixture.completed))
+        ])
+        let done = try await client(wire, journal, 1005).resume(fixture.capture_id) { _ in jpeg }
+        XCTAssertEqual(done.note, "confirmed")
+        XCTAssertEqual(done.operation, waiting.operation)
+        XCTAssertEqual(done.imageSHA256, waiting.imageSHA256)
+        let requests = await wire.requests()
+        XCTAssertEqual(requests.map { $0.url?.lastPathComponent }, ["prepare","run","status","run"])
+        XCTAssertNil(requests[2].httpBody?.range(of: jpeg))
+    }
     func testOldSavedDeadlineIsShortenedWithoutSending() async throws {
         let (f,w,m,c)=try await setup()
         var saved=try await c.stored(f.capture_id);saved.retryAt=999999999

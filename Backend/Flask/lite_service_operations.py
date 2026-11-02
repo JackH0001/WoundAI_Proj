@@ -23,7 +23,6 @@ RESULT_TTL=86400
 class OperationExpired(UsageConflict): pass
 class OperationUnknown(UsageConflict): pass
 class ImageRejected(UsageConflict): pass
-class ModelBusy(RuntimeError): pass
 
 
 def validate_retained_receipt(v,now):
@@ -391,7 +390,9 @@ class ServiceOperations:
         if receipt['outcome']!='reserved':return self.status(installation,operation)
         if v['model']!=self.model_version:raise UsageConflict('prepared model changed; explicit reconciliation required')
         if not self._model_slot.acquire(blocking=False):
-            raise ModelBusy('retry the reserved operation')
+            # A simultaneous copy of this very request may have claimed or
+            # completed the ticket since we read it. Return its current state.
+            return self.status(installation,operation)
         try:
             try:rgb=self.inference.decode(raw)
             except ImageRejected:
