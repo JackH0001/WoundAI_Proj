@@ -31,7 +31,7 @@ final class LiteOperationGuideTests: XCTestCase {
 
     func testOfflineSearchFindsTheExpectedInstructionsInBothProfiles() {
         let queries = ["相機黑畫面": "camera", "沒有 LiDAR 面積": "area",
-            "我要修邊": "outline", "想把ＰＤＦ帶去看診": "report",
+            "我要修邊": "outline", "想把ＰＤＦ帶去看診": "report", "把以前量的幾張印在同一份": "report",
             "另一處傷口": "wounds", "撤回研究": "research"]
         for personal in [false, true] {
             let topics = LiteHelpTopic.topics(personal: personal)
