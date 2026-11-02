@@ -1,6 +1,28 @@
 import XCTest
 
 final class NativeEntryUITests: XCTestCase {
+    @MainActor func testOperationGuideFindsReportWithoutAccountOrResearchRegistration() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launch()
+        let gate = app.buttons["設定與資料撤回"]
+        let settings = gate.waitForExistence(timeout: 3) ? gate : app.buttons["設定"].firstMatch
+        XCTAssertTrue(settings.waitForExistence(timeout: 8))
+        settings.tap()
+        let guide = app.buttons["lite.help.open"]
+        XCTAssertTrue(guide.waitForExistence(timeout: 5))
+        guide.tap()
+        let query = app.textFields["lite.help.question"]
+        XCTAssertTrue(query.waitForExistence(timeout: 5))
+        query.tap()
+        query.typeText("PDF")
+        let report = app.buttons["lite.help.topic.report"]
+        XCTAssertTrue(report.waitForExistence(timeout: 5))
+        report.tap()
+        XCTAssertTrue(app.staticTexts["紀錄 → 選一處傷口 → 匯出此傷口時間軸 PDF"].waitForExistence(timeout: 5))
+        attach(app, "offline-guide-report")
+    }
+
     @MainActor func testPrivacyPolicyOpensFromSettingsWithoutRegistrationAndReturns() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -113,7 +135,7 @@ final class NativeEntryUITests: XCTestCase {
         // the explicit registration step and must not imply a deletion error.
         XCTAssertTrue(app.buttons["核對裝置登記（不傳照片）"].waitForExistence(timeout: 8))
         XCTAssertFalse(app.buttons["服務帳號與刪除"].exists)
-        XCTAssertFalse(app.buttons["Sandbox 訂閱與恢復購買"].exists)
+        XCTAssertFalse(app.buttons["訂閱與恢復購買"].exists)
         XCTAssertFalse(app.buttons["核對原刪帳進度"].exists)
         attach(app, "first-use-registration")
         let preview = app.buttons["Plus 方案與價格"]

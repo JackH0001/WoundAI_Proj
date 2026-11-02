@@ -276,7 +276,7 @@ struct LiteNativeSessionView: View {
     @ObservedObject var session: LiteNativeSession
     var body: some View {
         Form {
-            Section("內部服務驗收") {
+            Section("服務連線") {
                 Text("先核對裝置，再登入同一服務帳號。此入口不會自動開啟研究上傳或清除手機紀錄。")
                 Text(session.message).font(.footnote)
                 if session.registration == .required {
@@ -289,14 +289,14 @@ struct LiteNativeSessionView: View {
             }
             if session.registration == .confirmed, let account = try? session.accountView() {
                 NavigationLink("服務帳號與刪除") { account }
-                NavigationLink("Sandbox 訂閱與恢復購買") { LiteNativePurchaseView(store: session.purchases, canManagePurchases: true) }
+                NavigationLink("訂閱與恢復購買") { LiteNativePurchaseView(store: session.purchases, canManagePurchases: true) }
             } else {
                 NavigationLink("Plus 方案與價格") { LiteNativePurchaseView(store: session.purchases, canManagePurchases: false) }
                 Text("可先查看方案。完成裝置登記後，這裡會顯示帳號登入、刪帳及訂閱與恢復購買。")
             }
-            Text("候選版可在拍攝後選擇個人雲端辨識；研究同意獨立。完整實機與刪帳驗收仍待完成。")
+            Text("拍攝後可自行選擇個人雲端辨識。使用個人服務或恢復購買不會開啟研究上傳。")
                 .font(.footnote).foregroundStyle(.secondary)
-        }.navigationTitle("內部服務驗收")
+        }.navigationTitle("個人服務")
         .task { await session.checkExistingRegistration() }
     }
 }

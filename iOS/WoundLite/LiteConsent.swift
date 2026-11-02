@@ -156,6 +156,9 @@ struct LiteSettingsView: View {
                 Section("App 資訊") {
                     LabeledContent("App", value: "WoundAILite")
                     LabeledContent("版本（建置號）", value: installedVersion)
+                    NavigationLink("操作指南") {
+                        LiteOperationGuide(version: installedVersion, personal: LiteNativeBuild.includesService)
+                    }.accessibilityIdentifier("lite.help.open")
                         .textSelection(.enabled)
                     LitePrivacyLink()
                     LiteTermsLink()
@@ -166,11 +169,11 @@ struct LiteSettingsView: View {
                     }
                 }
                 if let nativeSession {
-                    Section("候選版內部驗收") {
+                    Section("個人服務") {
                         NavigationLink("服務登入、訂閱與刪帳") { LiteNativeSessionView(session:nativeSession) }
                     }
                 } else if let nativeSetupNotice {
-                    Section("候選版內部驗收") {
+                    Section("個人服務") {
                         switch nativeSetupNotice {
                         case .missingConfiguration:
                             Text("此測試版本的服務網址尚未設定完成。您仍可使用本機紀錄。")
