@@ -8,6 +8,7 @@ struct LiteNativePurchaseView: View {
         Form {
             Section("個人雲端辨識") {
                 Text("免費方案每日可成功辨識 2 次。Plus 每日共 10 次，包含當日已使用的次數。").accessibilityIdentifier("lite.offer.quota")
+                Text("免費可同時追蹤 1 處傷口，Plus 每帳戶最多 5 處。每日辨識次數由各處傷口合計。結束追蹤可換另一處，舊時間軸仍可查看及匯出 PDF。")
                 Text("額度每日在 UTC 0 時重算，台灣時間為上午 8 時。處理中的辨識會暫時保留名額。查看已保存的結果不扣次數。")
                     .font(.footnote)
             }

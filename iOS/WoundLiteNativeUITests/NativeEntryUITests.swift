@@ -2,6 +2,32 @@ import XCTest
 
 final class NativeEntryUITests: XCTestCase {
     #if LITE_QA_SAVED_FIXTURE || LITE_QA_EXTERNAL_FIXTURE
+    @MainActor func testSelectedWoundTimelineOffersDateRangePhotosAndSystemSharing() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launch()
+        let local = app.buttons["查看既有紀錄"]
+        let history = local.waitForExistence(timeout:3) ? local : app.buttons["紀錄"].firstMatch
+        XCTAssertTrue(history.waitForExistence(timeout:8))
+        history.tap()
+        let export = app.buttons["lite.timeline.export"]
+        XCTAssertTrue(export.waitForExistence(timeout:5))
+        export.tap()
+        XCTAssertTrue(app.navigationBars["匯出時間軸"].waitForExistence(timeout:5))
+        XCTAssertTrue(app.switches["全部日期"].exists)
+        XCTAssertTrue(app.switches["附上照片與圈選"].exists)
+        let share = app.buttons["產生並分享 PDF"]
+        XCTAssertTrue(share.isEnabled)
+        attach(app,"selected-wound-timeline-export-options")
+        share.tap()
+        let copy = app.buttons["Copy"].firstMatch
+        let sheet = app.otherElements["ActivityListView"]
+        let appeared = NSPredicate { _,_ in copy.exists || sheet.exists || app.buttons["拷貝"].firstMatch.exists }
+        expectation(for:appeared,evaluatedWith:app)
+        waitForExpectations(timeout:12)
+        attach(app,"selected-wound-timeline-share-sheet")
+    }
+
     /// The history/PDF fixture has an existing synthetic 10.08 cm² record.
     /// This run uses a simulator without a registered Sandbox installation.
     @MainActor func testSavedRecordCanBeReadBeforeServiceRegistration() throws {

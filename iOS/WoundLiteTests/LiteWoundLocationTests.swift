@@ -14,6 +14,57 @@ final class LiteWoundLocationTests: XCTestCase {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("records.json")
     }
+    @MainActor func testFreeCanSwapWithoutLosingOriginalTimelineAndBlockedAtSecond() throws {
+        let file = try tempFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = LiteStore(fileURL: file)
+        let first = try XCTUnwrap(store.saveMeasurement(record(), selectedWoundID: "", enteredLocation: rightHeel))
+        let id = try XCTUnwrap(first.woundID)
+        XCTAssertNil(store.saveMeasurement(record(), selectedWoundID: "", enteredLocation: leftHeel))
+        XCTAssertTrue(store.finishWound(id, account: nil))
+        let second = try XCTUnwrap(store.saveMeasurement(record(), selectedWoundID: "", enteredLocation: leftHeel))
+        XCTAssertNotEqual(second.woundID, id)
+        let loaded = LiteStore(fileURL:file)
+        XCTAssertEqual(loaded.records.count, 2)
+        XCTAssertTrue(try XCTUnwrap(loaded.wounds.first(where: { $0.id == id })).ended)
+        XCTAssertEqual(LiteGrouping.records(for:id,in:loaded.records).map(\.id), [first.id])
+        XCTAssertNil(loaded.saveMeasurement(record(), selectedWoundID: id, enteredLocation: rightHeel))
+        XCTAssertFalse(loaded.resumeWound(try XCTUnwrap(loaded.wounds.first(where: { $0.id == id })), permit:nil))
+    }
+
+    @MainActor func testFinishingLegacyGroupLeavesSlotFreeForAnotherWound() throws {
+        let file = try tempFile()
+        defer { try? FileManager.default.removeItem(at:file.deletingLastPathComponent()) }
+        let store = LiteStore(fileURL:file)
+        XCTAssertTrue(store.add(record("first", wound:"legacy-a")))
+        XCTAssertTrue(store.add(record("second", wound:"legacy-b")))
+        XCTAssertEqual(store.localTrackingID,"legacy-a")
+        XCTAssertTrue(store.finishWound("legacy-a",account:nil))
+        XCTAssertNil(store.localTrackingID)
+        let new = try XCTUnwrap(store.saveMeasurement(record(),selectedWoundID:"",enteredLocation:rightHeel))
+        XCTAssertEqual(store.localTrackingID,new.woundID)
+        XCTAssertEqual(Set(store.records.map(\.id)),Set(["first","second",new.id]))
+    }
+
+    @MainActor func testDifferentAccountCannotWriteOrFinishBoundGroup() throws {
+        let file = try tempFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = LiteStore(fileURL:file), id = UUID().uuidString
+        let a = LiteWoundPermit(id:id, account:String(repeating:"a",count:64))
+        let b = LiteWoundPermit(id:id, account:String(repeating:"b",count:64))
+        let first = try XCTUnwrap(store.saveMeasurement(record(),selectedWoundID:"",enteredLocation:leftHeel,permit:a))
+        XCTAssertEqual(first.woundID,id)
+        XCTAssertNil(store.saveMeasurement(record(),selectedWoundID:id,enteredLocation:leftHeel))
+        XCTAssertNil(store.saveMeasurement(record(),selectedWoundID:id,enteredLocation:leftHeel,permit:b))
+        XCTAssertNil(store.saveMeasurement(record(),selectedWoundID:"",enteredLocation:leftHeel,permit:b))
+        XCTAssertFalse(store.finishWound(id,account:b.account))
+        XCTAssertTrue(store.finishWound(id,account:a.account))
+        let group = try XCTUnwrap(store.wounds.first)
+        XCTAssertNil(store.saveMeasurement(record(),selectedWoundID:id,enteredLocation:leftHeel,permit:a))
+        XCTAssertTrue(store.resumeWound(group,permit:a))
+        XCTAssertNotNil(store.saveMeasurement(record(),selectedWoundID:id,enteredLocation:leftHeel,permit:a))
+    }
+
     func testRequiredFieldsAndInvalidCombinations() {
         XCTAssertFalse(empty.isComplete)
         XCTAssertFalse(LiteWoundLocation(side: "left", site: "").isComplete)
@@ -50,7 +101,8 @@ final class LiteWoundLocationTests: XCTestCase {
         let file = try tempFile(); defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
         let store = LiteStore(fileURL: file)
         let a = try XCTUnwrap(store.saveMeasurement(record(), selectedWoundID: "", enteredLocation: rightHeel))
-        let b = try XCTUnwrap(store.saveMeasurement(record(), selectedWoundID: "", enteredLocation: rightHeel))
+        let b = try XCTUnwrap(store.saveMeasurement(record(), selectedWoundID: "", enteredLocation: rightHeel,
+            permit: LiteWoundPermit(id: UUID().uuidString, account: String(repeating: "a", count: 64))))
         XCTAssertNotEqual(a.woundID, b.woundID)
         XCTAssertEqual(store.wounds.count, 2)
     }
@@ -173,7 +225,8 @@ final class LiteWoundLocationTests: XCTestCase {
                 server: "https://example.invalid", anonID: "synthetic", imageID: "synthetic",
                 imageW: 32, imageH: 32))
             input.polysJson = "[[[0,0],[10,0],[10,10]]]"
-            let saved = try XCTUnwrap(store.saveMeasurement(input, selectedWoundID: "", enteredLocation: location))
+            let saved = try XCTUnwrap(store.saveMeasurement(input, selectedWoundID: "", enteredLocation: location,
+                permit: LiteWoundPermit(id: UUID().uuidString, account: String(repeating: "a", count: 64))))
             let loaded = try XCTUnwrap(LiteStore(fileURL: file).records.first { $0.id == saved.id })
             XCTAssertEqual(loaded.woundLocation, location)
             XCTAssertTrue(loaded.woundLocation!.label.contains("其他"))

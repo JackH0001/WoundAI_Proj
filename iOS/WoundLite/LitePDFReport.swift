@@ -121,6 +121,21 @@ struct LitePDFShare: Identifiable {
         url = directory.appendingPathComponent("WoundAILite-\(UUID().uuidString).pdf")
         try HealthDataFiles.write(data, to: url)
     }
+    init(directory: URL, render: (URL) throws -> Void) throws {
+        try HealthDataFiles.prepareDirectory(directory)
+        url = directory.appendingPathComponent("WoundAILite-timeline-" + id.uuidString + ".pdf")
+        do {
+            try HealthDataFiles.write(Data(), to:url)
+            try render(url)
+            try HealthDataFiles.excludeExistingFile(url)
+            let file = try FileHandle(forReadingFrom:url)
+            defer { try? file.close() }
+            guard try file.read(upToCount:5) == Data("%PDF-".utf8) else { throw CocoaError(.fileWriteUnknown) }
+        } catch {
+            try? FileManager.default.removeItem(at:url)
+            throw error
+        }
+    }
     func remove() { try? FileManager.default.removeItem(at: url) }
     /// One process launch only; an active share must not be purged by a view redraw.
     static func purgeAfterLaunch(directory: URL = Self.directory) {

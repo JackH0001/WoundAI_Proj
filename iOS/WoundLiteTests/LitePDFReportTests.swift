@@ -36,6 +36,58 @@ final class LitePDFReportTests: XCTestCase {
         XCTAssertTrue(historical.contains("圈選版本未確認"))
     }
 
+    func testTimelinePDFIsChronologicalPaginatedAndIsolatedToOneWound() throws {
+        let group = LiteWoundGroup(id:"A",name:"合成標靶 A",location:.init(side:"right", site:"heel"))
+        var entries = (1...4).map { day -> LiteRecord in
+            var row = record()
+            row.id = "private-\(day)"
+            row.woundID = group.id
+            row.dateISO = "2026-10-2\(day)T01:00:00Z"
+            return row
+        }
+        entries[2].measurementContext = nil
+        entries[2].surfaceCm2 = 123.45
+        var foreign = record()
+        foreign.woundID = "B"
+        foreign.surfaceCm2 = 678.91
+        let selection = try LiteTimelineSelection(group:group,records:[foreign]+entries.reversed())
+        XCTAssertEqual(selection.rows.map(\.id), entries.map(\.id))
+        let img = image()
+        let file = try LiteTimelinePDF.export(selection,photos:true) { _ in img }
+        defer { file.remove() }
+        let data = try Data(contentsOf:file.url), pdf = try XCTUnwrap(PDFDocument(data:data))
+        XCTAssertEqual(pdf.pageCount,2)
+        let text = try XCTUnwrap(pdf.string)
+        for value in ["10.08","9.91","未提供面積","免貼紙","合成標靶 A","2026/10/24"] {
+            XCTAssertTrue(text.contains(value),value)
+        }
+        for value in ["123.45","678.91","private-","9.87","6.54"] { XCTAssertFalse(text.contains(value),value) }
+        let attachment = XCTAttachment(data:data,uniformTypeIdentifier:"com.adobe.pdf")
+        attachment.name = "WoundAILite-synthetic-wound-timeline.pdf"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    func testTimelineDateRangeUsesLocalDaysAndDoesNotGuessMissingDates() throws {
+        var calendar = Calendar(identifier:.gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier:"Asia/Taipei"))
+        let day = try XCTUnwrap(ISO8601DateFormatter().date(from:"2026-10-21T01:00:00Z"))
+        var rows = ["2026-10-20T15:59:59Z","2026-10-20T16:00:00Z","2026-10-21T15:59:59.500Z",
+                    "2026-10-21T16:00:00Z","unknown"].map { date -> LiteRecord in
+            var row = record(); row.id = date; row.dateISO = date; row.woundID = "A"; return row
+        }
+        rows.reverse()
+        let group = LiteWoundGroup(id:"A",name:"A")
+        let selected = try LiteTimelineSelection(group:group,records:rows,first:day,last:day,calendar:calendar)
+        XCTAssertEqual(selected.rows.map(\.id), ["2026-10-20T16:00:00Z","2026-10-21T15:59:59.500Z"])
+        XCTAssertEqual(selected.missingDates,1)
+        XCTAssertEqual(try LiteTimelineSelection(group:group,records:rows).rows.last?.id,"unknown")
+        let file = try LiteTimelinePDF.export(selected,photos:false) { _ in self.image() }
+        defer { file.remove() }
+        XCTAssertEqual(PDFDocument(url:file.url)?.pageCount,1)
+        XCTAssertThrowsError(try LiteTimelineSelection(group:group,records:rows,first:day,last:day.addingTimeInterval(-86400)))
+    }
+
     func testOnePageChineseReportContainsCorrectSourcesWithoutInternalIdentifiersOrVolume() throws {
         let data = LitePDFReport.render(record: record(), image: image())
         let pdf = try XCTUnwrap(PDFDocument(data: data)); let text = try XCTUnwrap(pdf.string)

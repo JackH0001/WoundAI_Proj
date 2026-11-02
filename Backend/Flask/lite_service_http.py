@@ -6,7 +6,7 @@ from lite_usage_ledger import UsageConflict,UsageLimit
 from lite_attest_state import StateUnavailable
 
 PREFIX='/api/v1/lite/service/'
-SERVICE_PATHS={PREFIX+'prepare',PREFIX+'status',PREFIX+'run',PREFIX+'recover',PREFIX+'resubmit',PREFIX+'balance'}
+SERVICE_PATHS={PREFIX+'prepare',PREFIX+'status',PREFIX+'run',PREFIX+'recover',PREFIX+'resubmit',PREFIX+'balance',PREFIX+'wounds'}
 
 
 def blueprint(operations, *, balance_enabled=False):
@@ -17,6 +17,16 @@ def blueprint(operations, *, balance_enabled=False):
         try:
             admission=getattr(g,'lite_admission',None)
             if admission is None:return jsonify(error='lite_attestation_required'),401
+            if kind == 'wounds':
+                if request.mimetype != 'application/json': raise UsageConflict('JSON required')
+                body = loads_json_object_strict(request.get_data(cache=True).decode())
+                fields = {'anon_id','account_sha256','action'}
+                if body.get('action') != 'status': fields |= {'wound_id','revision'}
+                if set(body) != fields or body['anon_id'] != admission.installation:
+                    raise UsageConflict('exact wound request required')
+                result = operations.wound_roster(admission.installation,body['account_sha256'],body['action'],
+                                                  body.get('wound_id'),body.get('revision'))
+                return jsonify(result), 409 if result.get('decision') in ('changed','limit') else 200
             if kind == 'balance':
                 if request.mimetype != 'application/json':
                     raise UsageConflict('JSON balance request required')
@@ -61,7 +71,7 @@ def blueprint(operations, *, balance_enabled=False):
             response=jsonify(error='lite_operation_unconfirmed',retry_action='status',keep_local=True)
             response.headers['Retry-After']='5';return response,503
 
-    kinds = ('prepare','run','status','recover','resubmit') + (('balance',) if balance_enabled else ())
+    kinds = ('prepare','run','status','recover','resubmit') + (('balance','wounds') if balance_enabled else ())
     for kind in kinds:
         bp.add_url_rule(PREFIX+kind,kind,lambda kind=kind:action(kind),methods=['POST'])
     @bp.after_request

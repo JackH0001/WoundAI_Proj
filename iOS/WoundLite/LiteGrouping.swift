@@ -4,7 +4,13 @@ struct LiteWoundGroup: Identifiable, Equatable {
     let id: String
     let name: String
     var location: LiteWoundLocation? = nil
+    var account: String? = nil
+    var ended = false
     var displayName: String { location.map { "\(name)・\($0.label)" } ?? "\(name)・待補位置" }
+    var trackingLabel: String {
+        guard account != nil, let wire = try? LiteWoundRoster.wireID(id) else { return displayName }
+        return displayName + "（" + wire.suffix(6).uppercased() + "）"
+    }
 }
 
 enum LiteGrouping {
@@ -19,13 +25,17 @@ enum LiteGrouping {
 
     static func groups(_ records: [LiteRecord]) -> [LiteWoundGroup] {
         var seen = Set<String>()
-        return records.sorted { $0.dateISO < $1.dateISO }.compactMap { record in
+        return records.sorted { first, second in
+            first.dateISO == second.dateISO ? first.id < second.id : first.dateISO < second.dateISO
+        }.compactMap { record in
             guard let id = record.woundID, !id.isEmpty, seen.insert(id).inserted else { return nil }
             let locations = records.filter { $0.woundID == id }.compactMap(\.woundLocation)
             let valid = locations.first.flatMap { first in
                 first.isComplete && locations.allSatisfy { $0 == first } ? first : nil
             }
-            return LiteWoundGroup(id: id, name: record.woundName ?? "傷口 \(id.prefix(6))", location: valid)
+            let members = records.filter { $0.woundID == id }
+            return LiteWoundGroup(id: id, name: record.woundName ?? "傷口 \(id.prefix(6))", location: valid,
+                account: members.compactMap(\.woundAccount).first, ended: members.contains { $0.woundEnded == true })
         }
     }
 

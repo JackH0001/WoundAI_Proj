@@ -265,6 +265,54 @@ class ServiceOperations:
         self.accounts.require_active(account)
         return balance
 
+    def wound_roster(self, installation, expected_account, action, wound=None, version=None):
+        """An account owns up to five opaque active IDs. Photos and locations stay local."""
+        account = self.accounts.resolve(installation)
+        subject = account['subject']
+        if digest(subject) != _hex(expected_account) or action not in ('status','open','finish'):
+            raise UsageConflict('wrong account or wound action')
+        life = self.accounts.lifecycle
+        if life is None or not life.service_catalog or not subject.startswith('apple-'):
+            raise StateUnavailable('verified account lifecycle required')
+        if action != 'status':
+            _hex(wound,32)
+            if type(version) is not int or not 0 <= version < 2**53: raise UsageConflict('invalid roster revision')
+        grant = self.accounts.grant(account,self.now())
+        grant.validate(subject,self.now())
+        limit = 5 if grant.limit == 10 else 1
+        person = subject[6:]
+        from lite_attest_state import CAS_ATTEMPTS
+        for _ in range(CAS_ATTEMPTS):
+            rev, root = life.require_active(person)
+            roster = root.get('wounds', {'revision':0,'active':[]})
+            active = roster['active']
+            snapshot = dict(schema='lite.wounds/1',account_sha256=expected_account,
+                            revision=roster['revision'],active=active,limit=limit)
+            if action == 'status':
+                return snapshot
+            if (wound in active) == (action == 'open'):
+                if action == 'open' and wound not in active[:limit]:
+                    return dict(snapshot,decision='limit')
+                return dict(snapshot,decision='confirmed')
+            if version != roster['revision']:
+                return dict(snapshot,decision='changed')
+            if action == 'open' and len(active) >= limit:
+                return dict(snapshot,decision='limit')
+            updated = active+[wound] if action == 'open' else [w for w in active if w != wound]
+            grant.validate(subject,self.now())
+            next_roster = dict(revision=version+1,active=updated)
+            try:
+                won = life.store.compare_exchange(life._key(person),rev,dict(root,wounds=next_roster))
+            except StateUnavailable:
+                won = False
+            if not won: continue
+            # Re-read before reporting success, including a concurrent close.
+            _, latest = life.require_active(person)
+            observed = latest['wounds']
+            return dict(snapshot,revision=observed['revision'],active=observed['active'],
+                        decision='confirmed' if (wound in observed['active']) == (action=='open') else 'changed')
+        raise StateUnavailable('wound roster write unconfirmed')
+
     def prepare(self,installation,operation,image_sha256):
         _hex(image_sha256);account=self.accounts.resolve(installation);subject=account['subject']
         grant=None

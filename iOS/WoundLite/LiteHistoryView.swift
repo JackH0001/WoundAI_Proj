@@ -11,6 +11,8 @@ struct LiteHistoryView: View {
     @State private var selected: LiteRecord?
     @State private var woundFilter = ""
     @State private var choseInitialWound = false
+    @State private var reportWound: LiteWoundGroup?
+    @State private var manageTracking = false
     private let ungrouped = "__ungrouped__"
 
     init(store: LiteStore, recordToOpen: Binding<String?> = .constant(nil), nativeSession: LiteNativeSession? = nil) {
@@ -61,11 +63,16 @@ struct LiteHistoryView: View {
                                 Text("全部紀錄").tag("")
                                 Text("未分組").tag(ungrouped)
                                 ForEach(store.wounds) { wound in
-                                    Text(wound.displayName).tag(wound.id)
+                                    Text(wound.displayName + (wound.ended ? "（已結束）" : "")).tag(wound.id)
                                 }
                             }
                         } header: {
-                            Text("選擇傷口")
+                            Text("傷口時間軸")
+                        }
+                        if let wound = store.wounds.first(where: { $0.id == woundFilter }) {
+                            Button { reportWound = wound } label: {
+                                Label("匯出此傷口時間軸 PDF",systemImage:"square.and.arrow.up")
+                            }.accessibilityIdentifier("lite.timeline.export")
                         }
                         Section("LiDAR 表面積估算趨勢（cm²）") {
                             if !woundFilter.isEmpty, woundFilter != ungrouped {
@@ -90,6 +97,8 @@ struct LiteHistoryView: View {
                 }
             }
             .navigationTitle("紀錄")
+            .toolbar { Button("管理追蹤") { manageTracking = true } }
+            .sheet(isPresented: $manageTracking) { LiteTrackingManager(store: store, session: nativeSession) }
             .onAppear {
                 openSavedRecord()
                 if !choseInitialWound, !store.records.isEmpty {
@@ -104,6 +113,9 @@ struct LiteHistoryView: View {
             }
             .sheet(item: $selected) { r in
                 LiteRecordDetailView(recordId: r.id, store: store, nativeSession:nativeSession)
+            }
+            .sheet(item:$reportWound) { group in
+                LiteTimelineExportView(group:group,store:store)
             }
             .confirmationDialog(
                 "確定刪除這筆紀錄？",
@@ -380,14 +392,12 @@ struct LiteRecordDetailView: View {
                     Text("此位置會用於同一傷口的紀錄。不同傷口即使位置相同，仍應分開建檔。")
                         .font(.caption).foregroundStyle(.secondary)
                     if let error = store.storageError { Text(error).foregroundStyle(.orange) }
+                    if let assignmentNotice { Text(assignmentNotice).foregroundStyle(.orange) }
                     Button("儲存位置與分組") {
                         guard let r = record else { return }
                         var completed = wound
                         completed.location = LiteWoundLocation(side: assignmentSide, site: assignmentSite)
-                        if store.assign(r, to: completed) {
-                            assigningWound = nil
-                            Task { await store.syncRevision(recordID: recordId) }
-                        }
+                        saveAssignment(r, to: completed)
                     }
                     .disabled(!LiteWoundLocation(side: assignmentSide, site: assignmentSite).isComplete)
                 }
@@ -414,9 +424,7 @@ struct LiteRecordDetailView: View {
 
     private func assign(_ record: LiteRecord, to wound: LiteWoundGroup) {
         if wound.location?.isComplete == true {
-            if store.assign(record, to: wound) {
-                Task { await store.syncRevision(recordID: recordId) }
-            }
+            saveAssignment(record, to: wound)
         } else {
             assignmentSide = ""
             assignmentSite = ""
@@ -424,11 +432,38 @@ struct LiteRecordDetailView: View {
         }
     }
 
+    @State private var assignmentNotice: String?
+
+    private func saveAssignment(_ original: LiteRecord, to wound: LiteWoundGroup) {
+        guard !busy else { return }
+        let accountGeneration = nativeSession?.identity.generation
+        busy = true
+        Task { @MainActor in
+            defer { busy = false }
+            do {
+                let owner = store.wounds.first(where: { $0.id == wound.id })?.account
+                guard original.woundAccount == nil || original.woundAccount == owner || owner == nil else {
+                    throw LiteWoundTrackingError.otherAccount
+                }
+                let permit = try await nativeSession?.woundPermit(id: wound.id, owner: owner ?? original.woundAccount,
+                                                                  resume: owner == nil && !wound.ended)
+                guard nativeSession?.identity.generation == accountGeneration,
+                      let latest = record, latest.woundID == original.woundID,
+                      latest.woundAccount == original.woundAccount else { throw LiteWoundTrackingError.changed }
+                guard store.assign(latest, to: wound, permit: permit) else { return }
+                assignmentNotice = nil
+                assigningWound = nil
+                await store.syncRevision(recordID: recordId)
+            } catch { assignmentNotice = ((error as? LiteWoundTrackingError) ?? .unavailable).localizedDescription }
+        }
+    }
+
     private func detailCard(_ r: LiteRecord) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             if let error = store.storageError { Text(error).font(.footnote).foregroundStyle(.orange) }
+            if let assignmentNotice { Text(assignmentNotice).font(.footnote).foregroundStyle(.orange) }
             Menu {
-                ForEach(store.wounds) { wound in
+                ForEach(store.wounds.filter { !$0.ended }) { wound in
                     Button(wound.displayName) { assign(r, to: wound) }
                 }
                 Button("新增一處傷口") { assign(r, to: store.newWound()) }

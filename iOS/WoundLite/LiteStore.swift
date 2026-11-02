@@ -34,6 +34,8 @@ struct LiteRecord: Codable, Identifiable {
     var woundID: String? = nil
     var woundName: String? = nil
     var woundLocation: LiteWoundLocation? = nil
+    var woundAccount: String? = nil
+    var woundEnded: Bool? = nil
     var cloudSync: LiteCloudSyncState? = nil
     var researchCapture: LitePendingResearchCapture? = nil
     var manuallyConfirmed: Bool? = nil
@@ -64,25 +66,91 @@ final class LiteStore: ObservableObject {
 
     var wounds: [LiteWoundGroup] { LiteGrouping.groups(records) }
 
-    func newWound() -> LiteWoundGroup {
+    func newWound(id: String = UUID().uuidString) -> LiteWoundGroup {
         let last = wounds.compactMap { Int($0.name.replacingOccurrences(of: "傷口 ", with: "")) }.max() ?? 0
-        return LiteWoundGroup(id: UUID().uuidString, name: "傷口 \(last + 1)")
+        return LiteWoundGroup(id: id, name: "傷口 \(last + 1)")
+    }
+
+    /// Legacy folders remain readable. Only the first unended local folder is
+    /// the free offline tracking slot. A signed account needs its server permit.
+    var localTrackingID: String? {
+        let local = records.filter { $0.woundAccount == nil && $0.woundID != nil }
+        if local.contains(where: { $0.woundEnded != nil }) {
+            // Once a folder was explicitly tracked or finished, leave older folders available
+            // for selection without consuming the newly released slot.
+            return LiteGrouping.groups(local.filter { $0.woundEnded == false }).first?.id
+        }
+        return LiteGrouping.groups(local).first?.id
+    }
+    private func trackable(_ wound: LiteWoundGroup, permit: LiteWoundPermit?) -> Bool {
+        let owners = Set(records.filter { $0.woundID == wound.id }.compactMap(\.woundAccount))
+        guard owners.count <= 1 else { return false }
+        if let permit {
+            return permit.id == wound.id && (owners.isEmpty || owners.contains(permit.account))
+                && (wound.account == nil || wound.account == permit.account)
+        }
+        return owners.isEmpty && !wound.ended && wound.account == nil
+            && (localTrackingID == nil || localTrackingID == wound.id)
     }
 
     @discardableResult
-    func assign(_ record: LiteRecord, to wound: LiteWoundGroup) -> Bool {
+    func finishWound(_ id: String, account: String?) -> Bool {
+        let owners = Set(records.filter { $0.woundID == id }.compactMap(\.woundAccount))
+        guard let group = wounds.first(where:{ $0.id == id }), owners.count <= 1,
+              group.account == nil || group.account == account else { return false }
+        var next = records
+        for i in next.indices where next[i].woundID == id {
+            next[i].woundEnded = true
+            if let account { next[i].woundAccount = account }
+        }
+        return persist(next)
+    }
+    @discardableResult
+    func resumeWound(_ group: LiteWoundGroup, permit: LiteWoundPermit?) -> Bool {
+        guard let current = wounds.first(where: { $0.id == group.id }) else { return false }
+        var proposed = current
+        proposed.ended = false
+        guard trackable(proposed, permit: permit) else {
+            storageError = "目前方案的追蹤名額已滿，請先結束一處追蹤。"
+            return false
+        }
+        var next = records
+        for i in next.indices where next[i].woundID == group.id {
+            next[i].woundEnded = false
+            next[i].woundAccount = permit?.account
+        }
+        return persist(next)
+    }
+
+    func maySave(to id: String, permit: LiteWoundPermit?) -> Bool {
+        let wound = wounds.first(where: { $0.id == id }) ?? newWound(id: id)
+        return !wound.ended && trackable(wound, permit: permit)
+    }
+
+    @discardableResult
+    func assign(_ record: LiteRecord, to wound: LiteWoundGroup, permit: LiteWoundPermit? = nil) -> Bool {
         guard let index = records.firstIndex(where: { $0.id == record.id }),
               let location = wound.location, location.isComplete else {
             storageError = "請先補齊傷口側別與詳細部位，尚未變更分組。"
             return false
         }
         var next = records
+        let current = wounds.first(where:{ $0.id == wound.id }) ?? wound
+        let storedAccount = records[index].woundAccount
+        guard !current.ended, trackable(current,permit:permit),
+              storedAccount == nil || storedAccount == permit?.account else {
+            storageError = "請先核對這個帳戶的追蹤名額；原紀錄已保留。"
+            return false
+        }
         // A completed target group is authoritative; don't overwrite it from a stale sheet.
         let resolved = wounds.first(where: { $0.id == wound.id })?.location ?? location
         for i in next.indices where next[i].woundID == wound.id { next[i].woundLocation = resolved }
         next[index].woundID = wound.id
         next[index].woundName = wound.name
         next[index].woundLocation = resolved
+        for i in next.indices where next[i].woundID == wound.id {
+            next[i].woundAccount = permit?.account; next[i].woundEnded = false
+        }
         return persist(next)
     }
 
@@ -108,27 +176,39 @@ final class LiteStore: ObservableObject {
     /// Legacy records remain readable; completing their location and adding the new record is one write.
     func saveMeasurement(_ record: LiteRecord, selectedWoundID: String,
                          enteredLocation: LiteWoundLocation,
-                         queueResearchSync: Bool = false) -> LiteRecord? {
+                         queueResearchSync: Bool = false, permit: LiteWoundPermit? = nil) -> LiteRecord? {
         let wound: LiteWoundGroup
         if selectedWoundID.isEmpty {
-            wound = newWound()
+            wound = newWound(id: permit?.id ?? UUID().uuidString)
         } else if let existing = wounds.first(where: { $0.id == selectedWoundID }) {
             wound = existing
+        } else if let permit, permit.id == selectedWoundID {
+            wound = newWound(id:permit.id)
         } else {
             storageError = "所選傷口已不存在，請重新選擇；尚未儲存。"
             return nil
         }
         let location = wound.location ?? enteredLocation
+        guard !wound.ended, trackable(wound,permit:permit) else {
+            storageError = "這個傷口目前無可用追蹤名額。請選擇正在追蹤的傷口，或先結束一處追蹤。照片已保留。"
+            return nil
+        }
         guard location.isComplete else {
             storageError = "請先選擇側別與詳細部位，再存入紀錄。"
             return nil
         }
         var next = records
-        for i in next.indices where next[i].woundID == wound.id { next[i].woundLocation = location }
+        for i in next.indices where next[i].woundID == wound.id {
+            next[i].woundLocation = location
+            next[i].woundAccount = permit?.account
+            next[i].woundEnded = false
+        }
         var saved = record
         saved.woundID = wound.id
         saved.woundName = wound.name
         saved.woundLocation = location
+        saved.woundAccount = permit?.account
+        saved.woundEnded = false
         if var job = saved.researchCapture {
             // Freeze the first annotation before the measurement leaves the screen.
             job.firstRevision = try? saved.revisionJSON(width: job.width, height: job.height)

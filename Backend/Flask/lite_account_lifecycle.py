@@ -58,6 +58,16 @@ class AccountLifecycle:
         try:
             fields = {'v','scope','person','phase','head','count','closure'}
             if self.service_catalog: fields |= {'service_head','service_count'}
+            if 'wounds' in c:
+                fields.add('wounds')
+                roster = c['wounds']
+                if (type(roster) is not dict or set(roster) != {'revision','active'}
+                        or type(roster['revision']) is not int or not 0 < roster['revision'] < 2**53
+                        or type(roster['active']) is not list or len(roster['active']) > 5
+                        or c['phase'] != 'active'):
+                    raise ValueError()
+                for wound in roster['active']: _hex(wound,32)
+                if len(set(roster['active'])) != len(roster['active']): raise ValueError()
             if (set(c) != fields
                     or type(c['v']) is not int or c['v'] != self.version or c['scope'] != self.scope
                     or c['person'] != person or c['phase'] not in ('active','closing')
@@ -205,7 +215,9 @@ class AccountLifecycle:
                 return self.progress(person,installation,operation)
             d = dict(operation=operation,requester=installation,requested_at=self.now(),
                      inventory_sha256=self.inventory_digest(c))
-            try: self.store.compare_exchange(self._key(person),rev,dict(c,phase='closing',closure=d))
+            closing = dict(c,phase='closing',closure=d)
+            closing.pop('wounds', None)
+            try: self.store.compare_exchange(self._key(person),rev,closing)
             except StateUnavailable: pass
         raise StateUnavailable('account closure unconfirmed; retry saved request')
 

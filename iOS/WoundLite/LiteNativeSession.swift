@@ -81,6 +81,7 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     var researchDelivery: LiteResearchCaptureDelivery?
     let deletionService: LiteAccountDeletionHTTPService
     private let balanceTransport: any LiteAuthenticatedTransport
+    let woundTransport: any LiteAuthenticatedTransport
     private var researchLink: LiteResearchDeletionLink?
     private var deletingLocalRecords = Set<String>()
     private let access: LiteSandboxAccess
@@ -136,6 +137,7 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
             transport: scoped("service", ["prepare", "run", "status", "recover", "resubmit"], ordinary: true),
             journal: storage("recognition"), now: now)
         balanceTransport = scoped("service", ["balance"], ordinary: true)
+        woundTransport = scoped("service", ["wounds"], ordinary: true)
         deletionService = try LiteAccountDeletionHTTPService(origin: origin,
             transport: scoped("account/deletion", ["request", "status", "reauth/challenge", "reauth/confirm"], ordinary: false))
     }
@@ -211,6 +213,21 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
             registration = .unreadable
             message = "裝置登記尚未確認。請先重讀原裝置登記，再決定是否續接。"
         }
+    }
+
+    func trackingContext() async throws -> LiteDeletionContext? {
+        let start = identity.generation
+        guard let owner = try await existing() else {
+            guard start == identity.generation else { throw LiteAccountFailure.conflict }
+            return nil
+        }
+        guard try await identity.hasTrackingAccount(owner: owner) else {
+            guard start == identity.generation else { throw LiteAccountFailure.conflict }
+            return nil
+        }
+        let context = try await identity.activeServiceContext()
+        guard context.installation == owner, start == identity.generation else { throw LiteAccountFailure.conflict }
+        return context
     }
 
     func personalBalance() async throws -> LitePersonalBalance {

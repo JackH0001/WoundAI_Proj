@@ -54,6 +54,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
     var paths = [String](), session: [String: Any]?, ended = false, closed = false
     var production = false, lostConfirmation = false, lostRun = false
     var afterContext: (@Sendable () async -> Void)?
+    var activeWounds = [String](), woundRevision = 0
     let golden: [String: Any]
     init() throws {
         let file = try XCTUnwrap(Bundle(for: LiteNativeSessionTests.self).url(forResource: "lite_service_operation", withExtension: "json"))
@@ -90,6 +91,20 @@ private actor SessionWire: LiteAuthenticatedTransport {
             guard !ended, !closed, let current = session else { throw LiteAccountFailure.unavailable }
             result = current
         case "account/logout": ended = true; result = ["v": 1, "state": "signed_out", "installation": owner, "operation": operation]
+        case "service/wounds":
+            XCTAssertEqual(body["account_sha256"] as? String, sessionHash)
+            let action = body["action"] as? String
+            var decision: String?
+            if action != "status" {
+                XCTAssertEqual(body["revision"] as? Int, woundRevision)
+                let wound = try XCTUnwrap(body["wound_id"] as? String)
+                if action == "open", !activeWounds.contains(wound) { activeWounds.append(wound); woundRevision += 1 }
+                if action == "finish", activeWounds.contains(wound) { activeWounds.removeAll { $0 == wound }; woundRevision += 1 }
+                decision = "confirmed"
+            }
+            result = ["schema":"lite.wounds/1", "account_sha256":sessionHash,"revision":woundRevision,
+                      "limit":5,"active":activeWounds]
+            if let decision { result["decision"] = decision }
         case "purchase/context":
             result = ["v": 1, "operation": operation, "installation": owner, "account_sha256": sessionHash,
                 "app_account_token": sessionToken, "registration_sha256": sessionHash, "scope_sha256": sessionHash,
@@ -160,6 +175,52 @@ private actor SessionWire: LiteAuthenticatedTransport {
         XCTAssertFalse(LiteNativeBuild.includesService)
     }
     #endif
+    func testTrackingUsesOriginalAccountAndDoesNotSilentlyReopenRemoteEnd() async throws {
+        let wire = try SessionWire()
+        let session = try runtime(wire, SessionJournal())
+        let id = try LiteWoundRoster.newID(for: UUID().uuidString)
+        let local = try await session.woundPermit(id:id,owner:nil)
+        XCTAssertNil(local)
+        await session.identity.signIn()
+        let first = try await session.woundPermit(id:id, owner:nil)
+        XCTAssertEqual(first?.account, sessionHash)
+        let roster = try await session.woundList()
+        XCTAssertEqual(roster?.remoteGroups(excluding:[]).first?.id, id)
+        let group = LiteWoundGroup(id:id,name:"合成傷口",account:sessionHash)
+        _ = try await session.finishTracking(group)
+        do {
+            _ = try await session.woundPermit(id:id,owner:sessionHash)
+            XCTFail("stale phone reopened a finished wound")
+        } catch LiteWoundTrackingError.ended {}
+        let restored = try await session.woundPermit(id:id,owner:sessionHash,resume:true)
+        XCTAssertEqual(restored?.id,id)
+        await session.identity.signOut()
+        do {
+            _ = try await session.woundPermit(id:id,owner:sessionHash)
+            XCTFail("signed out account wrote to a bound wound")
+        } catch LiteWoundTrackingError.otherAccount {}
+        let counts = await wire.counts()
+        XCTAssertNil(counts["service/run"])
+        XCTAssertNil(counts["purchase/confirm"])
+    }
+
+    func testLegacyGroupRetainsItsTimelineIDWithoutDuplicatingRemoteFolder() throws {
+        let group = LiteWoundGroup(id:"old human-readable ID",name:"原傷口")
+        let opaque = try LiteWoundRoster.wireID(group.id)
+        XCTAssertTrue(LiteServiceBytes.hex(opaque,32))
+        let remote = LiteWoundRoster(schema:"lite.wounds/1",account_sha256:sessionHash,revision:1,active:[opaque],limit:1,decision:nil)
+        XCTAssertTrue(remote.remoteGroups(excluding:[group]).isEmpty)
+        let remoteGroup = try XCTUnwrap(remote.remoteGroups(excluding:[]).first)
+        XCTAssertEqual(try LiteWoundRoster.wireID(remoteGroup.id),opaque)
+    }
+
+    func testMalformedRosterRejectsDuplicateIDsAndUnexpectedGrant() throws {
+        for (ids, limit) in [([String(repeating:"a",count:32),String(repeating:"a",count:32)],5), ([],6), (["invalid"],1)] {
+            let roster = LiteWoundRoster(schema:"lite.wounds/1",account_sha256:sessionHash,revision:1,active:ids,limit:limit,decision:nil)
+            XCTAssertThrowsError(try roster.validate(account:sessionHash))
+        }
+    }
+
     func testRegistrationIsExplicitAndDoesNotSignInOrBuy() async throws {
         let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit()
         let r = try runtime(wire, SessionJournal(), apple: apple, storeKit: kit)
@@ -1033,7 +1094,8 @@ extension LiteNativeSessionTests {
             // A later opt-in must never admit a photo made before consent.
             consenting = true
             await vm.applyManual([[[5,5],[5,55],[55,55],[55,5]]], correctionIoU:0.7)
-            let saved = try XCTUnwrap(vm.saveCapture(in:store,selectedWoundID:"",location:.init(side:"right",site:"heel")))
+            let saved = try XCTUnwrap(vm.saveCapture(in:store,selectedWoundID:store.localTrackingID ?? "",
+                                                     location:.init(side:"right",site:"heel")))
             defer { store.images.delete(saved.imageName); if let d = saved.depthName { store.images.delete(d) } }
             XCTAssertEqual(saved.researchCapture?.captureID, consentAtCapture ? depth.captureProvenance?.id.uuidString.lowercased() : nil)
             XCTAssertEqual(saved.researchCapture?.firstRevision != nil, consentAtCapture)

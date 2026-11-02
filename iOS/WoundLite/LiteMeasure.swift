@@ -353,7 +353,7 @@ final class LiteMeasureVM: ObservableObject {
     /// The UI and recovery tests use this same commit path. Photos/depth stay
     /// intact on an uncertain index write; only a verified save clears the UI.
     func saveCapture(in store: LiteStore, selectedWoundID: String,
-                     location: LiteWoundLocation) -> LiteRecord? {
+                     location: LiteWoundLocation, permit: LiteWoundPermit? = nil) -> LiteRecord? {
         recordStore = store
         guard savedId == nil, !busy, !store.needsReload,
               native == nil || draft != nil,
@@ -395,7 +395,8 @@ final class LiteMeasureVM: ObservableObject {
             }
         }
         guard let saved = store.saveMeasurement(record, selectedWoundID: selectedWoundID,
-            enteredLocation: location, queueResearchSync: native == nil ? LitePrefs.researchConsent == true : record.researchCapture != nil) else {
+            enteredLocation: location, queueResearchSync: native == nil ? LitePrefs.researchConsent == true : record.researchCapture != nil,
+            permit: permit) else {
             let message = store.storageError
             // A write may have committed before reporting an error. Read back
             // this exact newly allocated pair instead of deleting referenced data.
@@ -656,6 +657,13 @@ struct LiteMeasureView: View {
     @State private var showSaveConfirmation = false
     @State private var saveNotice: String?
     @State private var confirmRetake = false
+    @State private var checkingWound = false
+    @State private var roster: LiteWoundRoster?
+
+    private var availableGroups: [LiteWoundGroup] {
+        let local = store.wounds
+        return local.filter { !$0.ended } + (roster?.remoteGroups(excluding: local) ?? [])
+    }
 
     var body: some View {
         NavigationStack {
@@ -721,6 +729,7 @@ struct LiteMeasureView: View {
                 }
                 .padding()
             }
+            .disabled(checkingWound)
             .navigationTitle("量測")
             .alert("重新拍攝？", isPresented: $confirmRetake) {
                 Button("保留目前量測", role: .cancel) { }
@@ -829,11 +838,11 @@ struct LiteMeasureView: View {
     private func saveRow(e: DepthAreaResult) -> some View {
         let v = liteVerdict(e)
         if v.usable {
-            let selected = store.wounds.first { $0.id == woundID }
+            let selected = availableGroups.first { $0.id == woundID }
             let target = currentSaveTarget
             HStack(alignment: .top, spacing: 10) {
                 Menu {
-                    ForEach(store.wounds) { wound in
+                    ForEach(availableGroups) { wound in
                         Button {
                             woundID = wound.id
                             addingNewWound = false
@@ -841,9 +850,9 @@ struct LiteMeasureView: View {
                             saveNotice = nil
                         } label: {
                             if !addingNewWound && woundID == wound.id {
-                                Label(wound.displayName, systemImage: "checkmark")
+                                Label(wound.trackingLabel, systemImage: "checkmark")
                             } else {
-                                Text(wound.displayName)
+                                Text(wound.trackingLabel)
                             }
                         }
                     }
@@ -857,7 +866,7 @@ struct LiteMeasureView: View {
                     .padding(.horizontal, 10)
                     .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
                 }
-                .disabled(store.wounds.isEmpty)
+                .disabled(availableGroups.isEmpty)
                 .accessibilityLabel("選擇已紀錄傷口")
                 Button {
                     addingNewWound = true
@@ -890,6 +899,19 @@ struct LiteMeasureView: View {
                 Text("請選擇已紀錄傷口，或點右側「新增紀錄傷口＋」。")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            if let nativeSession {
+                Button("核對帳戶正在追蹤的傷口") {
+                    checkingWound = true
+                    Task { @MainActor in
+                        defer { checkingWound = false }
+                        do {
+                            roster = try await nativeSession.woundList()
+                            saveNotice = roster?.summary
+                                ?? "目前使用本機免費追蹤。"
+                        } catch { roster = nil; saveNotice = LiteWoundTrackingError.unavailable.localizedDescription }
+                    }
+                }
+            }
             Text("追蹤同一處傷口時，請選擇原有傷口；不同傷口的紀錄會分開顯示。")
                 .font(.caption).foregroundStyle(.secondary)
             if let error = store.storageError { Text(error).font(.footnote).foregroundStyle(.orange) }
@@ -909,11 +931,11 @@ struct LiteMeasureView: View {
 
     private var currentSaveTarget: LiteWoundSaveTarget? {
         LiteWoundSaveTarget.resolve(addingNew: addingNewWound, selectedID: woundID,
-            entered: LiteWoundLocation(side: woundSide, site: woundSite), groups: store.wounds)
+            entered: LiteWoundLocation(side: woundSide, site: woundSite), groups: availableGroups)
     }
 
     private func selectLastWound() {
-        woundID = LiteGrouping.mostRecentWoundID(store.records) ?? ""
+        woundID = LiteGrouping.mostRecentWoundID(store.records.filter { $0.woundEnded != true }) ?? ""
         addingNewWound = false
         woundSide = ""; woundSite = ""
         saveTarget = nil; saveNotice = nil
@@ -927,8 +949,35 @@ struct LiteMeasureView: View {
             saveNotice = "傷口或位置已變更，請重新確認後存入。"
             return
         }
+        guard !checkingWound else { return }
+        checkingWound = true
+        let draftID = vm.draft?.id
+        let image = vm.image
+        let accountGeneration = nativeSession?.identity.generation
+        let owner = availableGroups.first(where: { $0.id == target.woundID })?.account
+        Task { @MainActor in
+            defer { checkingWound = false }
+            do {
+                let id = target.woundID.isEmpty
+                    ? try LiteWoundRoster.newID(for: draftID ?? UUID().uuidString) : target.woundID
+                let permit = try await nativeSession?.woundPermit(id: id, owner: owner)
+                guard nativeSession?.identity.generation == accountGeneration, vm.image === image,
+                      vm.draft?.id == draftID, currentSaveTarget == target,
+                      !store.needsReload, !vm.busy, vm.savedId == nil else { throw LiteWoundTrackingError.changed }
+                guard store.maySave(to: id, permit: permit) else {
+                    if permit == nil { throw LiteWoundTrackingError.full(1) }
+                    throw LiteWoundTrackingError.changed
+                }
+                persistConfirmed(target, permit: permit)
+            } catch {
+                saveNotice = ((error as? LiteWoundTrackingError) ?? .unavailable).localizedDescription
+            }
+        }
+    }
+
+    private func persistConfirmed(_ target: LiteWoundSaveTarget, permit: LiteWoundPermit?) {
         guard let saved = vm.saveCapture(in: store, selectedWoundID: target.woundID,
-                                        location: target.location) else { return }
+                                        location: target.location, permit: permit) else { return }
         woundID = saved.woundID ?? ""
         addingNewWound = false
         vm.savedId = saved.id

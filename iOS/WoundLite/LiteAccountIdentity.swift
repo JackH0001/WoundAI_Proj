@@ -228,6 +228,15 @@ struct LiteAccountCheckpoint:Codable,Equatable {
     private func hasDeletionIntent(_ owner:String)async throws->Bool {
         try await journal.load(LiteAccountDeletionCheckpoint.key(origin:service.origin.absoluteString,owner:owner)) != nil
     }
+    func hasTrackingAccount(owner: String) async throws -> Bool {
+        let initial = generation
+        guard !busy, try await !hasDeletionIntent(owner) else { throw LiteAccountFailure.conflict }
+        let record = try await read(owner).1
+        guard initial == generation else { throw LiteAccountFailure.conflict }
+        if record == nil || record?.phase == "ended" { return false }
+        guard !blocked, let record, ["active", "renew"].contains(record.phase) else { throw LiteAccountFailure.unavailable }
+        return true
+    }
     func deletionContext() async throws -> LiteDeletionContext {
         try await activeServiceContext()
     }

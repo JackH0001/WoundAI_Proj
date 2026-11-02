@@ -201,7 +201,7 @@ struct LiteSettingsView: View {
                 if let nativeSession {
                     Section("個人雲端辨識") {
                         NavigationLink("查看個人帳號今日額度") { LitePersonalBalanceView(session: nativeSession) }
-                        Text("免費每日最多 2 次；Plus 每日總計最多 10 次。可從紀錄選取照片進行個人辨識，本機手動圈選與保存不扣次數。")
+                        Text("免費追蹤 1 處，Plus 每帳戶最多同時追蹤 5 處。每日個人辨識總額為免費 2 次、Plus 10 次。本機圈選、保存及分享時間軸 PDF 不扣辨識次數。")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
