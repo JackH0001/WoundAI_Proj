@@ -53,7 +53,7 @@ class NativeBackend:
     deletion: AccountDeletion
     progress: DispositionProgress
 
-    def create_app(self, *, link_signer=None):
+    def create_app(self, *, link_signer=None, research_source_enabled=False):
         app = Flask('woundailite-native-candidate', static_folder=None)
         # Reject unsupported research/admin routes BEFORE the general guard
         # can reserve capacity or create a research writer ticket.
@@ -64,6 +64,16 @@ class NativeBackend:
             from lite_attest_request import RESEARCH_OFFER_PATH
             if link_signer.role!='native':raise ValueError('native research issuer required')
             paths.add(RESEARCH_OFFER_PATH)
+        source_issuer = None
+        if type(research_source_enabled) is not bool:
+            raise ValueError('explicit research source setting required')
+        if research_source_enabled:
+            from lite_research_source_issuer import ResearchSourceIssuer, PATH as SOURCE
+            if link_signer is None or link_signer.role != 'native':
+                raise ValueError('pinned native issuer required')
+            source_issuer = ResearchSourceIssuer(scope=link_signer.scope, bucket=link_signer.bucket,
+                private_key=link_signer.signer.private_bytes_raw(), operations=self.operations)
+            paths.add(SOURCE)
 
         @app.before_request
         def service_routes_only():
@@ -76,7 +86,8 @@ class NativeBackend:
             return response
 
         install_lite_attest(app, service=self.security, budget=self.budget, privacy=self.privacy,
-            commerce=self.operations, purchases=self.purchases, identity=self.identity, deletion=self.deletion, link_signer=link_signer)
+            commerce=self.operations, purchases=self.purchases, identity=self.identity, deletion=self.deletion,
+            link_signer=link_signer, research_source=source_issuer)
         return app
 
 

@@ -561,6 +561,12 @@ def lite_annotation():
     st = _media_store()
     if not st.exists(_fw._key(os.path.join(_dir(), "lite/%s/%s.jpg" % (anon_id, image_id)))):
         return jsonify({"error": "查無對應影像；請先以 research_consent=true 呼叫 lite/segment"}), 400
+    if callable(getattr(st, 'capture_intent', None)):
+        intent = st.capture_intent(image_id)
+        if intent is not None:
+            index = st.capture_index(image_id)
+            if index is None or index.get('capture_receipt', {}).get('capture_intent_sha256') != intent.get('capture_intent_sha256'):
+                return jsonify(error="research_capture_unconfirmed"), 503
 
     # ── lay 修正率：人改了 AI 多少（Mac review 建議的指標）──────────
     #
@@ -769,6 +775,12 @@ def lite_annotation_revision():
         meta = st.get_json(image_key + ".json")
         if not meta or (meta.get("image_w"), meta.get("image_h")) != (w, h):
             return jsonify(error="image_dimensions_mismatch"), 409
+        if 'capture_receipt' in meta:
+            # A partial capture write is not an accepted research image yet.
+            # Never let a known ID bypass the final media/index readback.
+            index = st.capture_index(iid)
+            if index is None or index.get('capture_receipt') != meta['capture_receipt']:
+                return jsonify(error="research_capture_unconfirmed"), 503
         def receipt(row):
             if (row.get("anon_id"), row.get("image_id"), row.get("revision"), row.get("payload_sha256")) != (aid, iid, rev, digest):
                 return jsonify(error="revision_conflict"), 409

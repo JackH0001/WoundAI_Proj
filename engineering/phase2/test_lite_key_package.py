@@ -33,7 +33,8 @@ class PackageTests(unittest.TestCase):
         for n in ('models/weight.onnx','upload.jpg','.env','app.py','lite_native_startup.py','secret.p8'):
             p=self.root/'Backend/Flask'/n;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('not for worker')
         m=self.build()
-        self.assertEqual(len(m['files']),39)
+        self.assertEqual(len(m['files']),40)
+        self.assertIn('lite_result_contract.py',m['files'])
         self.assertIn('lite_run_identity.py',m['files'])
         self.assertFalse(m['release_approved'])
         r=self.verify();self.assertEqual(r.returncode,0,r.stderr)

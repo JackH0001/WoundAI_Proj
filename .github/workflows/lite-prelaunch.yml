@@ -106,6 +106,10 @@ jobs:
         run: |
           python -m unittest -v test_lite_account_data_inventory > evidence/account-data-inventory-tests.log 2>&1
           python tools/lite_account_data_inventory_probe.py --output evidence/account-data-inventory-probe.json
+      - name: Independent research capture without repeat recognition (synthetic only)
+        run: |
+          python -m unittest -v test_lite_research_source test_lite_research_source_http test_lite_research_capture test_lite_research_ingest_flow > evidence/research-capture-tests.log 2>&1
+          python tools/lite_research_capture_probe.py --output evidence/research-capture-probe.json
       - name: Account deletion and independent research admission races (synthetic only)
         run: |
           python -m unittest -v test_lite_cross_origin_research test_lite_research_issuer test_lite_worker_research_records > evidence/cross-origin-research-tests.log 2>&1

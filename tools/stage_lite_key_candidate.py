@@ -13,7 +13,7 @@ MODULES = tuple(('audit_chain_contract lite_account_deletion lite_account_identi
     'lite_apple_account_events lite_apple_grants lite_apple_oauth lite_attest_assertion '
     'lite_attest_request lite_attest_state lite_bucket_policy lite_deletion_identity '
     'lite_disposition_context lite_disposition_progress lite_grant_key_custody lite_key_provisioning lite_key_readiness '
-    'lite_key_startup lite_raster_tools lite_run_identity lite_service_disposition lite_service_operations '
+    'lite_key_startup lite_result_contract lite_raster_tools lite_run_identity lite_service_disposition lite_service_operations '
     'lite_service_recovery lite_service_release lite_service_subscription_links '
     'lite_store_locations lite_subscription_authority lite_subscription_executor '
     'lite_subscription_migration lite_subscription_runtime lite_usage_cutover '

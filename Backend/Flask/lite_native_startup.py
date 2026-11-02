@@ -272,9 +272,12 @@ def application(environment=None):
     try:
         from lite_research_issuer import settings as issuer_settings
         link_signer=issuer_settings(env,'native')
+        research_source = env.get('LITE_RESEARCH_CAPTURE_ENABLED', '0')
+        if research_source not in ('0', '1'): raise ValueError('invalid research capture setting')
         return build_native_runtime(raw,expected_config=env['LITE_NATIVE_CONFIG_SHA256'],
             expected_source=env['LITE_NATIVE_SOURCE'],expected_image=env['LITE_NATIVE_IMAGE_SHA256'],
-            secrets=env['LITE_NATIVE_SECRET_DIR'],package=Path(__file__).parent).create_app(link_signer=link_signer)
+            secrets=env['LITE_NATIVE_SECRET_DIR'],package=Path(__file__).parent).create_app(
+                link_signer=link_signer, research_source_enabled=research_source=='1')
     except Exception:
         # Never emit provider response bodies, mounted key bytes or account rows.
         raise RuntimeError('native candidate startup failed; preserve configuration and audit') from None

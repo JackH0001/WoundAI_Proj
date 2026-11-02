@@ -1498,7 +1498,11 @@ if LITE_API_ENABLED:
         if LITE_SERVICE and ('LITE_RESEARCH_LINK_FILE' in os.environ or 'LITE_RESEARCH_LINK_SHA256' in os.environ):
             from lite_research_issuer import settings as _issuer_settings
             _link_signer = _issuer_settings(os.environ, 'research')
-        install_lite_attest(app, service=_lite_security, budget=_lite_budget, privacy=_lite_privacy, link_signer=_link_signer)
+        from lite_research_capture import configured_receiver as _capture_receiver
+        _research_capture = _capture_receiver(os.environ, signer=_link_signer,
+            privacy=_lite_privacy, request_budget=_lite_budget)
+        install_lite_attest(app, service=_lite_security, budget=_lite_budget, privacy=_lite_privacy,
+            link_signer=_link_signer, research_capture=_research_capture)
         from api_lite import lite_bp as _lite_bp, init_lite as _init_lite
         _init_lite(segment_for_lite)
         app.register_blueprint(_lite_bp)
