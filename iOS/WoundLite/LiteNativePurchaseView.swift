@@ -3,6 +3,7 @@ import SwiftUI
 /// The candidate injects a trusted service bridge. Reading the disclosures needs no service access.
 struct LiteNativePurchaseView: View {
     @ObservedObject var store: LiteNativePurchaseStore
+    let canManagePurchases: Bool
     var body: some View {
         Form {
             Section("個人雲端辨識") {
@@ -21,8 +22,10 @@ struct LiteNativePurchaseView: View {
                         .accessibilityIdentifier("lite.offer.price")
                     Text("每月自動續訂，可在 Apple 訂閱設定取消。購買會綁定目前的服務帳號。")
                         .font(.footnote)
-                    Button("以 \(offer.displayPrice)／月訂閱") { Task { await store.purchase(accepting: offer) } }
-                        .accessibilityIdentifier("lite.offer.buy")
+                    if canManagePurchases {
+                        Button("以 \(offer.displayPrice)／月訂閱") { Task { await store.purchase(accepting: offer) } }
+                            .accessibilityIdentifier("lite.offer.buy")
+                    }
                 } else {
                     Text("尚未取得可購買的每月方案與價格。")
                     Button("重新讀取 Apple 商品") { Task { await store.loadOffer() } }
@@ -32,22 +35,25 @@ struct LiteNativePurchaseView: View {
                 LitePrivacyLink()
                 LiteTermsLink()
             }
-            Section("既有訂閱") {
-                Button("恢復購買") { Task { await store.restore() } }
-                Button("核對未完成購買") { Task { await store.reconcile() } }
-                Link("管理 Apple 訂閱", destination: URL(string: "https://apps.apple.com/account/subscriptions")!)
-            }.disabled(store.busy)
-            Section("核對狀態") {
-                if store.busy { ProgressView("正在核對，請勿重複購買…") }
-                Text(store.message).accessibilityIdentifier("nativePurchaseStatus")
-                Text("研究上傳由您另行決定。").font(.footnote)
+            if canManagePurchases {
+                Section("既有訂閱") {
+                    Button("恢復購買") { Task { await store.restore() } }
+                    Button("核對未完成購買") { Task { await store.reconcile() } }
+                    Link("管理 Apple 訂閱", destination: URL(string: "https://apps.apple.com/account/subscriptions")!)
+                }.disabled(store.busy)
+                Section("核對狀態") {
+                    if store.busy { ProgressView("正在核對，請勿重複購買…") }
+                    Text(store.message).accessibilityIdentifier("nativePurchaseStatus")
+                    Text("研究上傳由您另行決定。").font(.footnote)
+                }
+            } else {
+                Text("這裡只向 Apple 查詢當地月費。要訂閱或恢復購買，請先核對裝置並登入服務帳號。研究上傳由您另行決定。")
+                    .font(.footnote).accessibilityIdentifier("lite.offer.preview")
             }
         }
-        .navigationTitle("訂閱與恢復購買")
-        .task {
-            store.startObserving()
-            await store.reconcile()
-            await store.loadOffer()
+        .navigationTitle(canManagePurchases ? "訂閱與恢復購買" : "Plus 方案與價格")
+        .task(id: canManagePurchases) {
+            await store.openOffers(canManagePurchases: canManagePurchases)
         }
     }
 }

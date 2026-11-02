@@ -230,6 +230,13 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
         for event in events { try event.validate(context) }
         for event in events { try await process(event, using: context) }
     }
+    func openOffers(canManagePurchases: Bool) async {
+        if canManagePurchases {
+            startObserving()
+            await reconcile()
+        }
+        await loadOffer()
+    }
     func loadOffer() async {
         guard !busy, !loadingOffer else { return }
         loadingOffer = true

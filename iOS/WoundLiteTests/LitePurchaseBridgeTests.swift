@@ -58,7 +58,7 @@ private actor PurchaseJournal:LiteServiceJournal {
     var beforePurchase:(()async throws->Void)?,beforeFinish:(()async throws->Void)?
     var continuation:AsyncStream<LitePurchaseUpdate>.Continuation?
     var catalog: LiteMonthlyOffer? = nativeTestOffer
-    var lookups = 0
+    var lookups = 0, unfinishedReads = 0
     func knownPurchases() async throws -> [LitePurchaseEvent] { pending + restored }
     func monthlyOffer() async throws -> LiteMonthlyOffer {
         lookups += 1
@@ -71,7 +71,7 @@ private actor PurchaseJournal:LiteServiceJournal {
         if case .completed(let e)=outcome{pending=[e]};return outcome
     }
     func restore() async throws ->[LitePurchaseEvent]{restoreCalls+=1;return restored}
-    func unfinished() async throws ->[LitePurchaseEvent]{pending}
+    func unfinished() async throws ->[LitePurchaseEvent]{unfinishedReads += 1; return pending}
     func updates()->AsyncStream<LitePurchaseUpdate>{AsyncStream{continuation=$0}}
     func finish(_ e:LitePurchaseEvent)async throws {
         try await beforeFinish?();if failFinish{throw LitePurchaseFailure.unavailable};finishes+=1;pending=[]
@@ -119,6 +119,27 @@ private actor PurchaseJournal:LiteServiceJournal {
         XCTAssertEqual(service.contexts, 0)
         let rows = await journal.values()
         XCTAssertTrue(rows.isEmpty)
+    }
+    func testUnregisteredPreviewReadsOnlyCatalogEvenWithAnUnfinishedPurchase() async {
+        let (service, provider, journal, store) = setup()
+        provider.pending = [event()]
+        await store.openOffers(canManagePurchases: false)
+        await Task.yield()
+        XCTAssertEqual(store.offer, nativeTestOffer)
+        XCTAssertNil(provider.continuation)
+        XCTAssertEqual(provider.unfinishedReads, 0)
+        XCTAssertEqual(provider.purchases, 0)
+        XCTAssertEqual(provider.restoreCalls, 0)
+        XCTAssertEqual(service.contexts, 0)
+        XCTAssertEqual(service.calls, 0)
+        let saved = await journal.values()
+        XCTAssertTrue(saved.isEmpty)
+        provider.catalog = nil
+        await store.openOffers(canManagePurchases: false)
+        XCTAssertNil(store.offer)
+        XCTAssertEqual(provider.lookups, 2)
+        XCTAssertEqual(provider.unfinishedReads, 0)
+        XCTAssertEqual(provider.pending.count, 1)
     }
 
     func testPriceAndStorefrontChangesRequireFreshUserActionBeforePurchase() async {
@@ -305,6 +326,23 @@ private actor PurchaseJournal:LiteServiceJournal {
 import StoreKit
 import StoreKitTest
 @MainActor final class LiteNativeStoreKitTests:XCTestCase {
+    func testOfferPreviewDisplaysTheStoreKitPriceWithoutATransaction() async throws {
+        let config = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "WoundLiteCommerce", withExtension: "storekit"))
+        let session = try freshCommerceTestSession(url: config)
+        defer { session.clearTransactions() }
+        let products = try await Product.products(for: [purchaseProduct])
+        let product = try XCTUnwrap(products.first)
+        let service = PurchaseService(), journal = PurchaseJournal()
+        let store = LiteNativePurchaseStore(service: service, provider: LiteStoreKitPurchaseProvider(xcodeTest: true), journal: journal)
+        await store.openOffers(canManagePurchases: false)
+        XCTAssertEqual(store.offer?.displayPrice, product.displayPrice)
+        XCTAssertEqual(store.offer?.name, product.displayName)
+        XCTAssertTrue(session.allTransactions().isEmpty)
+        XCTAssertEqual(service.contexts, 0)
+        XCTAssertEqual(service.calls, 0)
+        let saved = await journal.values()
+        XCTAssertTrue(saved.isEmpty)
+    }
     func testAnAnnualProductWithTheExpectedIdentifierCannotBeOfferedAsMonthly() async throws {
         // Change only the local test catalogue. Confirm StoreKit actually saw
         // the annual term before checking the purchase screen's rejection.
@@ -317,8 +355,7 @@ import StoreKitTest
         defer { try? FileManager.default.removeItem(at: directory) }
         let file = directory.appendingPathComponent("Annual.storekit")
         try annual.write(to: file, atomically: true, encoding: .utf8)
-        let session = try SKTestSession(contentsOf: file)
-        session.disableDialogs = true
+        let session = try freshCommerceTestSession(url: file)
         defer { session.resetToDefaultState() }
         let products = try await Product.products(for: [purchaseProduct])
         let product = try XCTUnwrap(products.first)
@@ -335,7 +372,7 @@ import StoreKitTest
     }
     func testLocalStoreKitPropagatesServerTokenAndDefersFinishUntilAcknowledged()async throws {
         let url=try XCTUnwrap(Bundle(for:Self.self).url(forResource:"WoundLiteCommerce",withExtension:"storekit"))
-        let session=try SKTestSession(contentsOf:url);session.disableDialogs=true;session.clearTransactions()
+        let session=try freshCommerceTestSession(url:url)
         defer{session.clearTransactions()}
         let s=PurchaseService();s.environment="Xcode";s.fail=true
         let p=LiteStoreKitPurchaseProvider(xcodeTest:true),j=PurchaseJournal()

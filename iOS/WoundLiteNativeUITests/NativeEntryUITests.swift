@@ -116,6 +116,16 @@ final class NativeEntryUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Sandbox 訂閱與恢復購買"].exists)
         XCTAssertFalse(app.buttons["核對原刪帳進度"].exists)
         attach(app, "first-use-registration")
+        let preview = app.buttons["Plus 方案與價格"]
+        XCTAssertTrue(preview.isHittable)
+        preview.tap()
+        XCTAssertTrue(app.navigationBars["Plus 方案與價格"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["lite.offer.quota"].exists)
+        XCTAssertFalse(app.buttons["lite.offer.buy"].exists)
+        XCTAssertFalse(app.buttons["恢復購買"].exists)
+        XCTAssertFalse(app.buttons["核對未完成購買"].exists)
+        XCTAssertFalse(app.staticTexts["nativePurchaseStatus"].exists)
+        attach(app, "read-only-offer-before-registration")
         #endif
     }
 
