@@ -5,8 +5,11 @@ configuration blocks Lite, never falls back to anonymous access. Request bodies
 remain exactly the bytes signed; only verified ownership reaches business code.
 """
 import base64
+import hashlib
+import hmac
 import re
 from contextlib import contextmanager
+from dataclasses import dataclass
 from flask import Blueprint, current_app, g, jsonify, request
 from werkzeug.exceptions import BadRequest, RequestEntityTooLarge
 from audit_chain_contract import loads_json_object_strict
@@ -24,6 +27,33 @@ REGISTER_PATH = PREFIX + 'attest/register'
 REJOIN_PATH = PREFIX+'research/rejoin'
 POST_PATHS = {PREFIX+'segment', PREFIX+'annotation', PREFIX+'annotation/revision', REJOIN_PATH}
 MAX_BODY = 32 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class InternalOwner:
+    role: str
+    installation_sha256: str
+    account_sha256: str | None = None
+
+    def __post_init__(self):
+        pins = (self.installation_sha256, self.account_sha256) if self.role == 'native' else (self.installation_sha256,)
+        if (self.role not in ('native', 'research') or (self.role == 'research' and self.account_sha256 is not None)
+                or any(type(pin) is not str or not re.fullmatch(r'[0-9a-f]{64}', pin) for pin in pins)):
+            raise ValueError('incomplete internal owner binding')
+
+    @classmethod
+    def configured(cls, env, role):
+        mode = env.get('LITE_INTERNAL_OWNER_MODE')
+        pin = env.get('LITE_INTERNAL_INSTALLATION_SHA256')
+        account = env.get('LITE_INTERNAL_ACCOUNT_SHA256')
+        if mode is None and pin is None and account is None:
+            return None
+        if mode != 'owner-only':
+            raise ValueError('explicit internal owner mode required')
+        return cls(role, pin, account)
+
+    def permits_installation(self, installation):
+        return hmac.compare_digest(hashlib.sha256(installation.encode('utf-8')).hexdigest(), self.installation_sha256)
 
 
 def _b64(value, maximum, exact=None):
@@ -116,9 +146,13 @@ def _signed_headers():
     return key, challenge, assertion, operation
 
 
-def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerce=None, purchases=None, identity=None, deletion=None, link_signer=None, research_capture=None, research_source=None):
+def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerce=None, purchases=None, identity=None, deletion=None, link_signer=None, research_capture=None, research_source=None, internal_owner=None):
     if 'lite_attest_http' in app.extensions:
         raise ValueError('Lite security gate already installed')
+    if internal_owner is not None and (not isinstance(internal_owner, InternalOwner)
+            or internal_owner.role != ('native' if commerce is not None else 'research')
+            or (internal_owner.role == 'native' and identity is None)):
+        raise ValueError('internal owner binding does not match this service')
     if service is not None and not isinstance(service, RegistrationService):
         raise ValueError('trusted registration service required')
     if budget is not None and not isinstance(budget, RequestBudget):
@@ -187,7 +221,9 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
     app.extensions['lite_attest_http'] = dict(service=service, budget=budget, privacy=privacy, commerce=commerce)
     if commerce is not None:app.register_blueprint(commerce_blueprint(commerce, balance_enabled=identity is not None))
     if purchases is not None:app.register_blueprint(purchase_blueprint(purchases))
-    if identity is not None:app.register_blueprint(identity_blueprint(identity))
+    if identity is not None:
+        account_pin = internal_owner.account_sha256 if internal_owner else None
+        app.register_blueprint(identity_blueprint(identity, internal_account_sha256=account_pin))
     if deletion is not None:app.register_blueprint(deletion_blueprint(deletion))
     if identity is not None and identity.events is not None:app.register_blueprint(apple_events_blueprint(identity.events))
     bp = Blueprint('lite_attest_http', __name__)
@@ -295,10 +331,29 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
             if owner != admitted.installation:
                 return jsonify(error='lite_owner_mismatch'), 403
             g.lite_admission = admitted
+            # TestFlight membership alone does not identify a service installation.
+            # Leave existing privacy rights and receipt reads on their own signed routes.
+            old_right = (request.method == 'DELETE' or deletion_only or capture_lookup or request.endpoint in {
+                'lite_service_http.status', 'lite_account_identity.status', 'lite_account_identity.logout',
+                'lite_account_identity.renew'})
+            restrict = internal_owner is not None and not old_right
+            if restrict:
+                permitted=internal_owner.permits_installation(admitted.installation)
+                if request.endpoint in {'lite_account_identity.challenge','lite_account_identity.confirm'}:
+                    previous=identity.existing_account_pin(owner)
+                    if previous is not None:
+                        # A returning participant may reauthenticate only their
+                        # original account. New business writes are still gated.
+                        g.lite_previous_account_sha256=previous
+                        permitted=True
+                if not permitted:
+                    return jsonify(error='lite_internal_owner_required', keep_local=True), 403
             if service_only:
-                if identity is not None and not account_only:
-                    try: identity.require_session(owner)
+                if identity is not None and (not account_only or (restrict and link_only)):
+                    try: session = identity.require_session(owner)
                     except ValueError: return jsonify(error='lite_sign_in_required',keep_local=True),401
+                    if restrict and not identity.matches_account(session['account'], internal_owner.account_sha256):
+                        return jsonify(error='lite_internal_owner_required', keep_local=True), 403
                 # Explicitly registered, authenticated service work has no research
                 # writer ticket and cannot reach research media through this route.
                 # The service account/usage coordinator separately authorizes work.

@@ -1484,7 +1484,7 @@ def segment_for_lite(image_rgb):
 # 也讓它在沒有 ONNX 模型的環境下 import 得起來（契約測試因此不必載入模型）。
 if LITE_API_ENABLED:
     try:
-        from lite_attest_http import install_lite_attest
+        from lite_attest_http import InternalOwner, install_lite_attest
         from lite_attest_config import build_lite_security
         try:
             _lite_security, _lite_budget, _lite_privacy = build_lite_security(os.environ)
@@ -1502,7 +1502,8 @@ if LITE_API_ENABLED:
         _research_capture = _capture_receiver(os.environ, signer=_link_signer,
             privacy=_lite_privacy, request_budget=_lite_budget)
         install_lite_attest(app, service=_lite_security, budget=_lite_budget, privacy=_lite_privacy,
-            link_signer=_link_signer, research_capture=_research_capture)
+            link_signer=_link_signer, research_capture=_research_capture,
+            internal_owner=InternalOwner.configured(os.environ,'research') if LITE_SERVICE else None)
         from api_lite import lite_bp as _lite_bp, init_lite as _init_lite
         _init_lite(segment_for_lite)
         app.register_blueprint(_lite_bp)

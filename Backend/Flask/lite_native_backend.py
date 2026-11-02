@@ -53,7 +53,7 @@ class NativeBackend:
     deletion: AccountDeletion
     progress: DispositionProgress
 
-    def create_app(self, *, link_signer=None, research_source_enabled=False):
+    def create_app(self, *, link_signer=None, research_source_enabled=False, internal_owner=None):
         app = Flask('woundailite-native-candidate', static_folder=None)
         # Reject unsupported research/admin routes BEFORE the general guard
         # can reserve capacity or create a research writer ticket.
@@ -87,7 +87,7 @@ class NativeBackend:
 
         install_lite_attest(app, service=self.security, budget=self.budget, privacy=self.privacy,
             commerce=self.operations, purchases=self.purchases, identity=self.identity, deletion=self.deletion,
-            link_signer=link_signer, research_source=source_issuer)
+            link_signer=link_signer, research_source=source_issuer, internal_owner=internal_owner)
         return app
 
 

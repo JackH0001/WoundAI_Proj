@@ -262,7 +262,16 @@ class AccountIdentityBridge:
         if self.grants is not None: result['authorization_code_required'] = True
         return result
 
-    def confirm(self, installation, operation, signed, state, authorization_code=None):
+    @staticmethod
+    def matches_account(account, expected):
+        return hmac.compare_digest(digest(account['subject']), expected)
+
+    def existing_account_pin(self, installation):
+        if self.registry.store.load(self.registry.key(installation)) is None:
+            return None
+        return digest(self.registry.registration(installation)['subject'])
+
+    def confirm(self, installation, operation, signed, state, authorization_code=None, *, internal_account_sha256=None):
         _hex(operation,32)
         self._lifecycle_required()
         if type(signed) is not str or not 1 <= len(signed) <= 16000: raise IdentityRejected('bounded identity required')
@@ -278,6 +287,8 @@ class AccountIdentityBridge:
                 claims=self.verifier.verify(signed,c['nonce'])
                 if claims['issued'] < c['created_at']-30: raise IdentityRejected('token predates challenge')
                 identity=hmac.new(self.secret, (self.namespace+'\0'+self.verifier.issuer+'\0'+claims['sub']).encode(),hashlib.sha256).hexdigest()
+                if internal_account_sha256 is not None and not hmac.compare_digest(digest('apple-'+identity), internal_account_sha256):
+                    raise IdentityRejected('not eligible for this internal service')
                 if self.lifecycle is not None:
                     self.lifecycle.initialize_new(identity,existing_account=self.store.load(key('human-account',identity)) is not None)
                 if self.events is not None:
@@ -301,6 +312,8 @@ class AccountIdentityBridge:
                 continue
             if c['token_sha256'] != token_hash or self.now() >= c['session_expires_at']:
                 raise IdentityRejected('saved sign-in differs or expired')
+            if internal_account_sha256 is not None and not self.matches_account(c['account'],internal_account_sha256):
+                raise IdentityRejected('not eligible for this internal service')
             if self.lifecycle is not None: self.lifecycle.require_active(c['account']['identity_sha256'])
             if self.grants is not None:
                 self.grants.capture(installation, operation, c['nonce'], signed, authorization_code)
@@ -399,7 +412,7 @@ class AccountIdentityBridge:
         raise StateUnavailable('logout unconfirmed')
 
 
-def blueprint(bridge):
+def blueprint(bridge, *, internal_account_sha256=None):
     if not isinstance(bridge,AccountIdentityBridge): raise ValueError('trusted identity bridge required')
     bp=Blueprint('lite_account_identity',__name__)
     def action(kind):
@@ -412,7 +425,10 @@ def blueprint(bridge):
             if kind == 'renew': fields |= {'renewal_operation','expected_generation'}
             if request.mimetype!='application/json' or set(body)!=fields: raise IdentityRejected('exact account fields required')
             if body['anon_id']!=admission.installation:return jsonify(error='lite_owner_mismatch'),403
-            if kind=='confirm':result=bridge.confirm(admission.installation,body['operation'],body['identity_token'],body['state'],body.get('authorization_code'))
+            if kind=='confirm':
+                pin=getattr(g,'lite_previous_account_sha256',internal_account_sha256)
+                result=bridge.confirm(admission.installation,body['operation'],body['identity_token'],body['state'],
+                                      body.get('authorization_code'),internal_account_sha256=pin)
             elif kind=='renew':result=bridge.renew(admission.installation,body['operation'],body['renewal_operation'],body['expected_generation'])
             elif kind=='status':result=bridge.status(admission.installation)
             else:result=getattr(bridge,kind)(admission.installation,body['operation'])

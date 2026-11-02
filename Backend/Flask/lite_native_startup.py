@@ -270,14 +270,17 @@ def application(environment=None):
         raise ValueError('bounded mounted configuration required')
     raw=path.read_bytes()
     try:
+        from lite_attest_http import InternalOwner
         from lite_research_issuer import settings as issuer_settings
+        internal_owner=InternalOwner.configured(env,'native')
         link_signer=issuer_settings(env,'native')
         research_source = env.get('LITE_RESEARCH_CAPTURE_ENABLED', '0')
         if research_source not in ('0', '1'): raise ValueError('invalid research capture setting')
         return build_native_runtime(raw,expected_config=env['LITE_NATIVE_CONFIG_SHA256'],
             expected_source=env['LITE_NATIVE_SOURCE'],expected_image=env['LITE_NATIVE_IMAGE_SHA256'],
             secrets=env['LITE_NATIVE_SECRET_DIR'],package=Path(__file__).parent).create_app(
-                link_signer=link_signer, research_source_enabled=research_source=='1')
+                link_signer=link_signer, research_source_enabled=research_source=='1',
+                internal_owner=internal_owner)
     except Exception:
         # Never emit provider response bodies, mounted key bytes or account rows.
         raise RuntimeError('native candidate startup failed; preserve configuration and audit') from None
