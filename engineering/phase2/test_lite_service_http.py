@@ -149,6 +149,48 @@ class ServiceHTTPTests(SignedServiceClient, unittest.TestCase):
         self.assertTrue(self.privacy._load(self.owner)[1]['withdrawn'])
         self.assertEqual(self.privacy._load(self.owner)[1]['writers'],[])
 
+    def test_busy_worker_preserves_the_same_ticket_while_control_requests_finish(self):
+        for n in (1, 2):
+            self.assertEqual(self.json_request('prepare', n).json['state'], 'ready')
+        entered, release = threading.Event(), threading.Event()
+        infer = self.inference.infer
+        def hold(rgb):
+            entered.set()
+            self.assertTrue(release.wait(10))
+            return infer(rgb)
+        with ThreadPoolExecutor(max_workers=1) as pool, patch.object(self.inference, 'infer', hold):
+            task = pool.submit(self.ops.run, self.owner, f'{1:032x}', self.f.jpeg)
+            try:
+                self.assertTrue(entered.wait(10))
+                self.assertEqual(self.run_request(1).status_code, 202)
+                busy = self.run_request(2)
+                self.assertEqual((busy.status_code, busy.json['error'], busy.json['retry_action']),
+                                 (429, 'lite_model_busy', 'status'))
+                self.assertEqual(busy.headers['Retry-After'], '5')
+                self.assertTrue(busy.json['keep_local'])
+                status = self.json_request('status', 2)
+                self.assertEqual((status.json['state'], status.json['receipt']['outcome']), ('ready', 'reserved'))
+                self.assertEqual((self.quota()['attempts'], self.quota()['used']), (2, 0))
+                path = '/api/v1/lite/data/' + self.owner
+                self.assertEqual(self.client.delete(path, headers=self.headers(path, b'', '',
+                    method='DELETE', purpose='withdraw')).status_code, 200)
+            finally:
+                release.set()
+            self.assertEqual(task.result()['receipt']['outcome'], 'succeeded')
+        result = self.run_request(2)
+        self.assertEqual(result.json['receipt']['outcome'], 'succeeded')
+        self.assertEqual(self.run_request(2).json, result.json)
+        self.assertEqual((self.quota()['attempts'], self.quota()['used'], self.model_calls), (2, 2, 2))
+
+    def test_model_failure_releases_worker_without_rerunning_uncertain_work(self):
+        for n in (1, 2):
+            self.assertEqual(self.json_request('prepare', n).json['state'], 'ready')
+        with patch.object(self.inference, 'infer', side_effect=StateUnavailable('interrupted')):
+            self.assertEqual(self.run_request(1).status_code, 503)
+        self.assertEqual(self.run_request(1).status_code, 202)
+        self.assertEqual(self.run_request(2).json['receipt']['outcome'], 'succeeded')
+        self.assertEqual((self.quota()['used'], self.model_calls), (1, 1))
+
     def test_unprovisioned_authenticated_device_cannot_choose_account(self):
         self.ops.accounts=ServiceAccounts(SQLiteStateStore(self.root/'empty-accounts.sqlite'))
         r=self.json_request('prepare');self.assertEqual(r.status_code,503);self.assertEqual(self.model_calls,0)

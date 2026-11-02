@@ -10,6 +10,7 @@ import json
 import math
 import re
 import secrets
+import threading
 import time
 from lite_usage_ledger import UsageLedger, UsageConflict, UsageLimit, Ticket, free_grant, digest, _subject, _hex
 from lite_subscription_authority import ServiceBinding
@@ -22,6 +23,7 @@ RESULT_TTL=86400
 class OperationExpired(UsageConflict): pass
 class OperationUnknown(UsageConflict): pass
 class ImageRejected(UsageConflict): pass
+class ModelBusy(RuntimeError): pass
 
 
 def validate_retained_receipt(v,now):
@@ -193,6 +195,9 @@ class ServiceOperations:
             raise ValueError('trusted service components required')
         _hex(model_version)
         self.ledger,self.accounts,self.store,self.inference,self.model_version,self.clock=ledger,accounts,store,inference,model_version,clock
+        # The native worker has two HTTP threads. Leave one available for status
+        # and account requests while the other decodes an image or runs the model.
+        self._model_slot = threading.Lock()
         self.recovery=None
         if recovery_store is not None:
             from lite_service_recovery import ServiceRecovery
@@ -385,15 +390,20 @@ class ServiceOperations:
             raise
         if receipt['outcome']!='reserved':return self.status(installation,operation)
         if v['model']!=self.model_version:raise UsageConflict('prepared model changed; explicit reconciliation required')
-        try:rgb=self.inference.decode(raw)
-        except ImageRejected:
-            self.ledger.cancel_unstarted(ticket,digest(['preflight_rejected',v['image_sha256']]))
-            raise
-        if not self.ledger.claim(ticket,v['worker']):return self.status(installation,operation)
-        # Any unexpected model or persistence exception remains pending. No
-        # second executor, automatic timeout release or guessed failure outcome.
-        self.accounts.require_active(account)
-        result=self.inference.infer(rgb);result_hash=digest(result)
+        if not self._model_slot.acquire(blocking=False):
+            raise ModelBusy('retry the reserved operation')
+        try:
+            try:rgb=self.inference.decode(raw)
+            except ImageRejected:
+                self.ledger.cancel_unstarted(ticket,digest(['preflight_rejected',v['image_sha256']]))
+                raise
+            if not self.ledger.claim(ticket,v['worker']):return self.status(installation,operation)
+            # A model failure after the claim leaves this operation pending.
+            self.accounts.require_active(account)
+            result=self.inference.infer(rgb)
+        finally:
+            self._model_slot.release()
+        result_hash=digest(result)
         self.accounts.require_active(account)
         for _ in range(CAS_ATTEMPTS):
             revision,current=self._require(subject,operation)

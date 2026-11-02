@@ -1,7 +1,7 @@
 """Opt-in signed service endpoints; register ONLY through install_lite_attest."""
 from flask import Blueprint,g,jsonify,request
 from audit_chain_contract import loads_json_object_strict
-from lite_service_operations import ServiceOperations,MAX_IMAGE,OperationExpired,OperationUnknown,ImageRejected
+from lite_service_operations import ServiceOperations,MAX_IMAGE,OperationExpired,OperationUnknown,ImageRejected,ModelBusy
 from lite_usage_ledger import UsageConflict,UsageLimit
 from lite_attest_state import StateUnavailable
 
@@ -61,6 +61,11 @@ def blueprint(operations, *, balance_enabled=False):
         except OperationExpired:return jsonify(error='lite_operation_expired',retry_action='none',keep_local=True),410
         except OperationUnknown:return jsonify(error='lite_operation_unknown',retry_action='prepare',keep_local=True),404
         except ImageRejected:return jsonify(error='lite_image_rejected',retry_action='none',keep_local=True),422
+        except ModelBusy:
+            response=jsonify(error='lite_model_busy', retry_action='status', keep_local=True,
+                             message='辨識服務忙碌，請稍候。已保留這次工作，不必重拍。')
+            response.headers['Retry-After']='5'
+            return response,429
         except UsageLimit as exc:
             response=jsonify(error='lite_usage_limit',reason=exc.reason,retry_after=exc.retry_after,keep_local=True)
             response.headers['Retry-After']=str(exc.retry_after);return response,429
