@@ -30,7 +30,10 @@ CAS_ATTEMPTS = 8
 
 class StateUnavailable(RuntimeError): pass
 class AdmissionRejected(ValueError): pass
-class ChallengeLimit(AdmissionRejected): pass
+class ChallengeLimit(AdmissionRejected):
+    def __init__(self, retry_after):
+        super().__init__('outstanding challenge limit')
+        self.retry_after = retry_after
 
 
 def _key_name(key_id):
@@ -267,8 +270,10 @@ class AssertionAdmission:
                 raise StateUnavailable('server clock precedes issued challenge')
             state['challenges'] = {k: v for k, v in state['challenges'].items() if v['expires_at'] > now}
             limit = MAX_WITHDRAWAL_CHALLENGES if purpose == 'withdraw' else MAX_CHALLENGES
-            if sum(v.get('purpose', 'assert') == purpose for v in state['challenges'].values()) >= limit:
-                raise ChallengeLimit('outstanding challenge limit')
+            expiries = [v['expires_at'] for v in state['challenges'].values()
+                        if v.get('purpose', 'assert') == purpose]
+            if len(expiries) >= limit:
+                raise ChallengeLimit(min(expiries) - now)
             identifier, nonce = secrets.token_hex(16), secrets.token_bytes(32)
             if identifier in state['challenges']:
                 continue

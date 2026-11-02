@@ -66,6 +66,37 @@ class HTTPTests(SignedHTTPClient, unittest.TestCase):
         self.assertTrue(response.json['retryable'])
         self.assertNotIn('stored',response.json)
 
+    def test_challenge_backpressure_uses_first_expiry_of_its_own_lane(self):
+        from lite_attest_state import MAX_CHALLENGES, MAX_WITHDRAWAL_CHALLENGES, CHALLENGE_TTL
+        self.register()
+        start = self.e.now
+        def ask(lane):
+            return self.client.post(CHALLENGE_PATH, json={'key_id': self.key, 'purpose': lane})
+        # An older privacy challenge must not shorten the wait for another lane.
+        for _ in range(MAX_WITHDRAWAL_CHALLENGES):
+            self.assertEqual(ask('withdraw').status_code, 200)
+        self.e.now = start + 10
+        self.assertEqual(ask('assert').status_code, 200)
+        self.e.now = start + 20
+        for _ in range(MAX_CHALLENGES - 1):
+            self.assertEqual(ask('assert').status_code, 200)
+        registered = self.e.store.load(self.e.key_id)
+        for lane, expected in [('withdraw', CHALLENGE_TTL - 20), ('assert', CHALLENGE_TTL - 10)]:
+            with self.subTest(lane=lane):
+                result = ask(lane)
+                self.assertEqual(result.status_code, 429)
+                self.assertEqual(result.headers['Retry-After'], str(expected))
+                self.assertEqual(result.json['retry_after'], expected)
+                self.assertTrue(result.json['retryable'])
+                self.assertEqual(result.json['error'], 'lite_challenge_limit')
+        self.assertEqual(self.e.store.load(self.e.key_id), registered)
+        self.e.now = start + CHALLENGE_TTL
+        self.assertEqual(ask('withdraw').status_code, 200)
+        self.e.now += 9
+        self.assertEqual(ask('assert').headers['Retry-After'], '1')
+        self.e.now += 1
+        self.assertEqual(ask('assert').status_code, 200)
+
     def test_nonempty_delete_remains_rejected(self):
         response=self.client.delete('/api/v1/lite/data/'+'0'*32,data=b'x',
             environ_overrides={'wsgi.input_terminated':True})

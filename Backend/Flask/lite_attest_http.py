@@ -38,6 +38,12 @@ def _b64(value, maximum, exact=None):
     return raw
 
 
+def _challenge_limit_response(exc):
+    response = jsonify(error='lite_challenge_limit', retry_after=exc.retry_after)
+    response.headers['Retry-After'] = str(exc.retry_after)
+    return response, 429
+
+
 def _body(maximum):
     if request.content_length is None and request.method != 'DELETE':
         raise AdmissionRejected('Content-Length required')
@@ -270,8 +276,8 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
             return jsonify(error='lite_consent_epoch_conflict'), 409
         except WriterLimit:
             return jsonify(error='lite_writers_busy'), 429
-        except ChallengeLimit:
-            return jsonify(error='lite_challenge_limit'), 429
+        except ChallengeLimit as exc:
+            return _challenge_limit_response(exc)
         except (AdmissionRejected, AssertionRejected, ValueError):
             return jsonify(error='lite_attestation_required'), 401
         except StateUnavailable:
@@ -300,8 +306,8 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
                 raise AdmissionRejected('invalid registration request')
             result = service.register(_b64(data['key_id'], 32, 32), data['challenge_id'], _b64(data['attestation'], 65536))
             return jsonify(installation=result.installation, key_id=base64.b64encode(result.key_id).decode('ascii'))
-        except ChallengeLimit:
-            return jsonify(error='lite_challenge_limit'), 429
+        except ChallengeLimit as exc:
+            return _challenge_limit_response(exc)
         except (AdmissionRejected, AssertionRejected, ValueError):
             return jsonify(error='lite_attestation_rejected'), 401
         except StateUnavailable:
