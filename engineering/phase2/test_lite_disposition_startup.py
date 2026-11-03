@@ -12,6 +12,7 @@ from lite_attest_state import GCSStateStore,StateUnavailable
 from lite_disposition_executor import PATH
 from lite_disposition_worker_probe import WorkerFixture
 from lite_service_history import ServiceResultHistory
+from lite_service_history_probe import HistoryBucket
 from lite_store_locations import LimitedStateStore
 from lite_subscription_executor import key,canonical
 from lite_usage_ledger import digest
@@ -35,7 +36,10 @@ class Providers:
     def identity_checked(self,c):
         self.calls.append('identity')
         if self.wrong_identity:raise ValueError('wrong runtime')
-    def state(self,bucket,prefix):return self.f.stores[prefix.rsplit('/',1)[-1]]
+    def state(self,bucket,prefix):
+        if bucket is self.f.security:
+            return GCSStateStore(bucket, prefix=prefix)
+        return self.f.stores[prefix.rsplit('/',1)[-1]]
     def activate_budget(self,allocation):self.allocation=allocation
     def oauth(self,secret):return self.f.f.w.p.deletion.grants.provider
 
@@ -50,6 +54,10 @@ class Fixture:
         f.f.ops.store=GCSStateStore(f.service_bucket,prefix='lite-native/test/operations')
         f.service=ServiceResultHistory(disposition=f.f.results,store=f.service.jobs,audit_store=f.service.audit,
             policy=dict(v=1,id='synthetic-v1',bucket=f.service_bucket.name,prefix=f.f.ops.store.prefix))
+        self.security = HistoryBucket()
+        self.security.name = 'synthetic-research-security'
+        research = GCSStateStore(self.security, prefix='lite_security/v1/lite-public/privacy-fenced')
+        f.h.m.r.store = f.h.m.r.privacy.manifest.store = research
         f.w=f.worker();f.ready();self.person=f.person
         p=f.w.p;d=p.deletion;m=f.h.m;self.now=d.lifecycle.now();self.seq=0
         self.stores=dict(lifecycle=d.lifecycle.store,lifecycle_audit=d.lifecycle.audit,identity=d.bridge.store,
@@ -64,7 +72,7 @@ class Fixture:
             provider_budget=f.f.store('startup-provider-budget'),provider_budget_audit=f.f.store('startup-provider-budget-audit'))
         assert set(self.stores)==set(startup.STORES)
         self.operator=ed25519.Ed25519PrivateKey.generate();self.drainer=ed25519.Ed25519PrivateKey.generate()
-        self.buckets={f.service_bucket.name:f.service_bucket,f.h.bucket.name:f.h.bucket}
+        self.buckets={f.service_bucket.name:f.service_bucket,f.h.bucket.name:f.h.bucket,self.security.name:self.security}
         for name,b in self.buckets.items():
             b._properties.update(kind='storage#bucket',name=name,projectNumber='123456789',location='ASIA-EAST1',metageneration='1',
                 iamConfiguration=dict(publicAccessPrevention='enforced',uniformBucketLevelAccess={'enabled':True}))
@@ -91,12 +99,15 @@ class Fixture:
         # Existing test ring uses its own project, kept exact instead of renamed.
         project=p.cipher.provider.keyring.split('/')[1]
         self.c['deployment'].update(project=project,service_account='disposition@'+project+'.iam.gserviceaccount.com')
+        self.c['stores']['research'] = dict(bucket=self.security.name, prefix=research.prefix)
+        self.research_origin = digest(['lite-research-origin/1', project, '123456789',
+                                       f.h.bucket.name, self.security.name, research.prefix])
         from research_pair_fixture import pair_config
         self.c['research_associations']=pair_config(m.f,m.r,[(m.owner,m.owner)])
         self.providers=Providers(self)
     def build(self,**changes):
         kw=dict(expected_config=hashlib.sha256(raw(self.c)).hexdigest(),expected_source='a'*40,expected_image='b'*64,
-            secrets=self.root,providers=self.providers,clock=lambda:self.now)
+            expected_research_origin=self.research_origin,secrets=self.root,providers=self.providers,clock=lambda:self.now)
         kw.update(changes);self.e=startup.build_disposition(raw(self.c),**kw);return self.e
     def command(self,action='run'):
         self.seq+=1;p=dict(kind='lite-disposition-command/1',manifest=digest(self.c['manifest']),command=f'{self.seq:032x}',
@@ -152,6 +163,79 @@ class StartupTests(unittest.TestCase):
         del self.f.c['identity_secret'];self.f.c['deployment']['keyring']=self.f.c['deployment']['keyring'].replace('asia-east1','us-east1')
         with self.assertRaises(ValueError):self.f.build()
         self.assertEqual(self.f.providers.calls,[])
+    def test_research_origin_is_independent_of_rehashed_worker_config(self):
+        research = self.f.c['stores']['research']
+        for field, value in [('prefix','lite-research/internal/research'),
+                             ('prefix','lite_security/v1/another-audience/privacy-fenced'),
+                             ('prefix','lite_security/v1/lite-public/keys'),
+                             ('bucket',self.f.c['stores']['executor']['bucket'])]:
+            with self.subTest(field=field, value=value), patch.dict(research, {field:value}):
+                with self.assertRaises(ValueError):
+                    self.f.build()
+                self.assertFalse(self.f.providers.calls)
+
+    def test_other_worker_stores_cannot_use_research_security_bucket(self):
+        self.f.c['stores']['worker']['bucket'] = self.f.security.name
+        with self.assertRaisesRegex(ValueError, 'dedicated'):
+            self.f.build()
+        self.assertFalse(self.f.providers.calls)
+
+    def test_wrong_or_missing_independent_origin_pin_refused_before_connection(self):
+        for pin in (None, '', '0'*64):
+            with self.subTest(pin=pin), self.assertRaisesRegex(ValueError, 'writer deployment'):
+                self.f.build(expected_research_origin=pin)
+        self.assertFalse(self.f.providers.calls)
+
+    def test_resolved_shadow_is_rejected_before_worker_reserves_its_budget(self):
+        state = self.f.providers.state
+        def shadow(bucket, prefix):
+            if bucket is self.f.security:
+                return GCSStateStore(bucket, prefix='lite-research/internal/research')
+            return state(bucket, prefix)
+        with patch.object(self.f.providers,'state',side_effect=shadow), self.assertRaisesRegex(ValueError,'reviewed origin'):
+            self.f.build()
+        self.assertFalse(hasattr(self.f.providers,'allocation'))
+
+    def test_writer_and_worker_observe_same_receipt_and_withdrawal(self):
+        from unittest.mock import Mock
+        from test_lite_bucket_policy import metadata
+        from test_lite_service_profile import lite_environment
+        import lite_attest_config
+        from lite_research_association import object_key
+
+        f = self.f
+        env = lite_environment(f.root)
+        project = f.c['deployment']
+        media_name = f.c['media']['bucket']
+        env.update(WOUNDAI_GCS_BUCKET=media_name, WOUNDAI_LITE_SECURITY_BUCKET=f.security.name,
+                   WOUNDAI_LITE_SECURITY_PROJECT=project['project'],
+                   WOUNDAI_LITE_SECURITY_PROJECT_NUMBER=project['project_number'])
+        media = Mock()
+        media.name = media_name
+        media._properties = dict(metadata(media_name), projectNumber=project['project_number'])
+        media.list_blobs.return_value = []
+        buckets = {media_name:media, f.security.name:f.security}
+        with patch.object(lite_attest_config.storage, 'Client') as client, \
+             patch.object(lite_attest_config, '_refuse_cloud_in_test_process'), \
+             patch.dict(f.security._properties, softDeletePolicy={'retentionDurationSeconds':'0'}):
+            client.return_value.bucket.side_effect = buckets.__getitem__
+            _, _, writer = lite_attest_config.build_lite_security(env)
+
+        spec = f.c['research_associations']
+        proof, = spec.pop('proofs')
+        spec['source'] = 'issuer-records/1'
+        pair = proof['pair']
+        native_key = object_key('native', [pair[k] for k in ('scope','person','native','operation')])
+        research_key = object_key('research', [pair[k] for k in ('scope','bucket','research')])
+        self.assertTrue(f.stores['deletion_audit'].compare_exchange(native_key,0,{k:proof[k] for k in ('pair','native')}))
+        closure = f.build().w.r.w.c
+        self.assertEqual(closure.advance(f.person)['waiting_for'], 'verified_research_link_required')
+        self.assertTrue(writer.manifest.store.compare_exchange(research_key,0,proof))
+        receipt = writer.manifest.store.load(research_key)
+        self.assertEqual(closure.advance(f.person)['linked_grants'], 1)
+        self.assertTrue(writer.is_withdrawn(pair['research']))
+        self.assertEqual(writer.manifest.store.load(research_key), receipt)
+
     def test_same_operator_and_drain_keys_rejected(self):
         self.f.c['signers']['drain']=self.f.c['signers']['operator']
         with self.assertRaises(ValueError):self.f.build()

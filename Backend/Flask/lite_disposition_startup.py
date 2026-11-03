@@ -78,7 +78,7 @@ def research_associations(spec, *, native_audit=None, research_state=None):
     return ResearchAssociations(*keys, spec['proofs'])
 
 
-def preflight(raw, *, expected_config, expected_source, expected_image, secrets, clock):
+def preflight(raw, *, expected_config, expected_source, expected_image, expected_research_origin, secrets, clock):
     _hex(expected_config); _hex(expected_source, 40); _hex(expected_image)
     if (type(raw) is not bytes or not 1 <= len(raw) <= 65536
             or hashlib.sha256(raw).hexdigest() != expected_config): raise ValueError('bounded pinned configuration required')
@@ -121,17 +121,28 @@ def preflight(raw, *, expected_config, expected_source, expected_image, secrets,
         issuers = set(keys)
         if issuers & (set(decoded[0].values()) | set(decoded[1].values())):
             raise ValueError('research authorizations must use keys separate from operation signers')
-    if type(c['buckets']) is not dict or not 2 <= len(c['buckets']) <= 4: raise ValueError('isolated explicit bucket inventory required')
+    if type(c['buckets']) is not dict or not 3 <= len(c['buckets']) <= 4: raise ValueError('isolated explicit bucket inventory required')
     for name, meta in c['buckets'].items():
         text(name, r'[a-z0-9][a-z0-9-]{1,61}[a-z0-9]'); exact(meta, 'metadata_sha256'); _hex(meta['metadata_sha256'])
     if type(c['stores']) is not dict or set(c['stores']) != set(STORES): raise ValueError('complete named store map required')
+    media = exact(c['media'], 'bucket')
+    research = exact(c['stores']['research'], 'bucket prefix')
+    # An independently reviewed pin from the research writer also binds the
+    # audience and physical namespace. A valid-looking empty prefix is unsafe.
+    text(research['prefix'], r'lite_security/v1/[a-z0-9-]{1,64}/privacy-fenced')
+    origin = ['lite-research-origin/1', d['project'], d['project_number'],
+              media['bucket'], research['bucket'], research['prefix']]
+    if digest(origin) != expected_research_origin:
+        raise ValueError('research origin differs from writer deployment')
     locations = []
     for name, loc in c['stores'].items():
         exact(loc, 'bucket prefix')
         if loc['bucket'] not in c['buckets']: raise ValueError('unlisted state bucket')
-        text(loc['prefix'], r'lite-(?:native|disposition|research)/[a-z0-9_-]{1,64}/[a-z0-9_-]{1,64}')
+        if name != 'research':
+            if loc['bucket'] == research['bucket']:
+                raise ValueError('research security bucket must be dedicated')
+            text(loc['prefix'], r'lite-(?:native|disposition|research)/[a-z0-9_-]{1,64}/[a-z0-9_-]{1,64}')
         locations.append(('gcs', loc['bucket'], loc['prefix']))
-    media = exact(c['media'], 'bucket')
     if media['bucket'] not in c['buckets'] or media['bucket'] in {x[1] for x in locations}:
         raise ValueError('separate research media bucket required')
     if {x[1] for x in locations} | {media['bucket']} != set(c['buckets']): raise ValueError('unused bucket')
@@ -214,10 +225,10 @@ class CloudProviders:
         return AppleOAuthProvider(client_id='com.woundai.lite',client_secret=secret,post=apple_revoker(self.allocation))
 
 
-def build_disposition(raw, *, expected_config, expected_source, expected_image, secrets, providers=None,
+def build_disposition(raw, *, expected_config, expected_source, expected_image, expected_research_origin, secrets, providers=None,
                       clock=lambda:int(time.time())):
     c, signers, secret = preflight(raw, expected_config=expected_config, expected_source=expected_source,
-        expected_image=expected_image, secrets=secrets, clock=clock)
+        expected_image=expected_image, expected_research_origin=expected_research_origin, secrets=secrets, clock=clock)
     p = CloudProviders() if providers is None else providers
     try:
         p.connect(c, clock=clock)
@@ -233,6 +244,11 @@ def build_disposition(raw, *, expected_config, expected_source, expected_image, 
                 raise ValueError('reviewed private bucket policy changed')
             buckets[name] = b
         s = {n:p.state(buckets[v['bucket']],v['prefix']) for n,v in c['stores'].items()}
+        route = c['stores']['research']
+        if location(s['research']) != ('gcs', route['bucket'], route['prefix']):
+            raise ValueError('resolved research store differs from reviewed origin')
+        if any(location(store)[:2] == ('gcs', route['bucket']) for n, store in s.items() if n != 'research'):
+            raise ValueError('resolved auxiliary state shares research security bucket')
         locs = [location(x) for x in s.values()]
         if any(overlaps(a,b) for i,a in enumerate(locs) for b in locs[i+1:]): raise ValueError('resolved storage overlaps')
         if any(loc[0]=='gcs' and loc[1]==c['media']['bucket'] for loc in locs): raise ValueError('resolved state shares research media')
@@ -300,12 +316,12 @@ def application(environment=None):
     import os
     env = os.environ if environment is None else environment
     names = ('LITE_DISPOSITION_CONFIG','LITE_DISPOSITION_CONFIG_SHA256','LITE_DISPOSITION_SOURCE',
-             'LITE_DISPOSITION_IMAGE_SHA256','LITE_DISPOSITION_SECRETS')
+             'LITE_DISPOSITION_IMAGE_SHA256','LITE_DISPOSITION_SECRETS','LITE_DISPOSITION_RESEARCH_ORIGIN_SHA256')
     if any(type(env.get(n)) is not str or not env[n] for n in names): raise ValueError('explicit private disposition configuration required')
     path = Path(env[names[0]])
     if not path.is_absolute() or path.is_symlink() or not path.is_file() or not 1<=path.stat().st_size<=65536:
         raise ValueError('bounded regular configuration required')
     try:
         return build_disposition(path.read_bytes(),expected_config=env[names[1]],expected_source=env[names[2]],
-            expected_image=env[names[3]],secrets=env[names[4]]).create_app()
+            expected_image=env[names[3]],secrets=env[names[4]],expected_research_origin=env[names[5]]).create_app()
     except Exception: raise RuntimeError('private disposition startup refused; preserve evidence') from None
