@@ -237,6 +237,19 @@ struct LiteAccountCheckpoint:Codable,Equatable {
         guard !blocked, let record, ["active", "renew"].contains(record.phase) else { throw LiteAccountFailure.unavailable }
         return true
     }
+    /// Local presentation only. Signed transport checks the active account again before any request.
+    func purchaseAccessDeadline() async -> Date? {
+        let start = generation
+        do {
+            let owner = try await service.installation()
+            guard let record = try await read(owner).1, ["active", "renew"].contains(record.phase),
+                  let session = record.session, try await !hasDeletionIntent(owner),
+                  !blocked, !busy, generation == start else { return nil }
+            let deadline = Date(timeIntervalSince1970: Double(session.family_expires_at ?? session.expires_at))
+            return deadline > now() ? deadline : nil
+        } catch { return nil }
+    }
+
     func deletionContext() async throws -> LiteDeletionContext {
         try await activeServiceContext()
     }

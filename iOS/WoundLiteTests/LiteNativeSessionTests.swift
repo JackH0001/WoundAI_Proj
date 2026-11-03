@@ -357,6 +357,45 @@ private actor SessionWire: LiteAuthenticatedTransport {
         XCTAssertEqual(counts, ["registration": 0])
         XCTAssertTrue(rows.isEmpty)
     }
+    func testRegisteredDeviceOnlyReadsPricesUntilItsServiceAccountSignsIn() async throws {
+        let wire = try SessionWire(), journal = SessionJournal(), apple = SessionApple(), kit = SessionStoreKit()
+        let runtime = try runtime(wire, journal, apple: apple, storeKit: kit)
+        await runtime.checkExistingRegistration()
+        XCTAssertEqual(runtime.registration, .confirmed)
+        let absent = await runtime.identity.purchaseAccessDeadline()
+        XCTAssertNil(absent)
+        await runtime.purchases.observePurchases(canManagePurchases: absent != nil)
+        await runtime.purchases.loadOffer()
+        XCTAssertEqual(runtime.purchases.offer, nativeTestOffer)
+        let counts = await wire.counts(), emptyJournal = await journal.snapshot()
+        XCTAssertEqual(counts, ["registration": 0])
+        XCTAssertTrue(emptyJournal.isEmpty)
+        XCTAssertEqual(apple.calls, 0)
+        XCTAssertEqual(kit.buys, 0)
+        XCTAssertEqual(kit.restores, 0)
+    }
+
+    func testLocalPurchaseEligibilityAfterSignInRestartExpiryAndLogout() async throws {
+        let wire = try SessionWire(), journal = SessionJournal()
+        let original = try runtime(wire, journal)
+        await original.identity.signIn()
+        let before = await wire.counts(), rows = await journal.snapshot()
+        let originalDeadline = await original.identity.purchaseAccessDeadline()
+        XCTAssertEqual(originalDeadline, Date(timeIntervalSince1970: Double(sessionTime + 900)))
+        let restored = try runtime(wire, journal)
+        let restoredDeadline = await restored.identity.purchaseAccessDeadline()
+        XCTAssertEqual(restoredDeadline, originalDeadline)
+        let expired = try runtime(wire, journal, time: sessionTime + 900)
+        let expiredDeadline = await expired.identity.purchaseAccessDeadline()
+        XCTAssertNil(expiredDeadline)
+        let after = await wire.counts(), rowsAfter = await journal.snapshot()
+        XCTAssertEqual(before, after)
+        XCTAssertEqual(rows, rowsAfter)
+        await restored.identity.signOut()
+        let afterLogout = await restored.identity.purchaseAccessDeadline()
+        XCTAssertNil(afterLogout)
+    }
+
     func testBeforeSignInNeitherPurchaseNorRecognitionIsDispatched() async throws {
         let wire = try SessionWire(), r = try runtime(wire, SessionJournal())
         await r.purchases.purchaseDisplayedTestOffer()

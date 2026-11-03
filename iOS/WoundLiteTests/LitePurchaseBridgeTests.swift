@@ -123,7 +123,8 @@ private actor PurchaseJournal:LiteServiceJournal {
     func testUnregisteredPreviewReadsOnlyCatalogEvenWithAnUnfinishedPurchase() async {
         let (service, provider, journal, store) = setup()
         provider.pending = [event()]
-        await store.openOffers(canManagePurchases: false)
+        await store.observePurchases(canManagePurchases: false)
+        await store.loadOffer()
         await Task.yield()
         XCTAssertEqual(store.offer, nativeTestOffer)
         XCTAssertNil(provider.continuation)
@@ -135,7 +136,8 @@ private actor PurchaseJournal:LiteServiceJournal {
         let saved = await journal.values()
         XCTAssertTrue(saved.isEmpty)
         provider.catalog = nil
-        await store.openOffers(canManagePurchases: false)
+        await store.observePurchases(canManagePurchases: false)
+        await store.loadOffer()
         XCTAssertNil(store.offer)
         XCTAssertEqual(provider.lookups, 2)
         XCTAssertEqual(provider.unfinishedReads, 0)
@@ -302,6 +304,31 @@ private actor PurchaseJournal:LiteServiceJournal {
     func testExpiredContextNeverStartsPurchase()async {
         let(s,p,_,m)=setup();s.expired=true;await m.purchaseDisplayedTestOffer();XCTAssertEqual(p.purchases,0)
     }
+    func testPurchaseContextFailureDoesNotClaimAPendingAppleTransaction() async {
+        let (service, provider, _, store) = setup()
+        service.expired = true
+        await store.purchaseDisplayedTestOffer()
+        XCTAssertEqual(provider.purchases, 0)
+        XCTAssertEqual(service.calls, 0)
+        XCTAssertTrue(store.message.contains("尚未向 Apple 發起購買"), store.message)
+    }
+
+    func testRestoreContextFailureReportsThatAppleWasNotQueried() async {
+        let (service, provider, _, store) = setup()
+        service.expired = true
+        await store.restore()
+        XCTAssertEqual(provider.restoreCalls, 0)
+        XCTAssertEqual(service.calls, 0)
+        XCTAssertTrue(store.message.contains("尚未向 Apple 查詢既有訂閱"), store.message)
+    }
+
+    func testExplicitCheckWithNoUnfinishedTransactionsReportsAResult() async {
+        let (service, provider, _, store) = setup()
+        await store.reconcile()
+        XCTAssertEqual(provider.unfinishedReads, 1)
+        XCTAssertEqual(service.contexts, 0)
+        XCTAssertTrue(store.message.contains("沒有待完成的交易"), store.message)
+    }
     func testEmptyRestoreDoesNotRegisterOrResetQuota()async {
         let(s,p,_,m)=setup();await m.restore();XCTAssertEqual(s.calls,0);XCTAssertEqual(p.purchases,0)
         XCTAssertTrue(m.message.contains("沒有找到"))
@@ -334,7 +361,8 @@ import StoreKitTest
         let product = try XCTUnwrap(products.first)
         let service = PurchaseService(), journal = PurchaseJournal()
         let store = LiteNativePurchaseStore(service: service, provider: LiteStoreKitPurchaseProvider(xcodeTest: true), journal: journal)
-        await store.openOffers(canManagePurchases: false)
+        await store.observePurchases(canManagePurchases: false)
+        await store.loadOffer()
         XCTAssertEqual(store.offer?.displayPrice, product.displayPrice)
         XCTAssertEqual(store.offer?.name, product.displayName)
         XCTAssertTrue(session.allTransactions().isEmpty)

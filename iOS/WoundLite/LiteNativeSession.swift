@@ -289,11 +289,10 @@ struct LiteNativeSessionView: View {
             }
             if session.registration == .confirmed, let account = try? session.accountView() {
                 NavigationLink("服務帳號與刪除") { account }
-                NavigationLink("訂閱與恢復購買") { LiteNativePurchaseView(store: session.purchases, canManagePurchases: true) }
             } else {
-                NavigationLink("Plus 方案與價格") { LiteNativePurchaseView(store: session.purchases, canManagePurchases: false) }
-                Text("可先查看方案。完成裝置登記後，這裡會顯示帳號登入、刪帳及訂閱與恢復購買。")
+                Text("可先查看方案。完成裝置登記後，可登入服務帳號使用訂閱或恢復購買。")
             }
+            NavigationLink("Plus 方案與價格") { LiteNativePurchaseView(session: session) }
             Text("拍攝後可自行選擇個人雲端辨識。使用個人服務或恢復購買不會開啟研究上傳。")
                 .font(.footnote).foregroundStyle(.secondary)
         }.navigationTitle("個人服務")

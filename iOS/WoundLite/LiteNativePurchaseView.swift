@@ -3,7 +3,25 @@ import SwiftUI
 /// The candidate injects a trusted service bridge. Reading the disclosures needs no service access.
 struct LiteNativePurchaseView: View {
     @ObservedObject var store: LiteNativePurchaseStore
-    let canManagePurchases: Bool
+    @ObservedObject private var session: LiteNativeSession
+    @ObservedObject private var identity: LiteAccountIdentityStore
+    @Environment(\.scenePhase) private var scene
+    @State private var authorizedGeneration: Int?
+
+    init(session: LiteNativeSession) {
+        self.session = session
+        self.identity = session.identity
+        self.store = session.purchases
+    }
+
+    private struct AccountCheck: Equatable {
+        let registered: Bool, busy: Bool, active: Bool
+        let generation: Int
+    }
+
+    private var canManagePurchases: Bool {
+        session.registration == .confirmed && authorizedGeneration == identity.generation
+    }
     var body: some View {
         Form {
             Section("個人雲端辨識") {
@@ -47,13 +65,30 @@ struct LiteNativePurchaseView: View {
                     Text("研究上傳由您另行決定。").font(.footnote)
                 }
             } else {
-                Text("這裡只向 Apple 查詢當地月費。要訂閱或恢復購買，請先核對裝置並登入服務帳號。研究上傳由您另行決定。")
+                if session.registration == .confirmed, let account = try? session.accountView() {
+                    NavigationLink("核對服務帳號或使用 Apple 登入") { account }
+                }
+                Text("可先查看月費。完成裝置登記並登入原服務帳號後，這裡會顯示訂閱與恢復購買。研究上傳由您另行決定。")
                     .font(.footnote).accessibilityIdentifier("lite.offer.preview")
             }
         }
-        .navigationTitle(canManagePurchases ? "訂閱與恢復購買" : "Plus 方案與價格")
+        .navigationTitle("Plus 方案與價格")
+        .task(id: AccountCheck(registered: session.registration == .confirmed, busy: identity.busy,
+                               active: scene == .active, generation: identity.generation)) {
+            guard session.registration == .confirmed else { authorizedGeneration = nil; return }
+            guard scene == .active, !identity.busy else { return }
+            let generation = identity.generation
+            let deadline = await identity.purchaseAccessDeadline()
+            guard !Task.isCancelled, generation == identity.generation else { return }
+            guard let deadline else { authorizedGeneration = nil; return }
+            authorizedGeneration = generation
+            do { try await Task.sleep(for: .seconds(max(0, deadline.timeIntervalSince(identity.now())))) }
+            catch { return }
+            if !Task.isCancelled { authorizedGeneration = nil }
+        }
+        .task { await store.loadOffer() }
         .task(id: canManagePurchases) {
-            await store.openOffers(canManagePurchases: canManagePurchases)
+            await store.observePurchases(canManagePurchases: canManagePurchases)
         }
     }
 }
