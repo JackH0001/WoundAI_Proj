@@ -32,6 +32,7 @@ private enum CaptureDeliveryError: Error {
         switch self {
         case .response(401, _): return "請核對原服務帳號與裝置登記，再從這筆紀錄重試。"
         case .response(404, _): return "這個服務尚未開放研究保存。照片與圈選已存於手機。"
+        case .response(_, "research_photo_metadata"): return "已保留手機紀錄。照片附帶研究服務無法接受的資訊，這次研究送件已停止。"
         case .response(_, "face_detected"): return "照片可能包含人臉，本次研究送件已停止。"
         case .response(_, "research_source_receipt_expired"): return "這筆辨識的來源回執已到期，紀錄保留在手機。"
         case .response(410, _): return "原研究批次已停止收件，紀錄保留在手機。"

@@ -1,6 +1,7 @@
 import XCTest
 import SwiftUI
 import PDFKit
+import ImageIO
 @testable import WoundLite
 
 private let sessionTime = 1_800_000_000
@@ -732,6 +733,53 @@ extension LiteNativeSessionTests {
         XCTAssertEqual(LitePrefs.researchConsent, consent); XCTAssertNil(vm.cloudBinding)
         let encrypted = try Data(contentsOf: path.appendingPathComponent(draft.id + ".enc"))
         XCTAssertNil(encrypted.range(of: draft.jpeg)); XCTAssertNil(encrypted.range(of: Data("polygons".utf8)))
+    }
+    func testSyntheticCameraMetadataDoesNotCarryIntoTheLiteCaptureJPEG() async throws {
+        let wire = try SessionWire()
+        let originalJPEG = await wire.image()
+        let image = try XCTUnwrap(UIImage(data: originalJPEG)?.cgImage)
+        let target = NSMutableData()
+        let dest = try XCTUnwrap(CGImageDestinationCreateWithData(target, "public.jpeg" as CFString, 1, nil))
+        let metadata: [CFString: Any] = [
+            kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFArtist: "Synthetic-QA-Only"],
+            kCGImagePropertyGPSDictionary: [kCGImagePropertyGPSLatitude: 0.25, kCGImagePropertyGPSLatitudeRef: "N",
+                                            kCGImagePropertyGPSLongitude: 0.5, kCGImagePropertyGPSLongitudeRef: "E"],
+        ]
+        CGImageDestinationAddImage(dest, image, metadata as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(dest))
+        func properties(_ bytes: Data) throws -> [CFString: Any] {
+            let source = try XCTUnwrap(CGImageSourceCreateWithData(bytes as CFData, nil))
+            return try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+        }
+        let original = target as Data
+        let tags = try properties(original)
+        XCTAssertNotNil(tags[kCGImagePropertyGPSDictionary])
+        XCTAssertEqual((tags[kCGImagePropertyTIFFDictionary] as? [CFString: Any])?[kCGImagePropertyTIFFArtist] as? String, "Synthetic-QA-Only")
+        let vm = LiteMeasureVM(captureParticipation: { nil })
+        _ = await vm.ingest(try XCTUnwrap(UIImage(data: original)), depth: captureDepth())
+        let jpeg = try XCTUnwrap(vm.captureJPEG)
+        let output = try properties(jpeg)
+        XCTAssertNil(output[kCGImagePropertyGPSDictionary])
+        XCTAssertNil((output[kCGImagePropertyTIFFDictionary] as? [CFString: Any])?[kCGImagePropertyTIFFArtist])
+        let attachment = XCTAttachment(data: jpeg, uniformTypeIdentifier: "public.jpeg")
+        attachment.name = "synthetic-lite-normalized.jpg"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        for (name, space) in [("p3", CGColorSpace.displayP3), ("srgb", CGColorSpace.sRGB)] {
+            let color = try XCTUnwrap(CGColorSpace(name: space))
+            let context = try XCTUnwrap(CGContext(data: nil, width: 64, height: 64, bitsPerComponent: 8,
+                bytesPerRow: 0, space: color, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+            context.setFillColor(red: 0.7, green: 0.3, blue: 0.4, alpha: 1)
+            context.fill(CGRect(x: 0, y: 0, width: 64, height: 64))
+            let input = UIImage(cgImage: try XCTUnwrap(context.makeImage()))
+            _ = await vm.ingest(input, depth: captureDepth())
+            let sample = try XCTUnwrap(vm.captureJPEG)
+            XCTAssertNil(try properties(sample)[kCGImagePropertyGPSDictionary])
+            let proof = XCTAttachment(data: sample, uniformTypeIdentifier: "public.jpeg")
+            proof.name = "synthetic-lite-" + name + ".jpg"
+            proof.lifetime = .keepAlways
+            add(proof)
+        }
     }
     func testDraftDiskFailureNeverEnqueuesOrTransmitsAndCanRetryLocally() async throws {
         let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }

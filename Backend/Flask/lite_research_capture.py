@@ -22,6 +22,7 @@ from lite_attest_state import CAS_ATTEMPTS, StateUnavailable, _revision
 from lite_fenced_store import FencedPrivacy
 from lite_privacy_state import OwnerWithdrawn
 from lite_raster_tools import _has_face
+from lite_research_image_privacy import ResearchPhotoMetadata, check_research_jpeg
 from lite_raw_depth_contract import MAX_JPEG_BYTES, MAX_PIXELS, validate
 from lite_raw_depth_store import pack, save_capture
 from lite_research_source import ResearchSourceVerifier, SourceRejected, SourceExpired, encoded, sha, hexid
@@ -182,6 +183,7 @@ class ResearchCaptureReceiver:
         completed = store.capture_index(identifier)
         if completed is None:
             self.verifier.verify(ticket, owner=owner, consent_epoch=privacy.manifest.epoch)
+            check_research_jpeg(jpeg)
             found, _ = _has_face(bgr)
             if found is True: raise CapturePrivacyRejected('face detected')
             if found is not False: raise StateUnavailable('privacy check unavailable')
@@ -303,6 +305,8 @@ def blueprint(receiver):
             return jsonify(receipt)
         except SourceExpired:
             return jsonify(error='research_source_expired', renew_source_only=True, keep_local=True), 409
+        except ResearchPhotoMetadata:
+            return jsonify(error='research_photo_metadata', keep_local=True), 400
         except CapturePrivacyRejected:
             return jsonify(error='face_detected', keep_local=True), 400
         except (SourceRejected, InvalidSignature):

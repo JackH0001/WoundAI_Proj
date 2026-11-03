@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from PIL import Image
 from werkzeug.datastructures import MultiDict
 from werkzeug.test import EnvironBuilder
 from lite_attest_http import install_lite_attest
@@ -170,6 +171,33 @@ class ResearchCaptureTests(unittest.TestCase):
         meta=self.privacy.media(self.h.owner).get_json('lite/'+self.h.owner+'/'+r.json['image_id']+'.json')
         self.assertEqual(meta['ai_polygons'],[]); self.assertIsNone(meta['route'])
         self.assertIsNone(r.json['raw_depth_receipt']); self.unchanged_usage()
+
+    def test_author_in_signed_rgbd_rejected_before_media_or_personal_charge(self):
+        photo = io.BytesIO()
+        exif = Image.Exif()
+        exif[315] = 'Synthetic-QA'
+        with Image.open(io.BytesIO(self.jpeg)) as image:
+            image.save(photo, format='JPEG', exif=exif)
+        self.jpeg = photo.getvalue()
+        reply = self.upload(ticket=self.proof(operation=None),
+                            metadata=dict(self.metadata, rgb_sha256=hashlib.sha256(self.jpeg).hexdigest()))
+        self.assertEqual((reply.status_code, reply.json), (400, dict(error='research_photo_metadata', keep_local=True, consent_epoch='legacy')))
+        self.assertFalse(self.bucket.live)
+        self.unchanged_usage()
+
+    def test_historically_accepted_photo_still_recovers_its_original_receipt(self):
+        # Emulate a receipt committed before the metadata admission rule.
+        self.jpeg = self.jpeg[:-2] + bytes.fromhex('fffe0004') + b'QA' + self.jpeg[-2:]
+        self.ticket = self.proof(operation=None)
+        self.metadata['rgb_sha256'] = hashlib.sha256(self.jpeg).hexdigest()
+        with patch('lite_research_capture.check_research_jpeg'):
+            stored = self.upload()
+        self.assertEqual(stored.status_code, 200, stored.json)
+        frozen = copy.deepcopy(self.bucket.live)
+        self.assertEqual(self.lookup().json, stored.json)
+        self.assertEqual(self.upload().json, stored.json)
+        self.assertEqual(self.bucket.live, frozen)
+        self.unchanged_usage()
 
     def test_expired_ticket_only_reads_already_complete_capture(self):
         r=self.upload(); self.assertEqual(r.status_code,200,r.json)

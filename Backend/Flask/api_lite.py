@@ -296,6 +296,13 @@ def _lite_segment_impl():
     raw = request.files["image"].read()
     if len(raw) > MAX_IMAGE_BYTES:
         return jsonify({"error": "影像超過 %d MB" % (MAX_IMAGE_BYTES // 1024 // 1024)}), 413
+    if consent:
+        from lite_research_image_privacy import ResearchPhotoMetadata, check_research_image
+        try:
+            check_research_image(raw)
+        except ResearchPhotoMetadata:
+            return jsonify(error="research_photo_metadata", keep_local=True,
+                           message="照片附帶研究服務無法接受的資訊。請保留手機紀錄。"), 400
     raw_capture = None
     raw_metadata = None
     raw_depth = None
