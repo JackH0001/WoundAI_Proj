@@ -6,7 +6,7 @@
 
 在 iOS 目錄執行 `xcodegen generate --spec project.lite-sandbox.yml`。使用產生的 `WoundAILiteNativeSandbox.xcodeproj` 及 `WoundLite` scheme。在受控的建置設定填入 `WOUNDLITE_NATIVE_SANDBOX_ORIGIN`，值必須符合 `LiteNativeCandidateBinding.address`。本次地址是規劃給獨立候選服務的名稱，仍待部署核對。裝置建置缺少或誤填網址會停止。一般版從 `project.yml` 產生。
 
-研究與個人辨識使用不同的服務網址、裝置登記範圍與本機工作紀錄。啟動候選版時只準備本機元件。首次從「設定 → 服務登入、訂閱與刪帳」進入，先讀取這一安裝儲存的登記狀態。全新或尚未完成登記時顯示手動登記。遇到保護鎖或資料異常時只提供重讀。已登記的裝置才顯示帳號、刪帳與訂閱入口。Apple 登入從目前操作視窗發起。
+研究與個人辨識使用不同的服務網址、裝置登記範圍與本機工作紀錄。首次進入「設定 → 服務登入、訂閱與刪帳」會讀取這部裝置已保存的登記狀態。新安裝可查看 Apple 商品價格，再自行登記裝置及登入原服務帳號，之後才可購買或恢復。若服務資料被鎖定或讀取失敗，可於解鎖後重讀。候選版另在設定頁直接提供「管理 Apple 訂閱」，使用者可以前往 Apple 核對續訂，即使個人服務暫時無法啟動也能找到入口。
 
 從紀錄檢視先前的辨識結果只會讀本機。使用者另選個人雲端辨識時，僅送選取的 JPEG。原傷口標註、深度、面積及研究同意保留在原流程。內部版的隱私資訊另列服務所用的使用者識別碼與購買紀錄。
 
@@ -18,5 +18,7 @@
 4. 如專用模擬器已有歷史驗收的三筆合成紀錄，可用 `WOUNDLITE_UI_EXPECTATION=LITE_QA_EXTERNAL_FIXTURE` 核對預設畫面能分享 PDF，且看不到內部驗收入口。內部人員的候選建置另行設定 `WOUNDLITE_SAVED_RECORD_TEST=YES`，並以 `WOUNDLITE_UI_EXPECTATION=LITE_QA_SAVED_FIXTURE` 測試進入後仍需明確送出。一般版一律隱藏此入口。
 
 ## 簽署與實機門檻
+
+使用後置 LiDAR 裝置與紙上標靶驗證新拍攝。缺少後置 LiDAR 時可檢查已有的本機紀錄及設定；在全新安裝上，沒有紀錄可供匯出。首次在支援的實機上建立同一處傷口的兩筆有合格面積的合成紀錄，再驗證含照片與趨勢的時間軸 PDF。這段硬體條件也應寫入外測說明。
 
 送到 TestFlight 前，需核對同一個 App ID 的 distribution profile 同時允許 Sign in with Apple 與 production App Attest，再核對實際簽章、指定的候選服務、商品、測試帳號與新版號。服務接受的組建號須與實際簽署檔一致。未簽署的實機架構建置只能用於檢查打包內容。通過前置條件後，以同一合成照片依序驗收免費額度、購買及恢復、跨裝置帳號隔離與到期處理。[S0–S9 操作及讀回條件](lite_apple_sandbox_acceptance_20261027.md)

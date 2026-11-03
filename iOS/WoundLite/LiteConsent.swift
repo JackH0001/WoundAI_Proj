@@ -168,6 +168,7 @@ struct LiteSettingsView: View {
                         .textSelection(.enabled)
                     LitePrivacyLink()
                     LiteTermsLink()
+                    if LiteNativeBuild.includesService { LiteAppleSubscriptionLink() }
                 }
                 if let accountManagement {
                     Section("服務帳號") {

@@ -122,13 +122,17 @@ final class NativeEntryUITests: XCTestCase {
         let entry = app.buttons["服務登入、訂閱與刪帳"]
         let missing = app.staticTexts["此測試版本的服務網址尚未設定完成。您仍可使用本機紀錄。"]
         XCTAssertTrue(app.navigationBars["設定"].waitForExistence(timeout: 8))
+        let appleManagement = app.descendants(matching: .any)["lite.billing.manage"].firstMatch
         #if LITE_QA_ORDINARY
+        XCTAssertFalse(appleManagement.exists)
         XCTAssertFalse(entry.exists)
         XCTAssertFalse(missing.exists)
         #elseif LITE_QA_MISSING_BINDING
+        XCTAssertTrue(appleManagement.isHittable)
         XCTAssertTrue(missing.waitForExistence(timeout: 8))
         XCTAssertFalse(entry.exists)
         #else
+        XCTAssertTrue(appleManagement.isHittable, "Apple billing management must be reachable before device registration")
         XCTAssertTrue(entry.waitForExistence(timeout: 8))
         entry.tap()
         // App Attest cannot enroll a simulator. A clean install must stop at
@@ -143,10 +147,13 @@ final class NativeEntryUITests: XCTestCase {
         preview.tap()
         XCTAssertTrue(app.navigationBars["Plus 方案與價格"].waitForExistence(timeout: 8))
         XCTAssertTrue(app.staticTexts["lite.offer.quota"].exists)
+        XCTAssertTrue(app.staticTexts["lite.offer.captureRequirement"].exists)
         XCTAssertFalse(app.buttons["lite.offer.buy"].exists)
         XCTAssertFalse(app.buttons["恢復購買"].exists)
         XCTAssertFalse(app.buttons["核對未完成購買"].exists)
         XCTAssertFalse(app.staticTexts["nativePurchaseStatus"].exists)
+        for _ in 0..<4 where !appleManagement.isHittable { app.swipeUp() }
+        XCTAssertTrue(appleManagement.isHittable)
         attach(app, "read-only-offer-before-registration")
         #endif
     }

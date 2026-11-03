@@ -33,7 +33,7 @@ struct LiteHelpTopic: Identifiable {
                 .init(id: "subscription", title: "在哪裡看月費或恢復購買？", path: "設定 → 服務登入、訂閱與刪帳",
                       steps: "開「Plus 方案與價格」可先看 Apple 顯示的月費。要恢復訂閱，先核對裝置並登入原服務帳號，再回到方案頁按「恢復購買」。", terms: ["月費", "價格", "訂閱", "恢復購買", "付費", "plus", "price", "restore"]),
                 .init(id: "billing", title: "怎麼取消續訂或申請退款？", path: "iPhone 或 iPad 的設定 → 您的姓名 → 訂閱",
-                      steps: "選擇 WoundAILite Plus 後可取消續訂。若要申請退款，從 Apple 帳單支援頁查看資格與進度。請保留服務帳號與原紀錄。", terms: ["取消訂閱", "取消續訂", "退訂", "退款", "refund", "cancel subscription"]),
+                      steps: "也可在 WoundAILite 的設定點「管理 Apple 訂閱」，使用當初購買的 Apple 帳號選擇 WoundAILite Plus，查看續訂日期或取消續訂。申請退款請使用 Apple 帳單支援。", terms: ["取消訂閱", "取消續訂", "退訂", "退款", "refund", "cancel subscription"]),
                 .init(id: "deletion", title: "如何刪除服務帳號？", path: "設定 → 服務登入、訂閱與刪帳 → 服務帳號與刪除",
                       steps: "刪帳會一併要求撤回可對應的研究資料，請先閱讀畫面並核對處理進度。Apple 續訂需另外到系統的訂閱設定管理。", terms: ["刪帳", "刪除帳號", "delete account"]),
             ]

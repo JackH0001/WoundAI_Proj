@@ -1,5 +1,12 @@
 import SwiftUI
 
+struct LiteAppleSubscriptionLink: View {
+    var body: some View {
+        Link("管理 Apple 訂閱", destination: URL(string: "https://apps.apple.com/account/subscriptions")!)
+            .accessibilityIdentifier("lite.billing.manage")
+    }
+}
+
 /// The candidate injects a trusted service bridge. Reading the disclosures needs no service access.
 struct LiteNativePurchaseView: View {
     @ObservedObject var store: LiteNativePurchaseStore
@@ -26,6 +33,8 @@ struct LiteNativePurchaseView: View {
         Form {
             Section("個人雲端辨識") {
                 Text("免費方案每日可成功辨識 2 次。Plus 每日共 10 次，包含當日已使用的次數。").accessibilityIdentifier("lite.offer.quota")
+                Text("拍攝新的傷口紀錄需使用配備後置 LiDAR 的 iPhone 或 iPad。請先在量測頁確認這部裝置可拍攝，再決定是否訂閱。")
+                    .font(.footnote).accessibilityIdentifier("lite.offer.captureRequirement")
                 Text("免費可同時追蹤 1 處傷口，Plus 每帳戶最多 5 處。每日辨識次數由各處傷口合計。結束追蹤可換另一處，舊時間軸仍可查看及匯出 PDF。")
                 Text("額度每日在 UTC 0 時重算，台灣時間為上午 8 時。處理中的辨識會暫時保留名額。查看已保存的結果不扣次數。")
                     .font(.footnote)
@@ -49,7 +58,8 @@ struct LiteNativePurchaseView: View {
                     Button("重新讀取 Apple 商品") { Task { await store.loadOffer() } }
                 }
             }.disabled(store.busy)
-            Section("訂閱前可先閱讀") {
+            Section("訂閱管理與條款") {
+                LiteAppleSubscriptionLink()
                 LitePrivacyLink()
                 LiteTermsLink()
             }
@@ -57,7 +67,6 @@ struct LiteNativePurchaseView: View {
                 Section("既有訂閱") {
                     Button("恢復購買") { Task { await store.restore() } }
                     Button("核對未完成購買") { Task { await store.reconcile() } }
-                    Link("管理 Apple 訂閱", destination: URL(string: "https://apps.apple.com/account/subscriptions")!)
                 }.disabled(store.busy)
                 Section("核對狀態") {
                     if store.busy { ProgressView("正在核對，請勿重複購買…") }

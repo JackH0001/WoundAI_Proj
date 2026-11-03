@@ -70,7 +70,7 @@ struct LiteAccountManagementView:View {
             Section("保留與訂閱") {
                 Text("手機照片與紀錄保留。如果只想退出研究，可在「資料與撤回」單獨撤回並保留服務帳號。")
                 Text("刪除帳號不等於取消 Apple 訂閱。如有訂閱，請另至 Apple 訂閱管理確認。")
-                Link("管理 Apple 訂閱",destination:URL(string:"https://apps.apple.com/account/subscriptions")!)
+                LiteAppleSubscriptionLink()
             }
         }.navigationTitle("帳號與刪除")
         .task{await deletion.reload()}
