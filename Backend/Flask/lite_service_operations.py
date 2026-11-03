@@ -108,10 +108,12 @@ class ServiceAccounts:
         if self.bootstrap is not None:self.bootstrap(installation)
         self.require_active(value)
 
-    def registration(self,installation):
+    def registration(self,installation,*,required=True):
         """Immutable trusted installation mapping, without a subscription overlay."""
         row=self.store.load(self.key(installation))
-        if row is None:raise StateUnavailable('verified service account not provisioned')
+        if row is None:
+            if required:raise StateUnavailable('verified service account not provisioned')
+            return None
         v=row[1]
         try:
             if (type(v) is not dict or set(v)!={'v','installation_hash','subject','token','original_transaction','proof'}

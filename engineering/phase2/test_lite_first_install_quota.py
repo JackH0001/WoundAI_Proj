@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from PIL import Image
+from lite_apple_oauth import TOKEN_URL
 from lite_attest_state import SQLiteStateStore, StateUnavailable
 from lite_service_operations import ServiceAccounts
 from lite_service_release import ServiceReleaseController, ServiceReleaseReader, make_manifest
@@ -93,14 +94,115 @@ class FirstInstallTests(SignedServiceClient, unittest.TestCase):
             action='service-release-'+action,expected_state=digest(row[1] if row else None),
             issued_at=self.h.clock(),expires_at=self.h.clock()+900,nonce=f'{self.serial:064x}'))
 
-    def signed_client(self):
-        self.controller.apply(self.approval('publish'))
+    def connect_installation(self):
         self.backend=self.h.compose()
         self.client=self.backend.create_app().test_client()
         self.e=self.h.e; self.key=b64(self.e.key_id);self.counter=0;self.login_serial=100
-        self.register();self.login()
+        self.register()
+
+    def signed_client(self):
+        self.controller.apply(self.approval('publish'))
+        self.connect_installation();self.login()
         b=io.BytesIO();Image.new('RGB',(64,64),(200,100,120)).save(b,format='JPEG')
         self.f=SimpleNamespace(jpeg=b.getvalue());self.image_hash=hashlib.sha256(self.f.jpeg).hexdigest()
+
+    def confirmation(self, challenge, subject='apple-human-1'):
+        identity=self.backend.identity
+        version=identity.grants.cipher.provider.version(identity.lifecycle.scope,identity.events.identity(subject))
+        if version not in self.h.kms.states:self.h.kms.provision(version)
+        token=self.h.identity.token(challenge,sub=subject)
+        self.h.grant.token=token
+        return dict(operation=challenge['operation'],state=challenge['state'],identity_token=token,
+                    authorization_code='synthetic-code-'+challenge['operation'])
+
+    def test_closed_first_sign_in_never_starts_an_apple_challenge(self):
+        self.connect_installation()
+        lanes=('accounts','grants','identity','links','quota','lifecycle')
+        before={k:rows(self.stores[k]) for k in lanes}
+        calls=list(self.h.grant.calls)
+        for stage in ('unpublished','paused'):
+            if stage=='paused':
+                self.controller.apply(self.approval('publish'));self.controller.apply(self.approval('pause'))
+            with self.subTest(stage=stage):
+                self.assertEqual(self.post('account/challenge',operation='a'*32).status_code,503)
+                self.assertEqual(self.h.grant.calls,calls)
+                self.assertEqual({k:rows(self.stores[k]) for k in lanes},before)
+
+    def test_pause_after_challenge_retains_code_for_same_operation(self):
+        self.controller.apply(self.approval('publish'));self.connect_installation()
+        c=self.post('account/challenge',operation='a'*32).json
+        fields=self.confirmation(c)
+        self.controller.apply(self.approval('pause'))
+        before=list(self.h.grant.calls)
+        self.assertEqual(self.post('account/confirm',**fields).status_code,503)
+        self.assertEqual(self.h.grant.calls,before)
+        self.assertIsNone(self.backend.operations.accounts.registration(self.owner,required=False))
+        self.controller.apply(self.approval('resume'))
+        first=self.post('account/confirm',**fields)
+        self.assertEqual(first.status_code,200,first.json)
+        self.assertEqual(self.post('account/confirm',**fields).json,first.json)
+        self.assertEqual(self.h.grant.calls[len(before):],[TOKEN_URL])
+
+    def test_pause_during_exchange_preserves_grant_without_registering_or_exchanging_twice(self):
+        self.controller.apply(self.approval('publish'));self.connect_installation()
+        c=self.post('account/challenge',operation='a'*32).json;fields=self.confirmation(c)
+        before=len(self.h.grant.calls)
+        self.h.grant.hook=lambda _:self.controller.apply(self.approval('pause'))
+        self.assertEqual(self.post('account/confirm',**fields).status_code,503)
+        self.assertIsNone(self.backend.operations.accounts.registration(self.owner,required=False))
+        self.h.grant.hook=None
+        self.controller.apply(self.approval('resume'))
+        self.assertEqual(self.post('account/confirm',**fields).status_code,200)
+        self.assertEqual(self.h.grant.calls[before:],[TOKEN_URL])
+
+    def test_returning_account_can_reauthenticate_for_receipt_and_deletion_during_pause(self):
+        self.signed_client();first=self.complete(1).json
+        registry_before=rows(self.stores['accounts']);usage_before=rows(self.stores['quota'])
+        self.controller.apply(self.approval('pause'))
+        self.login()
+        self.assertEqual(self.json_request('status',1).json,first)
+        self.assertEqual(self.json_request('prepare',2).status_code,503)
+        self.assertEqual(self.post('account/deletion/request',operation='d'*32,confirmation='delete_account').status_code,202)
+        self.assertEqual(rows(self.stores['accounts']),registry_before)
+        self.assertEqual(rows(self.stores['quota']),usage_before)
+
+    def test_first_sign_in_repairs_partial_registration_without_a_second_exchange(self):
+        self.controller.apply(self.approval('publish'));self.connect_installation()
+        fields=self.confirmation(self.post('account/challenge',operation='a'*32).json)
+        before=len(self.h.grant.calls);accounts=self.backend.operations.accounts
+        with patch.object(accounts,'bootstrap',side_effect=StateUnavailable('injected interruption')):
+            self.assertEqual(self.post('account/confirm',**fields).status_code,503)
+        original=accounts.registration(self.owner)
+        self.controller.apply(self.approval('pause'))
+        self.assertEqual(self.post('account/challenge',operation='b'*32).status_code,503)
+        self.assertEqual(self.post('account/confirm',**fields).status_code,503)
+        self.controller.apply(self.approval('resume'))
+        self.assertEqual(self.post('account/confirm',**fields).status_code,200)
+        self.assertEqual(accounts.registration(self.owner),original)
+        self.assertEqual(self.h.grant.calls[before:],[TOKEN_URL])
+
+    def test_returning_installation_rejects_a_different_apple_account_before_exchange(self):
+        self.signed_client()
+        c=self.post('account/challenge',operation='a'*32).json
+        fields=self.confirmation(c,subject='another-apple')
+        lanes=('accounts','grants','grants_audit','lifecycle','identity','links','quota')
+        before={k:rows(self.stores[k]) for k in lanes};calls=list(self.h.grant.calls)
+        self.assertEqual(self.post('account/confirm',**fields).status_code,401)
+        self.assertEqual(self.h.grant.calls,calls)
+        self.assertEqual({k:rows(self.stores[k]) for k in lanes},before)
+
+    def test_corrupt_completed_receipt_never_authorizes_reauthentication(self):
+        self.signed_client()
+        account=self.backend.operations.accounts.registration(self.owner)
+        links=self.runtime.links
+        association=links._read(account['subject'],account['token'])[1]
+        key=links.audit_key('complete',association['plan'])
+        revision,receipt=links.audit.load(key)
+        self.assertTrue(links.audit.compare_exchange(key,revision,dict(receipt,unexpected=True)))
+        calls=list(self.h.grant.calls)
+        self.assertEqual(self.post('account/challenge',operation='e'*32).status_code,503)
+        self.assertEqual(self.h.grant.calls,calls)
+        self.assertEqual(links.audit.load(key)[1],dict(receipt,unexpected=True))
 
     def test_first_person_can_use_two_on_opening_day_and_no_extra_on_replay(self):
         self.signed_client()

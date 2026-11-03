@@ -230,13 +230,23 @@ class AccountIdentityBridge:
         except (ValueError, TypeError, KeyError) as exc: raise StateUnavailable('identity state corrupt; never reset') from exc
         return row
 
+    def _sign_in_registration(self, installation):
+        registration = self.registry.registration(installation, required=False)
+        if registration is not None:
+            if self.lifecycle is not None:
+                if not registration['subject'].startswith('apple-'):
+                    raise IdentityRejected('verified Apple account required')
+                self.lifecycle.require_active(registration['subject'][6:])
+            if self.runtime.links.confirmed_registration(registration):
+                return registration, True
+        if self.runtime.service_release is not None:
+            self.runtime.service_release.require_active()
+        return registration, False
+
     def challenge(self, installation, operation):
         _hex(operation,32)
         self._lifecycle_required()
-        if self.lifecycle is not None and self.registry.store.load(self.registry.key(installation)) is not None:
-            a = self.registry.registration(installation)
-            if not a['subject'].startswith('apple-'): raise IdentityRejected('verified Apple account required')
-            self.lifecycle.require_active(a['subject'][6:])
+        self._sign_in_registration(installation)
         for _ in range(CAS_ATTEMPTS):
             old = self._read(installation)
             if old and old[1]['operation'] == operation:
@@ -267,9 +277,8 @@ class AccountIdentityBridge:
         return hmac.compare_digest(digest(account['subject']), expected)
 
     def existing_account_pin(self, installation):
-        if self.registry.store.load(self.registry.key(installation)) is None:
-            return None
-        return digest(self.registry.registration(installation)['subject'])
+        registration = self.registry.registration(installation, required=False)
+        return digest(registration['subject']) if registration is not None else None
 
     def confirm(self, installation, operation, signed, state, authorization_code=None, *, internal_account_sha256=None):
         _hex(operation,32)
@@ -281,12 +290,15 @@ class AccountIdentityBridge:
             rev,c=row
             if (c['state'] != state or c['phase'] == 'ended' or
                     self.audit.load(key('human-logout',digest([self.namespace,installation,operation]))) is not None): raise IdentityRejected('sign-in state rejected')
+            existing, provisioned = self._sign_in_registration(installation)
             token_hash=digest(signed)
             if c['phase'] == 'challenge':
                 if self.now() >= c['expires_at']: raise IdentityRejected('sign-in expired')
                 claims=self.verifier.verify(signed,c['nonce'])
                 if claims['issued'] < c['created_at']-30: raise IdentityRejected('token predates challenge')
                 identity=hmac.new(self.secret, (self.namespace+'\0'+self.verifier.issuer+'\0'+claims['sub']).encode(),hashlib.sha256).hexdigest()
+                if existing is not None and existing['subject'] != 'apple-'+identity:
+                    raise IdentityRejected('installation belongs to another account; no implicit switch')
                 if internal_account_sha256 is not None and not hmac.compare_digest(digest('apple-'+identity), internal_account_sha256):
                     raise IdentityRejected('not eligible for this internal service')
                 if self.lifecycle is not None:
@@ -318,9 +330,7 @@ class AccountIdentityBridge:
             if self.grants is not None:
                 self.grants.capture(installation, operation, c['nonce'], signed, authorization_code)
             a=c['account'];proof=digest(['apple-device-binding/1',self.namespace,installation,a])
-            registration=self.registry.store.load(self.registry.key(installation))
-            if registration is not None:
-                existing=self.registry.registration(installation)
+            if existing is not None:
                 if existing['subject']!=a['subject'] or existing['token']!=a['token']:
                     raise IdentityRejected('installation belongs to another account; no implicit switch')
                 proof=existing['proof']
@@ -328,7 +338,8 @@ class AccountIdentityBridge:
                 app_account_token=a['token'],identity_token_sha256=token_hash,registration_proof=proof,
                 session_expires_at=c['session_expires_at'])
             self.immutable(self.audit,key('human-verified',digest([self.namespace,installation,operation])),evidence)
-            self.registry.provision(installation,a['subject'],a['token'],None,proof)
+            if not provisioned:
+                self.registry.provision(installation,a['subject'],a['token'],None,proof)
             # Logout/new challenge may race with provisioning. The immutable
             # mapping may remain, but it cannot authorize an ended session.
             if c['phase']=='verified':
