@@ -20,6 +20,12 @@ App Store Connect 的 WoundAILite「App 資訊」顯示 Apple 標準許可協議
 * 恢復時先檢查整批交易的帳號 token、商品與環境。已有本機回執時，還要核對當次服務帳號雜湊。回放已收到雲端確認但尚未完成 StoreKit 處理的交易時，後端以原操作編號查核存檔。
 * 原生客戶端可在受 App Attest 保護的 `purchase/context` 送出 `mode=existing`，要求只讀既有操作。未提供此欄位沿用原協定。缺少既有操作回 409。交易確認也只接受既有操作，重讀不會建立缺少的資料列。新舊前後端配對應在候選部署時核對。
 
+## Apple 簽章中的帳號代碼
+
+購買交易、伺服器查得的交易及寬限期續訂資訊，都以同一個服務帳號 UUID 核對歸屬。Apple 將這個值定義為 UUID，標準十六進位表示容許大小寫。服務端在驗簽後用原帳號的小寫 UUID 比對，保留連字號位置及所有數位。原始簽章、帳號資料及既有回執以原格式保存。[Apple 的帳號代碼定義](https://developer.apple.com/documentation/appstoreserverapi/appaccounttoken) · [RFC 9562 第 4 節](https://www.rfc-editor.org/rfc/rfc9562.html#section-4)
+
+合成簽章重播分別改變上述三處的字母大小寫。先前這三種情形都拒絕原帳號的購買確認。修正後三種皆可確認並重讀同一份回執。當日已用兩次時，升級後剩八次。不同帳號、連字號缺失及不符的續訂歸屬仍被拒絕。這項相容性有本機驗證；Apple Sandbox 真實交易的表示方式與結果仍待實機核對。
+
 ## 覆核入口
 
 1. `LitePurchaseBridgeTests` 包含變價、同價跨商店、連按、目錄不可用、回覆遺失、不同 token、不同帳號雜湊、混合帳號批次及暫停後完成交易。

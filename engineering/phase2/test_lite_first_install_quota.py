@@ -20,7 +20,7 @@ from lite_usage_ledger import UsageLedger, UsageConflict, digest
 from lite_usage_rollout import UsageRollout, validate_baselines, ObservationUnavailable, ObservationContradiction
 from test_lite_signed_client import SignedServiceClient, b64
 from test_lite_usage_rollout import SyntheticProvider
-from test_lite_subscription_grace import rows
+from test_lite_subscription_grace import enable_grace, rows
 import test_lite_native_startup as startup
 
 class FrozenInventory(SyntheticProvider):
@@ -242,6 +242,53 @@ class FirstInstallTests(SignedServiceClient, unittest.TestCase):
         grant=self.backend.operations.accounts.grant(account,self.h.clock())
         balance=self.ledger.snapshot(account['subject'],self.h.clock()//86400,grant)
         self.assertEqual((balance['limit'],balance['used'],balance['remaining']),(10,2,8))
+
+    def test_signed_uuid_case_preserves_grace_restore_receipt_and_used_quota(self):
+        self.signed_client()
+        for index in (1, 2):
+            self.assertEqual(self.complete(index).json['receipt']['outcome'], 'succeeded')
+        operation = 'c' * 32
+        token = self.post('purchase/context', operation=operation).json['app_account_token']
+        self.assertNotEqual(token, token.upper())
+        apple = self.h.release.n.a
+        renewal = enable_grace(apple)
+        renewal['appAccountToken'] = token.upper()
+        apple.payload['appAccountToken'] = token[:18].upper() + token[18:]
+        signed = apple.sign(dict(apple.payload, appAccountToken=token.upper()))
+        before = rows(self.stores['quota'])
+        first = self.post('purchase/confirm', operation=operation, signed_transaction=signed)
+        self.assertEqual(first.status_code, 200, first.json)
+        self.assertEqual(first.json['app_account_token'], token)
+        with patch.object(apple.client, 'get_all_subscription_statuses', side_effect=AssertionError('duplicate status query')):
+            replay = self.post('purchase/confirm', operation=operation,
+                               signed_transaction=apple.sign(dict(apple.payload, appAccountToken=token)))
+            self.assertEqual(replay.json, first.json)
+        self.assertEqual(rows(self.stores['quota']), before)
+        account = self.backend.operations.accounts.resolve(self.owner)
+        grant = self.backend.operations.accounts.grant(account, self.h.clock())
+        balance = self.ledger.snapshot(account['subject'], self.h.clock() // 86400, grant)
+        self.assertEqual((balance['limit'], balance['used'], balance['remaining']), (10, 2, 8))
+
+    def test_signed_uuid_aliases_and_foreign_owner_cannot_claim_subscription(self):
+        self.signed_client()
+        operation = 'c' * 32
+        token = self.post('purchase/context', operation=operation).json['app_account_token']
+        apple = self.h.release.n.a
+        apple.payload['appAccountToken'] = token
+        wrong = ('0' if token[0] != '0' else '1') + token[1:]
+        with patch.object(apple.client, 'get_all_subscription_statuses', side_effect=AssertionError('unexpected status query')) as lookup:
+            for invalid in (wrong.upper(), token.replace('-', ''), '{' + token + '}', 'urn:uuid:' + token, token + ' '):
+                with self.subTest(invalid=invalid):
+                    signed = apple.sign(dict(apple.payload, appAccountToken=invalid))
+                    self.assertEqual(self.post('purchase/confirm', operation=operation, signed_transaction=signed).status_code, 409)
+            lookup.assert_not_called()
+        signed = apple.sign(apple.payload)
+        apple.payload['appAccountToken'] = wrong.upper()
+        self.assertEqual(self.post('purchase/confirm', operation=operation, signed_transaction=signed).status_code, 409)
+        apple.payload['appAccountToken'] = token
+        enable_grace(apple)['appAccountToken'] = wrong.upper()
+        self.assertEqual(self.post('purchase/confirm', operation=operation, signed_transaction=signed).status_code, 409)
+        self.assertIsNone(self.backend.operations.accounts.resolve(self.owner)['original_transaction'])
 
     def test_concurrent_first_reservations_create_one_row_and_one_attempt(self):
         self.signed_client();barrier=Barrier(4)
