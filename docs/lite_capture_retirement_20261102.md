@@ -65,8 +65,9 @@ are included in the review package.
   automatic compaction to prevent recreation. This is not an account-deletion
   completion receipt or a claim that every local or cloud copy was erased.
 - Uncertain earlier index writes can leave allocated encrypted media copies;
-  orphan reconciliation remains a separate task. Corrupt draft recovery also
-  remains pending. There is no automatic age-based draft purge.
+  orphan reconciliation remains a separate task. See the following update for
+  recovery of unaffected drafts when one file is unreadable. There is no
+  automatic age-based draft purge.
 - Already dispatched cloud work cannot be unsent. Its receipts remain for
   settlement/audit; new capture resumption is fenced after retirement.
 - New UI, physical file protection, true service quota/readback and Apple Sandbox
@@ -75,6 +76,21 @@ are included in the review package.
 - Independent, consent-bound research ingestion after personal recognition is
   still required without rerunning the model or charging another recognition.
 - Public configuration must omit the saved-record internal acceptance entry.
+
+### Mixed draft recovery
+
+Opening the measurement screen checks the saved record index and the retirement
+journal before listing unfinished captures. A change to the index from another
+scene requires a fresh read. A directory-level read failure clears the list of
+available drafts and prompts the user to retry. The current editor and on-disk
+records are preserved.
+
+Each encrypted capture or receipt is checked individually. An unreadable file
+stays in place and contributes to the notice count. Other verified drafts can
+be opened, outlined and saved. Recovery keeps only their IDs and dates in the
+list. A committed draft is finalized after matching the stored JPEG and depth
+bytes. A readable draft already marked for discard is retired as before.
+Neither path opens a recognition job or enrolls the user in research.
 
 ## Review and rerun
 

@@ -33,6 +33,12 @@ struct LiteCaptureDraftSummary: Identifiable, Sendable {
     let createdAt: Date
 }
 
+struct LiteCaptureInventory: Sendable {
+    var pending: [LiteCaptureDraftSummary] = []
+    var needsFinalization: [String] = []
+    var unresolvedCount = 0
+}
+
 private struct LiteCaptureSavedReceipt: Codable, Equatable {
     let version: Int
     let kind: String
@@ -64,40 +70,52 @@ actor LiteCaptureDraftStore {
     private func bytes(_ id: String) throws -> Data {
         let path = try file(id)
         try HealthDataFiles.excludeExistingFile(path)
-        guard let data = PhiCrypto.decryptBytes(try Data(contentsOf: path)), data.count <= 32 * 1024 * 1024
+        // The encrypted envelope includes a 12-byte GCM nonce and a 16-byte tag.
+        let maxSealedSize = 32 * 1024 * 1024 + 28
+        guard let size = try path.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              size > 28, size <= maxSealedSize else { throw LiteServiceFailure.invalidState }
+        let sealed = try Data(contentsOf: path, options: .mappedIfSafe)
+        guard sealed.count == size, let data = PhiCrypto.decryptBytes(sealed)
         else { throw LiteServiceFailure.invalidState }
         return data
     }
     func load(_ id: String) throws -> LiteCaptureDraft {
-        let data = try bytes(id)
-        let value = try JSONDecoder().decode(LiteCaptureDraft.self, from: data)
+        try decodeDraft(id, from: bytes(id))
+    }
+    private func decodeDraft(_ id: String, from raw: Data) throws -> LiteCaptureDraft {
+        let value = try JSONDecoder().decode(LiteCaptureDraft.self, from: raw)
         guard value.id == id else { throw LiteServiceFailure.conflict }
         _ = try value.depth()
         return value
     }
-    func pending(excluding saved: Set<String>) throws -> [LiteCaptureDraftSummary] {
+    func unfinishedDraft(_ id: String) throws -> LiteCaptureDraft? {
+        let raw = try bytes(id)
+        if let receipt = try? JSONDecoder().decode(LiteCaptureSavedReceipt.self, from: raw), receipt.valid(for: id) { return nil }
+        return try decodeDraft(id, from: raw)
+    }
+
+    /// A directory error blocks the list. A single unreadable envelope only
+    /// blocks that capture. Keep summaries, never a batch of decoded RGB-D pairs.
+    func inventory(saved: Set<String>, retired: Set<String>) throws -> LiteCaptureInventory {
         try HealthDataFiles.prepareDirectory(directory)
-        var result = [LiteCaptureDraftSummary]()
+        var result = LiteCaptureInventory()
         for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
             where file.pathExtension == "enc" {
             let id = file.deletingPathExtension().lastPathComponent
-            if saved.contains(id) { continue }
-            let raw = try bytes(id)
-            if let receipt = try? JSONDecoder().decode(LiteCaptureSavedReceipt.self, from: raw), receipt.valid(for: id) { continue }
-            let draft = try load(id) // Unreadable is not an empty draft library.
-            if draft.savedRecordID == nil { result.append(.init(id: id, createdAt: draft.createdAt)) }
+            do {
+                guard let draft = try unfinishedDraft(id) else { continue }
+                if retired.contains(id) {
+                    try saveReceipt(LiteCaptureSavedReceipt(draft, kind: "retired-capture"))
+                } else if saved.contains(id) {
+                    result.needsFinalization.append(id)
+                } else if draft.savedRecordID == nil {
+                    result.pending.append(.init(id: id, createdAt: draft.createdAt))
+                } else {
+                    result.unresolvedCount += 1
+                }
+            } catch { result.unresolvedCount += 1 }
         }
-        return result.sorted { $0.createdAt > $1.createdAt }
-    }
-    func unfinalized(savedIDs: Set<String>) throws -> [LiteCaptureDraft] {
-        var result = [LiteCaptureDraft]()
-        for id in savedIDs {
-            guard UUID(uuidString: id)?.uuidString == id,
-                  FileManager.default.fileExists(atPath: try file(id).path) else { continue }
-            let raw = try bytes(id)
-            if let receipt = try? JSONDecoder().decode(LiteCaptureSavedReceipt.self, from: raw), receipt.valid(for: id) { continue }
-            result.append(try load(id))
-        }
+        result.pending.sort { $0.createdAt > $1.createdAt }
         return result
     }
     func create(jpeg: Data, depth: DepthCapture, id: UUID = UUID(), now: Date = Date(),
@@ -137,9 +155,7 @@ actor LiteCaptureDraftStore {
     func retire(_ ids: Set<String>) throws {
         for id in ids where UUID(uuidString: id)?.uuidString == id {
             guard FileManager.default.fileExists(atPath: try file(id).path) else { continue }
-            let raw = try bytes(id)
-            if let receipt = try? JSONDecoder().decode(LiteCaptureSavedReceipt.self, from: raw), receipt.valid(for: id) { continue }
-            let draft = try load(id)
+            guard let draft = try unfinishedDraft(id) else { continue }
             try saveReceipt(LiteCaptureSavedReceipt(draft, kind: "retired-capture"))
         }
     }

@@ -303,6 +303,20 @@ final class LiteStore: ObservableObject {
         }
     }
 
+    /// Check the persisted index before treating any draft as saved or available.
+    /// A second scene may have committed a different index since our last read.
+    func confirmCaptureIndex() -> Bool {
+        guard refreshCaptureRetirement() else { return false }
+        do {
+            guard try readIndex() == loadedIndex else { throw IndexFailure.changed }
+            return true
+        } catch {
+            needsReload = true
+            storageError = "拍攝清單與目前的紀錄檔尚未核對。請至「紀錄」點「重新讀取紀錄」。"
+            return false
+        }
+    }
+
     func captureCleanupFailed() {
         storageError = "刪除要求已保存，但拍攝草稿尚未確認清理完成；原紀錄仍保留，請解鎖後重試刪除。"
     }

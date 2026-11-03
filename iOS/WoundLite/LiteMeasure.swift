@@ -32,6 +32,7 @@ final class LiteMeasureVM: ObservableObject {
     private var draftIdentity: (UUID, Date)?
     private var draftResearchPin: LiteResearchCapturePin?
     private weak var recordStore: LiteStore?
+    private var latestDraftRead = UUID()
     @Published var image: UIImage?
     /// The exact normalized JPEG used by the cloud and the local RGB-D sidecar.
     private(set) var captureJPEG: Data?
@@ -226,23 +227,40 @@ final class LiteMeasureVM: ObservableObject {
         return false   // 未同意研究 → 一律手動，資料不離機
     }
 
-    /// Construction, listing and resume only read local encrypted files/journals.
+    /// Reconcile this installation's saved and retired drafts without starting service work.
     func reloadDrafts(in store: LiteStore) async {
         recordStore = store
         guard let native else { return }
-        guard store.refreshCaptureRetirement() else {
+        let request = UUID()
+        latestDraftRead = request
+        guard store.confirmCaptureIndex() else {
+            pendingCaptures = []
             draftNotice = "請先完整重讀紀錄，再恢復尚未存入的拍攝；原始檔案保留。"
             return
         }
         do {
             let saved = Set(store.records.map(\.id))
-            try await native.captures.retire(store.retiredCaptureIDs)
-            for value in try await native.captures.unfinalized(savedIDs: saved) {
-                try await finalizeDraft(value, in: store)
+            let inventory = try await native.captures.inventory(saved: saved, retired: store.retiredCaptureIDs)
+            var unresolved = inventory.unresolvedCount
+            for id in inventory.needsFinalization {
+                guard request == latestDraftRead else { return }
+                do {
+                    if let value = try await native.captures.unfinishedDraft(id) {
+                        try await finalizeDraft(value, in: store)
+                    }
+                } catch { unresolved += 1 }
             }
-            pendingCaptures = try await native.captures.pending(excluding: saved.union(store.retiredCaptureIDs))
-            draftNotice = nil
-        } catch { draftNotice = "尚未完成的拍攝無法讀取。請先解鎖後重讀，原檔保留。" }
+            guard request == latestDraftRead else { return }
+            guard store.confirmCaptureIndex() else { throw LiteServiceFailure.invalidState }
+            let excluded = store.retiredCaptureIDs.union(store.records.map(\.id))
+            pendingCaptures = inventory.pending.filter { !excluded.contains($0.id) }
+            draftNotice = unresolved == 0 ? nil : "有 \(unresolved) 筆拍攝尚待核對。請解鎖後點「重新核對本機拍攝」。"
+        } catch {
+            if request == latestDraftRead {
+                pendingCaptures = []
+                draftNotice = store.needsReload ? store.storageError : "拍攝清單暫時無法核對。請解鎖後重讀；原檔保留。"
+            }
+        }
     }
 
     func retryDraftSave() async {
@@ -348,7 +366,7 @@ final class LiteMeasureVM: ObservableObject {
     }
 
     private func finalizeDraft(_ value: LiteCaptureDraft, in store: LiteStore) async throws {
-        guard let native, !store.needsReload, let row = store.records.first(where: { $0.id == value.id }),
+        guard let native, store.confirmCaptureIndex(), let row = store.records.first(where: { $0.id == value.id }),
               store.images.rawBytes(row.imageName) == value.jpeg,
               let depthName = row.depthName,
               store.images.rawBytes(depthName) == value.encodedDepth else { throw LiteServiceFailure.conflict }
