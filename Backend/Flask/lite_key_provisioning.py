@@ -63,20 +63,40 @@ class CreateOnlyKeyProvider:
         if status not in (200,409):raise StateUnavailable('account key creation unconfirmed')
 
 
+def validate_key_plan(plan, expected_digest):
+    """The short operator session and external beta both have a fixed absolute budget."""
+    _hex(expected_digest)
+    if type(plan) is not dict or type(plan.get('v')) is not int:
+        raise ValueError('explicit key provisioning plan required')
+    fields = {'v', 'namespace', 'scope', 'keyring', 'source', 'image', 'operation',
+              'not_before', 'expires_at', 'max_creates'}
+    if plan['v'] == 1:
+        max_seconds, max_attempts = 3600, 1000
+    elif plan['v'] == 2 and plan.get('purpose') == 'external-testflight':
+        fields.add('purpose')
+        max_seconds, max_attempts = 7 * 86400, 10
+    else:
+        raise ValueError('unknown key provisioning plan')
+    if set(plan) != fields or digest(plan) != expected_digest:
+        raise ValueError('key provisioning plan differs from the approved digest')
+    if any(type(plan[k]) is not int for k in ('not_before', 'expires_at', 'max_creates')):
+        raise ValueError('integer key provisioning limits required')
+    if not (0 <= plan['not_before'] < plan['expires_at'] <= plan['not_before'] + max_seconds
+            and 1 <= plan['max_creates'] <= max_attempts):
+        raise ValueError('key provisioning limits exceed the selected plan')
+    _subject(plan['namespace'])
+    _hex(plan['source'], 40)
+    for name in ('scope', 'image', 'operation'):
+        _hex(plan[name])
+
+
 class AccountKeyProvisioner:
     immutable=staticmethod(SubscriptionRuntime.immutable)
     def __init__(self, *, enabled=False, manifest, expected_manifest, lifecycle, provider, store, audit_store, clock):
-        _hex(expected_manifest)
-        m=copy.deepcopy(manifest)
-        if (enabled is not True or type(m) is not dict or digest(m)!=expected_manifest
-                or set(m)!={'v','namespace','scope','keyring','source','image','operation','not_before','expires_at','max_creates'}
-                or type(m['v']) is not int or m['v']!=1
-                or any(type(m[k]) is not int for k in ('not_before','expires_at','max_creates'))
-                or not 0<=m['not_before']<m['expires_at']<=m['not_before']+3600
-                or not 1<=m['max_creates']<=1000):
-            raise ValueError('explicit fixed, time- and count-bounded provisioning plan required')
-        _subject(m['namespace']);_hex(m['source'],40)
-        for k in ('scope','image','operation'):_hex(m[k])
+        if enabled is not True:
+            raise ValueError('explicit private worker enablement required')
+        m = copy.deepcopy(manifest)
+        validate_key_plan(m, expected_manifest)
         if (not isinstance(lifecycle,AccountLifecycle) or not isinstance(provider,CreateOnlyKeyProvider)
                 or m['scope']!=lifecycle.scope or m['keyring']!=provider.keyring or not callable(clock)):
             raise ValueError('matching provisioning authority required')

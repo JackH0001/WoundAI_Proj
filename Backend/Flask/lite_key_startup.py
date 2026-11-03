@@ -13,7 +13,7 @@ from lite_account_lifecycle import AccountLifecycle
 from lite_attest_state import GCSStateStore, StateUnavailable
 from lite_bucket_policy import validate_bucket_policy
 from lite_run_identity import verify_attached_identity
-from lite_key_provisioning import AccountKeyProvisioner, CreateOnlyKeyProvider
+from lite_key_provisioning import AccountKeyProvisioner, CreateOnlyKeyProvider, validate_key_plan
 from lite_store_locations import LimitedStateStore, location, overlaps
 from lite_subscription_executor import key
 from lite_usage_ledger import digest, _hex, _subject
@@ -40,7 +40,7 @@ def preflight(raw, *, expected_config, expected_source, expected_image):
         raise ValueError('pinned bounded worker configuration required')
     c = loads_json_object_strict(raw.decode('utf-8'))
     exact(c, 'schema enabled deployment binding buckets stores manifest manifest_sha256')
-    if c['schema'] != 'lite-key-startup/1' or c['enabled'] is not True:
+    if c['schema'] not in ('lite-key-startup/1', 'lite-key-startup/external-testflight-1') or c['enabled'] is not True:
         raise ValueError('explicit private worker enablement required')
     d = exact(c['deployment'], 'source image project project_number service_account invoker_account keyring')
     if d['source'] != expected_source or d['image'] != expected_image:
@@ -56,15 +56,12 @@ def preflight(raw, *, expected_config, expected_source, expected_image):
     _subject(b['namespace']); _hex(b['identity_key_sha256'])
     if b['issuer'] != 'https://appleid.apple.com' or b['audience'] != 'com.woundai.lite':
         raise ValueError('Lite account binding required')
-    m = exact(c['manifest'], 'v namespace scope keyring source image operation not_before expires_at max_creates')
-    _hex(c['manifest_sha256']); _subject(m['namespace']); _hex(m['operation'])
-    if (digest(m) != c['manifest_sha256'] or type(m['v']) is not int or m['v'] != 1
-            or m['source'] != expected_source or m['image'] != expected_image
-            or m['scope'] != digest(b) or m['keyring'] != d['keyring']
-            or any(type(m[k]) is not int for k in ('not_before', 'expires_at', 'max_creates'))
-            or not 0 <= m['not_before'] < m['expires_at'] <= m['not_before']+3600
-            or not 1 <= m['max_creates'] <= 1000):
-        raise ValueError('matching bounded provisioning plan required')
+    m = c['manifest']
+    validate_key_plan(m, c['manifest_sha256'])
+    expected_version = 1 if c['schema'] == 'lite-key-startup/1' else 2
+    if (m['v'] != expected_version or m['source'] != expected_source or m['image'] != expected_image
+            or m['scope'] != digest(b) or m['keyring'] != d['keyring']):
+        raise ValueError('key plan must match the worker profile, source, image and account binding')
     if type(c['buckets']) is not dict or not 1 <= len(c['buckets']) <= 4:
         raise ValueError('bounded explicit bucket inventory required')
     for name, meta in c['buckets'].items():

@@ -26,9 +26,13 @@ contains only the identity-HMAC key hash, never the secret.
 The worker transport allows exact key/key-version GETs and deterministic key
 creation within one named ring. It rejects encryption, decryption, version 2,
 destroy, restore, rotation, IAM, listing and foreign resources before transport.
-Creation remains bounded to the approved window (at most one hour) and total POST
-budget. Restart never resets the budget or abandons uncertain creation. Expiry
-still permits previously prepared keys to be read back, but cannot create more.
+The original operator plan permits up to one hour and 1,000 create attempts.
+A separately reviewed external TestFlight plan can span up to seven days and permit
+at most ten create attempts in total. Both plans use absolute start and expiry times
+and a durable counter for the exact manifest digest. A retry that needs another
+provider create attempt consumes a slot. An existing ready key can be read after
+expiry. Each new plan requires an explicit, independently approved configuration.
+
 This is a finite acceptance mechanism, not a complete continuous production
 provisioning policy.
 
@@ -54,6 +58,26 @@ container boot. Actual Linux image build remains a separate gate.
 The prelaunch workflow now defines a dedicated Linux image job, including a
 network-disabled, read-only container check that missing pins refuse startup.
 That new job is not claimed passed until the fixed source is pushed and CI runs.
+
+### First login during an external beta
+
+The longer window requires both configuration schema
+`lite-key-startup/external-testflight-1` and a v2 manifest with
+`purpose: external-testflight`. The original schema accepts only v1 manifests.
+Specify the smallest window and total attempt budget needed for the invited group.
+For example, a second participant arriving 72 hours after the first can prepare
+their account key during a seven-day pilot. At expiry, check the remaining test
+schedule before proposing another authorization. A worker restart retains the
+original end time and used budget.
+
+This option applies to the existing account-specific key design. The key worker
+continues to require a verified active account grant and private invocation by
+the intended native service. It does not admit a tester to the native or research
+service. An owner-only release still rejects a new tester. Before submitting,
+exercise the proposed external service with a separate fresh installation and
+an independent test Apple identity, and check that it cannot see the owner's
+results or use their subscription. TestFlight, Apple Sandbox, IAM, an isolated
+external data scope and the usable dates for reviewers must be checked separately.
 
 ## Deployment and minimum-permission acceptance (not executed)
 
