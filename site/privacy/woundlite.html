@@ -19,7 +19,7 @@
 </style></head><body>
 <div class="warn"><strong>待審閱草稿 / Draft for review</strong><br>本稿區分一般版與內部驗收版。外測前須核對隱私揭露、資料治理及研究程序。</div>
 <h1>WoundAILite 民眾版隱私權政策草稿</h1>
-<p class="sub">2026-11-02 修訂。研究同意文案版本為 2026-10-16.1，本稿另說明個人服務的追蹤名額及時間軸分享。</p>
+<p class="sub">2026-11-03 修訂。研究同意版本為 2026-10-16.1。本稿補充深度圖的範圍，以及雲端紀錄如何與安裝或帳號連結。</p>
 <h2>1. 離線使用與雲端選擇</h2>
 <p>WoundAILite 提供個人傷口照片紀錄、圈選與 LiDAR 輔助表面積估算。估算供紀錄參考，不提供診斷或治療建議；此說明不是醫療器材法規分類結論。</p>
 <p>本機拍攝、圈選、保存及分享單筆或同一處傷口的時間軸 PDF，無須登入服務帳號。一般版的雲端研究功能需另行同意。內部測試版另提供個人雲端辨識，由您登入服務帳號，在量測頁選擇當次拍攝或已保存的拍攝草稿，並確認送出。這項操作只上傳選取的 JPEG，深度留在手機。使用個人服務或恢復購買都不會開啟研究上傳。</p>
@@ -29,7 +29,7 @@
 <p>候選 App 對上述量測索引、照片及深度檔案設定排除系統備份，原子更新後亦保留該設定；此旗標不能保證所有備份均排除，也不清除過去已有的備份。換機、移除 App 或遺失裝置可能無法復原本機紀錄；研究上傳不是個人備份服務。</p>
 <h2>3. 同意後傳送與使用的資料</h2>
 <ul>
-<li>傷口照片、有效的原始 LiDAR 深度數值、深度與照片尺寸、相機內參、方向及其他量測品質參數。</li>
+<li>傷口照片。若裝置取得 LiDAR 深度，會保存整張深度圖，包括圈選邊界以外的距離數值，以及深度與照片尺寸、相機內參、方向及量測品質參數。</li>
 <li>AI 輪廓、您確認或修改後的輪廓、表面積及其他已有的量測估算、傷口分組代碼與側別／部位、同意版本。</li>
 <li>由驗證流程綁定的安裝假名代碼，以及請求／修訂識別資訊。未手動修改的 AI 結果也可能同步，並標示為未經人工修正的 AI 來源。</li>
 </ul>
@@ -37,7 +37,7 @@
 <p>已取得雲端影像識別碼的紀錄，修正後可另傳輪廓、分组與量測修訂，不重傳照片；網路或伺服器未確認時，App 顯示待同步，不能視為已保存。沒有雲端識別碼的舊紀錄只在本機更新。</p>
 <h2>4. 去識別限制與影像安全</h2>
 <p>影像重新編碼不會移除像素中的姓名、臉部、證件、刺青或背景資訊。請只拍傷口部位，避免其他可識別內容入鏡。候選公開後台在偵測到人臉，或人臉檢查不可用時拒絕繼續辨識及研究保存；這項有限檢查不保證所有人臉或個人資訊都能被偵測，也不是已完成的自動模糊化服務。</p>
-<p>影像、深度、傷口位置與歷次量測可能揭露健康資訊。安裝假名代碼會串聯同一安裝的資料；沒有姓名或帳號不等於完全匿名，也不能保證無法重新辨識。因此隱私宣告將照片、健康資料與裝置識別資訊列為有關聯資料。</p>
+<p>影像、深度、傷口位置與歷次量測可能揭露健康資訊。安裝假名代碼會串聯同一安裝的資料；沒有姓名或帳號不等於完全匿名，也不能保證無法重新辨識。同意研究上傳後，研究照片、深度及輪廓可連結至同一安裝。雲端另保存請求與修訂紀錄，供核對送件及限制使用次數。</p>
 <h2>5. 身分驗證、供應商與連線資料</h2>
 <p>候選使用 Apple App Attest 驗證請求來源及原安裝身分。這會與 Apple 的裝置驗證服務通訊；不是註冊 Apple ID 帳號給 WoundLite，也不把驗證結果當成量測準確率證明。尚須完成真實 Apple／後台端到端驗收。</p>
 <p>候選雲端由 Google Cloud 處理與儲存資料。應用程式限流記錄安裝代碼及加鹽 IP 雜湊；雜湊不能保證不可反推，也不代表雲端平台、代理或存取日誌沒有原始 IP。正式服務地區、日誌欄位、存取權限、保存期限、研究接收者與跨境安排須在開放前確認。本稿不承諾未核對的「完全不與第三方處理」或「不保存任何連線資料」。</p>
@@ -58,7 +58,7 @@
 <p>用途或處理範圍實質改變時，須更新政策及必要的同意流程；不能將新用途自動套用於舊資料。發布前需使 App、App Store Connect 隱私問卷、公開政策與實際部署一致。</p>
 <div class="en" lang="en">
 <h1>WoundAILite Privacy Policy — Draft</h1>
-<p class="sub">Revised November 2, 2026. Research consent version 2026-10-16.1. This unpublished draft describes personal tracking slots and optional timeline sharing in the candidate.</p>
+<p class="sub">Revised November 3, 2026. Research consent version 2026-10-16.1. This draft clarifies the extent of depth capture and how cloud records are associated with an installation or account.</p>
 <h2>1. Offline use and cloud choice</h2>
 <p>WoundAILite supports on-device photos, outlines, reference area estimates and sharing of single-record or selected-wound timeline PDFs without a service account. Area estimates are for personal records and sharing with a clinician. The app does not diagnose conditions or recommend treatments. The ordinary build offers cloud research features with separate consent. In the internal candidate, you can also sign in and explicitly send a selected JPEG from a new capture or a saved capture draft for personal recognition. Its depth remains on the phone for this action. Using personal recognition or restoring a purchase does not enable research upload.</p>
 <h2>2. On-device records</h2>
@@ -66,10 +66,10 @@
 <p>Photographs and depth sidecars use AES-GCM with a device Keychain key. Measurements, dates, grouping, location and outlines are sandboxed JSON, not separately AES-encrypted. Local deletion does not delete cloud copies. Removing the app or losing its original installation identity may prevent self-service withdrawal of older data; contact support first.</p>
 <p>The candidate app requests exclusion of its measurement index, photographs and depth files from system backups, including after atomic updates. This flag does not guarantee exclusion from every backup or remove previous backups. Local records may be unrecoverable after a device change, app removal or device loss; research uploads are not a personal backup service.</p>
 <h2>3. Consented transmissions and purposes</h2>
-<p>Candidate uploads include the photograph, valid raw LiDAR depth, image/depth dimensions, camera intrinsics, orientation and available quality metadata; AI and corrected outlines, surface-area and other available estimates, wound-group codes, side/site and consent version; and a verified installation pseudonym with request/revision identifiers. Unedited AI results may also be synchronized and remain marked as unverified AI output.</p>
+<p>Candidate uploads include the photograph, the full raw LiDAR depth map when available, including distances outside the selected outline, image/depth dimensions, camera intrinsics, orientation and available quality metadata; AI and corrected outlines, surface-area and other available estimates, wound-group codes, side/site and consent version; and a verified installation pseudonym with request/revision identifiers. Unedited AI results may also be synchronized and remain marked as unverified AI output.</p>
 <p>Purposes are cloud recognition, consented wound-recognition/measurement research and later independent WoundAI3D research/model improvement. This does not provide validated automated 3D diagnosis. A depth-storage receipt does not prove RGB-D registration, sensor accuracy or training eligibility. Derived validity masks are not native sensor confidence; unavailable pose/time is not invented. Record corrections send revisions without retransmitting the photograph; unacknowledged requests remain pending. Older records without a cloud image identifier remain local.</p>
 <h2>4. Identification risks</h2>
-<p>Re-encoding does not remove faces, names, documents, tattoos or background details in pixels. Photograph the wound only. The public backend candidate stops inference and research persistence when a face is detected or its face check is unavailable. This limited check cannot guarantee detection of every identifying feature and is not an implemented automatic-blurring service. Photographs, depth, body location and longitudinal measurements may reveal health information. An installation pseudonym links records; no account does not mean complete anonymity. The privacy manifest therefore marks photos, health data and device identifiers as linked.</p>
+<p>Re-encoding does not remove faces, names, documents, tattoos or background details in pixels. Photograph the wound only. The public backend candidate stops inference and research persistence when a face is detected or its face check is unavailable. This limited check cannot guarantee detection of every identifying feature and is not an implemented automatic-blurring service. Photographs, depth, body location and longitudinal measurements may reveal health information. An installation pseudonym links records; no account does not mean complete anonymity. With research consent, photographs, depth maps and outlines can be linked to the same installation. The service also retains request and revision records to reconcile submissions and enforce usage limits.</p>
 <h2>5. Verification and providers</h2>
 <p>The candidate uses Apple App Attest to verify installations and uses Google Cloud for cloud processing. Rate records include an installation pseudonym and a salted IP hash. Infrastructure logs may contain an original IP address. Production regions, access, retention, research recipients and cross-border arrangements require confirmation before opening. The internal test has no advertising or cross-app tracking. Research data is not used for advertising.</p>
 <h3>Optional personal service and subscription</h3>
