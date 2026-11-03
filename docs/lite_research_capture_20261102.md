@@ -108,3 +108,9 @@ reach device authentication. Check for 401 on unsigned input and a matching
 receipt on a valid signed request. Disabled endpoints, wrong methods, query
 strings and native-only paths must return 404. Checking only `/api/health` or
 testing a blueprint without the first request hook can miss a broken upload.
+
+## 修訂收據與研究標註用量（2026-11-03）
+
+雙服務封裝演練重現一個中斷點：修邊結果已存入，研究用量紀錄寫入失敗，原版重送會取得成功收據，該修訂卻少計一次。新寫入的標註記錄採用的計數方式，以便在收據確認時依同意批次、修訂識別碼及原始 UTC 日期補齊用量。伺服器使用既有儲存層的條件式寫入，本機檔案採鎖定，GCS 採指定物件不存在才建立。首次成功落盤的用量紀錄保留當次連線的加鹽 IP 雜湊；這項資訊只存在原有的用量紀錄。既有舊標註沿用已建立的回執，因舊用量沒有逐筆識別碼，不回溯補扣。
+
+本機合成回歸涵蓋中斷於用量寫入之前或寫入回覆遺失、跨日重試、內容衝突、不同網路重送、並行重送與既有資料。原圖、深度、修邊版次及個人辨識額度均不因核對而重建。本次修正針對已存修訂的計數與回執，研究每日總量檢查仍沿用既有的讀取後放行機制。
