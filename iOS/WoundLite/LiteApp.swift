@@ -74,6 +74,14 @@ struct LiteAccountResearchPause {
 /// 民眾版偏好設定。獨立於醫療版（不同 bundle 沙盒，天然隔離）。
 enum LitePrefs {
     private static let d = UserDefaults.standard
+    static let researchChoiceKey = "lite_research_consent"
+    // The server contract and signed historical receipts have their own version.
+    // This marker records which additional on-device notice the user reviewed.
+    static let noticeKey = "lite_research_notice_version"
+    static let noticeVersion = "2026-11-03.1"
+    static func reviewedChoice(_ choice: Bool?, notice: String?) -> Bool? {
+        choice == true && notice != noticeVersion ? nil : choice
+    }
     /// nil＝還沒問過（首啟要問）；true/false＝使用者的選擇，設定頁可改。
     static var researchPausedForAccountDeletion: Bool {
         LiteAccountResearchPause.standard.blocks(AppSettings.backendURL())
@@ -85,19 +93,21 @@ enum LitePrefs {
         get {
             guard !researchPausedForAccountDeletion, !LiteWithdrawalJournal.standard.blocksUploads else { return false }
             // An old acceptance must not silently authorize the revised disclosure.
-            return LiteBackendConfiguration.consentChoice(
-                d.object(forKey: "lite_research_consent") as? Bool,
+            let choice = LiteBackendConfiguration.consentChoice(
+                d.object(forKey: researchChoiceKey) as? Bool,
                 savedVersion: d.string(forKey: "lite_consent_version"), requiredVersion: consentVersion,
                 savedOrigin: d.string(forKey: "lite_consent_origin"), currentOrigin: AppSettings.backendURL())
+            return reviewedChoice(choice, notice: d.string(forKey: noticeKey))
         }
         set {
-            d.set(newValue, forKey: "lite_research_consent")
+            if newValue == true && (researchPausedForAccountDeletion || LiteWithdrawalJournal.standard.blocksUploads) { return }
             d.set(newValue == nil ? nil : consentVersion, forKey: "lite_consent_version")
             d.set(newValue == nil ? nil : AppSettings.backendURL(), forKey: "lite_consent_origin")
+            d.set(newValue == true ? noticeVersion : nil, forKey: noticeKey)
+            d.set(newValue, forKey: researchChoiceKey)
         }
     }
-    /// 同意文案版本。**改了同意頁的實質內容就要遞增**——每筆上傳都帶著它，
-    /// 日後治理要能回答「這筆是在哪一版文案下同意的」。
+    /// Research upload contract. Changes to authorized use require a new server-accepted version.
     static let consentVersion = "2026-10-16.1"
 
     /// Legacy anonymous UUID, retained for old records/support only.

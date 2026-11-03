@@ -26,7 +26,7 @@ struct LiteConsentView: View {
                         LiteNativeBuild.includesService ? "您可自行圈選，或登入個人服務後明確送出照片供辨識。同意研究上傳會讓符合研究條件的新紀錄進入研究送件流程。" : "拍攝後由雲端 AI 自動圈出傷口，再由您確認或修改。",
                         "研究資料包括照片、量測估算、傷口分組與側別部位。若有 AI 圈選，即使您沒有修邊，也可保存原始輪廓。您確認或修改的輪廓另有紀錄。",
                         "若拍到 LiDAR 深度，會一併傳送整張深度圖和相機參數。圈選外的物品也可能留下距離資訊。請避開臉部、姓名與證件。隨機安裝代碼可連結同一安裝的歷次資料。",
-                        "已上傳影像的紀錄修正圈選後，會同步修訂輪廓與量測資料；不重傳照片。舊紀錄若無雲端識別碼則只更新本機。",
+                        "已送出的研究照片若有修訂，會同步圈選與量測資料。重新開啟後，原同意期間仍在等候的研究送件也可能續傳。",
                         "用途：改進傷口辨識與 3D 量測精度的研究與模型訓練。",
                         "本版使用獨立 WoundAILite 服務；舊服務的影像與紀錄不會自動轉移。切換服務後須重新選擇是否上傳。",
                         "可在設定關閉未來上傳；另可要求撤回研究並清除本安裝目前可見的雲端影像與深度。本機紀錄保留；備份、歷史版本、研究標註與既有模型的刪除仍待驗證。",
@@ -106,7 +106,12 @@ struct LiteSettingsView: View {
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "未知"
         return "\(version)（\(build)）"
     }
-    @State private var consent = LitePrefs.researchConsent ?? false
+    @AppStorage(LitePrefs.researchChoiceKey) private var storedChoice: Bool?
+    @AppStorage(LitePrefs.noticeKey) private var reviewedNotice: String?
+    @State private var reviewingResearchChoice = false
+    private var consent: Bool {
+        storedChoice == true && reviewedNotice == LitePrefs.noticeVersion && LitePrefs.researchConsent == true
+    }
     @StateObject private var withdrawal = LiteWithdrawalModel.shared
     @State private var confirmWithdrawal = false
     @State private var reviewRenewedConsent = false
@@ -192,11 +197,16 @@ struct LiteSettingsView: View {
                 }
                 #endif
                 Section("研究上傳") {
-                    Toggle(LiteNativeBuild.includesService ? "上傳資料供研究" : "上傳去識別資料供研究（啟用自動辨識）", isOn: Binding(get:{ consent && !LitePrefs.researchPausedForAccountDeletion }, set:{ consent = $0 }))
-                        .onChange(of: consent) { _, v in LitePrefs.researchConsent = v }
+                    Toggle(LiteNativeBuild.includesService ? "上傳資料供研究" : "上傳去識別資料供研究（啟用自動辨識）", isOn: Binding(
+                        get: { consent },
+                        set: { requested in
+                            if requested { reviewingResearchChoice = true }
+                            else { LitePrefs.researchConsent = false }
+                        }))
+                        .id(consent)
                         .disabled(LitePrefs.researchPausedForAccountDeletion || withdrawal.blocksUploads || withdrawal.busy)
                     Text(consent && !LitePrefs.researchPausedForAccountDeletion
-                         ? "拍攝影像、深度、修正輪廓、量測估算與傷口側別部位會上傳供辨識與研究；紀錄修改也會同步。可隨時關閉。"
+                         ? "研究送件可包含照片、整張深度圖、原始 AI 圈選與後續修訂，以及量測估算與側別部位。可隨時關閉。"
                          : LiteNativeBuild.includesService ? "可在本機圈選，或登入後從量測頁選擇個人雲端辨識。個人服務和研究使用分開決定。" : "完全離線：照片與深度只留在手機，輪廓手動圈選。")
                         .font(.footnote).foregroundStyle(.secondary)
                     if LitePrefs.researchPausedForAccountDeletion {
@@ -288,7 +298,7 @@ struct LiteSettingsView: View {
                     .confirmationDialog("撤回研究並要求清除雲端媒體？", isPresented: $confirmWithdrawal,
                                         titleVisibility: .visible) {
                         Button("確認撤回", role: .destructive) {
-                            consent = false
+                            LitePrefs.researchConsent = false
                             Task { await withdrawal.request(server: AppSettings.backendURL()) }
                         }
                         Button("取消", role: .cancel) {}
@@ -298,6 +308,12 @@ struct LiteSettingsView: View {
                 }
             }
             .navigationTitle("設定")
+            .sheet(isPresented: $reviewingResearchChoice) {
+                LiteConsentView { agreed in
+                    reviewingResearchChoice = false
+                    if agreed && !withdrawal.busy { LitePrefs.researchConsent = true }
+                }
+            }
             .sheet(isPresented: $reviewRenewedConsent) {
                 LiteConsentView(onChoose: { choice in
                     reviewRenewedConsent = false
@@ -320,7 +336,6 @@ struct LiteSettingsView: View {
                         }
                         if restored {
                             LitePrefs.researchConsent = true
-                            consent = LitePrefs.researchConsent == true
                         }
                     }
                 }, renewingUnsentWithdrawal: withdrawal.mayReviewUnsentCancellation,

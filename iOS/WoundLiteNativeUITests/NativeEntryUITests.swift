@@ -176,6 +176,66 @@ final class NativeEntryUITests: XCTestCase {
         #endif
     }
 
+    /// Runs on a simulator without LiDAR or a service account. Exercise the
+    /// real Settings switch and persisted preference without taking a photo.
+    @MainActor func testResearchSwitchRequiresConfirmedConsentAndPersistsTheChoice() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        func openSettings() {
+            app.launch()
+            app.buttons["設定與資料撤回"].tap()
+            XCTAssertTrue(app.navigationBars["設定"].waitForExistence(timeout: 5))
+        }
+        func reveal(_ element: XCUIElement) {
+            for _ in 0..<8 where !element.isHittable { app.swipeUp() }
+            XCTAssertTrue(element.isHittable)
+        }
+        let research = app.switches.matching(NSPredicate(format: "label CONTAINS %@", "供研究")).firstMatch
+        func checkValue(_ value: String) {
+            let changed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", value), object: research)
+            XCTAssertEqual(XCTWaiter.wait(for: [changed], timeout: 5), .completed)
+        }
+        func toggle() {
+            reveal(research)
+            research.coordinate(withNormalizedOffset: CGVector(dx: 0.91, dy: 0.5)).tap()
+        }
+        openSettings()
+        reveal(research)
+        if research.value as? String == "1" { toggle() }
+        toggle()
+        let sheet = app.navigationBars["WoundAILite"]
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5), "The switch enabled uploads without the consent screen")
+        // Closing the app mid-review must not apply the unconfirmed choice.
+        app.terminate()
+        openSettings()
+        reveal(research)
+        checkValue("0")
+        toggle()
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5))
+        let decline = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "不同意")).firstMatch
+        reveal(decline)
+        decline.tap()
+        XCTAssertTrue(app.navigationBars["設定"].waitForExistence(timeout: 5))
+        checkValue("0")
+        toggle()
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5))
+        let agree = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "同意研究上傳")).firstMatch
+        reveal(agree)
+        agree.tap()
+        XCTAssertTrue(app.navigationBars["設定"].waitForExistence(timeout: 5))
+        checkValue("1")
+        app.terminate()
+        openSettings()
+        reveal(research)
+        checkValue("1")
+        toggle()
+        checkValue("0")
+        app.terminate()
+        openSettings()
+        reveal(research)
+        checkValue("0")
+    }
+
     @MainActor private func attach(_ app: XCUIApplication, _ name: String) {
         let item = XCTAttachment(screenshot: app.screenshot())
         item.name = name

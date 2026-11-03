@@ -50,6 +50,15 @@ final class LiteBackendConfigurationTests: XCTestCase {
             XCTAssertEqual(LiteBackendConfiguration.releaseOrigin(value), LiteBackendConfiguration.unavailableOrigin, value)
         }
     }
+    func testUpdatedNoticeRequiresExistingParticipantsToChooseAgain() {
+        for previous in [nil, "old-disclosure"] as [String?] {
+            XCTAssertNil(LitePrefs.reviewedChoice(true, notice: previous))
+            XCTAssertEqual(LitePrefs.reviewedChoice(false, notice: previous), false)
+        }
+        XCTAssertNil(LitePrefs.reviewedChoice(nil, notice: LitePrefs.noticeVersion))
+        XCTAssertEqual(LitePrefs.reviewedChoice(true, notice: LitePrefs.noticeVersion), true)
+    }
+
     func testConsentRequiresBothVersionAndOrigin() {
         XCTAssertEqual(choice(true, version: "v2", saved: origin), true)
         XCTAssertEqual(choice(false, version: "v2", saved: origin), false)
