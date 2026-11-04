@@ -255,6 +255,8 @@ jobs:
           python -m unittest -v test_lite_fresh_bootstrap test_lite_fresh_bootstrap_factory > evidence/fresh-bootstrap-tests.log 2>&1
           python tools/lite_fresh_bootstrap_probe.py --output evidence/fresh-bootstrap-probe.json
           python tools/lite_fresh_bootstrap_probe.py --factory --output evidence/fresh-bootstrap-factory-probe.json
+      - name: Bounded read-only source inventory (synthetic transport only)
+        run: python -m unittest -v test_lite_fresh_inventory > evidence/fresh-inventory-tests.log 2>&1
       - name: Closed-account service inventory and late-writer seals (synthetic only)
         run: |
           python -m unittest -v test_lite_service_disposition > evidence/service-disposition-tests.log 2>&1
