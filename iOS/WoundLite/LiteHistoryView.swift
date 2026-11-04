@@ -11,6 +11,7 @@ struct LiteHistoryView: View {
     @State private var selected: LiteRecord?
     @State private var woundFilter = ""
     @State private var choseInitialWound = false
+    @State private var compareWound: LiteWoundGroup?
     @State private var reportWound: LiteWoundGroup?
     @State private var manageTracking = false
     private let ungrouped = "__ungrouped__"
@@ -70,6 +71,9 @@ struct LiteHistoryView: View {
                             Text("傷口時間軸")
                         }
                         if let wound = store.wounds.first(where: { $0.id == woundFilter }) {
+                            Button { compareWound = wound } label: {
+                                Label("比較最近兩次照片", systemImage: "rectangle.split.2x1")
+                            }.accessibilityIdentifier("lite.timeline.compare")
                             Button { reportWound = wound } label: {
                                 Label("匯出此傷口時間軸 PDF",systemImage:"square.and.arrow.up")
                             }.accessibilityIdentifier("lite.timeline.export")
@@ -113,6 +117,9 @@ struct LiteHistoryView: View {
             }
             .sheet(item: $selected) { r in
                 LiteRecordDetailView(recordId: r.id, store: store, nativeSession:nativeSession)
+            }
+            .fullScreenCover(item: $compareWound) { group in
+                LitePhotoComparisonView(group: group, store: store)
             }
             .sheet(item:$reportWound) { group in
                 LiteTimelineExportView(group:group,store:store)
@@ -170,7 +177,7 @@ struct LiteHistoryView: View {
     }
 
     private static func pretty(_ iso: String) -> String {
-        guard let d = ISO8601DateFormatter().date(from: iso) else { return iso }
+        guard let d = LiteRecord.captureDate(iso) else { return iso }
         let f = DateFormatter()
         f.dateFormat = "M/d HH:mm"
         return f.string(from: d)
@@ -601,7 +608,7 @@ struct LiteRecordDetailView: View {
     }
 
     private static func pretty(_ iso: String) -> String {
-        guard let d = ISO8601DateFormatter().date(from: iso) else { return iso }
+        guard let d = LiteRecord.captureDate(iso) else { return iso }
         let f = DateFormatter()
         f.dateFormat = "M/d HH:mm"
         return f.string(from: d)
@@ -747,5 +754,79 @@ struct LiteTrendChart: View {
             }
         }
         .padding(.vertical, 8)
+    }
+}
+
+private struct LitePhotoComparisonView: View {
+    let group: LiteWoundGroup
+    @ObservedObject var store: LiteStore
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            GeometryReader { geometry in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text(group.displayName).font(.headline)
+                        switch LitePhotoComparison(group: group, records: store.records) {
+                        case .unavailable(let reason):
+                            Text(reason)
+                        case .pair(let previous, let current, let missingDates):
+                            let layout = geometry.size.width >= 650
+                                ? AnyLayout(HStackLayout(alignment: .top, spacing: 16))
+                                : AnyLayout(VStackLayout(alignment: .leading, spacing: 16))
+                            layout {
+                                LiteComparisonPhoto(label: "前次", record: previous, images: store.images)
+                                    .id(previous.id + previous.imageName)
+                                LiteComparisonPhoto(label: "最近一次", record: current, images: store.images)
+                                    .id(current.id + current.imageName)
+                            }
+                            if missingDates > 0 {
+                                Text("另有 \(missingDates) 筆缺少可核對的時間。").font(.footnote)
+                            }
+                            Text("請參照拍攝日期及外觀。兩張照片各自縮放，距離、角度與光線會影響看起來的大小和顏色。")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading).padding()
+                }
+            }
+            .navigationTitle("前後照片").navigationBarTitleDisplayMode(.inline)
+            .toolbar { Button("完成") { dismiss() } }
+        }
+    }
+}
+
+private struct LiteComparisonPhoto: View {
+    let label: String
+    let record: LiteRecord
+    let images: LocalImageStore
+    @State private var image: UIImage?
+    @State private var finished = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(label).font(.headline)
+            if let date = LiteRecord.captureDate(record.dateISO) {
+                Text(date.formatted(date: .abbreviated, time: .standard)).font(.subheadline)
+            }
+            ZStack {
+                RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08))
+                if let image {
+                    Image(uiImage: image).resizable().scaledToFit().accessibilityLabel(label + "照片")
+                } else if finished {
+                    Text("此筆照片暫時無法讀取").foregroundStyle(.secondary)
+                } else {
+                    ProgressView()
+                }
+            }
+            .frame(maxWidth: .infinity).frame(height: 240)
+        }
+        .task(id: record.imageName) {
+            let preview = await ImageLoadQueue.shared.thumbnail(store: images, name: record.imageName, maxPixel: 1280)
+            guard !Task.isCancelled else { return }
+            image = preview.image
+            finished = true
+        }
     }
 }

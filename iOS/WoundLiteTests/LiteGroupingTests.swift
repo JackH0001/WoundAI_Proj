@@ -97,6 +97,58 @@ final class LiteGroupingTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: blocked), original)
     }
 
+    func testPhotoPairAndListUseSameInstantOrderIncludingOffsetsAndFractionalSeconds() throws {
+        var old = record("old", day: 1, area: 1, wound: "a")
+        var first = record("prior", day: 1, area: 3, wound: "a")
+        var last = record("recent", day: 2, area: 7, wound: "a")
+        var undated = record("undated", day: 3, area: 5, wound: "a")
+        old.dateISO = "2026-11-01T20:44:00+08:00"
+        first.dateISO = "2026-11-01T16:00:00.100Z"
+        last.dateISO = "2026-11-01T12:00:00.200-04:00"
+        last.imageName = "" // A missing recent photo must not substitute the older date.
+        undated.dateISO = "unknown"
+        let other = record("other", day: 20, area: 9, wound: "b")
+        let rows = [last, undated, other, old, first]
+        let group = LiteWoundGroup(id: "a", name: "測試")
+        guard case .pair(let previous, let current, let omitted) = LitePhotoComparison(group: group, records: rows)
+        else { return XCTFail("Expected the two most recent observations from a single wound") }
+        XCTAssertEqual([previous.id, current.id, current.imageName], ["prior", "recent", ""])
+        XCTAssertEqual(omitted, 1)
+        XCTAssertEqual(LiteGrouping.records(for: group.id, in: rows).map(\.id), ["recent", "prior", "old", "undated"])
+        XCTAssertEqual(LiteGrouping.mostRecentWoundID(rows), group.id)
+        XCTAssertEqual(LiteGrouping.changePercent(last, in: rows) ?? -1, 400.0/3.0, accuracy: 0.001)
+        XCTAssertEqual(try LiteTimelineSelection(group: group, records: rows).rows.map(\.id),
+                       ["old", "prior", "recent", "undated"])
+    }
+
+    func testPhotoPairWithholdsAmbiguousTimesUnassignedAndDifferentOwners() {
+        let group = LiteWoundGroup(id: "a", name: "測試")
+        let first = record("first", day: 1, area: 1, wound: "a")
+        let last = record("last", day: 2, area: 2, wound: "a")
+        var foreign = first
+        foreign.woundAccount = "other"
+        for records in [[first], [first, record("not assigned", day: 2, area: 1)],
+                        [first, last, record("tie", day: 1, area: 4, wound: "a")],
+                        [first, last, record("tie", day: 2, area: 5, wound: "a")],
+                        [last, foreign], [first, first, last]] {
+            guard case .unavailable = LitePhotoComparison(group: group, records: records) else {
+                return XCTFail("Must not infer a pair across people, missing assignments or ambiguous timestamps")
+            }
+        }
+    }
+
+    func testConflictingOwnersOfOneImportedGroupCannotBeComparedOrExported() {
+        var first = record("a", day: 1, area: 2, wound: "w")
+        var second = record("b", day: 2, area: 4, wound: "w")
+        first.woundAccount = "account-a"; second.woundAccount = "account-b"
+        let group = LiteWoundGroup(id: "w", name: "測試", account: "account-a")
+        let rows = [first, second]
+        XCTAssertThrowsError(try LiteTimelineSelection(group: group, records: rows))
+        XCTAssertTrue(LiteWoundTrend.points(woundID: group.id, records: rows).isEmpty)
+        XCTAssertNil(LiteGrouping.changePercent(second, in: rows))
+        XCTAssertEqual(Set(LiteGrouping.records(for: group.id, in: rows).map(\.id)), ["a", "b"])
+    }
+
     func testTrendUsesOnlySelectedWoundAndOrdersActualTimes() {
         let early = record("a1", day: 1, area: 10, wound: "a")
         let late = record("a2", day: 3, area: 8, wound: "a")

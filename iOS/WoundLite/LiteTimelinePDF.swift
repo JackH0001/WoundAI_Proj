@@ -14,9 +14,7 @@ struct LiteTimelineSelection {
   func date(of record: LiteRecord) -> Date? { datedRows[record.id] }
 
   func displayDate(_ iso: String) -> String {
-    let precise = ISO8601DateFormatter()
-    precise.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    guard let date = ISO8601DateFormatter().date(from: iso) ?? precise.date(from: iso) else {
+    guard let date = LiteRecord.captureDate(iso) else {
       return "日期待確認"
     }
     let formatter = DateFormatter()
@@ -51,11 +49,12 @@ struct LiteTimelineSelection {
     }
     self.group = group
     self.calendar = calendar
-    let iso = ISO8601DateFormatter()
-    let precise = ISO8601DateFormatter()
-    precise.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    let series = records.filter { $0.woundID == group.id }.map {
-      ($0, iso.date(from: $0.dateISO) ?? precise.date(from: $0.dateISO))
+    let rowsInGroup = records.filter { $0.woundID == group.id }
+    guard LiteGrouping.canCombine(rowsInGroup, account: group.account) else {
+      throw LiteTimelineError.invalidSelection
+    }
+    let series = rowsInGroup.map {
+      ($0, LiteRecord.captureDate($0.dateISO))
     }
     datedRows = Dictionary(series.compactMap { record, date in date.map { (record.id, $0) } },
                            uniquingKeysWith: { first, _ in first })
@@ -337,7 +336,11 @@ struct LiteTimelineExportView: View {
             DatePicker("迄日", selection: $end, displayedComponents: .date)
           }
           Toggle("附上照片與圈選", isOn: $photos)
-          Text("依時間由舊到新，共 \(selection?.rows.count ?? 0) 筆。").font(.footnote)
+          if let selection {
+            Text("依時間由舊到新，共 \(selection.rows.count) 筆。").font(.footnote)
+          } else {
+            Text("請核對日期範圍與傷口分組。無法核對時仍可查看個別紀錄。").font(.footnote)
+          }
         }
         Button(busy ? "正在產生 PDF…" : "產生並分享 PDF") { export() }
           .disabled(busy || selection?.rows.isEmpty != false || store.needsReload)

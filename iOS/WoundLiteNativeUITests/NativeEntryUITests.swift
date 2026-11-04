@@ -44,6 +44,37 @@ final class NativeEntryUITests: XCTestCase {
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(privacy.waitForExistence(timeout: 5))
     }
+    #if LITE_QA_PHOTO_FIXTURE
+    @MainActor func testLocalWoundPhotosOpenInTimeOrderAndReturnToTimeline() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launch()
+        let local = app.buttons["查看既有紀錄"]
+        let history = local.waitForExistence(timeout: 3) ? local : app.buttons["紀錄"].firstMatch
+        XCTAssertTrue(history.waitForExistence(timeout: 8))
+        history.tap()
+        let compare = app.buttons["lite.timeline.compare"]
+        XCTAssertTrue(compare.waitForExistence(timeout: 5))
+        compare.tap()
+        XCTAssertTrue(app.navigationBars["前後照片"].waitForExistence(timeout: 5))
+        let previous = app.images["前次照片"]
+        let latest = app.images["最近一次照片"]
+        XCTAssertTrue(previous.waitForExistence(timeout: 8))
+        XCTAssertTrue(latest.waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["合成紙上標靶・右・膝後"].exists)
+        XCTAssertFalse(app.staticTexts["獨立對照"].exists)
+        if app.frame.width >= 650 {
+            XCTAssertLessThan(previous.frame.midX, latest.frame.midX)
+        } else {
+            XCTAssertLessThan(previous.frame.midY, latest.frame.midY)
+        }
+        attach(app, "local-two-photo-comparison")
+        app.buttons["完成"].tap()
+        XCTAssertTrue(compare.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["lite.timeline.export"].exists)
+    }
+    #endif
+
     #if LITE_QA_SAVED_FIXTURE || LITE_QA_EXTERNAL_FIXTURE
     @MainActor func testSelectedWoundTimelineOffersDateRangePhotosAndSystemSharing() throws {
         continueAfterFailure = false
