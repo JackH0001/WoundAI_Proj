@@ -124,7 +124,7 @@ class AccountGrantCipher:
     immutable = staticmethod(SubscriptionRuntime.immutable)
 
     def __init__(self, *, provider, lifecycle, store, audit_store, readiness=None):
-        if not isinstance(provider,GoogleGrantKeyProvider) or not isinstance(lifecycle,AccountLifecycle):
+        if type(provider) is not GoogleGrantKeyProvider or not isinstance(lifecycle,AccountLifecycle):
             raise ValueError('explicit account lifecycle and key provider required')
         if store is audit_store or (getattr(store,'path',None) is not None
                 and getattr(store,'path',None)==getattr(audit_store,'path',None)):

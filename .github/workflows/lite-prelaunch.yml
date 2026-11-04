@@ -243,8 +243,9 @@ jobs:
           > evidence/app-backend-tests.log 2>&1
       - name: Per-account grant keys and retained backup erasure (synthetic only)
         run: |
-          python -m unittest -v test_lite_grant_key_custody > evidence/grant-key-custody-tests.log 2>&1
+          python -m unittest -v test_lite_grant_key_custody test_lite_rotating_grant_keys > evidence/grant-key-custody-tests.log 2>&1
           python tools/lite_grant_key_custody_probe.py --output evidence/grant-key-custody-probe.json
+          python tools/lite_rotating_grant_keys_probe.py --output evidence/rotating-grant-keys-probe.json
       - name: Closed-account service inventory and late-writer seals (synthetic only)
         run: |
           python -m unittest -v test_lite_service_disposition > evidence/service-disposition-tests.log 2>&1

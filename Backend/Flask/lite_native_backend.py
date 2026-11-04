@@ -105,7 +105,7 @@ def compose_native_backend(*, enabled=False, runtime, rollout, security, budget,
             or not isinstance(security, RegistrationService) or not isinstance(budget, RequestBudget)
             or not isinstance(privacy, (PrivacyState, FencedPrivacy))
             or not isinstance(verifier, AppleIdentityVerifier) or not isinstance(oauth, AppleOAuthProvider)
-            or not isinstance(key_provider, GoogleGrantKeyProvider) or not isinstance(inference, RasterInference)):
+            or type(key_provider) is not GoogleGrantKeyProvider or not isinstance(inference, RasterInference)):
         raise ValueError('complete trusted native candidate dependencies required')
     _subject(namespace); _hex(model_version)
     if type(identity_key) is not bytes or len(identity_key) != 32:

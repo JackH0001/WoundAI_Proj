@@ -49,7 +49,7 @@ class DispositionProgress:
 
     def __init__(self, *, deletion, results, cipher, store, audit_store):
         if (not isinstance(deletion, AccountDeletion) or not isinstance(results, ServiceResultDisposition)
-                or not isinstance(cipher, AccountGrantCipher) or results.life is not deletion.lifecycle
+                or type(cipher) is not AccountGrantCipher or results.life is not deletion.lifecycle
                 or cipher.lifecycle is not deletion.lifecycle or deletion.grants.cipher is not cipher):
             raise ValueError('matching indexed deletion, results and account keys required')
         peers = (deletion.store, deletion.audit, deletion.lifecycle.store, deletion.lifecycle.audit,
