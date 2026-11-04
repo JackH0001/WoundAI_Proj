@@ -68,7 +68,7 @@ class AccountDispositionWorker:
             self.p._validate_service(p['progress'],r)
             done=r['service_result_payloads']=='current_sealed'
         elif lane=='grant_key':
-            self.p._validate_key(p['progress'],r);done=r['kms_state']=='DESTROYED'
+            self.p._validate_key(p['progress'],r);done=self.p.key_observed(r)
         elif lane=='apple_revocation':
             d=p['progress']['deletion']
             if (r.get('operation')!=d['operation'] or r.get('installation')!=d['requester']
@@ -188,7 +188,7 @@ class AccountDispositionWorker:
         """Private checkpoint view; no Apple/KMS/media listing or mutation."""
         p=self._plan(person);row=self._read(p);j=self._initial(p) if row is None else row[1];_,c=self._control(p)
         return dict(v=1,plan_sha256=digest(p),revision=j['step'],paused=c['paused'],control_revision=c['revision'],
-            states=dict(j['states']),observations=dict(j['receipts']),pending_lanes=list(PENDING),
+            states=dict(j['states']),observations=dict(j['receipts']),pending_lanes=list(PENDING)+(['shared_key_retirement'] if self.p.shared else []),
             account_deleted=False,physical_backups_erased=False,observed_scope_only=True)
 
     def request_rescan(self,person,*,lane):

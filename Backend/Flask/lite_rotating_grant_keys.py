@@ -1,4 +1,4 @@
-"""Explicit shared-KEK custody candidate; not selected by production startup.
+"""Explicit shared-KEK custody candidate; opt-in startup only.
 
 Each account still has an independent random data key. Only the wrapping KMS
 key is shared. Closing an account fences its current key but cannot prove that
@@ -17,6 +17,30 @@ from lite_subscription_executor import key
 from lite_usage_ledger import digest, _hex
 
 
+SHARED_SCHEME = 'shared-kms-envelope-1'
+
+
+def shared_settings(spec, keyring):
+    """Validate startup pins without opening a transport or selecting defaults."""
+    if (type(spec) is not dict or set(spec) != {'scheme','crypto_key','write_version','read_versions'}
+            or spec['scheme'] != SHARED_SCHEME):
+        raise ValueError('explicit shared custody scheme required')
+    crypto_key, write, versions = spec['crypto_key'], spec['write_version'], spec['read_versions']
+    if (type(crypto_key) is not str or not re.fullmatch(
+            re.escape(keyring)+r'/cryptoKeys/[A-Za-z0-9_-]{1,63}', crypto_key)
+            or type(versions) is not list or not 1 <= len(versions) <= 64
+            or any(type(v) is not str or not re.fullmatch(
+                re.escape(crypto_key)+r'/cryptoKeyVersions/[1-9][0-9]{0,9}', v) for v in versions)
+            or len(set(versions)) != len(versions) or type(write) is not str or write not in versions):
+        raise ValueError('explicit bounded shared key versions required')
+    return dict(crypto_key=crypto_key, write_version=write, read_versions=versions.copy())
+
+
+def shared_mode(scope, keyring, spec):
+    settings=shared_settings(spec,keyring)
+    return dict(v=1,scheme=SHARED_SCHEME,scope=scope,keyring=keyring,crypto_key=settings['crypto_key'])
+
+
 class RotatingGrantKeyProvider(GoogleGrantKeyProvider):
     """Only explicitly listed versions of one wrapping key are usable.
 
@@ -26,13 +50,8 @@ class RotatingGrantKeyProvider(GoogleGrantKeyProvider):
     """
     def __init__(self, *, session, keyring, crypto_key, write_version, read_versions):
         super().__init__(session=session, keyring=keyring)
-        if (type(crypto_key) is not str or not re.fullmatch(
-                re.escape(keyring)+r'/cryptoKeys/[A-Za-z0-9_-]{1,63}', crypto_key)
-                or type(read_versions) is not list or not 1 <= len(read_versions) <= 64
-                or any(type(v) is not str or not re.fullmatch(
-                    re.escape(crypto_key)+r'/cryptoKeyVersions/[1-9][0-9]{0,9}', v) for v in read_versions)
-                or len(set(read_versions)) != len(read_versions) or write_version not in read_versions):
-            raise ValueError('explicit bounded shared key versions required')
+        shared_settings(dict(scheme=SHARED_SCHEME,crypto_key=crypto_key,
+            write_version=write_version,read_versions=read_versions),keyring)
         self.crypto_key, self.write_version = crypto_key, write_version
         self.read_versions = frozenset(read_versions)
 
@@ -59,8 +78,8 @@ class RotatingGrantCipher(AccountGrantCipher):
 
     The existing indexed Apple authority accepts this subtype, so login,
     revocation and failure handling can be tested with actual application code.
-    The production composer must not select it until progress/startup contracts
-    and the independent KEK retirement workflow are reviewed.
+    Startup must select the separate shared-mode configuration and progress
+    catalog. Independent KEK retirement remains a separate operator workflow.
     """
     def __init__(self, *, provider, lifecycle, store, audit_store, readiness=None):
         if not isinstance(provider, RotatingGrantKeyProvider) or not isinstance(lifecycle, AccountLifecycle):
@@ -339,6 +358,17 @@ class RotatingGrantCipher(AccountGrantCipher):
             if row is None or row[1] != updated:
                 raise StateUnavailable('shared account key closure unconfirmed')
             c = row[1]; intent = self.audit.load(ik)
+        receipt = self.closure_receipt(person, closure)
+        self.immutable(self.audit,key('shared-grant-key-closure-observed',digest(receipt)),receipt)
+        return receipt
+
+    def closure_receipt(self, person, closure):
+        """Read-only evidence for public progress; no provider call or repair."""
+        _hex(person); _hex(closure)
+        row = self._read(person)
+        if row is None: raise StateUnavailable('closed shared key inventory missing')
+        c = row[1]
+        intent = self.audit.load(key('account-grant-key-destroy-intent',digest([self.scope,person])))
         if (c['closure'] != closure or c['phase'] != 'closed' or intent is None
                 or intent[1] != dict(v=2,scope=self.scope,person=person,closure=closure)):
             raise StateUnavailable('shared closure evidence differs')
@@ -348,5 +378,10 @@ class RotatingGrantCipher(AccountGrantCipher):
             retirement_inventory_verified=False,
             grant_key_unrecoverable=False, physical_backup_deletion_confirmed=False,
             account_deleted=False, data_disposition='pending')
-        self.immutable(self.audit,key('shared-grant-key-closure-observed',digest(receipt)),receipt)
         return receipt
+
+    def validate_closure_receipt(self, person, closure, receipt):
+        expected = self.closure_receipt(person, closure)
+        proof = self.audit.load(key('shared-grant-key-closure-observed',digest(expected)))
+        if type(receipt) is not dict or digest(receipt) != digest(expected) or proof is None or digest(proof[1]) != digest(expected):
+            raise StateUnavailable('shared key closure receipt differs from original evidence')

@@ -22,6 +22,7 @@ from lite_attest_http import install_lite_attest, CHALLENGE_PATH, REGISTER_PATH
 from lite_fenced_store import FencedPrivacy
 from lite_privacy_state import PrivacyState
 from lite_grant_key_custody import AccountGrantCipher, GoogleGrantKeyProvider
+from lite_rotating_grant_keys import RotatingGrantCipher, RotatingGrantKeyProvider
 from lite_native_purchase import NativePurchaseBridge, PURCHASE_PATHS
 from lite_service_http import SERVICE_PATHS
 from lite_service_operations import ServiceOperations, RasterInference
@@ -92,20 +93,25 @@ class NativeBackend:
 
 
 def compose_native_backend(*, enabled=False, runtime, rollout, security, budget, privacy,
-        verifier, oauth, key_provider, stores, namespace, identity_key, inference, model_version, key_readiness=None):
+        verifier, oauth, key_provider, stores, namespace, identity_key, inference, model_version, key_readiness=None, shared_keys=False):
     """Validate the complete graph before any component writes config markers.
 
     Never calls activate_fresh(), rollout.execute(), a provider, or a cleanup
     worker. Paused/unpublished releases may start so account deletion remains
     accessible; the existing durable guards still deny login and new work.
     """
+    if type(shared_keys) is not bool:
+        raise ValueError('explicit key scheme required')
+    expected_provider = RotatingGrantKeyProvider if shared_keys else GoogleGrantKeyProvider
+    if shared_keys and key_readiness is not None:
+        raise ValueError('shared keys cannot use per-account key preparation')
     if enabled is not True:
         raise ValueError('native Sandbox candidate requires explicit enablement')
     if (not isinstance(runtime, SubscriptionRuntime) or not isinstance(rollout, UsageRollout)
             or not isinstance(security, RegistrationService) or not isinstance(budget, RequestBudget)
             or not isinstance(privacy, (PrivacyState, FencedPrivacy))
             or not isinstance(verifier, AppleIdentityVerifier) or not isinstance(oauth, AppleOAuthProvider)
-            or type(key_provider) is not GoogleGrantKeyProvider or not isinstance(inference, RasterInference)):
+            or type(key_provider) is not expected_provider or not isinstance(inference, RasterInference)):
         raise ValueError('complete trusted native candidate dependencies required')
     _subject(namespace); _hex(model_version)
     if type(identity_key) is not bytes or len(identity_key) != 32:
@@ -152,7 +158,8 @@ def compose_native_backend(*, enabled=False, runtime, rollout, security, budget,
         identity_key_sha256=hashlib.sha256(identity_key).hexdigest())
     life = AccountLifecycle(store=stores['lifecycle'], audit_store=stores['lifecycle_audit'],
         binding=binding, clock=verifier.clock, service_catalog=True)
-    cipher = AccountGrantCipher(provider=key_provider, lifecycle=life,
+    cipher_class = RotatingGrantCipher if shared_keys else AccountGrantCipher
+    cipher = cipher_class(provider=key_provider, lifecycle=life,
         store=stores['keys'], audit_store=stores['keys_audit'], readiness=key_readiness)
     events = AppleAccountEvents(verifier=verifier, store=stores['events'], audit_store=stores['events_audit'],
         namespace=namespace, identity_key=identity_key)

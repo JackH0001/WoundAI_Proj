@@ -25,6 +25,7 @@ from lite_privacy_state import PrivacyState
 from lite_apple_identity_provider import RefreshingAppleIdentityVerifier
 from lite_apple_oauth import AppleClientSecret, AppleOAuthProvider
 from lite_grant_key_custody import GoogleGrantKeyProvider
+from lite_rotating_grant_keys import RotatingGrantKeyProvider, shared_settings
 from lite_key_readiness import KeyReadinessClient
 from lite_subscription_authority import ApplePolicy, AppleSubscriptionAuthority, apple_verifier
 from lite_subscription_migration import StableSubscriptionLinks, scope
@@ -80,8 +81,9 @@ def preflight(raw, *, expected_config, expected_source, expected_image, secrets,
         raise ValueError('pinned bounded native configuration required')
     c=loads_json_object_strict(raw.decode('utf-8'))
     exact(c,'schema enabled namespace deployment app apple budgets buckets stores controls secrets model'
-          + (' key_preparation' if 'key_preparation' in c else ''))
-    if c['schema'] not in ('lite-native-startup/1', 'lite-native-startup/2') or c['enabled'] is not True:
+          + (' key_preparation' if 'key_preparation' in c else '')
+          + (' grant_keys' if 'grant_keys' in c else ''))
+    if c['schema'] not in ('lite-native-startup/1', 'lite-native-startup/2', 'lite-native-startup/3') or c['enabled'] is not True:
         raise ValueError('explicit native Sandbox enablement required')
     _subject(c['namespace'])
     d=exact(c['deployment'],'source image project project_number service_account keyring')
@@ -91,6 +93,10 @@ def preflight(raw, *, expected_config, expected_source, expected_image, secrets,
     text(d['project_number'],r'[1-9][0-9]{5,19}')
     text(d['service_account'],r'[a-z][a-z0-9-]{4,28}[a-z0-9]@'+re.escape(d['project'])+r'\.iam\.gserviceaccount\.com')
     text(d['keyring'],r'projects/'+re.escape(d['project'])+r'/locations/asia-east1/keyRings/[A-Za-z0-9_-]+')
+    shared = c['schema'] == 'lite-native-startup/3'
+    if shared != ('grant_keys' in c) or (shared and 'key_preparation' in c):
+        raise ValueError('shared keys require schema 3 and no per-account preparation')
+    if shared: shared_settings(c['grant_keys'], d['keyring'])
     if 'key_preparation' in c:
         prep=exact(c['key_preparation'],'origin')
         text(prep['origin'],r'https://[a-z0-9][a-z0-9-]+\.a\.run\.app')
@@ -142,7 +148,7 @@ def preflight(raw, *, expected_config, expected_source, expected_image, secrets,
             or release['usage_namespace']!=usage['namespace'] or release['fence']!=usage['writer_fence_sha256']):
         raise ValueError('subscription/release/usage pins differ')
     secret_refs=exact(c['secrets'],'identity oauth api')
-    separate_mounts = c['schema'] == 'lite-native-startup/2'
+    separate_mounts = c['schema'] in ('lite-native-startup/2', 'lite-native-startup/3')
     blobs = {role: pinned_file(secrets, ref, 16384, mount=role if separate_mounts else None)
              for role, ref in secret_refs.items()}
     if len(blobs['identity']) != 32 or (not separate_mounts and len({v['file'] for v in secret_refs.values()}) != 3):
@@ -250,11 +256,15 @@ def build_native_runtime(raw, *, expected_config, expected_source, expected_imag
     account_scope=digest(dict(namespace=c['namespace'],issuer='https://appleid.apple.com',audience=BUNDLE,
         identity_key_sha256=hashlib.sha256(blobs['identity']).hexdigest()))
     readiness=p.readiness(c,account_scope) if 'key_preparation' in c else None
+    shared = c['schema'] == 'lite-native-startup/3'
+    provider = (RotatingGrantKeyProvider(session=p.kms,keyring=c['deployment']['keyring'],
+        **shared_settings(c['grant_keys'],c['deployment']['keyring'])) if shared else
+        GoogleGrantKeyProvider(session=p.kms,keyring=c['deployment']['keyring']))
     return compose_native_backend(enabled=True,runtime=runtime,rollout=rollout,security=security,budget=budget,
         privacy=PrivacyState(stores['privacy']),verifier=p.identity(clock),oauth=p.oauth(secret),
-        key_provider=GoogleGrantKeyProvider(session=p.kms,keyring=c['deployment']['keyring']),
+        key_provider=provider,
         stores={k:stores[k] for k in STORE_NAMES},namespace=c['namespace'],identity_key=blobs['identity'],
-        inference=model.raster,model_version=model.version,key_readiness=readiness)
+        inference=model.raster,model_version=model.version,key_readiness=readiness,shared_keys=shared)
 
 
 def application(environment=None):

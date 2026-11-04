@@ -10,6 +10,7 @@ from lite_account_deletion import AccountDeletion
 from lite_account_identity import IdentityRejected
 from lite_attest_state import CAS_ATTEMPTS, StateUnavailable
 from lite_grant_key_custody import AccountGrantCipher
+from lite_rotating_grant_keys import RotatingGrantCipher
 from lite_service_disposition import ServiceResultDisposition
 from lite_subscription_executor import key
 from lite_subscription_runtime import SubscriptionRuntime
@@ -19,6 +20,9 @@ PENDING_LANES = ['historical_versions_backups', 'research_association_dispositio
                  'identity_subscription_retention', 'live_provider_device_acceptance']
 CATALOG = digest(dict(v=1, service='current_slot_seal', grant_key='kms_account_version',
                       pending_lanes=PENDING_LANES))
+SHARED_PENDING_LANES = PENDING_LANES + ['shared_key_retirement']
+SHARED_CATALOG = digest(dict(v=1, service='current_slot_seal', grant_key='shared_kek_access_closure',
+                             pending_lanes=SHARED_PENDING_LANES))
 
 
 def aliases(a, b):
@@ -49,7 +53,7 @@ class DispositionProgress:
 
     def __init__(self, *, deletion, results, cipher, store, audit_store):
         if (not isinstance(deletion, AccountDeletion) or not isinstance(results, ServiceResultDisposition)
-                or type(cipher) is not AccountGrantCipher or results.life is not deletion.lifecycle
+                or type(cipher) not in (AccountGrantCipher, RotatingGrantCipher) or results.life is not deletion.lifecycle
                 or cipher.lifecycle is not deletion.lifecycle or deletion.grants.cipher is not cipher):
             raise ValueError('matching indexed deletion, results and account keys required')
         peers = (deletion.store, deletion.audit, deletion.lifecycle.store, deletion.lifecycle.audit,
@@ -59,9 +63,12 @@ class DispositionProgress:
             raise ValueError('disposition progress and audit require independent stores')
         self.deletion, self.results, self.cipher = deletion, results, cipher
         self.store, self.audit = store, audit_store
+        self.shared = type(cipher) is RotatingGrantCipher
+        self.catalog = SHARED_CATALOG if self.shared else CATALOG
+        self.pending_lanes = SHARED_PENDING_LANES if self.shared else PENDING_LANES
         self.research = None
         self.immutable(store, key('disposition-progress-config', deletion.scope),
-                       dict(v=1, scope=deletion.scope, catalog=CATALOG))
+                       dict(v=1, scope=deletion.scope, catalog=self.catalog))
 
     def attach_research(self, worker):
         """Explicit private-worker composition; public routes still only observe.
@@ -87,7 +94,7 @@ class DispositionProgress:
         s = self.results.plan(person)
         if (p['scope'], p['operation'], p['inventory_sha256']) != (s['scope'], s['closure_operation'], s['inventory_sha256']):
             raise StateUnavailable('disposition inventories differ')
-        return dict(v=1, catalog=CATALOG, deletion=p, service=s)
+        return dict(v=1, catalog=self.catalog, deletion=p, service=s)
 
     def _key(self, plan): return key('disposition-progress', digest(plan))
 
@@ -106,6 +113,9 @@ class DispositionProgress:
 
     def _validate_key(self, p, r):
         d = p['deletion']
+        if self.shared:
+            self.cipher.validate_closure_receipt(d['person'], digest(d), r)
+            return
         if (type(r) is not dict or set(r) != {'v','scope','person','closure','version','kms_state',
                 'grant_key_unrecoverable','physical_backup_deletion_confirmed','account_deleted','data_disposition'}
                 or type(r['v']) is not int or r['v'] != 1 or r['scope'] != d['scope'] or r['person'] != d['person']
@@ -115,6 +125,16 @@ class DispositionProgress:
                 or r['physical_backup_deletion_confirmed'] is not False or r['account_deleted'] is not False
                 or r['data_disposition'] != 'pending'):
             raise StateUnavailable('grant key receipt differs')
+
+    def key_observed(self, receipt):
+        # This means the bounded per-account lane is observed, not that a
+        # shared KEK was retired or a full account was cryptographically erased.
+        return receipt['current_key_access']=='closed' if self.shared else receipt['kms_state']=='DESTROYED'
+
+    def key_state(self, receipt):
+        if receipt is None: return 'not_started'
+        if self.shared: return 'backup_pending'
+        return 'unrecoverable' if receipt['kms_state']=='DESTROYED' else 'destroy_scheduled'
 
     def _read(self, p):
         row = self.store.load(self._key(p))
@@ -153,7 +173,7 @@ class DispositionProgress:
                 raise StateUnavailable('unknown blocked disposition lane')
             if old:
                 if old['service'] is not None and (s is None or s['sealed'] <= old['service']['sealed']): s = old['service']
-                if old['grant_key'] is not None and (k is None or old['grant_key']['kms_state']=='DESTROYED'): k = old['grant_key']
+                if old['grant_key'] is not None and (k is None or self.key_observed(old['grant_key'])): k = old['grant_key']
             b = sorted(set(blocked))
             value = dict(v=1, plan=p, sequence=1 if old is None else old['sequence']+1,
                          service=s, grant_key=k, blocked=b)
@@ -176,11 +196,11 @@ class DispositionProgress:
         s, k = (None, None) if j is None else (j['service'], j['grant_key'])
         if k is not None and base['apple_revocation'] != 'confirmed':
             raise StateUnavailable('key disposition contradicts Apple revocation')
-        progress = dict(v=1, catalog_sha256=CATALOG, revision=0 if j is None else j['sequence'],
+        progress = dict(v=1, catalog_sha256=self.catalog, revision=0 if j is None else j['sequence'],
             service_total=p['service']['total'], service_sealed=0 if s is None else s['sealed'],
             service_state='not_started' if s is None else s['service_result_payloads'],
-            grant_key_state='not_started' if k is None else 'unrecoverable' if k['kms_state']=='DESTROYED' else 'destroy_scheduled',
-            blocked_lanes=[] if j is None else j['blocked'], pending_lanes=PENDING_LANES.copy())
+            grant_key_state=self.key_state(k),
+            blocked_lanes=[] if j is None else j['blocked'], pending_lanes=self.pending_lanes.copy())
         return dict(base, v=2, data_disposition='pending', disposition=progress)
 
     def advance(self, person, *, limit=20):

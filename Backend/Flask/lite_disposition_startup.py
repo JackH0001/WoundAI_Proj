@@ -21,10 +21,11 @@ import lite_disposition_bootstrap as bootstrap
 from lite_disposition_context import (ClosedAccountContext, GrantRevocationContext,
     RegistryReadContext, ResultReadContext, existing)
 from lite_disposition_executor import DispositionExecutor, validate_manifest
-from lite_disposition_progress import DispositionProgress, CATALOG
+from lite_disposition_progress import DispositionProgress, CATALOG, SHARED_CATALOG
 from lite_disposition_worker import AccountDispositionWorker
 from lite_fenced_store import FencedPrivacy
 from lite_grant_key_custody import AccountGrantCipher, GoogleGrantKeyProvider
+from lite_rotating_grant_keys import RotatingGrantCipher, RotatingGrantKeyProvider, shared_settings, shared_mode
 from lite_reconsent import Reconsent
 from lite_research_media_disposition import ResearchMediaDisposition
 from lite_research_association import ResearchAssociations
@@ -85,14 +86,18 @@ def preflight(raw, *, expected_config, expected_source, expected_image, expected
     c = loads_json_object_strict(raw.decode())
     expected = 'schema enabled deployment binding buckets stores media policies manifest manifest_sha256 provider_budget bootstrap_budget signers apple'
     has_associations = 'research_associations' in c
-    exact(c, expected+' research_associations' if has_associations else expected)
-    if c['schema'] != 'lite-disposition-startup/2' or c['enabled'] is not True:
+    exact(c, expected + (' research_associations' if has_associations else '')
+          + (' grant_keys' if 'grant_keys' in c else ''))
+    if c['schema'] not in ('lite-disposition-startup/2','lite-disposition-startup/3') or c['enabled'] is not True:
         raise ValueError('explicit private disposition enablement required')
     d = exact(c['deployment'], 'source image project project_number service_account keyring')
     if d['source'] != expected_source or d['image'] != expected_image: raise ValueError('source/image pins differ')
     text(d['project'], r'[a-z][a-z0-9-]{4,28}[a-z0-9]'); text(d['project_number'], r'[1-9][0-9]{5,19}')
     text(d['service_account'], r'[a-z][a-z0-9-]{4,28}[a-z0-9]@'+re.escape(d['project'])+r'\.iam\.gserviceaccount\.com')
     text(d['keyring'], r'projects/'+re.escape(d['project'])+r'/locations/asia-east1/keyRings/[A-Za-z0-9_-]+')
+    shared = c['schema'] == 'lite-disposition-startup/3'
+    if shared != ('grant_keys' in c): raise ValueError('shared keys require private schema 3')
+    if shared: shared_settings(c['grant_keys'], d['keyring'])
     b = exact(c['binding'], 'namespace issuer audience identity_key_sha256')
     _subject(b['namespace']); _hex(b['identity_key_sha256'])
     if b['issuer'] != 'https://appleid.apple.com' or b['audience'] != 'com.woundai.lite': raise ValueError('Lite binding required')
@@ -169,16 +174,21 @@ def preflight(raw, *, expected_config, expected_source, expected_image, expected
 
 
 class DispositionKMSSession:
-    """Only reviewed accounts' describe/decrypt/destroy; no wrap/create/restore."""
-    def __init__(self, session, keyring, scope, persons):
+    """Legacy account describe/decrypt/destroy; shared describe/decrypt only."""
+    def __init__(self, session, keyring, scope, persons, *, shared_keys=None):
         self.session = session
-        provider = GoogleGrantKeyProvider(session=session, keyring=keyring)
-        self.versions = {'https://cloudkms.googleapis.com/v1/'+provider.version(scope, person) for person in persons}
+        self.shared = shared_keys is not None
+        if self.shared:
+            settings = shared_settings(shared_keys,keyring)
+            self.versions = {'https://cloudkms.googleapis.com/v1/'+v for v in settings['read_versions']}
+        else:
+            provider = GoogleGrantKeyProvider(session=session, keyring=keyring)
+            self.versions = {'https://cloudkms.googleapis.com/v1/'+provider.version(scope, person) for person in persons}
         self.keys = {v.rsplit('/cryptoKeyVersions/',1)[0] for v in self.versions}
 
     def request(self, method, url, **kw):
         allowed = method == 'GET' and url in self.versions
-        allowed |= method == 'POST' and (url in {v+':destroy' for v in self.versions} or url in {k+':decrypt' for k in self.keys})
+        allowed |= method == 'POST' and ((not self.shared and url in {v+':destroy' for v in self.versions}) or url in {k+':decrypt' for k in self.keys})
         if not allowed: raise StateUnavailable('disposition KMS method outside reviewed accounts')
         return self.session.request(method, url, **kw)
 
@@ -219,7 +229,7 @@ class CloudProviders:
         self.client = Client(project=c['deployment']['project'],credentials=self.credentials,
             _http=BudgetedSession(storage,allocation,provider='gcs',authorized=True))
         self.kms = DispositionKMSSession(BudgetedSession(kms,allocation,provider='kms',response_limit=32768,authorized=True),
-            c['deployment']['keyring'],digest(c['binding']),[a['person'] for a in c['manifest']['accounts']])
+            c['deployment']['keyring'],digest(c['binding']),[a['person'] for a in c['manifest']['accounts']], shared_keys=c.get('grant_keys'))
     def oauth(self, secret):
         if self.allocation is None: raise StateUnavailable('provider allocation required before Apple access')
         return AppleOAuthProvider(client_id='com.woundai.lite',client_secret=secret,post=apple_revoker(self.allocation))
@@ -274,17 +284,23 @@ def build_disposition(raw, *, expected_config, expected_source, expected_image, 
     scope = life.scope; namespace = c['binding']['namespace']
     # Native baseline must already exist. This factory cannot silently start a
     # fresh account/key/progress history after configuration or evidence loss.
-    mode = dict(v=1,scheme='account-kms-envelope-1',scope=scope,keyring=c['deployment']['keyring'])
+    shared = c['schema']=='lite-disposition-startup/3'
+    mode = (shared_mode(scope,c['deployment']['keyring'],c['grant_keys']) if shared else
+        dict(v=1,scheme='account-kms-envelope-1',scope=scope,keyring=c['deployment']['keyring']))
+    catalog = SHARED_CATALOG if shared else CATALOG
     existing(s['keys'],key('account-grant-cipher-config',scope),mode)
     existing(s['deletion'],key('account-deletion-config',namespace),dict(v=1,scope=scope,lease_seconds=AccountDeletion.LEASE_SECONDS))
-    existing(s['progress'],key('disposition-progress-config',scope),dict(v=1,scope=scope,catalog=CATALOG))
+    existing(s['progress'],key('disposition-progress-config',scope),dict(v=1,scope=scope,catalog=catalog))
     existing(s['accounts'],hashlib.sha256(b'lite/service-accounts/lifecycle/1').digest(),dict(v=2,binding=life.binding,service_catalog='linked-operations/1'))
     for a in c['manifest']['accounts']:
         row = life._read(a['person'])
         if row is None or row[1]['phase'] != 'closing': raise ValueError('already accepted account closure required')
         v = row[1]['closure']; life.progress(a['person'],v['requester'],v['operation'])
-    cipher = AccountGrantCipher(provider=GoogleGrantKeyProvider(session=p.kms,keyring=c['deployment']['keyring']),
-        lifecycle=life,store=s['keys'],audit_store=s['keys_audit'])
+    provider = (RotatingGrantKeyProvider(session=p.kms,keyring=c['deployment']['keyring'],
+        **shared_settings(c['grant_keys'],c['deployment']['keyring'])) if shared else
+        GoogleGrantKeyProvider(session=p.kms,keyring=c['deployment']['keyring']))
+    cipher_class = RotatingGrantCipher if shared else AccountGrantCipher
+    cipher = cipher_class(provider=provider,lifecycle=life,store=s['keys'],audit_store=s['keys_audit'])
     grants = GrantRevocationContext(lifecycle=life,provider=p.oauth(secret),cipher=cipher,store=s['grants'],audit_store=s['grants_audit'])
     registry = RegistryReadContext(s['accounts'],life)
     ctx = ClosedAccountContext(lifecycle=life,grants=grants,store=s['identity'],audit_store=s['identity_audit'],registry=registry)

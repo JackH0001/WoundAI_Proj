@@ -340,11 +340,12 @@ class SharedCustodyTests(unittest.TestCase):
         self.assertEqual(len(self.f.g.calls),len(before)+1)
     def test_legacy_progress_cannot_silently_claim_shared_key_destruction(self):
         from lite_disposition_progress_probe import ProgressFixture
-        from lite_disposition_progress import DispositionProgress
+        from lite_disposition_progress import DispositionProgress, CATALOG
         with patch('lite_disposition_progress_probe.KeyFixture',SharedFixture):
             f=ProgressFixture(self,attach=False)
+        f.store('progress').compare_exchange(key('disposition-progress-config',f.d.scope),0,dict(v=1,scope=f.d.scope,catalog=CATALOG))
         before=rows(f.store('progress')),rows(f.store('progress-audit'))
-        with self.assertRaises(ValueError):DispositionProgress(deletion=f.d,results=f.results,cipher=f.f.cipher,
+        with self.assertRaises(StateUnavailable):DispositionProgress(deletion=f.d,results=f.results,cipher=f.f.cipher,
             store=f.store('progress'),audit_store=f.store('progress-audit'))
         self.assertEqual((rows(f.store('progress')),rows(f.store('progress-audit'))),before)
     def test_native_composer_rejects_unapproved_scheme_before_state_writes(self):

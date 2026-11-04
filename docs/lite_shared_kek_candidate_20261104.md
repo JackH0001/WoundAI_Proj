@@ -1,6 +1,6 @@
 # Shared rotating KEK: custody candidate, 2026-11-04
 
-Status: local synthetic validation; **not connected to native startup or the public deletion receipt**. No cloud write, key import, key enablement/destruction, deployment, purchase, TestFlight upload or original-data change is part of this change.
+Status: local synthetic validation. The custody core is now selectable only by explicit startup schema 3, with a separate shared-key progress catalog. See [runtime integration](lite_shared_runtime_20261104.md). No cloud write, key import, key enablement/destruction, deployment, purchase, TestFlight upload or original-data change is part of this change.
 
 The owner chose to validate shared rotation. The existing native candidate instead selects `AccountGrantCipher`, whose KMS version is dedicated to one account. The earlier 2026-11-01 two-version Google KMS experiment verified wrapping/rewrapping, but did not connect those operations to the indexed Apple login and revocation code. This change closes that **custody-core** gap. It does not complete service deployment.
 
@@ -14,7 +14,7 @@ The owner chose to validate shared rotation. The existing native candidate inste
 - The receipt explicitly reports `historical_key_access=pending_retirement`, `retirement_inventory_verified=false`, `grant_key_unrecoverable=false` and `account_deleted=false`. Current access denial, KMS disabling and ciphertext deletion are not permanent erasure.
 - No plaintext DEK is persisted, cached or logged. The key store retains encrypted initial/rotation proposals for recovery; audit contains hashes and version dependencies, not usable wrapped DEKs. Python cannot guarantee memory zeroization.
 
-Native composition and legacy deletion progress now reject an incompatible provider/cipher before writing their state. This is deliberate: the existing progress protocol can only express per-account KMS destruction. It must not interpret shared-key closure as `DESTROYED` or silently select this new scheme.
+Legacy native composition still rejects a shared provider unless the separate mode is explicitly selected. The runtime integration adds a distinct progress catalog; existing per-account mode/catalog records cannot silently change. Shared closure is never interpreted as `DESTROYED`.
 
 ## Reproduce
 
@@ -39,12 +39,12 @@ The probe additionally decrypts a retained copy with independent AES operations,
 
 ## Before any service can use this scheme
 
-1. Define a new disposition catalog and native UI state for shared-key closure / pending backup retirement. Existing clients must reject unsupported receipts without claiming completion. Never recycle the old per-account catalog hash.
-2. Add an explicit startup schema and matching private-worker composition. Pin shared key/version inventory, deny per-account provisioning and grant only version inspection + encrypt/decrypt to the runtime. Include the module in the reviewed packaging allowlists only with that integration.
+1. Implemented locally: a separate disposition catalog and iOS state for shared-key closure / pending backup retirement. Old installed clients still lack this parser; coordinate client delivery before selecting shared mode. The old catalog hash is unchanged.
+2. Implemented locally: explicit schema 3 and matching private-worker composition, reviewed packaging allowlists and pinned shared version inventory. Per-account provisioning is rejected. Real provider/IAM acceptance remains pending; the private disposition worker is additionally prohibited from encrypting or destroying any shared version.
 3. Implement a separately authorized retirement executor. It must account for active rows, initial/rotation proposals, versions, backups, pending writes and worker drain; migrate all surviving accounts; prove no live dependency remains; observe the agreed retention window and KMS destruction. The per-account reservation inventory here is supporting evidence, **not** proof that all external backups have been inventoried.
 4. Define crash/backup restoration procedures that preserve account closure intent and never restore a deleted account's access. Shared KEK restoration can restore historical decryptability; do not promise instant cryptographic deletion or a fixed deletion deadline before this is specified and validated.
 5. Inventory any existing per-account or legacy vault before a fresh shared-mode deployment. The modes intentionally cannot open each other's records. Do not overwrite the immutable mode record to force migration.
-6. Complete the separately authorized owner Apple-key import, explicit service deployment review and real Apple login/Sandbox purchase/restore acceptance. The two Apple `.p8` signing keys are distinct from these KMS wrapping keys; the owner-import authorization does not authorize this deployment or retirement.
+6. The separately authorized owner Apple-key import was completed on 2026-11-04: both version 1 objects are disabled, with metadata-only readback. Still required: explicit service deployment review and real Apple login/Sandbox purchase/restore acceptance. The two Apple `.p8` signing keys are distinct from these KMS wrapping keys; the owner-import authorization does not authorize this deployment or retirement.
 
 ## Cost implication and references
 

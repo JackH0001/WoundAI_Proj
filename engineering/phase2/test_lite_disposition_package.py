@@ -33,8 +33,9 @@ class PackageTests(unittest.TestCase):
         for n in ('models/weight.onnx','upload.jpg','.env','app.py','lite_native_startup.py','secret.p8'):
             p=self.root/'Backend/Flask'/n;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('not for worker')
         m=self.build()
-        self.assertEqual(len(m['files']),55)
+        self.assertEqual(len(m['files']),56)
         self.assertIn('lite_result_contract.py',m['files'])
+        self.assertIn('lite_rotating_grant_keys.py',m['files'])
         self.assertTrue({'lite_research_association.py','lite_stored_research_associations.py'} <= m['files'].keys())
         self.assertNotIn('lite_research_issuer.py',m['files'])
         self.assertFalse(m['release_approved'])

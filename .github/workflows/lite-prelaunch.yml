@@ -246,6 +246,10 @@ jobs:
           python -m unittest -v test_lite_grant_key_custody test_lite_rotating_grant_keys > evidence/grant-key-custody-tests.log 2>&1
           python tools/lite_grant_key_custody_probe.py --output evidence/grant-key-custody-probe.json
           python tools/lite_rotating_grant_keys_probe.py --output evidence/rotating-grant-keys-probe.json
+      - name: Opt-in shared key startup, signed service and private disposition
+        run: |
+          python -m unittest -v test_lite_shared_runtime > evidence/shared-runtime-tests.log 2>&1
+          python tools/lite_shared_runtime_probe.py --output evidence/shared-runtime-probe.json
       - name: Closed-account service inventory and late-writer seals (synthetic only)
         run: |
           python -m unittest -v test_lite_service_disposition > evidence/service-disposition-tests.log 2>&1
@@ -265,12 +269,12 @@ jobs:
               f.write('Passing characterization tests do NOT authorize launch, billing or deployment. ')
               f.write('The current check/append HTTP quota race is an expected, recorded launch blocker. ')
               f.write('The CAS ledger now has opt-in authenticated service-only HTTP tests. ')
-              f.write('Application startup does not enable these routes; cloud/native cutover is still pending. ')
+              f.write('Explicit candidate startup has synthetic coverage; cloud/native cutover is still pending. ')
               f.write('No IAP login, cloud load, live GCS cleanup, real payment or ads were tested.\n')
               f.write('Review-gap tests intentionally retain the default-off G1/G2/G3 baseline; they do not enable production.\n')
               f.write('Separate opt-in tests cover daily cutover, leases, cross-day successor authorization and rollback. ')
               f.write('Native successor persistence is implemented and has separate simulator tests. ')
-              f.write('The live provider adapter and public UI integration are not implemented; release remains blocked.\n')
+              f.write('Provider adapters and native UI require live acceptance; release remains blocked.\n')
           PY
       - uses: actions/upload-artifact@v4
         if: always()

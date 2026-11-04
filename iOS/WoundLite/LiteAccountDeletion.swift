@@ -35,17 +35,20 @@ struct LiteDeletionContext: Codable, Equatable {
 /// imply that historical media, research data or the entire account was erased.
 struct LiteDispositionProgress: Codable, Equatable {
     static let catalog="490147fc0741120d0f36252d2d6c03f15da67e1b89bd3bc217c6d1b6848fc891"
+    static let sharedCatalog="777efba0a2965937c94677a5d617a9ec134173eeb2736e339576fc6b57de0068"
+    static let sharedPending=pending+["shared_key_retirement"]
     static let pending=["historical_versions_backups","research_association_disposition",
                         "identity_subscription_retention","live_provider_device_acceptance"]
     let v:Int,catalog_sha256:String,revision:Int,service_total:Int,service_sealed:Int
     let service_state:String,grant_key_state:String,blocked_lanes:[String],pending_lanes:[String]
     func validate(apple:String,previous:Self?=nil)throws {
         let serviceOrder=["not_started":0,"pending":1,"current_sealed":2]
-        let keyOrder=["not_started":0,"destroy_scheduled":1,"unrecoverable":2]
-        guard v==1,catalog_sha256==Self.catalog,(0...1000000).contains(revision),
+        let shared=catalog_sha256==Self.sharedCatalog
+        let keyOrder=shared ? ["not_started":0,"backup_pending":1] : ["not_started":0,"destroy_scheduled":1,"unrecoverable":2]
+        guard v==1,(catalog_sha256==Self.catalog || shared),(0...1000000).contains(revision),
               (0...100000).contains(service_total),(0...service_total).contains(service_sealed),
               let sr=serviceOrder[service_state],let kr=keyOrder[grant_key_state],
-              pending_lanes==Self.pending,blocked_lanes==Array(Set(blocked_lanes)).sorted(),
+              pending_lanes==(shared ? Self.sharedPending : Self.pending),blocked_lanes==Array(Set(blocked_lanes)).sorted(),
               blocked_lanes.allSatisfy({["apple_revocation","service_results","grant_key"].contains($0)}),
               service_state != "not_started" || service_sealed==0,
               service_state != "pending" || service_sealed<service_total,
@@ -66,6 +69,7 @@ struct LiteDispositionProgress: Codable, Equatable {
         return service_state=="not_started" ? "尚未開始" : "處理中（\(service_sealed)/\(service_total)）"
     }
     var keyText:String {
+        if grant_key_state=="backup_pending" { return "目前存取已停止；歷史加密副本仍待處理" }
         if grant_key_state=="unrecoverable" { return "已確認無法解密" }
         if grant_key_state=="destroy_scheduled" { return "已排程，等待銷毀確認" }
         return blocked_lanes.contains("grant_key") ? "金鑰處理暫待核對，可稍後查看原進度" : "尚未開始"

@@ -412,6 +412,55 @@ private actor DeletionJournal:LiteServiceJournal {
         d.merge(changes){_,new in new}
         return try JSONDecoder().decode(LiteDeletionReceipt.self,from:JSONSerialization.data(withJSONObject:d))
     }
+    private func sharedReceipt(_ changes:[String:Any]=[:],progress:[String:Any]=[:])throws->LiteDeletionReceipt {
+        var p:[String:Any]=["catalog_sha256":LiteDispositionProgress.sharedCatalog,
+            "pending_lanes":LiteDispositionProgress.sharedPending,"grant_key_state":"backup_pending"]
+        p.merge(progress){_,new in new}
+        return try receipt(changes,progress:p)
+    }
+    func testSharedClosureShowsBackupPendingWithoutClaimingDeletion()throws {
+        let r=try sharedReceipt();try r.validate(owner:deletionOwner,operation:op)
+        XCTAssertEqual(r.disposition?.keyText,"目前存取已停止；歷史加密副本仍待處理")
+        XCTAssertFalse(r.account_deleted);XCTAssertEqual(r.data_disposition,"pending")
+        XCTAssertTrue(r.disposition?.pending_lanes.contains("shared_key_retirement")==true)
+    }
+    func testSharedCatalogCannotReportKeyDestroyedOrUnrecoverable()throws {
+        for state in ["destroy_scheduled","unrecoverable"] {
+            let r=try sharedReceipt(progress:["grant_key_state":state])
+            XCTAssertThrowsError(try r.validate(owner:deletionOwner,operation:op))
+        }
+    }
+    func testLegacyCatalogCannotInterpretSharedBackupStatus()throws {
+        let r=try receipt(progress:["grant_key_state":"backup_pending"])
+        XCTAssertThrowsError(try r.validate(owner:deletionOwner,operation:op))
+    }
+    func testSharedRetirementPendingLaneCannotBeOmitted()throws {
+        let r=try sharedReceipt(progress:["pending_lanes":LiteDispositionProgress.pending])
+        XCTAssertThrowsError(try r.validate(owner:deletionOwner,operation:op))
+    }
+    func testSharedStatusCannotChangeExistingDeletionCatalog()throws {
+        let old=try receipt(),shared=try sharedReceipt(progress:["revision":2])
+        XCTAssertThrowsError(try shared.validate(owner:deletionOwner,operation:op,previous:old))
+        XCTAssertThrowsError(try old.validate(owner:deletionOwner,operation:op,previous:shared))
+    }
+    func testSharedClosureStillRequiresAppleRevocationConfirmation()throws {
+        let r=try sharedReceipt(["apple_revocation":"pending","grants_revoked":1])
+        XCTAssertThrowsError(try r.validate(owner:deletionOwner,operation:op))
+    }
+    func testSharedPendingProgressCanAdvanceAndReplayButNotRegress()throws {
+        let initial=try sharedReceipt(progress:["revision":0,"service_state":"not_started",
+            "service_sealed":0,"grant_key_state":"not_started"])
+        let next=try sharedReceipt()
+        XCTAssertNoThrow(try next.validate(owner:deletionOwner,operation:op,previous:initial))
+        XCTAssertNoThrow(try next.validate(owner:deletionOwner,operation:op,previous:next))
+        XCTAssertThrowsError(try initial.validate(owner:deletionOwner,operation:op,previous:next))
+    }
+    func testSharedBackupPendingReceiptPersistsWithoutChangingOriginalIntent()throws {
+        let r=try sharedReceipt()
+        let again=try JSONDecoder().decode(LiteDeletionReceipt.self,from:JSONEncoder().encode(r))
+        XCTAssertNoThrow(try again.validate(owner:deletionOwner,operation:op,previous:r))
+        XCTAssertEqual(again.operation,op);XCTAssertTrue(again.local_records_preserved)
+    }
     func testLegacyReceiptUpgradesWithoutChangingOriginalIntent()throws {
         let old=DeletionService().reply(op),new=try receipt()
         XCTAssertNoThrow(try new.validate(owner:deletionOwner,operation:op,previous:old))
