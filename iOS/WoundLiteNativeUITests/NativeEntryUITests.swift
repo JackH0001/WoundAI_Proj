@@ -183,6 +183,20 @@ final class NativeEntryUITests: XCTestCase {
         XCTAssertFalse(app.buttons["恢復購買"].exists)
         XCTAssertFalse(app.buttons["核對未完成購買"].exists)
         XCTAssertFalse(app.staticTexts["nativePurchaseStatus"].exists)
+        let continueSubscription = app.buttons["lite.offer.signIn"]
+        for _ in 0..<4 where !continueSubscription.isHittable { app.swipeUp() }
+        XCTAssertTrue(continueSubscription.isHittable)
+        XCTAssertTrue(continueSubscription.isEnabled)
+        attach(app, "subscription-sign-in-before-registration")
+        continueSubscription.tap()
+        // Simulator App Attest cannot register. The same page must explain
+        // the unfinished step without opening an Apple purchase or hiding retry.
+        let failure = app.staticTexts["lite.offer.preparationStatus"]
+        let finished = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", "可能是連線或服務尚未就緒"), object: failure)
+        XCTAssertEqual(XCTWaiter.wait(for: [finished], timeout: 15), .completed)
+        XCTAssertTrue(continueSubscription.isEnabled)
+        XCTAssertFalse(app.buttons["lite.offer.buy"].exists)
+        attach(app, "subscription-registration-unavailable-no-purchase")
         for _ in 0..<4 where !appleManagement.isHittable { app.swipeUp() }
         XCTAssertTrue(appleManagement.isHittable)
         attach(app, "read-only-offer-before-registration")

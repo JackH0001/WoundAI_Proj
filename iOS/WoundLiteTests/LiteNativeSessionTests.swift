@@ -29,8 +29,12 @@ private actor SessionJournal: LiteServiceJournal {
 
 @MainActor private final class SessionApple: LiteAppleIdentityProvider {
     var calls = 0, allowed = true
+    var cancelled = false
+    var onSignIn: (() async -> Void)?
     func signIn(_ c: LiteAccountChallenge) async throws -> LiteAppleIdentity {
         calls += 1
+        await onSignIn?()
+        if cancelled { throw LiteAccountFailure.cancelled }
         return LiteAppleIdentity(identityToken: "synthetic-jwt", state: c.state, user: "synthetic-user", authorizationCode: "one-use-code")
     }
     func authorized(user: String) async throws -> Bool { allowed }
@@ -375,6 +379,111 @@ private actor SessionWire: LiteAuthenticatedTransport {
         XCTAssertEqual(apple.calls, 0)
         XCTAssertEqual(kit.buys, 0)
         XCTAssertEqual(kit.restores, 0)
+    }
+
+    func testPurchasePreparationRegistersAndSignsInWithoutBuyingOrResearch() async throws {
+        let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit(), journal = SessionJournal()
+        let r = try LiteNativeSession(origin: origin, transport: wire, identityProvider: apple,
+            purchaseProvider: kit, journal: journal, register: { await wire.register() }, existing: { nil },
+            now: { Date(timeIntervalSince1970: Double(sessionTime)) })
+        await r.prepareForPurchase()
+        let counts = await wire.counts(), access = await r.identity.purchaseAccessDeadline()
+        XCTAssertEqual(r.registration, .confirmed); XCTAssertNotNil(access)
+        XCTAssertEqual(counts["registration"], 1); XCTAssertEqual(apple.calls, 1)
+        XCTAssertEqual(counts["account/confirm"], 1)
+        XCTAssertEqual(kit.buys, 0); XCTAssertEqual(kit.restores, 0)
+        XCTAssertNil(counts["purchase/context"])
+        XCTAssertEqual(Set(counts.keys), ["registration", "account/challenge", "account/confirm"])
+        XCTAssertFalse(r.preparingPurchase)
+        XCTAssertTrue(r.purchasePreparationMessage.contains("再按訂閱"))
+    }
+
+    func testPurchasePreparationReusesRegistrationAndActiveAccountAfterRestart() async throws {
+        let wire = try SessionWire(), journal = SessionJournal(), apple = SessionApple(), kit = SessionStoreKit()
+        let first = try runtime(wire, journal, apple: apple, storeKit: kit)
+        await first.prepareForPurchase()
+        let before = await wire.counts(), saved = await journal.snapshot()
+        let restarted = try runtime(wire, journal, apple: apple, storeKit: kit)
+        await restarted.prepareForPurchase()
+        let after = await wire.counts(), preserved = await journal.snapshot()
+        XCTAssertEqual(before, after); XCTAssertEqual(saved, preserved)
+        XCTAssertEqual(apple.calls, 1); XCTAssertEqual(after["registration"], 0)
+        XCTAssertEqual(kit.buys, 0); XCTAssertEqual(kit.restores, 0)
+    }
+
+    func testPurchasePreparationUnreadableRegistrationNeverCreatesAnotherIdentity() async throws {
+        let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit()
+        let r = try LiteNativeSession(origin: origin, transport: wire, identityProvider: apple,
+            purchaseProvider: kit, journal: SessionJournal(), register: { await wire.register() },
+            existing: { throw LiteAttestFailure.unavailable })
+        await r.prepareForPurchase(); await r.prepareForPurchase()
+        let counts = await wire.counts()
+        XCTAssertEqual(r.registration, .unreadable); XCTAssertEqual(counts, ["registration": 0])
+        XCTAssertEqual(apple.calls, 0); XCTAssertEqual(kit.buys, 0)
+        XCTAssertTrue(r.purchasePreparationMessage.contains("解鎖"))
+        XCTAssertTrue(r.purchasePreparationMessage.contains("尚未付款"))
+    }
+
+    func testPurchasePreparationOfflineStopsBeforeAppleOrPurchase() async throws {
+        let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit()
+        let r = try LiteNativeSession(origin: origin, transport: wire, identityProvider: apple,
+            purchaseProvider: kit, journal: SessionJournal(), register: { throw URLError(.notConnectedToInternet) }, existing: { nil })
+        await r.prepareForPurchase()
+        let counts = await wire.counts()
+        XCTAssertEqual(r.registration, .unreadable); XCTAssertEqual(counts, ["registration": 0])
+        XCTAssertEqual(apple.calls, 0); XCTAssertEqual(kit.buys, 0)
+        XCTAssertFalse(r.preparingPurchase)
+        XCTAssertTrue(r.purchasePreparationMessage.contains("服務尚未就緒"))
+    }
+
+    func testPurchasePreparationCancelledAppleLoginKeepsRecordsAndDoesNotBuy() async throws {
+        let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit(), journal = SessionJournal()
+        let sentinel = Data("retained-local-record".utf8)
+        try await journal.replace(String(repeating: "9", count: 32), expected: nil, with: sentinel)
+        apple.cancelled = true
+        let r = try runtime(wire, journal, apple: apple, storeKit: kit)
+        await r.prepareForPurchase()
+        let access = await r.identity.purchaseAccessDeadline(), rows = await journal.snapshot(), counts = await wire.counts()
+        XCTAssertNil(access); XCTAssertTrue(rows.values.contains(sentinel))
+        XCTAssertEqual(apple.calls, 1); XCTAssertEqual(kit.buys, 0)
+        XCTAssertNil(counts["account/confirm"])
+        XCTAssertTrue(r.purchasePreparationMessage.contains("已取消登入"))
+        XCTAssertTrue(r.purchasePreparationMessage.contains("尚未付款"))
+    }
+
+    func testPurchasePreparationRepeatedTapIsSingleFlight() async throws {
+        let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit()
+        let r = try runtime(wire, SessionJournal(), apple: apple, storeKit: kit)
+        apple.onSignIn = { await r.prepareForPurchase() }
+        await r.prepareForPurchase()
+        let counts = await wire.counts()
+        XCTAssertEqual(apple.calls, 1); XCTAssertEqual(counts["account/confirm"], 1)
+        XCTAssertEqual(kit.buys, 0); XCTAssertFalse(r.preparingPurchase)
+    }
+
+    func testPurchasePreparationLogoutDuringAppleResponseDoesNotGrantAccess() async throws {
+        let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit()
+        let r = try runtime(wire, SessionJournal(), apple: apple, storeKit: kit)
+        apple.onSignIn = { await r.identity.signOut() }
+        await r.prepareForPurchase()
+        let access = await r.identity.purchaseAccessDeadline(), counts = await wire.counts()
+        XCTAssertNil(access); XCTAssertNil(counts["account/confirm"])
+        XCTAssertEqual(kit.buys, 0); XCTAssertFalse(r.preparingPurchase)
+        XCTAssertTrue(r.purchasePreparationMessage.contains("尚未付款"))
+    }
+
+    func testPurchasePreparationCannotReopenPendingDeletion() async throws {
+        let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit(), journal = SessionJournal()
+        let r = try runtime(wire, journal, apple: apple, storeKit: kit)
+        await r.identity.signIn()
+        let deletion = r.deletion(pauseResearch: {})
+        await deletion.requestConfirmed()
+        let before = await wire.counts(), saved = await journal.snapshot()
+        await r.prepareForPurchase()
+        let after = await wire.counts(), preserved = await journal.snapshot(), access = await r.identity.purchaseAccessDeadline()
+        XCTAssertEqual(before, after); XCTAssertEqual(saved, preserved); XCTAssertNil(access)
+        XCTAssertEqual(apple.calls, 1); XCTAssertEqual(kit.buys, 0)
+        XCTAssertTrue(r.purchasePreparationMessage.contains("刪帳"))
     }
 
     func testLocalPurchaseEligibilityAfterSignInRestartExpiryAndLogout() async throws {

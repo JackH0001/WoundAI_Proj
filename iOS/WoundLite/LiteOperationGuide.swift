@@ -33,7 +33,7 @@ struct LiteHelpTopic: Identifiable {
                 .init(id: "balance", title: "如何核對今天剩餘的辨識次數？", path: "設定 → 查看個人帳號今日額度",
                       steps: "登入後查看服務回覆的餘額。每日成功辨識免費 2 次、Plus 共 10 次，由同帳戶所有傷口合計。在手機上保存或匯出 PDF 不會扣次。", terms: ["次數", "額度", "用完", "免費", "扣次", "餘額", "quota"]),
                 .init(id: "subscription", title: "在哪裡看月費或恢復購買？", path: "設定 → 服務登入、訂閱與刪帳",
-                      steps: "開「Plus 方案與價格」可先看 Apple 顯示的月費。要恢復訂閱，先核對裝置並登入原服務帳號，再回到方案頁按「恢復購買」。", terms: ["月費", "價格", "訂閱", "恢復購買", "付費", "plus", "price", "restore"]),
+                      steps: "開「Plus 方案與價格」先看 Apple 顯示的月費，按「登入並繼續訂閱 Plus」，依提示完成裝置核對與 Apple 登入。登入不會付款；確認價格後，再按含月費的訂閱按鈕並在 Apple 確認。已有訂閱請登入原服務帳號，再按「恢復購買」，不必再次購買。若連線或服務尚未就緒，請依畫面提示稍後重試。", terms: ["月費", "價格", "訂閱", "恢復購買", "付費", "plus", "price", "restore"]),
                 .init(id: "billing", title: "怎麼取消續訂或申請退款？", path: "iPhone 或 iPad 的設定 → 您的姓名 → 訂閱",
                       steps: "也可在 WoundAILite 的設定點「管理 Apple 訂閱」，使用當初購買的 Apple 帳號選擇 WoundAILite Plus，查看續訂日期或取消續訂。申請退款請使用 Apple 帳單支援。", terms: ["取消訂閱", "取消續訂", "退訂", "退款", "refund", "cancel subscription"]),
                 .init(id: "deletion", title: "如何刪除服務帳號？", path: "設定 → 服務登入、訂閱與刪帳 → 服務帳號與刪除",

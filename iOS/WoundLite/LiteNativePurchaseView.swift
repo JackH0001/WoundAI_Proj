@@ -27,7 +27,7 @@ struct LiteNativePurchaseView: View {
     }
 
     private var canManagePurchases: Bool {
-        session.registration == .confirmed && authorizedGeneration == identity.generation
+        session.registration == .confirmed && !identity.busy && authorizedGeneration == identity.generation
     }
     var body: some View {
         Form {
@@ -51,6 +51,8 @@ struct LiteNativePurchaseView: View {
                         .font(.footnote)
                     if canManagePurchases {
                         Button("以 \(offer.displayPrice)／月訂閱") { Task { await store.purchase(accepting: offer) } }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(session.preparingPurchase)
                             .accessibilityIdentifier("lite.offer.buy")
                     }
                 } else {
@@ -58,6 +60,22 @@ struct LiteNativePurchaseView: View {
                     Button("重新讀取 Apple 商品") { Task { await store.loadOffer() } }
                 }
             }.disabled(store.busy)
+            if !canManagePurchases {
+                Section("繼續訂閱或恢復購買") {
+                    Button("登入並繼續訂閱 Plus") { Task { await session.prepareForPurchase() } }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(session.preparingPurchase || session.registering || identity.busy || store.busy)
+                        .accessibilityIdentifier("lite.offer.signIn")
+                    if session.preparingPurchase { ProgressView("正在準備，請勿重複操作…") }
+                    Text(session.purchasePreparationMessage)
+                        .accessibilityIdentifier("lite.offer.preparationStatus")
+                    Text("已有訂閱請登入原服務帳號。此步不會付款；研究上傳由您另行決定。")
+                        .font(.footnote).accessibilityIdentifier("lite.offer.preview")
+                    if session.registration == .confirmed, let account = try? session.accountView() {
+                        NavigationLink("核對未完成登入或帳號狀態") { account }
+                    }
+                }
+            }
             Section("訂閱管理與條款") {
                 LiteAppleSubscriptionLink()
                 LitePrivacyLink()
@@ -73,12 +91,6 @@ struct LiteNativePurchaseView: View {
                     Text(store.message).accessibilityIdentifier("nativePurchaseStatus")
                     Text("研究上傳由您另行決定。").font(.footnote)
                 }
-            } else {
-                if session.registration == .confirmed, let account = try? session.accountView() {
-                    NavigationLink("核對服務帳號或使用 Apple 登入") { account }
-                }
-                Text("可先查看月費。完成裝置登記並登入原服務帳號後，這裡會顯示訂閱與恢復購買。研究上傳由您另行決定。")
-                    .font(.footnote).accessibilityIdentifier("lite.offer.preview")
             }
         }
         .navigationTitle("Plus 方案與價格")
