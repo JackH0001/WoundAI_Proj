@@ -203,6 +203,10 @@ class FreshBootstrapExecutor:
         if stage == 'subscription': self.runtime.activate_fresh(self.plan['subscription'], inner)
         elif stage == 'quota':
             if inner is not None:
+                # An earlier rollback may have paused durable control while
+                # provider containment was unavailable. Re-close preparation
+                # under this new signed recovery before the pause is resumed.
+                self.rollout.provider.disable_new(copy.deepcopy(self.rollout.manifest))
                 self.rollout.resume_paused(expected_pause_sha256=inner['expected_pause_sha256'],
                                           authorization_sha256=authorization)
             self.rollout.advance()
