@@ -2,6 +2,7 @@ import XCTest
 import SwiftUI
 import PDFKit
 import ImageIO
+import CryptoKit
 @testable import WoundLite
 
 private let sessionTime = 1_800_000_000
@@ -735,31 +736,36 @@ extension LiteNativeSessionTests {
         XCTAssertNil(encrypted.range(of: draft.jpeg)); XCTAssertNil(encrypted.range(of: Data("polygons".utf8)))
     }
     func testSyntheticCameraMetadataDoesNotCarryIntoTheLiteCaptureJPEG() async throws {
-        let wire = try SessionWire()
-        let originalJPEG = await wire.image()
-        let image = try XCTUnwrap(UIImage(data: originalJPEG)?.cgImage)
-        let target = NSMutableData()
-        let dest = try XCTUnwrap(CGImageDestinationCreateWithData(target, "public.jpeg" as CFString, 1, nil))
-        let metadata: [CFString: Any] = [
-            kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFArtist: "Synthetic-QA-Only"],
-            kCGImagePropertyGPSDictionary: [kCGImagePropertyGPSLatitude: 0.25, kCGImagePropertyGPSLatitudeRef: "N",
-                                            kCGImagePropertyGPSLongitude: 0.5, kCGImagePropertyGPSLongitudeRef: "E"],
-        ]
-        CGImageDestinationAddImage(dest, image, metadata as CFDictionary)
-        XCTAssertTrue(CGImageDestinationFinalize(dest))
+        // Fixed synthetic 64x64 JPEG, with EXIF Artist and GPS (0.25 N, 0.5 E).
+        // ImageIO on iOS 26.2 does not expose this Artist through its property
+        // dictionary. Pin independently encoded bytes and check the raw value
+        // too, so a reader omission cannot make this privacy test vacuous.
+        // SHA-256: b61d2583ae3c83b4054ad0eda6e5373e1f727fc4ce46845938532e21e6346552
+        let original = try XCTUnwrap(Data(base64Encoded: """
+            /9j/4AAQSkZJRgABAQAAAQABAAD/4QCmRXhpZgAATU0AKgAAAAgAAgE7AAIAAAASAAAAJoglAAQAAAABAAAAOAAAAABTeW50aGV0aWMtUUEtT25seQAABAABAAIAAAACTgAAAAACAAUAAAADAAAAbgADAAIAAAACRQAAAAAEAAUAAAADAAAAhgAAAAAAAAAAAAAAAQAAAA8AAAABAAAAAAAAAAEAAAAAAAAAAQAAAB4AAAABAAAAAAAAAAH/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCABAAEADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDkqKKK+fP6DCiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKAP/Z
+            """, options: .ignoreUnknownCharacters))
         func properties(_ bytes: Data) throws -> [CFString: Any] {
             let source = try XCTUnwrap(CGImageSourceCreateWithData(bytes as CFData, nil))
             return try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
         }
-        let original = target as Data
         let tags = try properties(original)
-        XCTAssertNotNil(tags[kCGImagePropertyGPSDictionary])
-        XCTAssertEqual((tags[kCGImagePropertyTIFFDictionary] as? [CFString: Any])?[kCGImagePropertyTIFFArtist] as? String, "Synthetic-QA-Only")
+        XCTAssertEqual(SHA256.hash(data: original).map { String(format: "%02x", $0) }.joined(),
+                       "b61d2583ae3c83b4054ad0eda6e5373e1f727fc4ce46845938532e21e6346552")
+        let artistBytes = Data("Synthetic-QA-Only".utf8)
+        XCTAssertNotNil(original.range(of: artistBytes))
+        let gps = try XCTUnwrap(tags[kCGImagePropertyGPSDictionary] as? [CFString: Any])
+        XCTAssertEqual(gps[kCGImagePropertyGPSLatitude] as? Double, 0.25)
+        XCTAssertEqual(gps[kCGImagePropertyGPSLongitude] as? Double, 0.5)
+        let inputProof = XCTAttachment(data: original, uniformTypeIdentifier: "public.jpeg")
+        inputProof.name = "synthetic-lite-tagged-input.jpg"
+        inputProof.lifetime = .keepAlways
+        add(inputProof)
         let vm = LiteMeasureVM(captureParticipation: { nil })
         _ = await vm.ingest(try XCTUnwrap(UIImage(data: original)), depth: captureDepth())
         let jpeg = try XCTUnwrap(vm.captureJPEG)
         let output = try properties(jpeg)
         XCTAssertNil(output[kCGImagePropertyGPSDictionary])
+        XCTAssertNil(jpeg.range(of: artistBytes))
         XCTAssertNil((output[kCGImagePropertyTIFFDictionary] as? [CFString: Any])?[kCGImagePropertyTIFFArtist])
         let attachment = XCTAttachment(data: jpeg, uniformTypeIdentifier: "public.jpeg")
         attachment.name = "synthetic-lite-normalized.jpg"
