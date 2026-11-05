@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import secrets
 import stat
 import subprocess
 import sys
@@ -31,7 +32,7 @@ import test_lite_shared_runtime as shared
 
 SCOPE = dict(project='synthetic-project', environment='owner-sandbox', namespace='synthetic-native',
              audience='com.example.synthetic', issuer='https://appleid.apple.com', media_bucket='synthetic-media')
-PASSWORD = 'synthetic-only-recovery-passphrase-2026'
+PASSWORD = secrets.token_urlsafe(32)
 
 
 def material():
@@ -77,7 +78,7 @@ class CustodyTests(unittest.TestCase):
 
     def test_wrong_password_never_returns_material(self):
         with self.assertRaisesRegex(ValueError, 'authentication failed'):
-            self.restore(password='another-synthetic-only-passphrase')
+            self.restore(password=PASSWORD + '-wrong')
 
     def test_ciphertext_corruption_rejected(self):
         def change(obj):

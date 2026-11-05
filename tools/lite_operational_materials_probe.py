@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import secrets
 import select
 import signal
 import sys
@@ -73,8 +74,8 @@ def receipt_from_terminal(transcript):
 
 def run():
     tool = Path(__file__).resolve().with_name('lite_operational_materials.py')
-    password = b'synthetic-cli-passphrase-only-2026'
-    incorrect = b'synthetic-incorrect-passphrase-2026'
+    password = secrets.token_urlsafe(32).encode('ascii')
+    incorrect = password + b'-wrong'
     transcripts = []
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp).resolve()
