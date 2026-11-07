@@ -28,7 +28,7 @@ import hashlib
 # is no literal fallback here any more.
 from institution_context import BOUND_ORG, token_matches_institution, account_session_claims
 from runtime_secrets import resolve_secret
-from model_preprocessing import load_preprocessing
+from model_preprocessing import load_preprocessing, student_logits_probability, STUDENT_OUTPUT_CONTRACT
 from lite_service_profile import service_profile, install_lite_perimeter, health_response as lite_health_response
 
 SERVICE_PROFILE = service_profile(os.environ)
@@ -1242,7 +1242,7 @@ def _apply_ssot_preproc(resized_rgb, model_key):
         x = x / 255.0
     return np.ascontiguousarray(x)
 
-def segment_wound_ai(image):
+def segment_wound_ai(image, *, provenance=None):
     """使用AI模型進行傷口分割 - 支援 ONNX Runtime 與 TensorFlow Keras。"""
     try:
         # ---- ONNX Runtime 推論 ----
@@ -1275,12 +1275,19 @@ def segment_wound_ai(image):
                 wound_mask = pred[..., -1]
             else:
                 wound_mask = pred
+            if mkey == 'student':
+                # ONNX export uses activation=None; iOS CoreML embeds sigmoid,
+                # Android applies it before resizing. Clipping raw logits here
+                # used an unintended probability cutoff of sigmoid(0.4)≈0.599.
+                wound_mask = student_logits_probability(wound_mask)
             wound_mask = cv2.resize(
                 wound_mask.astype(np.float32), (orig_w, orig_h),
                 interpolation=cv2.INTER_LINEAR,
             )
             wound_mask = np.clip(wound_mask, 0.0, 1.0)
             confidence = float(np.mean(np.maximum(wound_mask, 1.0 - wound_mask)))
+            if provenance is not None and mkey == "student":
+                provenance["student_output_contract"] = STUDENT_OUTPUT_CONTRACT
             return wound_mask, confidence
 
         # ---- TensorFlow Keras 推論 ----
@@ -1449,7 +1456,8 @@ def segment_for_lite(image_rgb):
     在醫療版與民眾版會得到不同答案，而那種差異最難歸因。
     """
     import numpy as _np
-    out = segment_wound_ai(image_rgb)
+    provenance = {}
+    out = segment_wound_ai(image_rgb, provenance=provenance)
     wound_prob = out[0] if isinstance(out, tuple) else out
     if wound_prob is None:
         mask = _np.zeros(image_rgb.shape[:2], bool)
@@ -1459,6 +1467,7 @@ def segment_for_lite(image_rgb):
     mask, info = escalate_mask(image_rgb, mask, w, h, policy="on_weak")
     info.setdefault("route", "student")
     info.setdefault("escalated", False)
+    info.update(provenance)
     return mask, info
 
 
@@ -1920,6 +1929,7 @@ def classify_wound():
         # (模型權重/訓練集/golden 釘值一律不變 → 對臨床效能零風險)
         phantom = str(request.form.get('seg', 'auto')).lower() == 'color'
         seg_model = _active_model_key(); route = "student"; escalated = False; au_ratio = None; iou_sa = None
+        provenance = {}
         phantom_pass = None; phantom_hint = False
         if phantom:
             _sr = _load_seg_red()
@@ -1930,7 +1940,7 @@ def classify_wound():
             seg_model = f"color_hsv(phantom,{phantom_pass})"; route = "phantom_color(非AI)"
         else:
             # Stage2 分割(端上主力 student)
-            wound_prob, conf = segment_wound_ai(img)
+            wound_prob, conf = segment_wound_ai(img, provenance=provenance)
             # 門檻只有一個來源（`student_threshold()`）。先前這裡與 segment_for_lite
             # 各寫一份同樣的運算式——兩份拷貝一旦分岔，同一張照片在醫療版與
             # 民眾版會得到不同遮罩，而兩邊看起來都「有套用 SSOT 門檻」。
@@ -2104,6 +2114,7 @@ def classify_wound():
             # App 在臨床模式看到 true 要警示:那多半不是這次回診拍的照片。
             'image_reused': bool(image_reused),
             'stage2_segment': {'model': seg_model, 'wound_ratio': round(float(mask.mean()), 4), 'confidence': round(conf, 4),
+                               'student_output_contract': provenance.get('student_output_contract'),
                                'route': route, 'escalated': escalated, 'au_area_ratio': au_ratio, 'iou_student_au': iou_sa,
                                'wound_polygon': wound_poly,
                                # 所有輪廓（由大到小）。只讀 wound_polygon 的話，

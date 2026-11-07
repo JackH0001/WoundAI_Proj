@@ -422,6 +422,7 @@ def _lite_segment_impl():
             # 第一版設在 put_blob 之後，於是落地的 JSON 少了它——
             # 回應裡有、檔案裡沒有，而只看回應完全察覺不到。
             "route": seg_info.get("route"),
+            "student_output_contract": seg_info.get("student_output_contract"),
             "escalated": bool(seg_info.get("escalated")),
             # AI 自己的輪廓也要落地。**沒有它，「民眾改了什麼」就永遠算不出來**——
             # lay 修正率（模型有輸出且人改了它）是比 empty 桶更早、更大量的
@@ -456,6 +457,7 @@ def _lite_segment_impl():
             # 記下 route 與輪廓數，日後才篩得出「哪些是集成救回來的」
             # 與「哪些連集成都空手」——後者是下一輪訓練的優先目標。
             "route": meta["route"], "escalated": meta["escalated"],
+            "student_output_contract": meta.get("student_output_contract"),
             "consent_version": consent_version or None,
         })
 
@@ -473,6 +475,7 @@ def _lite_segment_impl():
         "storage_receipt": storage_receipt,
         # `route` 讓「醫療版看得到、民眾版看不到」這種問題可以在一次回應裡歸因。
         "route": seg_info.get("route") or "student",
+        "student_output_contract": seg_info.get("student_output_contract"),
         "escalated": bool(seg_info.get("escalated")),
     }, anon_id, ip)
 
