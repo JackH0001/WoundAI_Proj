@@ -212,11 +212,13 @@ final class LiteWithdrawalModel: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var message: String?
     private let journal: LiteWithdrawalJournal
+    private let accountPaused: (String) -> Bool
     private let stopUploads: () -> Void
     private let owner: (String) async throws -> String?
     private let send: (String, String) async throws -> LiteWithdrawalOutcome
     private let sendScoped: (String, String, String) async throws -> LiteWithdrawalOutcome
     init(journal: LiteWithdrawalJournal = .standard,
+         accountPaused: @escaping (String) -> Bool = LiteAccountResearchPause.standard.blocks,
          stopUploads: @escaping () -> Void = { LitePrefs.researchConsent = false },
          owner: @escaping (String) async throws -> String? = { try await LiteSignedCloudTransport(baseURL: $0).withdrawalOwner() },
          send: @escaping (String, String) async throws -> LiteWithdrawalOutcome = {
@@ -226,7 +228,7 @@ final class LiteWithdrawalModel: ObservableObject {
              try await LiteSignedCloudTransport(baseURL: $0).withdraw(server: $0, owner: $1, epoch: $2)
          }) {
         self.journal = journal; self.stopUploads = stopUploads; self.owner = owner; self.send = send
-        self.sendScoped = sendScoped
+        self.sendScoped = sendScoped; self.accountPaused = accountPaused
         do {
             record = try journal.load()
             // Normalize a legacy excessive wait once and persist it; reopening
@@ -235,7 +237,10 @@ final class LiteWithdrawalModel: ObservableObject {
                 let bounded = ResearchCapacityWait.privacyDeadline(raw)
                 if bounded != raw { value.retryAt = bounded; try journal.save(value); record = value }
             }
-            if record?.phase == .pending, record?.owner == nil {
+            if let record, accountPaused(record.server),
+               record.phase == .reconsented || record.phase == .cancelledBeforeSubmission {
+                message = "先前的研究同意與撤回紀錄保留。因刪帳要求，目前研究上傳已暫停。"
+            } else if record?.phase == .pending, record?.owner == nil {
                 message = "尚未確認此服務的原上傳身分，未取得雲端撤回收據；本機紀錄保留，不能視為雲端資料已刪除。"
             } else if record?.phase == .cancelledBeforeSubmission {
                 message = "已保留原撤回與重新同意紀錄。舊服務資料未轉移，也未因本次操作刪除。"
@@ -249,9 +254,20 @@ final class LiteWithdrawalModel: ObservableObject {
     var blocksUploads: Bool { journal.blocksUploads }
     var finished: Bool { record?.phase == .liveMediaRemoved }
     var cancelledBeforeSubmission: Bool { record?.phase == .cancelledBeforeSubmission }
-    var mayReviewUnsentCancellation: Bool { record?.phase == .pending && record?.owner == nil }
+    private var accountAllowsRejoining: Bool {
+        guard let record else { return false }
+        return !accountPaused(record.server)
+    }
+    private func mayResume(_ server: String) -> Bool {
+        guard !accountPaused(server) else {
+            message = "這部手機已因刪帳要求暫停研究上傳。原撤回與同意紀錄保留。"
+            return false
+        }
+        return true
+    }
+    var mayReviewUnsentCancellation: Bool { accountAllowsRejoining && record?.phase == .pending && record?.owner == nil }
     var renewed: Bool { record?.phase == .reconsented }
-    var mayReviewCompletedRenewal: Bool { finished && record?.owner != nil }
+    var mayReviewCompletedRenewal: Bool { accountAllowsRejoining && finished && record?.owner != nil }
     static func hasBoundRecords(_ records: [LiteRecord], server: String) throws -> Bool {
         let target = try LiteWithdrawalJournal.origin(server)
         return try records.contains { record in
@@ -261,6 +277,9 @@ final class LiteWithdrawalModel: ObservableObject {
     }
     var statusTitle: String {
         if finished { return "已確認清除目前可見媒體" }
+        if (renewed || cancelledBeforeSubmission) && !accountAllowsRejoining {
+            return "先前已重新同意，目前因刪帳暫停上傳"
+        }
         if renewed { return "已重新同意：僅啟用新的研究上傳" }
         if cancelledBeforeSubmission { return "已取消尚未送出的撤回要求" }
         if record?.owner == nil { return "撤回對象尚未確認" }
@@ -270,15 +289,17 @@ final class LiteWithdrawalModel: ObservableObject {
         sendRenewal: (LiteReconsentIntent) async throws -> LiteReconsentReceipt = {
             try await LiteSignedCloudTransport(baseURL: $0.server).rejoin($0)
         }) async -> Bool {
-        guard !busy else { return false }
+        guard !busy, mayResume(server) else { return false }
         busy = true; defer { busy = false }
         do {
             guard let previous = try journal.load(), previous.phase == .liveMediaRemoved,
                   try LiteWithdrawalJournal.origin(server) == LiteWithdrawalJournal.origin(previous.server),
                   try await owner(previous.server) == previous.owner else { throw LiteWithdrawalFailure.noIdentity }
+            guard mayResume(server) else { return false }
             let intent = try journal.prepareRenewal(previous)
             let receipt = try await sendRenewal(intent)
             record = try journal.finishRenewal(intent, receipt: receipt)
+            guard mayResume(server) else { return false }
             message = "已確認重新加入。僅新的拍攝可研究上傳；先前撤回、舊待傳版本與手機紀錄保留，不會自動重傳。"
             return true
         } catch {
@@ -290,7 +311,7 @@ final class LiteWithdrawalModel: ObservableObject {
     /// migrate old records, or claim that old media was deleted.
     func reconsentUnsentWithdrawal(server: String, consentVersion: String,
                                   hasBoundRecords: () throws -> Bool) async -> Bool {
-        guard !busy else { return false }
+        guard !busy, mayResume(server) else { return false }
         busy = true; defer { busy = false }
         do {
             guard let value = try journal.load(), value.phase == .pending, value.owner == nil,
@@ -298,6 +319,7 @@ final class LiteWithdrawalModel: ObservableObject {
                   try !hasBoundRecords() else { throw LiteWithdrawalFailure.cancellationRequiresServer }
             guard try await owner(value.server) == nil else { throw LiteWithdrawalFailure.cancellationRequiresServer }
             guard try journal.load() == value, try !hasBoundRecords() else { throw LiteWithdrawalFailure.invalidState }
+            guard mayResume(server) else { return false }
             record = try journal.cancelUnsent(value, consentVersion: consentVersion)
             message = "已保留原撤回與本次重新同意紀錄。這只恢復今後的研究上傳，不代表舊服務資料已刪除或轉移。"
             return true

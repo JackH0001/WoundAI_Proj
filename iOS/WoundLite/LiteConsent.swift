@@ -1,12 +1,6 @@
 import SwiftUI
 
-/**
- 研究上傳同意（首啟必問；設定頁可改）。
-
- 同意 ↔ 功能的對價要說清楚：同意＝啟用雲端自動辨識，代價是去識別資料上傳；
- 不同意＝完全離線手動圈選。兩條路都是完整功能，不是「不同意就不能用」——
- App Store 審查（5.1.1 資料收集與儲存）也要求非必要資料收集不得綁架核心功能。
- */
+/// Optional research consent. Personal service recognition has its own explicit send action.
 struct LiteConsentView: View {
     let onChoose: (Bool) -> Void
     var renewingUnsentWithdrawal = false
@@ -16,7 +10,7 @@ struct LiteConsentView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text("選擇您的量測方式").font(.title2).bold()
+                    Text(LiteNativeBuild.includesService ? "是否同意上傳研究資料？" : "選擇您的量測方式").font(.title2).bold()
                     if renewingUnsentWithdrawal {
                         Text("您正在重新同意研究上傳。僅在確認撤回尚未送出、此服務沒有已登記身分或綁定紀錄後，才會取消這次未送出的撤回。原撤回與本次選擇會保留；舊服務紀錄不會移轉或重傳。")
                             .font(.subheadline)
@@ -28,28 +22,35 @@ struct LiteConsentView: View {
                             .font(.footnote)
                     }
 
-                    box(title: "🔬 同意研究上傳（啟用自動辨識）", tint: .blue, lines: [
-                        "拍攝後由雲端 AI 自動圈出傷口，再由您確認或修改。",
-                        "上傳傷口影像、LiDAR 深度圖與相機參數，以及您修改的輪廓、量測估算、傷口分組與側別部位。隨機安裝代碼會串聯同一安裝的資料；請勿拍入臉部、姓名或證件。",
-                        "已上傳影像的紀錄修正圈選後，會同步修訂輪廓與量測資料；不重傳照片。舊紀錄若無雲端識別碼則只更新本機。",
+                    box(title: LiteNativeBuild.includesService ? "同意研究上傳" : "🔬 同意研究上傳（啟用自動辨識）", tint: .blue, lines: [
+                        LiteNativeBuild.includesService ? "您可自行圈選，或登入個人服務後明確送出照片供辨識。同意研究上傳會讓符合研究條件的新紀錄進入研究送件流程。" : "拍攝後由雲端 AI 自動圈出傷口，再由您確認或修改。",
+                        "研究資料包括照片、量測估算、傷口分組與側別部位。若有 AI 圈選，即使您沒有修邊，也可保存原始輪廓。您確認或修改的輪廓另有紀錄。",
+                        "若拍到 LiDAR 深度，會一併傳送整張深度圖和相機參數。圈選外的物品也可能留下距離資訊。請避開臉部、姓名與證件。隨機安裝代碼可連結同一安裝的歷次資料。",
+                        "已送出的研究照片若有修訂，會同步圈選與量測資料。重新開啟後，原同意期間仍在等候的研究送件也可能續傳。",
                         "用途：改進傷口辨識與 3D 量測精度的研究與模型訓練。",
                         "本版使用獨立 WoundAILite 服務；舊服務的影像與紀錄不會自動轉移。切換服務後須重新選擇是否上傳。",
                         "可在設定關閉未來上傳；另可要求撤回研究並清除本安裝目前可見的雲端影像與深度。本機紀錄保留；備份、歷史版本、研究標註與既有模型的刪除仍待驗證。",
                     ])
 
-                    box(title: LiteNativeBuild.includesService ? "不同意研究上傳（本機手動圈選）" : "📴 不同意（完全離線）", tint: .green, lines: [
-                        LiteNativeBuild.includesService ? "拍攝後以加密方式存於本機。若您另從紀錄選擇個人雲端辨識，僅選取的照片會送往服務，深度留在本機。" : "照片與深度資料全部只留在您的手機（加密儲存）。",
-                        "傷口輪廓改由您手動圈選，量測計算全在裝置上完成。",
+                    box(title: LiteNativeBuild.includesService ? "不同意研究上傳" : "📴 不同意（完全離線）", tint: .green, lines: [
+                        LiteNativeBuild.includesService ? "拍攝後，照片及深度加密存於本機。若您在量測頁選擇個人雲端辨識，僅選取的照片會送往服務，深度留在本機。" : "照片與深度資料全部只留在您的手機（加密儲存）。",
+                        LiteNativeBuild.includesService ? "您仍可保存傷口紀錄與分享時間軸 PDF。面積估算在裝置上完成。" : "傷口輪廓改由您手動圈選，量測計算全在裝置上完成。",
                         "之後可在設定重新選擇；若已撤回並清除雲端資料，須另行閱讀並完成重新同意。",
                     ])
 
-                    Text(LiteNativeBuild.includesService ? "這項選擇只決定研究上傳。個人服務另行登入，您可在紀錄中自行選擇是否送出照片。" : "兩種方式的量測數學完全相同；差別只在輪廓怎麼來、資料去不去雲端。")
+                    if LiteNativeBuild.includesService {
+                        Text("您可單獨撤回研究並保留服務帳號。若確認刪除服務帳號，會同時提出與該帳號連結的研究撤回；清理進度須另外核對。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                    Text(LiteNativeBuild.includesService ? "這項選擇只決定研究上傳。個人雲端辨識另行登入，由您決定是否送出照片。" : "兩種方式的量測數學完全相同；差別只在輪廓怎麼來、資料去不去雲端。")
                         .font(.footnote).foregroundStyle(.secondary)
+
+                    LitePrivacyLink()
 
                     Button {
                         onChoose(true)
                     } label: {
-                        Text(renewingCompletedWithdrawal ? "重新同意：只啟用之後的新上傳" : renewingUnsentWithdrawal ? "重新同意並取消尚未送出的撤回" : "同意研究上傳，使用自動辨識")
+                        Text(renewingCompletedWithdrawal ? "重新同意：只啟用之後的新上傳" : renewingUnsentWithdrawal ? "重新同意並取消尚未送出的撤回" : LiteNativeBuild.includesService ? "同意研究上傳" : "同意研究上傳，使用自動辨識")
                             .frame(maxWidth: .infinity).padding(.vertical, 6)
                     }
                     .buttonStyle(.borderedProminent)
@@ -57,7 +58,7 @@ struct LiteConsentView: View {
                     Button {
                         onChoose(false)
                     } label: {
-                        Text(renewingCompletedWithdrawal ? "暫不開啟上傳，繼續離線使用" : renewingUnsentWithdrawal ? "保留撤回，繼續離線使用" : LiteNativeBuild.includesService ? "不同意研究上傳，使用本機圈選" : "不同意，完全離線手動圈選")
+                        Text(declineTitle)
                             .frame(maxWidth: .infinity).padding(.vertical, 6)
                     }
                     .buttonStyle(.bordered)
@@ -66,6 +67,16 @@ struct LiteConsentView: View {
             }
             .navigationTitle("WoundAILite")
         }
+    }
+
+    private var declineTitle: String {
+        if renewingCompletedWithdrawal {
+            return LiteNativeBuild.includesService ? "維持研究撤回" : "暫不開啟上傳，繼續離線使用"
+        }
+        if renewingUnsentWithdrawal {
+            return LiteNativeBuild.includesService ? "保留研究撤回要求" : "保留撤回，繼續離線使用"
+        }
+        return LiteNativeBuild.includesService ? "不同意研究上傳，繼續使用" : "不同意，完全離線手動圈選"
     }
 
     private func box(title: String, tint: Color, lines: [String]) -> some View {
@@ -95,7 +106,12 @@ struct LiteSettingsView: View {
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "未知"
         return "\(version)（\(build)）"
     }
-    @State private var consent = LitePrefs.researchConsent ?? false
+    @AppStorage(LitePrefs.researchChoiceKey) private var storedChoice: Bool?
+    @AppStorage(LitePrefs.noticeKey) private var reviewedNotice: String?
+    @State private var reviewingResearchChoice = false
+    private var consent: Bool {
+        storedChoice == true && reviewedNotice == LitePrefs.noticeVersion && LitePrefs.researchConsent == true
+    }
     @StateObject private var withdrawal = LiteWithdrawalModel.shared
     @State private var confirmWithdrawal = false
     @State private var reviewRenewedConsent = false
@@ -146,7 +162,13 @@ struct LiteSettingsView: View {
                 Section("App 資訊") {
                     LabeledContent("App", value: "WoundAILite")
                     LabeledContent("版本（建置號）", value: installedVersion)
+                    NavigationLink("操作指南") {
+                        LiteOperationGuide(version: installedVersion, personal: LiteNativeBuild.includesService)
+                    }.accessibilityIdentifier("lite.help.open")
                         .textSelection(.enabled)
+                    LitePrivacyLink()
+                    LiteTermsLink()
+                    if LiteNativeBuild.includesService { LiteAppleSubscriptionLink() }
                 }
                 if let accountManagement {
                     Section("服務帳號") {
@@ -154,11 +176,11 @@ struct LiteSettingsView: View {
                     }
                 }
                 if let nativeSession {
-                    Section("候選版內部驗收") {
+                    Section("個人服務") {
                         NavigationLink("服務登入、訂閱與刪帳") { LiteNativeSessionView(session:nativeSession) }
                     }
                 } else if let nativeSetupNotice {
-                    Section("候選版內部驗收") {
+                    Section("個人服務") {
                         switch nativeSetupNotice {
                         case .missingConfiguration:
                             Text("此測試版本的服務網址尚未設定完成。您仍可使用本機紀錄。")
@@ -176,22 +198,35 @@ struct LiteSettingsView: View {
                 }
                 #endif
                 Section("研究上傳") {
-                    Toggle("上傳去識別資料供研究（啟用自動辨識）", isOn: $consent)
-                        .onChange(of: consent) { _, v in LitePrefs.researchConsent = v }
-                        .disabled(withdrawal.blocksUploads || withdrawal.busy)
-                    Text(consent
-                         ? "拍攝影像、深度、修正輪廓、量測估算與傷口側別部位會上傳供辨識與研究；紀錄修改也會同步。可隨時關閉。"
-                         : LiteNativeBuild.includesService ? "拍攝時採本機圈選。個人雲端辨識需另從紀錄選擇照片並送出。" : "完全離線：照片與深度只留在手機，輪廓手動圈選。")
+                    Toggle(LiteNativeBuild.includesService ? "上傳資料供研究" : "上傳去識別資料供研究（啟用自動辨識）", isOn: Binding(
+                        get: { consent },
+                        set: { requested in
+                            if requested { reviewingResearchChoice = true }
+                            else { LitePrefs.researchConsent = false }
+                        }))
+                        .id(consent)
+                        .disabled(LitePrefs.researchPausedForAccountDeletion || withdrawal.blocksUploads || withdrawal.busy)
+                    Text(consent && !LitePrefs.researchPausedForAccountDeletion
+                         ? "研究送件可包含照片、整張深度圖、原始 AI 圈選與後續修訂，以及量測估算與側別部位。可隨時關閉。"
+                         : LiteNativeBuild.includesService ? "可在本機圈選，或登入後從量測頁選擇個人雲端辨識。個人服務和研究使用分開決定。" : "完全離線：照片與深度只留在手機，輪廓手動圈選。")
                         .font(.footnote).foregroundStyle(.secondary)
-                    if withdrawal.blocksUploads {
+                    if LitePrefs.researchPausedForAccountDeletion {
+                        Text("因刪帳要求，這部手機已暫停研究上傳。請至帳號刪除頁核對已連結資料的撤回進度。")
+                            .font(.footnote)
+                    } else if withdrawal.blocksUploads {
                         Text("研究上傳已因撤回停用。請查看下方「資料與撤回」狀態；重試查核不會重新開啟研究上傳。")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
-                Section("個人雲端辨識") {
-                    LiteQuotaView()
-                    Text("免費額度用完仍可手動圈選、量測與保存本機紀錄。機構及多人個案管理請洽 WoundAI。")
-                        .font(.footnote).foregroundStyle(.secondary)
+                if !LiteNativeBuild.includesService && consent && !withdrawal.blocksUploads && !LitePrefs.researchPausedForAccountDeletion {
+                    Section("研究辨識額度") { LiteResearchQuotaView() }
+                }
+                if let nativeSession {
+                    Section("個人雲端辨識") {
+                        NavigationLink("查看個人帳號今日額度") { LitePersonalBalanceView(session: nativeSession) }
+                        Text("免費追蹤 1 處，Plus 每帳戶最多同時追蹤 5 處。每日個人辨識總額為免費 2 次、Plus 10 次。本機圈選、保存及分享時間軸 PDF 不扣辨識次數。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
                 Section("雲端連線核對") {
                     #if DEBUG
@@ -201,11 +236,11 @@ struct LiteSettingsView: View {
                     Button(checkingConnection ? "核對中…" : "核對裝置登記（不傳照片）") {
                         Task { await checkConnection() }
                     }
-                    .disabled(checkingConnection || !consent || withdrawal.blocksUploads || withdrawal.busy)
+                    .disabled(checkingConnection || LitePrefs.researchConsent != true || withdrawal.blocksUploads || withdrawal.busy)
                     if let connectionMessage { Text(connectionMessage).font(.footnote) }
                     if mayRepairRegistration {
                         Button("修復尚未完成的裝置登記") { confirmRegistrationRepair = true }
-                            .disabled(checkingConnection || !consent || withdrawal.blocksUploads || withdrawal.busy)
+                            .disabled(checkingConnection || LitePrefs.researchConsent != true || withdrawal.blocksUploads || withdrawal.busy)
                             .confirmationDialog("核對並修復未完成的登記？", isPresented: $confirmRegistrationRepair,
                                                 titleVisibility: .visible) {
                                 Button("核對並修復") { Task { await checkConnection(repair: true) } }
@@ -264,7 +299,7 @@ struct LiteSettingsView: View {
                     .confirmationDialog("撤回研究並要求清除雲端媒體？", isPresented: $confirmWithdrawal,
                                         titleVisibility: .visible) {
                         Button("確認撤回", role: .destructive) {
-                            consent = false
+                            LitePrefs.researchConsent = false
                             Task { await withdrawal.request(server: AppSettings.backendURL()) }
                         }
                         Button("取消", role: .cancel) {}
@@ -274,6 +309,12 @@ struct LiteSettingsView: View {
                 }
             }
             .navigationTitle("設定")
+            .sheet(isPresented: $reviewingResearchChoice) {
+                LiteConsentView { agreed in
+                    reviewingResearchChoice = false
+                    if agreed && !withdrawal.busy { LitePrefs.researchConsent = true }
+                }
+            }
             .sheet(isPresented: $reviewRenewedConsent) {
                 LiteConsentView(onChoose: { choice in
                     reviewRenewedConsent = false
@@ -296,7 +337,6 @@ struct LiteSettingsView: View {
                         }
                         if restored {
                             LitePrefs.researchConsent = true
-                            consent = LitePrefs.researchConsent == true
                         }
                     }
                 }, renewingUnsentWithdrawal: withdrawal.mayReviewUnsentCancellation,

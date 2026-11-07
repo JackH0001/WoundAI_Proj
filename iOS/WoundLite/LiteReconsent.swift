@@ -3,7 +3,7 @@ import CryptoKit
 
 /// Pin participation when the camera result arrives, before asynchronous image
 /// processing. Renewed consent cannot reclassify an already-processing capture.
-struct LiteCaptureResearchScope: Equatable, Sendable {
+struct LiteCaptureResearchScope: Codable, Equatable, Sendable {
     let origin: String
     let epoch: String?
     @MainActor

@@ -177,6 +177,25 @@ def rate_record(anon_id, ip, operation="segment"):
                       "ip_hash": _ip_hash(ip), "operation": operation})
 
 
+def _confirm_revision_usage(row, ip):
+    # Older revisions used anonymous append-only rate entries. They cannot be
+    # matched reliably to a particular submission and must never be backcharged.
+    if "rate_accounting" not in row:
+        return
+    if row["rate_accounting"] != "revision-receipt/1":
+        raise ValueError("unknown revision accounting")
+    timestamp = row["received_at"]
+    day = time.strftime("%Y%m%d", time.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ"))
+    privacy = getattr(g, "lite_privacy", None)
+    epoch = getattr(getattr(privacy, "manifest", None), "epoch", "legacy")
+    identity = json.dumps(["lite.annotation-usage/1", epoch, row["annotation_receipt_id"]], separators=(",", ":"))
+    slot = hashlib.sha256(identity.encode()).hexdigest()[:16]
+    event = {"ts": timestamp, "anon_id": row["anon_id"], "ip_hash": _ip_hash(ip),
+             "operation": "annotation", "annotation_receipt_id": slot}
+    key = _fw._key(_rate_path(day, "annotation"))
+    _fw._store().append_record_once(key, slot, event)
+
+
 def segment_response(body, anon_id, ip, status=200):
     # A post-success read failure must not turn a completed inference into an
     # apparent failed request that the client retries. Omit unknown usage instead.
@@ -277,6 +296,13 @@ def _lite_segment_impl():
     raw = request.files["image"].read()
     if len(raw) > MAX_IMAGE_BYTES:
         return jsonify({"error": "影像超過 %d MB" % (MAX_IMAGE_BYTES // 1024 // 1024)}), 413
+    if consent:
+        from lite_research_image_privacy import ResearchPhotoMetadata, check_research_image
+        try:
+            check_research_image(raw)
+        except ResearchPhotoMetadata:
+            return jsonify(error="research_photo_metadata", keep_local=True,
+                           message="照片附帶研究服務無法接受的資訊。請保留手機紀錄。"), 400
     raw_capture = None
     raw_metadata = None
     raw_depth = None
@@ -561,6 +587,12 @@ def lite_annotation():
     st = _media_store()
     if not st.exists(_fw._key(os.path.join(_dir(), "lite/%s/%s.jpg" % (anon_id, image_id)))):
         return jsonify({"error": "查無對應影像；請先以 research_consent=true 呼叫 lite/segment"}), 400
+    if callable(getattr(st, 'capture_intent', None)):
+        intent = st.capture_intent(image_id)
+        if intent is not None:
+            index = st.capture_index(image_id)
+            if index is None or index.get('capture_receipt', {}).get('capture_intent_sha256') != intent.get('capture_intent_sha256'):
+                return jsonify(error="research_capture_unconfirmed"), 503
 
     # ── lay 修正率：人改了 AI 多少（Mac review 建議的指標）──────────
     #
@@ -769,9 +801,16 @@ def lite_annotation_revision():
         meta = st.get_json(image_key + ".json")
         if not meta or (meta.get("image_w"), meta.get("image_h")) != (w, h):
             return jsonify(error="image_dimensions_mismatch"), 409
+        if 'capture_receipt' in meta:
+            # A partial capture write is not an accepted research image yet.
+            # Never let a known ID bypass the final media/index readback.
+            index = st.capture_index(iid)
+            if index is None or index.get('capture_receipt') != meta['capture_receipt']:
+                return jsonify(error="research_capture_unconfirmed"), 503
         def receipt(row):
             if (row.get("anon_id"), row.get("image_id"), row.get("revision"), row.get("payload_sha256")) != (aid, iid, rev, digest):
                 return jsonify(error="revision_conflict"), 409
+            _confirm_revision_usage(row, _client_ip())
             return jsonify(status="stored", image_id=iid, revision=rev, payload_sha256=digest), 200
         old = next((e for e in rows if e.get("annotation_receipt_id") == slot), None)
         if old is not None:
@@ -779,10 +818,10 @@ def lite_annotation_revision():
         ok, retry, why = rate_check(aid, _client_ip(), "annotation")
         if not ok:
             return jsonify(error="rate_limited", reason=why, retry_after=retry), 429
-        row = dict(p, anon_id=aid, image_id=iid, revision=rev, payload_sha256=digest,
+        row = dict(p, anon_id=aid, image_id=iid, revision=rev, payload_sha256=digest, rate_accounting="revision-receipt/1",
                    annotation_receipt_id=slot, polygon_count=len(polys),
                    label_grade="lay" if p["source"] == "manual" else "ai_unverified", received_at=_fw.utc_now())
-        created = st.append_record_once(key, slot, row)
+        st.append_record_once(key, slot, row)
         denied = _lite_withdrawal_gate(aid)
         if denied is not None:
             return denied
@@ -792,9 +831,6 @@ def lite_annotation_revision():
         stored = next((e for e in readback if e.get("annotation_receipt_id") == slot), None)
         if stored is None:
             raise IOError("revision readback missing")
-        # Rate tracking failure may return 503, but retry still finds the durable receipt.
-        if created:
-            rate_record(aid, _client_ip(), "annotation")
         return receipt(stored)
     except Exception:
         logger.exception("Lite revision not confirmed")

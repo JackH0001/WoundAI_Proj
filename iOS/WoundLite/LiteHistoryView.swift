@@ -11,6 +11,9 @@ struct LiteHistoryView: View {
     @State private var selected: LiteRecord?
     @State private var woundFilter = ""
     @State private var choseInitialWound = false
+    @State private var compareWound: LiteWoundGroup?
+    @State private var reportWound: LiteWoundGroup?
+    @State private var manageTracking = false
     private let ungrouped = "__ungrouped__"
 
     init(store: LiteStore, recordToOpen: Binding<String?> = .constant(nil), nativeSession: LiteNativeSession? = nil) {
@@ -61,11 +64,19 @@ struct LiteHistoryView: View {
                                 Text("全部紀錄").tag("")
                                 Text("未分組").tag(ungrouped)
                                 ForEach(store.wounds) { wound in
-                                    Text(wound.displayName).tag(wound.id)
+                                    Text(wound.displayName + (wound.ended ? "（已結束）" : "")).tag(wound.id)
                                 }
                             }
                         } header: {
-                            Text("選擇傷口")
+                            Text("傷口時間軸")
+                        }
+                        if let wound = store.wounds.first(where: { $0.id == woundFilter }) {
+                            Button { compareWound = wound } label: {
+                                Label("比較最近兩次照片", systemImage: "rectangle.split.2x1")
+                            }.accessibilityIdentifier("lite.timeline.compare")
+                            Button { reportWound = wound } label: {
+                                Label("匯出此傷口時間軸 PDF",systemImage:"square.and.arrow.up")
+                            }.accessibilityIdentifier("lite.timeline.export")
                         }
                         Section("LiDAR 表面積估算趨勢（cm²）") {
                             if !woundFilter.isEmpty, woundFilter != ungrouped {
@@ -90,6 +101,8 @@ struct LiteHistoryView: View {
                 }
             }
             .navigationTitle("紀錄")
+            .toolbar { Button("管理追蹤") { manageTracking = true } }
+            .sheet(isPresented: $manageTracking) { LiteTrackingManager(store: store, session: nativeSession) }
             .onAppear {
                 openSavedRecord()
                 if !choseInitialWound, !store.records.isEmpty {
@@ -105,6 +118,12 @@ struct LiteHistoryView: View {
             .sheet(item: $selected) { r in
                 LiteRecordDetailView(recordId: r.id, store: store, nativeSession:nativeSession)
             }
+            .fullScreenCover(item: $compareWound) { group in
+                LitePhotoComparisonView(group: group, store: store)
+            }
+            .sheet(item:$reportWound) { group in
+                LiteTimelineExportView(group:group,store:store)
+            }
             .confirmationDialog(
                 "確定刪除這筆紀錄？",
                 isPresented: Binding(get: { pendingDelete != nil },
@@ -112,7 +131,10 @@ struct LiteHistoryView: View {
                 titleVisibility: .visible
             ) {
                 Button("刪除（無法復原）", role: .destructive) {
-                    if let r = pendingDelete { store.delete(r) }
+                    if let r = pendingDelete {
+                        if let nativeSession { Task { _ = await nativeSession.deleteLocalRecord(r, in: store) } }
+                        else { store.delete(r) }
+                    }
                     pendingDelete = nil
                 }
                 Button("取消", role: .cancel) { pendingDelete = nil }
@@ -155,7 +177,7 @@ struct LiteHistoryView: View {
     }
 
     private static func pretty(_ iso: String) -> String {
-        guard let d = ISO8601DateFormatter().date(from: iso) else { return iso }
+        guard let d = LiteRecord.captureDate(iso) else { return iso }
         let f = DateFormatter()
         f.dateFormat = "M/d HH:mm"
         return f.string(from: d)
@@ -283,7 +305,7 @@ struct LiteRecordDetailView: View {
                                         imageH: img.cgImage?.height ?? 1)
                         }
                         detailCard(r)
-                        if let nativeSession {
+                        if LiteNativeBuild.showsSavedRecordTest, let nativeSession {
                             NavigationLink("此筆服務辨識驗收（內部）") {
                                 LiteSavedServiceView(recordID:r.id,records:store,session:nativeSession)
                             }
@@ -335,18 +357,25 @@ struct LiteRecordDetailView: View {
                             syncing: store.syncingRecordIDs.contains(recordId),
                             consent: LitePrefs.researchConsent == true,
                             withdrawalBlocked: withdrawal.blocksUploads,
-                            retiredResearch: r.cloudSync.map { !withdrawal.blocksUploads && !LiteWithdrawalJournal.standard.permits($0.binding) } ?? false),
+                            retiredResearch: r.cloudSync.map { !withdrawal.blocksUploads && !LiteWithdrawalJournal.standard.permits($0.binding) }
+                                ?? r.researchCapture.map { nativeSession?.researchDelivery?.permits($0.pin.scope) != true } ?? false),
                         calculating: busy, change: changeSummary,
                         note: note, noteIsInformational: noteIsInformational,
                         canEdit: r.depthName != nil && image != nil,
-                        syncAllowed: r.cloudSync.map { LiteWithdrawalJournal.standard.permits($0.binding) } == true && LitePrefs.researchConsent == true,
+                        syncAllowed: LitePrefs.researchConsent == true && (r.cloudSync.map { LiteWithdrawalJournal.standard.permits($0.binding) }
+                            ?? r.researchCapture.map { nativeSession?.researchDelivery?.permits($0.pin.scope) == true } ?? false),
                         onEdit: {
                             note = nil; noteIsInformational = false; changeSummary = nil
                             editFlow.begin(record: r, fallback: polys)
                         },
                         onRetry: {
                             note = nil
-                            Task { await store.syncRevision(recordID: recordId) }
+                            Task {
+                                if r.cloudSync == nil, r.researchCapture != nil {
+                                    await nativeSession?.researchDelivery?.resume(recordId, store: store, explicit: true)
+                                }
+                                await store.syncRevision(recordID: recordId)
+                            }
                         })
                         .disabled(pdfBusy)
                 }
@@ -370,14 +399,12 @@ struct LiteRecordDetailView: View {
                     Text("此位置會用於同一傷口的紀錄。不同傷口即使位置相同，仍應分開建檔。")
                         .font(.caption).foregroundStyle(.secondary)
                     if let error = store.storageError { Text(error).foregroundStyle(.orange) }
+                    if let assignmentNotice { Text(assignmentNotice).foregroundStyle(.orange) }
                     Button("儲存位置與分組") {
                         guard let r = record else { return }
                         var completed = wound
                         completed.location = LiteWoundLocation(side: assignmentSide, site: assignmentSite)
-                        if store.assign(r, to: completed) {
-                            assigningWound = nil
-                            Task { await store.syncRevision(recordID: recordId) }
-                        }
+                        saveAssignment(r, to: completed)
                     }
                     .disabled(!LiteWoundLocation(side: assignmentSide, site: assignmentSite).isComplete)
                 }
@@ -404,9 +431,7 @@ struct LiteRecordDetailView: View {
 
     private func assign(_ record: LiteRecord, to wound: LiteWoundGroup) {
         if wound.location?.isComplete == true {
-            if store.assign(record, to: wound) {
-                Task { await store.syncRevision(recordID: recordId) }
-            }
+            saveAssignment(record, to: wound)
         } else {
             assignmentSide = ""
             assignmentSite = ""
@@ -414,11 +439,38 @@ struct LiteRecordDetailView: View {
         }
     }
 
+    @State private var assignmentNotice: String?
+
+    private func saveAssignment(_ original: LiteRecord, to wound: LiteWoundGroup) {
+        guard !busy else { return }
+        let accountGeneration = nativeSession?.identity.generation
+        busy = true
+        Task { @MainActor in
+            defer { busy = false }
+            do {
+                let owner = store.wounds.first(where: { $0.id == wound.id })?.account
+                guard original.woundAccount == nil || original.woundAccount == owner || owner == nil else {
+                    throw LiteWoundTrackingError.otherAccount
+                }
+                let permit = try await nativeSession?.woundPermit(id: wound.id, owner: owner ?? original.woundAccount,
+                                                                  resume: owner == nil && !wound.ended)
+                guard nativeSession?.identity.generation == accountGeneration,
+                      let latest = record, latest.woundID == original.woundID,
+                      latest.woundAccount == original.woundAccount else { throw LiteWoundTrackingError.changed }
+                guard store.assign(latest, to: wound, permit: permit) else { return }
+                assignmentNotice = nil
+                assigningWound = nil
+                await store.syncRevision(recordID: recordId)
+            } catch { assignmentNotice = ((error as? LiteWoundTrackingError) ?? .unavailable).localizedDescription }
+        }
+    }
+
     private func detailCard(_ r: LiteRecord) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             if let error = store.storageError { Text(error).font(.footnote).foregroundStyle(.orange) }
+            if let assignmentNotice { Text(assignmentNotice).font(.footnote).foregroundStyle(.orange) }
             Menu {
-                ForEach(store.wounds) { wound in
+                ForEach(store.wounds.filter { !$0.ended }) { wound in
                     Button(wound.displayName) { assign(r, to: wound) }
                 }
                 Button("新增一處傷口") { assign(r, to: store.newWound()) }
@@ -429,6 +481,9 @@ struct LiteRecordDetailView: View {
             Text(r.woundLocation?.label ?? "位置尚未填寫，可由上方分組選單補齊。")
                 .font(.footnote).foregroundStyle(.secondary)
             let assessment = r.savedArea
+            if let notice = r.contourUncertaintyNotice {
+                Text(notice).font(.footnote).foregroundStyle(.orange)
+            }
             if let series = assessment.series {
                 Text(String(format: "LiDAR 表面積估算：%.2f cm²", r.surfaceCm2)).font(.title3).bold()
                 Text(series.rawValue).font(.caption).foregroundStyle(.secondary)
@@ -556,7 +611,7 @@ struct LiteRecordDetailView: View {
     }
 
     private static func pretty(_ iso: String) -> String {
-        guard let d = ISO8601DateFormatter().date(from: iso) else { return iso }
+        guard let d = LiteRecord.captureDate(iso) else { return iso }
         let f = DateFormatter()
         f.dateFormat = "M/d HH:mm"
         return f.string(from: d)
@@ -665,10 +720,12 @@ struct LiteTrendChart: View {
                 Text("最近一次：\(latest.area, specifier: "%.2f") cm²")
                     .font(.headline)
                 Chart(points) { point in
-                    LineMark(x: .value("拍攝時間", point.date),
-                             y: .value("表面積", point.area))
-                        .foregroundStyle(Color.blue)
-                        .interpolationMethod(.linear)
+                    if let group = point.lineGroup {
+                        LineMark(x: .value("拍攝時間", point.date), y: .value("表面積", point.area),
+                                 series: .value("可比較的連續紀錄", group))
+                            .foregroundStyle(Color.blue)
+                            .interpolationMethod(.linear)
+                    }
                     PointMark(x: .value("拍攝時間", point.date),
                               y: .value("表面積", point.area))
                         .foregroundStyle(Color.blue)
@@ -686,6 +743,10 @@ struct LiteTrendChart: View {
                 .chartXAxisLabel("拍攝時間")
                 .chartYAxisLabel("cm²")
                 .frame(height: 190)
+                if points.contains(where: { $0.lineGroup == nil }) || Set(points.compactMap(\.lineGroup)).count > 1 {
+                    Text("圈選方式或版本不同時會分段顯示。版本未確認的紀錄只顯示單點。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if points.count == 1 {
                     Text("目前只有一筆紀錄；新增同一傷口的紀錄後即可比較變化。")
                         .font(.caption).foregroundStyle(.secondary)
@@ -696,5 +757,79 @@ struct LiteTrendChart: View {
             }
         }
         .padding(.vertical, 8)
+    }
+}
+
+private struct LitePhotoComparisonView: View {
+    let group: LiteWoundGroup
+    @ObservedObject var store: LiteStore
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            GeometryReader { geometry in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text(group.displayName).font(.headline)
+                        switch LitePhotoComparison(group: group, records: store.records) {
+                        case .unavailable(let reason):
+                            Text(reason)
+                        case .pair(let previous, let current, let missingDates):
+                            let layout = geometry.size.width >= 650
+                                ? AnyLayout(HStackLayout(alignment: .top, spacing: 16))
+                                : AnyLayout(VStackLayout(alignment: .leading, spacing: 16))
+                            layout {
+                                LiteComparisonPhoto(label: "前次", record: previous, images: store.images)
+                                    .id(previous.id + previous.imageName)
+                                LiteComparisonPhoto(label: "最近一次", record: current, images: store.images)
+                                    .id(current.id + current.imageName)
+                            }
+                            if missingDates > 0 {
+                                Text("另有 \(missingDates) 筆缺少可核對的時間。").font(.footnote)
+                            }
+                            Text("請參照拍攝日期及外觀。兩張照片各自縮放，距離、角度與光線會影響看起來的大小和顏色。")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading).padding()
+                }
+            }
+            .navigationTitle("前後照片").navigationBarTitleDisplayMode(.inline)
+            .toolbar { Button("完成") { dismiss() } }
+        }
+    }
+}
+
+private struct LiteComparisonPhoto: View {
+    let label: String
+    let record: LiteRecord
+    let images: LocalImageStore
+    @State private var image: UIImage?
+    @State private var finished = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(label).font(.headline)
+            if let date = LiteRecord.captureDate(record.dateISO) {
+                Text(date.formatted(date: .abbreviated, time: .standard)).font(.subheadline)
+            }
+            ZStack {
+                RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08))
+                if let image {
+                    Image(uiImage: image).resizable().scaledToFit().accessibilityLabel(label + "照片")
+                } else if finished {
+                    Text("此筆照片暫時無法讀取").foregroundStyle(.secondary)
+                } else {
+                    ProgressView()
+                }
+            }
+            .frame(maxWidth: .infinity).frame(height: 240)
+        }
+        .task(id: record.imageName) {
+            let preview = await ImageLoadQueue.shared.thumbnail(store: images, name: record.imageName, maxPixel: 1280)
+            guard !Task.isCancelled else { return }
+            image = preview.image
+            finished = true
+        }
     }
 }

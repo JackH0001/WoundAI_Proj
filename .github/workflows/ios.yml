@@ -20,6 +20,7 @@ on:
     branches: [main, develop]
     paths:
       - 'iOS/**'
+      - 'site/privacy/woundlite.html'
       - 'engineering/contracts/**'
       - 'tools/generate_medical_wound_catalog.py'
       - '.github/workflows/ios.yml'
@@ -28,6 +29,7 @@ on:
   pull_request:
     paths:
       - 'iOS/**'
+      - 'site/privacy/woundlite.html'
       - 'engineering/contracts/**'
       - 'tools/generate_medical_wound_catalog.py'
       - '.github/workflows/ios.yml'

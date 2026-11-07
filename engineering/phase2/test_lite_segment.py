@@ -5,11 +5,11 @@
 
 ## 這支測試最重要的一條
 
-**`research_consent != "true"` 時，什麼都不可以落地。**
+**`research_consent != "true"` 時，不得保存研究影像及標註。**
 
-民眾版的同意書寫的是「不同意＝資料不離機」。那句話必須在程式碼裡成立，
-不是在文案裡成立——而「有沒有寫檔」這件事從回應上完全看不出來，
-使用者、審查者、甚至寫程式的人都無從察覺。所以它必須有一條測試盯著。
+此端點仍會接收影像並回傳辨識結果，不能把未同意研究說成「資料不離機」。
+要驗的是研究影像不落地，防濫用的嘗試紀錄另行保留；只看 HTTP 回應不足以
+證明沒有保存，所以必須檢查儲存目錄。
 
 驗法是直接數儲存目錄的檔案：呼叫前後檔案數不變才算過。
 只檢查「回應沒有 image_id」是不夠的——那只證明沒告訴你，不證明沒存。
@@ -28,6 +28,7 @@
 而人臉偵測本來就只是縱深防禦，用測試去背書它的召回率會給人錯誤的安全感。
 """
 import base64
+import hashlib
 import importlib
 import io
 import json
@@ -53,8 +54,14 @@ def check(name, ok, detail=""):
 def make_jpeg(w=320, h=240, salt=b""):
     from PIL import Image
     buf = io.BytesIO()
-    Image.new("RGB", (w, h), (180, 95, 85)).save(buf, "JPEG")
-    return buf.getvalue() + salt
+    image = Image.new("RGB", (w, h), (180, 95, 85))
+    if salt:
+        # Distinguish fixtures through real pixels, not an opaque payload after
+        # JPEG EOI: research uploads intentionally reject trailing metadata.
+        color = tuple(hashlib.sha256(salt).digest()[:3])
+        image.paste(color, (0, 0, max(1, w // 4), h))
+    image.save(buf, "JPEG")
+    return buf.getvalue()
 
 
 def png16(w=8, h=6):
@@ -103,7 +110,9 @@ def main():
 
     # 注入假的分割器：本測試驗的是端點的行為，不是模型的品質。
     # 真模型要 200MB 的 ONNX，contract test 不該依賴它。
+    model_calls = []
     def fake_segment(rgb):
+        model_calls.append(rgb.shape)
         m = np.zeros(rgb.shape[:2], np.uint8)
         m[60:180, 80:240] = 1
         return m
@@ -132,6 +141,31 @@ def main():
         return cli.post("/api/v1/lite/segment", data=data,
                         content_type="multipart/form-data",
                         headers={"X-Forwarded-For": ip})
+
+    # Real, distinct JPEGs must pass; adding opaque bytes after EOI must still
+    # fail before model execution or research persistence. Rejected attempts
+    # remain rate-limited, but must not consume a successful recognition.
+    print("── 0 合成影像與隱私拒收 ──")
+    first = make_jpeg(salt=b"fixture-a")
+    second = make_jpeg(salt=b"fixture-b")
+    check("同一測試影像位元組穩定", first == make_jpeg(salt=b"fixture-a"))
+    check("不同測試影像以真實像素區分",
+          Image.open(io.BytesIO(first)).tobytes() != Image.open(io.BytesIO(second)).tobytes())
+    before_calls = len(model_calls)
+    r = post(anon="dev-trailing", ip="203.0.113.62",
+             image=(io.BytesIO(first + b"synthetic-private-metadata"), "w.jpg"))
+    check("JPEG 結尾附帶資訊仍拒收",
+          r.status_code == 400 and (r.get_json() or {}).get("error") == "research_photo_metadata",
+          r.get_json())
+    check("隱私拒收不執行模型", len(model_calls) == before_calls)
+    check("隱私拒收不扣成功辨識額度",
+          lite.quota_snapshot("dev-trailing", "203.0.113.62")[0]["used"] == 0)
+    files = {os.path.join(root, name) for root, _, names in os.walk(tmp) for name in names}
+    attempt_file = lite._rate_path(__import__("time").strftime(
+        "%Y%m%d", __import__("time").gmtime()), "attempt")
+    check("只保留安全嘗試紀錄、不保存研究影像",
+          files == {attempt_file} and len(fw.read_jsonl(attempt_file)) == 1,
+          sorted(files))
 
     # ── 1 基本 ────────────────────────────────────────────────
     print("── 1 分割 ──")

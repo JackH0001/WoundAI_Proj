@@ -100,3 +100,22 @@ Claude review priorities: validate the same frozen inventories throughout the
 composition, original checkpoint/audit availability, rescan round recovery,
 failure isolation, exact-generation preservation, and the explicit difference
 between a cooperative dispatch deadline and a hard provider deadline.
+
+## User-visible progress after an interrupted deletion
+
+The private worker saves the validated outcome of each step before publishing the
+public progress receipt. If publication is interrupted, the next authorized
+worker invocation can publish the saved observation even while dispatch is
+paused. Reading status from the app does not call Apple, KMS or the model.
+
+Public receipts show the latest confirmed service and key results, along with
+the steps waiting for verification. Completion of another step cannot clear an
+unresolved failure. Publication reads the audited worker checkpoint again when
+a competing update changes the public revision. No private key name, account
+identifier, provider error or research object is added to the public receipt.
+Existing clients can read the same v2 receipt format.
+
+A scheduled key remains pending. A shared key version appearing in a dedicated
+account-key record blocks the operation before a provider request. This worker
+does not implement shared key retirement. Restored backups, physical deletion
+and full account deletion remain separate verification steps.

@@ -141,6 +141,15 @@ class PerimeterTests(unittest.TestCase):
             with self.subTest(path=path,method=method):self.assertEqual(self.client.open(path,method=method).status_code,404)
         self.assertEqual(self.client.post('/api/v1/lite/segment',environ_overrides={'SCRIPT_NAME':'/prefix'}).status_code,404)
         self.assertEqual(self.calls,[])
+
+    def test_optional_research_paths_do_not_fall_through_to_unrelated_handlers(self):
+        for path in ('/api/v1/lite/research/capture', '/api/v1/lite/research/capture/status',
+                     '/api/v1/lite/research/deletion-proof'):
+            with self.subTest(path=path):
+                response = self.client.post(path)
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.json['error'], 'lite_route_not_supported')
+        self.assertEqual(self.calls, [])
     def test_epoch_routes_keep_canonical_method_and_identifier_checks(self):
         path='/api/v1/lite/data/'+'a'*32+'/'+'b'*32
         for invalid,method in [(path,'GET'),(path,'POST'),(path,'OPTIONS'),

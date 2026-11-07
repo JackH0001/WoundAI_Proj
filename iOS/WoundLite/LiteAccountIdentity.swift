@@ -218,7 +218,8 @@ struct LiteAccountCheckpoint:Codable,Equatable {
     @Published private(set) var message="服務帳號登入與研究同意分開處理。"
     @Published private(set) var busy=false
     let service:any LiteAccountIdentityService,provider:any LiteAppleIdentityProvider,journal:any LiteServiceJournal
-    private var blocked=false, generation=0
+    private var blocked=false
+    @Published private(set) var generation=0
     let now:()->Date
     init(service:any LiteAccountIdentityService,provider:any LiteAppleIdentityProvider,journal:any LiteServiceJournal,now:@escaping ()->Date=Date.init){
         self.service=service;self.provider=provider;self.journal=journal;self.now=now
@@ -227,11 +228,68 @@ struct LiteAccountCheckpoint:Codable,Equatable {
     private func hasDeletionIntent(_ owner:String)async throws->Bool {
         try await journal.load(LiteAccountDeletionCheckpoint.key(origin:service.origin.absoluteString,owner:owner)) != nil
     }
-    func deletionContext()async throws->LiteDeletionContext {
+    func hasTrackingAccount(owner: String) async throws -> Bool {
+        let initial = generation
+        guard !busy, try await !hasDeletionIntent(owner) else { throw LiteAccountFailure.conflict }
+        let record = try await read(owner).1
+        guard initial == generation else { throw LiteAccountFailure.conflict }
+        if record == nil || record?.phase == "ended" { return false }
+        guard !blocked, let record, ["active", "renew"].contains(record.phase) else { throw LiteAccountFailure.unavailable }
+        return true
+    }
+    /// Local presentation only. Signed transport checks the active account again before any request.
+    func purchaseAccessDeadline() async -> Date? {
+        let start = generation
+        do {
+            let owner = try await service.installation()
+            guard let record = try await read(owner).1, ["active", "renew"].contains(record.phase),
+                  let session = record.session, try await !hasDeletionIntent(owner),
+                  !blocked, !busy, generation == start else { return nil }
+            let deadline = Date(timeIntervalSince1970: Double(session.family_expires_at ?? session.expires_at))
+            return deadline > now() ? deadline : nil
+        } catch { return nil }
+    }
+
+    func deletionContext() async throws -> LiteDeletionContext {
+        try await activeServiceContext()
+    }
+    func activeServiceContext() async throws -> LiteDeletionContext {
+        let start = generation
         guard await canUseService() else{throw LiteAccountFailure.unavailable}
         let owner=try await service.installation();let(_,r)=try await read(owner)
-        guard let r,r.phase=="active",let account=r.session?.account_sha256 else{throw LiteAccountFailure.invalid}
+        guard generation == start, let r,r.phase=="active",let account=r.session?.account_sha256 else{throw LiteAccountFailure.invalid}
         return LiteDeletionContext(origin:service.origin.absoluteString,installation:owner,account:account)
+    }
+
+    /// Pin the signed-in account at capture time without an Apple or service request.
+    /// Transport authorization is checked again immediately before later dispatch.
+    func savedResearchContext() async throws -> LiteDeletionContext {
+        let start = generation
+        let owner = try await service.installation()
+        guard !blocked, try await !hasDeletionIntent(owner),
+              let checkpoint = try await read(owner).1, ["active", "renew"].contains(checkpoint.phase),
+              let account = checkpoint.session?.account_sha256, start == generation else {
+            throw LiteAccountFailure.unavailable
+        }
+        return LiteDeletionContext(origin: service.origin.absoluteString, installation: owner, account: account)
+    }
+
+    /// Check a known installation while its App Attest signing lane is occupied.
+    /// This operation may read the identity journal, but must never request a
+    /// device registration, renew a session, or send an account HTTP request.
+    func dispatchSession(for owner: String) async -> LiteAccountSession? {
+        let start = generation
+        do {
+            guard !busy, !blocked, try await !hasDeletionIntent(owner),
+                  let record = try await read(owner).1, record.phase == "active",
+                  let session = record.session, session.installation == owner,
+                  session.expires_at > Int(now().timeIntervalSince1970),
+                  let credential = record.credential,
+                  try await provider.authorized(user: credential.user),
+                  try await !hasDeletionIntent(owner), start == generation, !busy, !blocked
+            else { return nil }
+            return session
+        } catch { return nil }
     }
     func suspendForDeletion(_ context:LiteDeletionContext,operation:String)async throws {
         try context.validate();guard context.origin==service.origin.absoluteString,LiteServiceBytes.hex(operation,32),

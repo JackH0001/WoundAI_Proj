@@ -106,8 +106,13 @@ jobs:
         run: |
           python -m unittest -v test_lite_account_data_inventory > evidence/account-data-inventory-tests.log 2>&1
           python tools/lite_account_data_inventory_probe.py --output evidence/account-data-inventory-probe.json
+      - name: Independent research capture without repeat recognition (synthetic only)
+        run: |
+          python -m unittest -v test_lite_research_source test_lite_research_source_http test_lite_research_capture test_lite_research_image_privacy test_lite_face_privacy test_lite_research_ingest_flow > evidence/research-capture-tests.log 2>&1
+          python tools/lite_research_capture_probe.py --output evidence/research-capture-probe.json
       - name: Account deletion and independent research admission races (synthetic only)
         run: |
+          python -m unittest -v test_lite_cross_origin_research test_lite_research_issuer test_lite_worker_research_records > evidence/cross-origin-research-tests.log 2>&1
           python -m unittest -v test_lite_account_research_closure > evidence/account-research-closure-tests.log 2>&1
           python tools/lite_account_research_closure_probe.py --output evidence/account-research-closure-probe.json
       - name: Bounded research media disposition and interrupted paging (synthetic only)
@@ -141,7 +146,7 @@ jobs:
           python -m unittest -v test_lite_key_startup test_lite_key_package > evidence/key-worker-startup-tests.log 2>&1
           python tools/lite_key_startup_probe.py --output evidence/key-worker-startup-probe.json
       - name: Pinned native startup and independent package (synthetic only)
-        run: python -m unittest -v test_lite_native_startup test_lite_native_package > evidence/native-startup-package-tests.log 2>&1
+        run: python -m unittest -v test_lite_native_startup test_lite_native_package test_lite_run_identity test_lite_personal_balance test_lite_wound_roster > evidence/native-startup-package-tests.log 2>&1
       - name: Composed native Sandbox backend through signed HTTP (synthetic only)
         run: |
           python -m unittest -v test_lite_native_backend > evidence/native-backend-tests.log 2>&1
@@ -160,7 +165,7 @@ jobs:
           python tools/lite_usage_recovery_probe.py --output evidence/usage-recovery-probe.json
       - name: Cross-day authorization and cutover failure containment (synthetic only)
         run: |
-          python -m unittest -v test_lite_service_recovery test_lite_usage_rollout test_lite_cross_day_fixture > evidence/g3-cutover-tests.log 2>&1
+          python -m unittest -v test_lite_service_recovery test_lite_usage_rollout test_lite_cross_day_fixture test_lite_first_install_quota > evidence/g3-cutover-tests.log 2>&1
           python tools/lite_cross_day_fixture.py --report evidence/g3-cutover-probe.json
       - name: Opt-in authenticated service-only coordinator and real loopback
         # New opt-in retry/rollout behavior is tested separately from legacy gaps.
@@ -238,8 +243,25 @@ jobs:
           > evidence/app-backend-tests.log 2>&1
       - name: Per-account grant keys and retained backup erasure (synthetic only)
         run: |
-          python -m unittest -v test_lite_grant_key_custody > evidence/grant-key-custody-tests.log 2>&1
+          python -m unittest -v test_lite_grant_key_custody test_lite_rotating_grant_keys test_lite_shared_proposal_erasure > evidence/grant-key-custody-tests.log 2>&1
+          python -m unittest -v test_inspect_lite_secret_mounts > evidence/secret-mount-metadata-tests.log 2>&1
           python tools/lite_grant_key_custody_probe.py --output evidence/grant-key-custody-probe.json
+          python tools/lite_rotating_grant_keys_probe.py --output evidence/rotating-grant-keys-probe.json
+      - name: Opt-in shared key startup, signed service and private disposition
+        run: |
+          python -m unittest -v test_lite_shared_runtime > evidence/shared-runtime-tests.log 2>&1
+          python tools/lite_shared_runtime_probe.py --output evidence/shared-runtime-probe.json
+      - name: Bounded fresh bootstrap and explicit failure recovery (synthetic only)
+        run: |
+          python -m unittest -v test_lite_fresh_bootstrap test_lite_fresh_bootstrap_factory > evidence/fresh-bootstrap-tests.log 2>&1
+          python tools/lite_fresh_bootstrap_probe.py --output evidence/fresh-bootstrap-probe.json
+          python tools/lite_fresh_bootstrap_probe.py --factory --output evidence/fresh-bootstrap-factory-probe.json
+      - name: Bounded read-only source inventory (synthetic transport only)
+        run: python -m unittest -v test_lite_fresh_inventory > evidence/fresh-inventory-tests.log 2>&1
+      - name: Restore synthetic service keys and preserve account purchase identity and quota
+        run: |
+          python -m unittest -v test_lite_operational_materials > evidence/operational-materials-tests.log 2>&1
+          python tools/lite_operational_materials_probe.py --output evidence/operational-materials-probe.json
       - name: Closed-account service inventory and late-writer seals (synthetic only)
         run: |
           python -m unittest -v test_lite_service_disposition > evidence/service-disposition-tests.log 2>&1
@@ -259,12 +281,12 @@ jobs:
               f.write('Passing characterization tests do NOT authorize launch, billing or deployment. ')
               f.write('The current check/append HTTP quota race is an expected, recorded launch blocker. ')
               f.write('The CAS ledger now has opt-in authenticated service-only HTTP tests. ')
-              f.write('Application startup does not enable these routes; cloud/native cutover is still pending. ')
+              f.write('Explicit candidate startup has synthetic coverage; cloud/native cutover is still pending. ')
               f.write('No IAP login, cloud load, live GCS cleanup, real payment or ads were tested.\n')
               f.write('Review-gap tests intentionally retain the default-off G1/G2/G3 baseline; they do not enable production.\n')
               f.write('Separate opt-in tests cover daily cutover, leases, cross-day successor authorization and rollback. ')
               f.write('Native successor persistence is implemented and has separate simulator tests. ')
-              f.write('The live provider adapter and public UI integration are not implemented; release remains blocked.\n')
+              f.write('Provider adapters and native UI require live acceptance; release remains blocked.\n')
           PY
       - uses: actions/upload-artifact@v4
         if: always()

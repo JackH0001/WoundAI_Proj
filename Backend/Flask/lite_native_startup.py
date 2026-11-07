@@ -20,10 +20,12 @@ from lite_attest_enrollment import RegistrationService
 from lite_attest_state import GCSStateStore, StateUnavailable
 from lite_attest_budget import RequestBudget
 from lite_bucket_policy import validate_bucket_policy
+from lite_run_identity import verify_attached_identity
 from lite_privacy_state import PrivacyState
 from lite_apple_identity_provider import RefreshingAppleIdentityVerifier
 from lite_apple_oauth import AppleClientSecret, AppleOAuthProvider
 from lite_grant_key_custody import GoogleGrantKeyProvider
+from lite_rotating_grant_keys import RotatingGrantKeyProvider, shared_settings
 from lite_key_readiness import KeyReadinessClient
 from lite_subscription_authority import ApplePolicy, AppleSubscriptionAuthority, apple_verifier
 from lite_subscription_migration import StableSubscriptionLinks, scope
@@ -79,8 +81,9 @@ def preflight(raw, *, expected_config, expected_source, expected_image, secrets,
         raise ValueError('pinned bounded native configuration required')
     c=loads_json_object_strict(raw.decode('utf-8'))
     exact(c,'schema enabled namespace deployment app apple budgets buckets stores controls secrets model'
-          + (' key_preparation' if 'key_preparation' in c else ''))
-    if c['schema'] not in ('lite-native-startup/1', 'lite-native-startup/2') or c['enabled'] is not True:
+          + (' key_preparation' if 'key_preparation' in c else '')
+          + (' grant_keys' if 'grant_keys' in c else ''))
+    if c['schema'] not in ('lite-native-startup/1', 'lite-native-startup/2', 'lite-native-startup/3') or c['enabled'] is not True:
         raise ValueError('explicit native Sandbox enablement required')
     _subject(c['namespace'])
     d=exact(c['deployment'],'source image project project_number service_account keyring')
@@ -90,6 +93,10 @@ def preflight(raw, *, expected_config, expected_source, expected_image, secrets,
     text(d['project_number'],r'[1-9][0-9]{5,19}')
     text(d['service_account'],r'[a-z][a-z0-9-]{4,28}[a-z0-9]@'+re.escape(d['project'])+r'\.iam\.gserviceaccount\.com')
     text(d['keyring'],r'projects/'+re.escape(d['project'])+r'/locations/asia-east1/keyRings/[A-Za-z0-9_-]+')
+    shared = c['schema'] == 'lite-native-startup/3'
+    if shared != ('grant_keys' in c) or (shared and 'key_preparation' in c):
+        raise ValueError('shared keys require schema 3 and no per-account preparation')
+    if shared: shared_settings(c['grant_keys'], d['keyring'])
     if 'key_preparation' in c:
         prep=exact(c['key_preparation'],'origin')
         text(prep['origin'],r'https://[a-z0-9][a-z0-9-]+\.a\.run\.app')
@@ -141,7 +148,7 @@ def preflight(raw, *, expected_config, expected_source, expected_image, secrets,
             or release['usage_namespace']!=usage['namespace'] or release['fence']!=usage['writer_fence_sha256']):
         raise ValueError('subscription/release/usage pins differ')
     secret_refs=exact(c['secrets'],'identity oauth api')
-    separate_mounts = c['schema'] == 'lite-native-startup/2'
+    separate_mounts = c['schema'] in ('lite-native-startup/2', 'lite-native-startup/3')
     blobs = {role: pinned_file(secrets, ref, 16384, mount=role if separate_mounts else None)
              for role, ref in secret_refs.items()}
     if len(blobs['identity']) != 32 or (not separate_mounts and len({v['file'] for v in secret_refs.values()}) != 3):
@@ -190,8 +197,7 @@ class CloudProviders:
         self.kms=RuntimeKMSSession(AuthorizedSession(self.credentials))
     def bucket(self,name):return self.client.bucket(name)
     def identity_checked(self,c):
-        if self.credentials.service_account_email!=c['deployment']['service_account']:
-            raise ValueError('runtime service identity differs')
+        verify_attached_identity(c['deployment'])
     def state(self,bucket,prefix):return GCSStateStore(bucket,prefix=prefix)
     def apple(self,policy,roots,raw_key,c):
         from appstoreserverlibrary.api_client import AppStoreServerAPIClient
@@ -223,6 +229,7 @@ def build_native_runtime(raw, *, expected_config, expected_source, expected_imag
         expected_source=expected_source,expected_image=expected_image,secrets=secrets,clock=clock)
     p=CloudProviders() if providers is None else providers
     model=p.model(package,c['model']['preprocessing_sha256'])
+    p.identity_checked(c)
     p.connect(c)
     buckets={}
     for name,meta in c['buckets'].items():
@@ -230,7 +237,6 @@ def build_native_runtime(raw, *, expected_config, expected_source, expected_imag
         checked=validate_bucket_policy(b._properties,name=name,project_number=c['deployment']['project_number'],role='security',location='ASIA-EAST1')
         if checked['metageneration']!=meta['metageneration']:raise ValueError('bucket policy changed since review')
         buckets[name]=b
-    p.identity_checked(c)
     stores={k:p.state(buckets[v['bucket']],v['prefix']) for k,v in c['stores'].items()}
     verifier,client=p.apple(policy,roots,blobs['api'],c)
     authority=AppleSubscriptionAuthority(policy=policy,verifier=verifier,client=client,proof_store=stores['apple_proofs'],clock=clock)
@@ -250,11 +256,15 @@ def build_native_runtime(raw, *, expected_config, expected_source, expected_imag
     account_scope=digest(dict(namespace=c['namespace'],issuer='https://appleid.apple.com',audience=BUNDLE,
         identity_key_sha256=hashlib.sha256(blobs['identity']).hexdigest()))
     readiness=p.readiness(c,account_scope) if 'key_preparation' in c else None
+    shared = c['schema'] == 'lite-native-startup/3'
+    provider = (RotatingGrantKeyProvider(session=p.kms,keyring=c['deployment']['keyring'],
+        **shared_settings(c['grant_keys'],c['deployment']['keyring'])) if shared else
+        GoogleGrantKeyProvider(session=p.kms,keyring=c['deployment']['keyring']))
     return compose_native_backend(enabled=True,runtime=runtime,rollout=rollout,security=security,budget=budget,
         privacy=PrivacyState(stores['privacy']),verifier=p.identity(clock),oauth=p.oauth(secret),
-        key_provider=GoogleGrantKeyProvider(session=p.kms,keyring=c['deployment']['keyring']),
+        key_provider=provider,
         stores={k:stores[k] for k in STORE_NAMES},namespace=c['namespace'],identity_key=blobs['identity'],
-        inference=model.raster,model_version=model.version,key_readiness=readiness)
+        inference=model.raster,model_version=model.version,key_readiness=readiness,shared_keys=shared)
 
 
 def application(environment=None):
@@ -270,9 +280,17 @@ def application(environment=None):
         raise ValueError('bounded mounted configuration required')
     raw=path.read_bytes()
     try:
+        from lite_attest_http import InternalOwner
+        from lite_research_issuer import settings as issuer_settings
+        internal_owner=InternalOwner.configured(env,'native')
+        link_signer=issuer_settings(env,'native')
+        research_source = env.get('LITE_RESEARCH_CAPTURE_ENABLED', '0')
+        if research_source not in ('0', '1'): raise ValueError('invalid research capture setting')
         return build_native_runtime(raw,expected_config=env['LITE_NATIVE_CONFIG_SHA256'],
             expected_source=env['LITE_NATIVE_SOURCE'],expected_image=env['LITE_NATIVE_IMAGE_SHA256'],
-            secrets=env['LITE_NATIVE_SECRET_DIR'],package=Path(__file__).parent).create_app()
+            secrets=env['LITE_NATIVE_SECRET_DIR'],package=Path(__file__).parent).create_app(
+                link_signer=link_signer, research_source_enabled=research_source=='1',
+                internal_owner=internal_owner)
     except Exception:
         # Never emit provider response bodies, mounted key bytes or account rows.
         raise RuntimeError('native candidate startup failed; preserve configuration and audit') from None

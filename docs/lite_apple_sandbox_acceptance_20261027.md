@@ -8,6 +8,12 @@
 
 內部組態現在可從 App 的設定開啟原生服務流程。初次使用須先明確核對裝置登記，再進入 Apple 登入。一般組態維持原本的量測與紀錄流程。模擬器驗證到登記前，S0–S9 仍須使用正確簽署的實機及獨立候選服務。[建置與驗收邊界](lite_native_candidate_entry_20261101.md)
 
+### 先驗證商品目錄
+
+含方案預覽的候選版可在服務裝置尚未登記時，從「設定 → 服務登入、訂閱與刪帳 → Plus 方案與價格」讀取 Apple 對目前商店提供的商品名稱與每月價格。預覽只查商品目錄；未完成交易會保留至正式購買頁核對。測試者可保持原本的研究同意選擇。
+
+真實 TestFlight 驗收時，記錄 App 組建號、Apple 商店地區、顯示名稱、幣別與月費。若商品查詢沒有結果，先核對商品 ID、當地價格、在地化文字和付費協議，再檢查測試機的商店環境。產品可查到、購買成功以及恢復到原服務帳號，是三項分開的驗收。Apple 說明 Sandbox 商品查詢可在商品送審前進行。[Apple TN3186](https://developer.apple.com/documentation/technotes/tn3186-troubleshooting-in-app-purchases-availability-in-the-sandbox) · [Apple Sandbox 測試](https://developer.apple.com/documentation/storekit/testing-in-app-purchases-with-sandbox)
+
 進行 S2 前，確認購買頁已顯示 StoreKit 的當地商品名稱、每月價格、續訂方式與每日總額。先開頁並返回，核對沒有交易、扣額度或同意變更。若價格或商店在按下訂閱時已改變，顯示的新方案須經第二次明確點選。商品不可用時仍可恢復原有購買。S3/S4 另須以同筆未結交易重試，以及同一裝置換到不同服務帳號後查看既有回執，核對付款次數、服務帳號與交易完成次數。[修正及測試案例](lite_subscription_offer_20261101.md)
 
 ## 2026-10-29 原生組合入口補充

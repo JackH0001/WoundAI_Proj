@@ -322,7 +322,7 @@ final class LiteRevisionSyncTests: XCTestCase {
         for bound in [true, false] {
             var r = store.records.last!; r.id = UUID().uuidString
             if !bound { r.cloudSync = nil }
-            let saved = try XCTUnwrap(store.saveMeasurement(r, selectedWoundID: "",
+            let saved = try XCTUnwrap(store.saveMeasurement(r, selectedWoundID: store.localTrackingID ?? "",
                 enteredLocation: LiteWoundLocation(side: "right", site: "knee_back"),
                 queueResearchSync: !bound))
             XCTAssertNil(saved.cloudSync?.pending)

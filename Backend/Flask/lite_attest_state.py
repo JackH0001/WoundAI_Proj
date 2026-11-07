@@ -19,7 +19,7 @@ from google.api_core.exceptions import NotFound, PreconditionFailed, TooManyRequ
 
 from audit_chain_contract import loads_json_object_strict
 from lite_attest_assertion import AssertionPolicy, AssertionRejected, verify_assertion
-from lite_attest_request import client_data
+from lite_attest_request import client_data, RESEARCH_OFFER_PATH, RESEARCH_ACCEPT_PATH
 
 MAX_STATE = 16384
 CHALLENGE_TTL = 120
@@ -30,7 +30,10 @@ CAS_ATTEMPTS = 8
 
 class StateUnavailable(RuntimeError): pass
 class AdmissionRejected(ValueError): pass
-class ChallengeLimit(AdmissionRejected): pass
+class ChallengeLimit(AdmissionRejected):
+    def __init__(self, retry_after):
+        super().__init__('outstanding challenge limit')
+        self.retry_after = retry_after
 
 
 def _key_name(key_id):
@@ -257,7 +260,7 @@ class AssertionAdmission:
             raise AdmissionRejected('revoked key')
         return generation, state, point
 
-    def issue_challenge(self, key_id, *, purpose='assert'):
+    def issue_challenge(self, key_id, *, purpose='assert', before_commit=None):
         if purpose not in ('assert', 'withdraw'):
             raise AdmissionRejected('unsupported challenge purpose')
         for _ in range(CAS_ATTEMPTS):
@@ -267,18 +270,23 @@ class AssertionAdmission:
                 raise StateUnavailable('server clock precedes issued challenge')
             state['challenges'] = {k: v for k, v in state['challenges'].items() if v['expires_at'] > now}
             limit = MAX_WITHDRAWAL_CHALLENGES if purpose == 'withdraw' else MAX_CHALLENGES
-            if sum(v.get('purpose', 'assert') == purpose for v in state['challenges'].values()) >= limit:
-                raise ChallengeLimit('outstanding challenge limit')
+            expiries = [v['expires_at'] for v in state['challenges'].values()
+                        if v.get('purpose', 'assert') == purpose]
+            if len(expiries) >= limit:
+                raise ChallengeLimit(min(expiries) - now)
             identifier, nonce = secrets.token_hex(16), secrets.token_bytes(32)
             if identifier in state['challenges']:
                 continue
+            if before_commit is not None:
+                before_commit()
             state['challenges'][identifier] = {'nonce': base64.b64encode(nonce).decode('ascii'),
                                               'issued_at': now, 'expires_at': now + CHALLENGE_TTL, 'purpose': purpose}
             if self.store.compare_exchange(key_id, generation, state):
                 return Challenge(identifier, nonce, now + CHALLENGE_TTL)
         raise StateUnavailable('challenge update contention')
 
-    def admit(self, key_id, challenge_id, assertion, *, request_id, method, path, content_type, body):
+    def admit(self, key_id, challenge_id, assertion, *, request_id, method, path, content_type, body,
+              before_commit=None):
         if type(challenge_id) is not str or re.fullmatch(r'[0-9a-f]{32}', challenge_id) is None:
             raise AdmissionRejected('invalid challenge identifier')
         for _ in range(CAS_ATTEMPTS):
@@ -288,7 +296,7 @@ class AssertionAdmission:
             if challenge is None or not challenge['issued_at'] <= now < challenge['expires_at']:
                 raise AdmissionRejected('challenge missing, consumed or expired')
             deletion_path = re.fullmatch(re.escape('/api/v1/lite/data/' + state['installation']) + r'(?:/[0-9a-f]{32})?', path) is not None
-            account_deletion = method == 'POST' and path in (
+            account_deletion = method == 'POST' and path in (RESEARCH_OFFER_PATH, RESEARCH_ACCEPT_PATH,
                 '/api/v1/lite/account/deletion/request', '/api/v1/lite/account/deletion/status', '/api/v1/lite/account/deletion/reauth/challenge', '/api/v1/lite/account/deletion/reauth/confirm')
             if account_deletion and challenge.get('purpose', 'assert') != 'withdraw':
                 raise AdmissionRejected('account deletion requires privacy challenge')
@@ -302,6 +310,8 @@ class AssertionAdmission:
                                             client_data=data, previous_counter=state['counter'], policy=self.policy)
             except (ValueError, AssertionRejected) as exc:
                 raise AdmissionRejected('assertion not valid for this request') from exc
+            if before_commit is not None:
+                before_commit()
             state['counter'] = verified.counter
             del state['challenges'][challenge_id]
             if not challenge['issued_at'] <= self._now() < challenge['expires_at']:

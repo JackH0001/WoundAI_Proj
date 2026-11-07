@@ -4,6 +4,34 @@ import XCTest
 final class LiteBackendConfigurationTests: XCTestCase {
     let origin = LiteBackendConfiguration.dedicatedOrigin
 
+    func testPackagedPrivacyManifestCoversResearchAndServiceData() throws {
+        let file = try XCTUnwrap(Bundle.main.url(forResource: "PrivacyInfo", withExtension: "xcprivacy"))
+        let plist = try PropertyListSerialization.propertyList(from: Data(contentsOf: file), format: nil)
+        let manifest = try XCTUnwrap(plist as? [String: Any])
+        XCTAssertEqual(manifest["NSPrivacyTracking"] as? Bool, false)
+        XCTAssertEqual(manifest["NSPrivacyTrackingDomains"] as? [String], [])
+        let entries = try XCTUnwrap(manifest["NSPrivacyCollectedDataTypes"] as? [[String: Any]])
+        var purposes = [String: Set<String>]()
+        for entry in entries {
+            let type = try XCTUnwrap(entry["NSPrivacyCollectedDataType"] as? String)
+            XCTAssertNil(purposes[type], "Repeated privacy declaration for \(type)")
+            XCTAssertEqual(entry["NSPrivacyCollectedDataTypeLinked"] as? Bool, true)
+            XCTAssertEqual(entry["NSPrivacyCollectedDataTypeTracking"] as? Bool, false)
+            purposes[type] = Set(try XCTUnwrap(entry["NSPrivacyCollectedDataTypePurposes"] as? [String]))
+        }
+        let functionality = "NSPrivacyCollectedDataTypePurposeAppFunctionality"
+        let research = "NSPrivacyCollectedDataTypePurposeOther"
+        for type in ["PhotosorVideos", "Health", "DeviceID"] {
+            XCTAssertEqual(purposes["NSPrivacyCollectedDataType" + type], [functionality, research])
+        }
+        XCTAssertEqual(purposes["NSPrivacyCollectedDataTypeEnvironmentScanning"], [research])
+        XCTAssertEqual(purposes["NSPrivacyCollectedDataTypeProductInteraction"], [functionality])
+        for type in ["UserID", "PurchaseHistory"] {
+            XCTAssertEqual(purposes["NSPrivacyCollectedDataType" + type],
+                           LiteNativeBuild.includesService ? [functionality] : nil)
+        }
+    }
+
     func testReleaseRequiresDedicatedOrigin() {
         XCTAssertEqual(LiteBackendConfiguration.releaseOrigin(origin), origin)
         XCTAssertEqual(LiteBackendConfiguration.releaseOrigin(origin + "/"), origin)
@@ -22,6 +50,15 @@ final class LiteBackendConfigurationTests: XCTestCase {
             XCTAssertEqual(LiteBackendConfiguration.releaseOrigin(value), LiteBackendConfiguration.unavailableOrigin, value)
         }
     }
+    func testUpdatedNoticeRequiresExistingParticipantsToChooseAgain() {
+        for previous in [nil, "old-disclosure"] as [String?] {
+            XCTAssertNil(LitePrefs.reviewedChoice(true, notice: previous))
+            XCTAssertEqual(LitePrefs.reviewedChoice(false, notice: previous), false)
+        }
+        XCTAssertNil(LitePrefs.reviewedChoice(nil, notice: LitePrefs.noticeVersion))
+        XCTAssertEqual(LitePrefs.reviewedChoice(true, notice: LitePrefs.noticeVersion), true)
+    }
+
     func testConsentRequiresBothVersionAndOrigin() {
         XCTAssertEqual(choice(true, version: "v2", saved: origin), true)
         XCTAssertEqual(choice(false, version: "v2", saved: origin), false)

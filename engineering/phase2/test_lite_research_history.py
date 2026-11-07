@@ -22,6 +22,7 @@ from test_lite_research_media_disposition import MediaFixture, PageBucket
 from test_lite_fenced_objects import Blob
 from test_lite_subscription_grace import rows
 import test_lite_native_purchase as native
+from research_pair_fixture import pairs
 
 
 class VersionBucket(PageBucket):
@@ -72,7 +73,7 @@ class HistoryFixture:
         self.m=MediaFixture(host);m=self.m;self.bucket=VersionBucket();m.bucket=self.bucket
         m.r=Reconsent(FencedPrivacy(m.f.store('history-research-source'),self.bucket))
         m.closure=AccountResearchClosure(deletion=m.f.d,research=m.r,
-            store=m.f.store('history-closure'),audit_store=m.f.store('history-closure-audit'))
+            store=m.f.store('history-closure'),audit_store=m.f.store('history-closure-audit'),associations=pairs(m.f,m.r,[(m.owner,m.owner)]))
         m.w=m.worker();self.jobs=m.f.store('history-jobs');self.audit=m.f.store('history-audit')
         self.policy=dict(v=1,id='synthetic-v1',bucket=self.bucket.name,prefixes=['lite_fenced/v1/','lite_epochs/v1/'])
         self.h=self.worker();self.ref=ObjectRef(m.owner,'image','1'*16)
@@ -331,6 +332,7 @@ class ResearchHistoryTests(unittest.TestCase):
         m=self.f.m
         owners=[f'{i+100:032x}' for i in range(12)]
         for owner in owners:m.f.f.login(owner);m.seed(1,owner=owner)
+        m.closure.associations=pairs(m.f,m.r,[(x,x) for x in [m.owner,*owners]])
         self.f.seed(1);self.f.close();seals=copy.deepcopy(self.b.live);r,_=self.f.finish(max_calls=500)
         self.assertEqual(r['linked_grants'],13);self.assertEqual(r['objects_checked'],13)
         self.assertEqual(seals,self.b.live);self.assertEqual(len(self.b.history),13)

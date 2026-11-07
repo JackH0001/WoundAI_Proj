@@ -49,6 +49,35 @@ final class LiteReconsentTests: XCTestCase {
         XCTAssertTrue(journal.status(for: old)?.contains("不會自動重傳") == true)
         XCTAssertTrue(model().renewed); XCTAssertFalse(model().blocksUploads)
     }
+    func testAccountDeletionBlocksRejoinAndPreservesOriginalWithdrawal() async throws {
+        _ = try complete()
+        let before = try Data(contentsOf:journal.url)
+        let m = LiteWithdrawalModel(journal:journal, accountPaused:{ _ in true }, stopUploads:{ XCTFail() },
+                                    owner:{ _ in XCTFail(); return nil })
+        XCTAssertFalse(m.mayReviewCompletedRenewal)
+        let ok = await m.reconsentCompletedWithdrawal(server:server) { intent in
+            XCTFail("paused research cannot send a renewal"); return self.receipt(intent.request)
+        }
+        XCTAssertFalse(ok)
+        XCTAssertEqual(before, try Data(contentsOf:journal.url))
+    }
+    func testPauseDuringRenewalKeepsReceivedEpochWithoutEnablingUploads() async throws {
+        _ = try complete()
+        var paused = false
+        let m = LiteWithdrawalModel(journal:journal, accountPaused:{ _ in paused }, stopUploads:{ XCTFail() },
+                                    owner:{ _ in self.owner })
+        let ok = await m.reconsentCompletedWithdrawal(server:server) { intent in
+            paused = true
+            return self.receipt(intent.request)
+        }
+        XCTAssertFalse(ok)
+        XCTAssertEqual(try journal.load()?.phase, .reconsented)
+        XCTAssertNotNil(try journal.load()?.reconsentAudit)
+        XCTAssertTrue(m.message?.contains("暫停研究上傳") == true)
+        let reopened = LiteWithdrawalModel(journal:journal, accountPaused:{ _ in true })
+        XCTAssertTrue(reopened.statusTitle.contains("暫停上傳"))
+        XCTAssertTrue(reopened.message?.contains("已暫停") == true)
+    }
     func testHistoricalConsentRemainsReadableAndWithdrawableAfterTextUpdate() async throws {
         _ = try complete()
         let original = try Data(contentsOf: journal.url)

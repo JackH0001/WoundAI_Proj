@@ -24,6 +24,13 @@ class RequestBudget:
         self.key = hashlib.sha256(b'woundlite/global-request-budget/1').digest()
 
     def reserve(self, *, scope='general'):
+        self._check(scope, consume=True)
+
+    def check_available(self, *, scope):
+        """Stop before signature checking when full. Only reserve() grants a slot."""
+        self._check(scope, consume=False)
+
+    def _check(self, scope, *, consume):
         if scope not in ('general', 'withdraw'):
             raise ValueError('unknown budget scope')
         # Independent, bounded privacy capacity. Each lane has the configured
@@ -46,6 +53,7 @@ class RequestBudget:
                     raise StateUnavailable('invalid request budget state')
                 if minute < state['minute'] or day < state['day']:
                     raise StateUnavailable('request budget clock moved backwards')
+                state = dict(state)
                 if minute != state['minute']:
                     state['minute'], state['minute_used'] = minute, 0
                 if day != state['day']:
@@ -54,6 +62,8 @@ class RequestBudget:
                 raise BudgetExceeded((day + 1) * 86400 - now)
             if state['minute_used'] >= self.minute_limit:
                 raise BudgetExceeded((minute + 1) * 60 - now)
+            if not consume:
+                return
             state['minute_used'] += 1; state['day_used'] += 1
             if self.store.compare_exchange(key, rev, state):
                 return

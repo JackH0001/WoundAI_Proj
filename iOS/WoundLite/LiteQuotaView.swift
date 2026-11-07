@@ -1,47 +1,64 @@
 import SwiftUI
 
-@MainActor
-final class LiteUsageState: ObservableObject {
-    static let shared = LiteUsageState()
-    @Published private var quota: LiteCloudQuota?
-    private var server = ""
-    private var anonId = ""
+/// The research service meters a registered installation. This receipt has
+/// no authority to describe a personal account or a subscription.
+struct LiteResearchQuotaReceipt: Equatable {
+    let quota: LiteCloudQuota
+    let scope: LiteCaptureResearchScope
+    let owner: String
 
-    func record(_ value: LiteCloudQuota?, server: String, anonId: String) {
-        self.server = server
-        self.anonId = anonId
-        quota = value
-    }
-
-    func current(at date: Date) -> LiteCloudQuota? {
-        // This in-memory snapshot belongs to a verified upload. Registered keys never
-        // rotate automatically; reinstall/restart drops the snapshot, not the old binding.
-        guard server == AppSettings.backendURL(), LiteAttestClient.matches(anonId, "[0-9a-f]{32}"),
-              let quota, quota.isCurrent(at: date) else { return nil }
+    func current(at date: Date, scope current: LiteCaptureResearchScope?, registeredOwner: String?) -> LiteCloudQuota? {
+        guard scope == current, owner == registeredOwner, LiteAttestClient.matches(owner, "[0-9a-f]{32}"),
+              quota.isCurrent(at: date) else { return nil }
         return quota
     }
 }
 
-/// No local countdown or purchase button: only a valid server reply can supply
-/// a balance. Old backends, app restart and UTC rollover all remain unknown.
-struct LiteQuotaView: View {
+@MainActor final class LiteUsageState: ObservableObject {
+    static let shared = LiteUsageState()
+    @Published private(set) var receipt: LiteResearchQuotaReceipt?
+
+    func record(_ value: LiteCloudQuota?, server: String, anonId: String, epoch: String?) {
+        guard let origin = try? LiteWithdrawalJournal.origin(server) else { receipt = nil; return }
+        receipt = value.map { LiteResearchQuotaReceipt(quota: $0, scope: .init(origin: origin, epoch: epoch), owner: anonId) }
+    }
+}
+
+/// Loading the existing registration reads local state only. This view cannot
+/// enroll a replacement identity or contact either recognition service.
+struct LiteResearchQuotaView: View {
     @ObservedObject private var usage = LiteUsageState.shared
+    @Environment(\.scenePhase) private var phase
+    @State private var owner: String?
+    @State private var registrationScope: LiteCaptureResearchScope?
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { context in
+            let scope = try? LiteCaptureResearchScope.capture(server: AppSettings.backendURL(), consent: LitePrefs.researchConsent == true)
             VStack(alignment: .leading, spacing: 4) {
-                if let quota = usage.current(at: context.date) {
-                    Text("雲端辨識剩餘 \(quota.remaining)／\(quota.limit) 次")
-                    Text("依最近一次服務回覆；\(quota.resetsAt.formatted(date: .abbreviated, time: .shortened)) 重置。")
+                if phase == .active, registrationScope == scope, let quota = usage.receipt?.current(at: context.date, scope: scope, registeredOwner: owner) {
+                    Text("研究辨識剩餘 \(quota.remaining)／\(quota.limit) 次")
+                    Text("依最近一次研究服務回覆；\(quota.resetsAt.formatted(date: .abbreviated, time: .shortened)) 重置。")
                         .foregroundStyle(.secondary)
                 } else {
-                    Text("雲端辨識額度尚待服務確認")
-                    Text("支援的服務會在辨識後回報剩餘次數；本機紀錄不受雲端額度限制。")
+                    Text("研究辨識額度尚待服務確認")
+                    Text("研究服務會在辨識後回報本機研究登記的剩餘次數。")
                         .foregroundStyle(.secondary)
                 }
             }
             .font(.footnote)
             .accessibilityElement(children: .combine)
+        }
+        .task(id: phase == .active ? usage.receipt : nil) {
+            owner = nil
+            registrationScope = nil
+            guard phase == .active, let receipt = usage.receipt,
+                  receipt.scope.permits(server: AppSettings.backendURL(), consent: LitePrefs.researchConsent == true),
+                  let client = try? await LiteSignedCloudTransport(baseURL: receipt.scope.origin).resolve() else { return }
+            let existing = try? await client.existingInstallation()
+            guard !Task.isCancelled, usage.receipt == receipt else { return }
+            registrationScope = receipt.scope
+            owner = existing
         }
     }
 }
