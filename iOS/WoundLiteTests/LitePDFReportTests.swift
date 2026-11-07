@@ -36,6 +36,24 @@ final class LitePDFReportTests: XCTestCase {
         XCTAssertTrue(historical.contains("圈選版本未確認"))
     }
 
+    func testUnversionedCloudWarningPersistsThroughManualCorrectionAndPDF() throws {
+        var row = record()
+        row.source = "cloud"; row.contourOrigin = nil
+        let original = row.surfaceCm2
+        XCTAssertNotNil(row.contourUncertaintyNotice)
+        var report = try XCTUnwrap(PDFDocument(data: LitePDFReport.render(record: row, image: image()))?.string)
+        XCTAssertTrue(report.contains("可能偏小"))
+        row.source = "manual"; row.contourOrigin = .cloud(route: "student", contract: nil)
+        XCTAssertNotNil(row.contourUncertaintyNotice)
+        report = try XCTUnwrap(PDFDocument(data: LitePDFReport.render(record: row, image: image()))?.string)
+        XCTAssertTrue(report.contains("可能偏小"))
+        XCTAssertEqual(row.surfaceCm2, original)
+        row.contourOrigin = .cloud(route: "student", contract: LiteContourOrigin.studentV1)
+        XCTAssertNil(row.contourUncertaintyNotice)
+        row.contourOrigin = .manual
+        XCTAssertNil(row.contourUncertaintyNotice)
+    }
+
     func testTimelinePDFIsChronologicalPaginatedAndIsolatedToOneWound() throws {
         let group = LiteWoundGroup(id:"A",name:"合成標靶 A",location:.init(side:"right", site:"heel"))
         var entries = (1...4).map { day -> LiteRecord in
@@ -53,6 +71,7 @@ final class LitePDFReportTests: XCTestCase {
         entries[3].surfaceCm2 = 7.25
         entries[3].projectedCm2 = 7.03
         entries[3].contourOrigin = nil
+        entries[3].source = "cloud"
         var foreign = record()
         foreign.woundID = "B"
         foreign.surfaceCm2 = 678.91
@@ -65,7 +84,7 @@ final class LitePDFReportTests: XCTestCase {
         XCTAssertEqual(pdf.pageCount,entries.count+1)
         let text = try XCTUnwrap(pdf.string)
         for value in ["10.08","9.91","8.50","未提供面積","免貼紙","合成標靶 A","2026/10/24",
-                      "表面積趨勢","可繪 3 / 4 筆","舊版 LiDAR 表面積：7.25","青色細線標示已存傷口輪廓"] {
+                      "表面積趨勢","可繪 3 / 4 筆","舊版 LiDAR 表面積：7.25","青色細線標示已存傷口輪廓","可能偏小"] {
             XCTAssertTrue(text.contains(value),value)
         }
         for value in ["123.45","678.91","private-","9.87","6.54"] { XCTAssertFalse(text.contains(value),value) }

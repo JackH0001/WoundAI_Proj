@@ -217,7 +217,10 @@ enum LiteTimelinePDF {
             }
           }
           text(
-            "面積來源為免貼紙 LiDAR 深度估算；投影與表面積分開列示。", CGRect(x: 36, y: 748, width: 522, height: 20),
+            selection.rows.contains(where: { $0.contourUncertaintyNotice != nil })
+              ? "免貼紙 LiDAR 面積估算。含未確認的雲端圈選，範圍與面積可能偏小，請核對。"
+              : "面積來源為免貼紙 LiDAR 深度估算；投影與表面積分開列示。",
+            CGRect(x: 36, y: 748, width: 522, height: 20),
             size: 10)
           text(LitePDFReport.disclaimer, CGRect(x: 36, y: 770, width: 522, height: 30), size: 10)
           text(

@@ -151,6 +151,7 @@ enum LitePDFReport {
                      : "青色細線標示本筆保存的傷口輪廓。", size: 11)
             } else { text("本機照片已不存在或暫時無法讀取；未從雲端補下載。") }
             text("原始圈選：" + (record.contourOrigin?.label ?? "圈選版本未確認"))
+            if let notice = record.contourUncertaintyNotice { text(notice, size: 11) }
             for line in areaLines(record, image: image) { text(line) }
             text(disclaimer, size: 12)
             text("本報告只含所選單筆紀錄，不含深度／體積、帳號或雲端識別碼。分享由您自行選擇接收對象。", size: 10)

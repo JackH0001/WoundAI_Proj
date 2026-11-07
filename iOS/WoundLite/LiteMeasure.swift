@@ -748,6 +748,9 @@ struct LiteMeasureView: View {
                     }
 
                     if let e = vm.estimate {
+                        if let notice = vm.contourOrigin.uncertaintyNotice {
+                            Text(notice).font(.footnote).foregroundStyle(.orange)
+                        }
                         LiteResultCard(e: e, verdict: liteVerdict(e))
                         saveRow(e: e)
                     }

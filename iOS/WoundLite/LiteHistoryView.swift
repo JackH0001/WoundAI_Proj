@@ -481,6 +481,9 @@ struct LiteRecordDetailView: View {
             Text(r.woundLocation?.label ?? "位置尚未填寫，可由上方分組選單補齊。")
                 .font(.footnote).foregroundStyle(.secondary)
             let assessment = r.savedArea
+            if let notice = r.contourUncertaintyNotice {
+                Text(notice).font(.footnote).foregroundStyle(.orange)
+            }
             if let series = assessment.series {
                 Text(String(format: "LiDAR 表面積估算：%.2f cm²", r.surfaceCm2)).font(.title3).bold()
                 Text(series.rawValue).font(.caption).foregroundStyle(.secondary)

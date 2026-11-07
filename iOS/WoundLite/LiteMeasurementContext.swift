@@ -66,6 +66,11 @@ struct LiteContourOrigin: Codable, Equatable, Sendable {
         self == .manual || (method == "cloud" && outputContract == Self.studentV1
             && (route == "student" || route == "cloud_escalated(AU)"))
     }
+
+    var uncertaintyNotice: String? {
+        guard method == "cloud", !supportsComparison else { return nil }
+        return "原始雲端圈選版本未確認，範圍與面積可能偏小；請核對輪廓。"
+    }
 }
 
 enum LiteAreaSeries: String, CaseIterable, Identifiable {
@@ -91,6 +96,11 @@ enum LiteSavedArea {
 }
 
 extension LiteRecord {
+    var contourUncertaintyNotice: String? {
+        if let contourOrigin { return contourOrigin.uncertaintyNotice }
+        return source == "cloud" ? LiteContourOrigin.cloud(route: nil, contract: nil).uncertaintyNotice : nil
+    }
+
     var savedArea: LiteSavedArea {
         guard let context = measurementContext else {
             guard surfaceCm2.isFinite, projectedCm2.isFinite, surfaceCm2 >= 0, projectedCm2 >= 0
