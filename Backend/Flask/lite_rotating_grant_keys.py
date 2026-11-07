@@ -181,6 +181,96 @@ class RotatingGrantCipher(AccountGrantCipher):
         return encoded(dict(v=2, scope=self.scope, person=c['person'],
                             dek_id=c['dek_id'], version=c['version']))
 
+    def _proposal_index_key(self, person):
+        return key('shared-grant-proposal-index', digest([self.scope, person]))
+
+    def _proposal_index(self, person):
+        row = self.store.load(self._proposal_index_key(person))
+        if row is None: return None
+        c = row[1]
+        try:
+            if (set(c) != {'v','scope','person','phase','closure','proposals'} or c['v'] != 1
+                    or type(c['v']) is not int or c['scope'] != self.scope or c['person'] != person
+                    or c['phase'] not in ('open','closed') or type(c['proposals']) is not list
+                    or not 1 <= len(c['proposals']) <= 256
+                    or c['proposals'] != sorted(set(c['proposals']))): raise ValueError()
+            for p in c['proposals']: _hex(p)
+            if c['phase'] == 'closed': _hex(c['closure'])
+            elif c['closure'] is not None: raise ValueError()
+            proof = self.audit.load(key('shared-grant-proposal-index-proof', digest(c)))
+            if proof is None or proof[1] != c: raise ValueError()
+        except (KeyError, TypeError, ValueError):
+            raise StateUnavailable('shared proposal inventory corrupt') from None
+        return row
+
+    def _register_proposal(self, person, proposal_key, *, initial=False):
+        # Register BEFORE wrap/write. Closure freezes the same CAS row, then
+        # tombstones even absent slots: a delayed create-only writer loses CAS.
+        for _ in range(CAS_ATTEMPTS):
+            self._require_no_destroy_intent(person)
+            row = self._proposal_index(person)
+            if row is None:
+                if (not initial or self._read(person) is not None
+                        or self.store.load(proposal_key) is not None
+                        or self.audit.load(key('shared-grant-key-initialized',digest([self.scope,person]))) is not None):
+                    raise StateUnavailable('legacy proposal inventory requires explicit migration')
+                c = dict(v=1,scope=self.scope,person=person,phase='open',closure=None,proposals=[])
+            else: c = row[1]
+            if c['phase'] != 'open': raise StateUnavailable('shared proposal inventory closed')
+            if proposal_key.hex() in c['proposals']:
+                self._require_no_destroy_intent(person); return
+            updated = dict(c,proposals=sorted(c['proposals']+[proposal_key.hex()]))
+            if len(updated['proposals']) > 256: raise StateUnavailable('proposal inventory requires review')
+            self.immutable(self.audit,key('shared-grant-proposal-index-proof',digest(updated)),updated)
+            try: self.store.compare_exchange(self._proposal_index_key(person),0 if row is None else row[0],updated)
+            except StateUnavailable: pass
+        raise StateUnavailable('proposal registration unconfirmed; do not wrap')
+
+    def _closed_proposals(self, person, closure, *, erase=False):
+        # Existing v2 accounts without an index are NOT silently declared clean.
+        # Their old proposals require a separately reviewed inventory migration.
+        for _ in range(CAS_ATTEMPTS):
+            row = self._proposal_index(person)
+            if row is None: raise StateUnavailable('legacy proposal inventory requires explicit migration')
+            generation, c = row
+            if c['phase'] == 'closed':
+                if c['closure'] != closure: raise StateUnavailable('proposal closure differs')
+                break
+            if not erase: raise StateUnavailable('proposal erasure incomplete')
+            updated = dict(c,phase='closed',closure=closure)
+            self.immutable(self.audit,key('shared-grant-proposal-index-proof',digest(updated)),updated)
+            try: self.store.compare_exchange(self._proposal_index_key(person),generation,updated)
+            except StateUnavailable: pass
+        else: raise StateUnavailable('proposal inventory freeze unconfirmed')
+        initial = key('shared-grant-key-initial-proposal',digest([self.scope,person])).hex()
+        if initial not in c['proposals']: raise StateUnavailable('initial proposal absent from inventory')
+        for name in c['proposals']:
+            pk = bytes.fromhex(name)
+            for _ in range(CAS_ATTEMPTS):
+                saved = self.store.load(pk)
+                value = None if saved is None else saved[1]
+                if type(value) is dict and value.get('schema') == 'shared-proposal-tombstone/1':
+                    if (set(value) != {'schema','scope','person','closure','proposal','previous_sha256'}
+                            or value['scope'] != self.scope or value['person'] != person
+                            or value['closure'] != closure or value['proposal'] != name):
+                        raise StateUnavailable('proposal tombstone differs')
+                    if value['previous_sha256'] is not None: _hex(value['previous_sha256'])
+                    proof = self.audit.load(key('shared-grant-proposal-erased',digest(value)))
+                    if proof is None or proof[1] != value: raise StateUnavailable('proposal erasure evidence missing')
+                    break
+                if not erase: raise StateUnavailable('proposal erasure incomplete')
+                if value is not None:
+                    if type(value) is not dict: raise StateUnavailable('proposal record corrupt')
+                    record = value if name == initial else value.get('record')
+                    self._validate(record, person)
+                tombstone = dict(schema='shared-proposal-tombstone/1',scope=self.scope,person=person,
+                    closure=closure,proposal=name,previous_sha256=None if value is None else digest(value))
+                self.immutable(self.audit,key('shared-grant-proposal-erased',digest(tombstone)),tombstone)
+                try: self.store.compare_exchange(pk,0 if saved is None else saved[0],tombstone)
+                except StateUnavailable: pass
+            else: raise StateUnavailable('proposal erasure unconfirmed')
+        return len(c['proposals'])
+
     def _dek(self, person, *, create=False):
         self._require_no_destroy_intent(person)
         row = self._read(person)
@@ -191,6 +281,7 @@ class RotatingGrantCipher(AccountGrantCipher):
                 raise StateUnavailable('previously initialized key missing; explicit recovery required')
             if self.lifecycle._read(person) is None: raise StateUnavailable('indexed account required')
             pk = key('shared-grant-key-initial-proposal', digest([self.scope,person]))
+            self._register_proposal(person, pk, initial=True)
             saved = self.store.load(pk)
             if saved is None:
                 version = self.provider.write_version
@@ -275,6 +366,7 @@ class RotatingGrantCipher(AccountGrantCipher):
             raise StateUnavailable('rewrap source changed; inspect original operation')
         if int(target.rsplit('/',1)[1]) <= int(c['version'].rsplit('/',1)[1]):
             raise StateUnavailable('rewrap requires a later pinned version')
+        self._register_proposal(person, pk)
         self.immutable(self.audit, ik, dict(v=1,scope=self.scope,person=person,
             source=expected_record_sha256,target=target))
         if self.provider.describe(target) != 'ENABLED': raise StateUnavailable('target shared key unavailable')
@@ -358,6 +450,7 @@ class RotatingGrantCipher(AccountGrantCipher):
             if row is None or row[1] != updated:
                 raise StateUnavailable('shared account key closure unconfirmed')
             c = row[1]; intent = self.audit.load(ik)
+        self._closed_proposals(person, closure, erase=True)
         receipt = self.closure_receipt(person, closure)
         self.immutable(self.audit,key('shared-grant-key-closure-observed',digest(receipt)),receipt)
         return receipt
@@ -374,6 +467,7 @@ class RotatingGrantCipher(AccountGrantCipher):
             raise StateUnavailable('shared closure evidence differs')
         receipt = dict(v=2, scheme='shared-kms-envelope-1', scope=self.scope, person=person,
             closure=closure, dek_id=c['dek_id'], versions=c['versions'],
+            current_proposal_tombstones=self._closed_proposals(person, closure),
             current_key_access='closed', historical_key_access='pending_retirement',
             retirement_inventory_verified=False,
             grant_key_unrecoverable=False, physical_backup_deletion_confirmed=False,
