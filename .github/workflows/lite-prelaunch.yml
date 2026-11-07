@@ -243,7 +243,8 @@ jobs:
           > evidence/app-backend-tests.log 2>&1
       - name: Per-account grant keys and retained backup erasure (synthetic only)
         run: |
-          python -m unittest -v test_lite_grant_key_custody test_lite_rotating_grant_keys > evidence/grant-key-custody-tests.log 2>&1
+          python -m unittest -v test_lite_grant_key_custody test_lite_rotating_grant_keys test_lite_shared_proposal_erasure > evidence/grant-key-custody-tests.log 2>&1
+          python -m unittest -v test_inspect_lite_secret_mounts > evidence/secret-mount-metadata-tests.log 2>&1
           python tools/lite_grant_key_custody_probe.py --output evidence/grant-key-custody-probe.json
           python tools/lite_rotating_grant_keys_probe.py --output evidence/rotating-grant-keys-probe.json
       - name: Opt-in shared key startup, signed service and private disposition
