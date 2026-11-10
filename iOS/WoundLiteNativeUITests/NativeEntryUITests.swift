@@ -1,6 +1,39 @@
 import XCTest
 
 final class NativeEntryUITests: XCTestCase {
+    @MainActor func testUnmatchedHelpKeepsOfflineTopicsAndDoesNotRetainTheQuestion() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        func openGuide() {
+            app.launch()
+            let gate = app.buttons["設定與資料撤回"]
+            let settings = gate.waitForExistence(timeout: 3) ? gate : app.buttons["設定"].firstMatch
+            XCTAssertTrue(settings.waitForExistence(timeout: 8))
+            settings.tap()
+            let guide = app.buttons["lite.help.open"]
+            XCTAssertTrue(guide.waitForExistence(timeout: 5))
+            guide.tap()
+        }
+        openGuide()
+        let query = app.textFields["lite.help.question"]
+        XCTAssertTrue(query.waitForExistence(timeout: 5))
+        query.tap()
+        query.typeText("zxqv help acceptance")
+        XCTAssertTrue(app.staticTexts["沒有相符的關鍵字，可從下方挑選主題。"].waitForExistence(timeout: 5))
+        let report = app.buttons["lite.help.topic.report"]
+        for _ in 0..<6 where !report.isHittable { app.swipeUp() }
+        XCTAssertTrue(report.isHittable)
+        report.tap()
+        XCTAssertTrue(app.staticTexts["紀錄 → 選一處傷口 → 匯出此傷口時間軸 PDF"].waitForExistence(timeout: 5))
+        attach(app, "unmatched-help-offline-report")
+        app.terminate()
+        openGuide()
+        XCTAssertTrue(query.waitForExistence(timeout: 5))
+        let value = query.value as? String ?? ""
+        XCTAssertFalse(value.contains("zxqv"), "An operation question must not become saved app history")
+        attach(app, "help-query-not-retained-after-relaunch")
+    }
+
     @MainActor func testOperationGuideFindsReportWithoutAccountOrResearchRegistration() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
