@@ -35,9 +35,7 @@ from lite_usage_cutover import CutoverPolicy
 from lite_usage_ledger import digest, _subject, _hex
 
 
-STORE_NAMES = tuple(name for lane in ('events', 'lifecycle', 'keys', 'grants',
-    'identity', 'purchases', 'deletion', 'results', 'progress') for name in (lane, lane+'_audit')) + (
-    'operations', 'recovery')
+from lite_native_schema import STORE_NAMES
 
 
 from lite_store_locations import location, overlaps

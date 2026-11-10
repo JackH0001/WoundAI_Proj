@@ -16,7 +16,7 @@ from audit_chain_contract import loads_json_object_strict
 from lite_attest_state import GCSStateStore, StateUnavailable
 from lite_disposition_bootstrap import acquire, google_session, validate_limits
 from lite_fresh_bootstrap_factory import build, GCSFactory, NAMES
-from lite_native_backend import overlaps
+from lite_store_locations import overlaps
 from lite_provider_budget import ProviderBudget, validate_policy
 from lite_provider_transport import BudgetedSession
 from lite_usage_ledger import digest, _hex

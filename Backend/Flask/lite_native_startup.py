@@ -37,23 +37,8 @@ from lite_usage_cutover import validate as validate_usage
 from lite_usage_rollout import UsageRollout, validate_baselines
 from lite_service_release import ServiceReleaseReader, _validate as validate_release
 
-PEER_NAMES = ('security','budget','privacy','accounts','links','links_audit',
-    'subscription','subscription_audit','observer','release','release_audit',
-    'quota','rollout','rollout_audit','cutover','apple_proofs')
-ALL_STORES = PEER_NAMES + STORE_NAMES
+from lite_native_schema import PEER_NAMES, ALL_STORES, exact, text
 BUNDLE='com.woundai.lite'
-
-
-def exact(value, fields):
-    if type(value) is not dict or set(value)!=set(fields.split()):
-        raise ValueError('native configuration fields differ')
-    return value
-
-
-def text(value, pattern):
-    if type(value) is not str or re.fullmatch(pattern,value) is None:
-        raise ValueError('native configuration value invalid')
-    return value
 
 
 def pinned_file(root, reference, maximum, *, mount=None):

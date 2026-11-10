@@ -12,8 +12,8 @@ import time
 from audit_chain_contract import loads_json_object_strict
 from lite_attest_state import GCSStateStore, StateUnavailable, _encode
 from lite_bucket_policy import validate_bucket_policy
-from lite_native_backend import overlaps
-from lite_native_startup import ALL_STORES, exact, text
+from lite_store_locations import overlaps
+from lite_native_schema import ALL_STORES, exact, text
 from lite_subscription_authority import ApplePolicy, AppleSubscriptionAuthority
 from lite_subscription_executor import SignedEvidence, key
 from lite_subscription_migration import StableSubscriptionLinks

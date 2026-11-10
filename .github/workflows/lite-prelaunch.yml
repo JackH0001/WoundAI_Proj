@@ -7,6 +7,7 @@ on:
       - 'Backend/LiteNative/**'
       - 'Backend/LiteKeyWorker/**'
       - 'Backend/LiteDisposition/**'
+      - 'Backend/LiteBootstrap/**'
       - 'engineering/phase2/test_lite*.py'
       - 'engineering/phase2/requirements-commerce-test.txt'
       - 'tools/*lite*.py'
@@ -14,6 +15,34 @@ on:
 permissions:
   contents: read
 jobs:
+  bootstrap-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Stage private one-shot bootstrap without model or credentials
+        run: python3 tools/stage_lite_bootstrap_candidate.py --repo . --output /tmp/lite-bootstrap-context
+      - name: Build and verify independent bootstrap imports
+        run: |
+          chmod -R u=rwX,go= /tmp/lite-bootstrap-context
+          docker build --tag lite-bootstrap-ci /tmp/lite-bootstrap-context
+      - name: Reject unconfigured execution with no network
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges lite-bootstrap-ci --help
+          set +e
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges lite-bootstrap-ci > /tmp/lite-bootstrap-boot.log 2>&1
+          result=$?
+          set -e
+          test "$result" = 2
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('/tmp/lite-bootstrap-boot.log').read_text()
+          assert 'the following arguments are required' in text, text
+          assert 'ModuleNotFoundError' not in text, text
+          print('One-shot runner refused missing pins; no activation.')
+          PY
   disposition-image:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -253,7 +282,7 @@ jobs:
           python tools/lite_shared_runtime_probe.py --output evidence/shared-runtime-probe.json
       - name: Bounded fresh bootstrap and explicit failure recovery (synthetic only)
         run: |
-          python -m unittest -v test_lite_fresh_bootstrap test_lite_fresh_bootstrap_factory test_lite_fresh_bootstrap_runner > evidence/fresh-bootstrap-tests.log 2>&1
+          python -m unittest -v test_lite_fresh_bootstrap test_lite_fresh_bootstrap_factory test_lite_fresh_bootstrap_runner test_lite_bootstrap_package > evidence/fresh-bootstrap-tests.log 2>&1
           python tools/lite_fresh_bootstrap_probe.py --output evidence/fresh-bootstrap-probe.json
           python tools/lite_fresh_bootstrap_probe.py --factory --output evidence/fresh-bootstrap-factory-probe.json
       - name: Bounded read-only source inventory (synthetic transport only)
