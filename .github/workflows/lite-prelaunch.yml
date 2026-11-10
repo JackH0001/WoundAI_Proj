@@ -253,7 +253,7 @@ jobs:
           python tools/lite_shared_runtime_probe.py --output evidence/shared-runtime-probe.json
       - name: Bounded fresh bootstrap and explicit failure recovery (synthetic only)
         run: |
-          python -m unittest -v test_lite_fresh_bootstrap test_lite_fresh_bootstrap_factory > evidence/fresh-bootstrap-tests.log 2>&1
+          python -m unittest -v test_lite_fresh_bootstrap test_lite_fresh_bootstrap_factory test_lite_fresh_bootstrap_runner > evidence/fresh-bootstrap-tests.log 2>&1
           python tools/lite_fresh_bootstrap_probe.py --output evidence/fresh-bootstrap-probe.json
           python tools/lite_fresh_bootstrap_probe.py --factory --output evidence/fresh-bootstrap-factory-probe.json
       - name: Bounded read-only source inventory (synthetic transport only)
