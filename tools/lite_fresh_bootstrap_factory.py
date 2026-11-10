@@ -155,6 +155,15 @@ def build(raw, *, expected_config, plan, expected_plan, sources, writers,
             or set(c['stores'])!=set(ALL_STORES) or controls['usage']!=plan['usage']
             or controls['release']!=plan['release'] or controls['baselines']!=[]):
         raise ValueError('exact bootstrap locations and controls required')
+    # A self-consistent inventory can still describe the wrong physical data.
+    # Bind coverage to this service's actual stores before opening any adapter.
+    # Additional reviewed legacy locations remain mandatory external inputs;
+    # they cannot stand in for a current lane or count the same lane twice.
+    covered = [(row['role'], row['location']) for row in sources]
+    if (len(set(covered)) != len(covered)
+            or any((role, digest(c['stores'][role])) not in covered
+                   for role in ('accounts', 'links', 'quota'))):
+        raise ValueError('inventory must cover each actual account, link and quota location once')
     pairs=[]
     for name,loc in locations.items():
         exact(loc,'bucket prefix');text(loc['bucket'],r'[a-z0-9][a-z0-9-]{1,61}[a-z0-9]')

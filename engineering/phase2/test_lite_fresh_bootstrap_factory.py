@@ -80,6 +80,45 @@ class FactoryTests(unittest.TestCase):
         loc=copy.deepcopy(self.locations);loc['accounts']['prefix']='lite-native/other/accounts'
         with self.assertRaises(ValueError):self.make(locations=loc,expected_locations=digest(loc))
         self.assertEqual(self.calls,[])
+    def repin_inventory(self, sources):
+        # Recompute every public digest to model a consistently assembled but
+        # incorrectly scoped inventory, rather than merely a stale hash.
+        inv=dict(schema='lite-fresh-inventory/1',writers=self.f.writers,
+                 sources=[dict(s,count=0,snapshot=digest(['empty',s])) for s in sources])
+        sub=dict(self.f.plan['subscription'],inventory=digest(inv))
+        usage=dict(self.config['controls']['usage'],fresh_inventory_sha256=digest(inv))
+        release=dict(self.config['controls']['release'],usage_plan=digest(usage),
+                     policies={p:digest(sub) for p in self.config['controls']['release']['policies']})
+        c=copy.deepcopy(self.config);c['controls'].update(usage=usage,release=release)
+        plan=dict(self.f.plan,config=digest(c),inventory=inv,subscription=sub,usage=usage,release=release)
+        return dict(raw=canonical(c),expected_config=digest(c),plan=plan,expected_plan=digest(plan),sources=sources)
+    def test_rehashed_inventory_of_wrong_current_location_refused_before_provider(self):
+        for role in ('accounts','links','quota'):
+            sources=copy.deepcopy(self.f.sources)
+            row=next(s for s in sources if s['role']==role)
+            row['location']=digest(dict(self.config['stores'][role],prefix='native/unused/'+role))
+            with self.subTest(role=role),self.assertRaises(ValueError):self.make(**self.repin_inventory(sources))
+        self.assertEqual(self.calls,[])
+    def test_inventory_role_swap_cannot_substitute_another_lane(self):
+        sources=copy.deepcopy(self.f.sources)
+        sources[0]['location'],sources[1]['location']=sources[1]['location'],sources[0]['location']
+        with self.assertRaises(ValueError):self.make(**self.repin_inventory(sources))
+        self.assertEqual(self.calls,[])
+    def test_current_location_cannot_be_counted_twice_under_different_ids(self):
+        sources=copy.deepcopy(self.f.sources)
+        sources.append(dict(sources[0],id='duplicate-account-location'))
+        with self.assertRaises(ValueError):self.make(**self.repin_inventory(sources))
+        self.assertEqual(self.calls,[])
+    def test_additional_reviewed_legacy_location_does_not_replace_current_coverage(self):
+        sources=copy.deepcopy(self.f.sources)
+        sources.append(dict(id='legacy-personal-quota',role='quota',location=digest(dict(bucket='old-native-bucket',prefix='native/old/quota'))))
+        before={k:rows(v) for k,v in self.states.items()}
+        self.make(**self.repin_inventory(sources))
+        self.assertEqual(before,{k:rows(v) for k,v in self.states.items()})
+    def test_source_ids_and_order_do_not_define_storage_coverage(self):
+        sources=[dict(s,id='reviewed-'+s['role']) for s in reversed(self.f.sources)]
+        self.make(**self.repin_inventory(sources))
+        self.assertEqual(len(self.calls),len(NAMES))
     def test_operation_prefix_cannot_alias_any_data_lane(self):
         loc=copy.deepcopy(self.locations);loc['gate']=self.config['stores']['grants']
         with self.assertRaises(ValueError):self.make(locations=loc,expected_locations=digest(loc))
