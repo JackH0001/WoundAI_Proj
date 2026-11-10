@@ -91,6 +91,11 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     @Published private(set) var registering = false
     @Published private(set) var preparingPurchase = false
     @Published private(set) var purchasePreparationMessage = "先登入服務帳號，再確認月費並訂閱；登入不會付款或開啟研究上傳。"
+    private var preparationCopy: LiteServiceCopy.Message?
+    func presentationPurchasePreparation(locale: Locale) -> String {
+        preparationCopy?.render(matching: purchasePreparationMessage, locale: locale)
+            ?? LiteServiceCopy.text(purchasePreparationMessage, locale: locale)
+    }
     @Published private(set) var message = "內部 Sandbox 驗收；服務登入、訂閱與研究同意分開處理。"
 
     /// Explicit injected transport also permits signed synthetic HTTP replay.
@@ -230,7 +235,8 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
             purchasePreparationMessage = "帳號狀態已變更，請重新核對後再繼續；尚未付款。"; return
         }
         guard registration != .unreadable else {
-            purchasePreparationMessage = message + " 尚未付款。"; return
+            preparationCopy = .init(pieces: [.init(message), .init(" 尚未付款。")])
+            purchasePreparationMessage = preparationCopy!.source; return
         }
         if registration == .required { await registerDevice() }
         guard registration == .confirmed else {
@@ -247,7 +253,8 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
             await identity.signIn()
         }
         guard await identity.purchaseAccessDeadline() != nil else {
-            purchasePreparationMessage = identity.message + " 尚未付款，也未開啟 Apple 購買。"; return
+            preparationCopy = .init(pieces: [.init(identity.message), .init(" 尚未付款，也未開啟 Apple 購買。")])
+            purchasePreparationMessage = preparationCopy!.source; return
         }
         purchasePreparationMessage = "服務帳號已確認。請核對月費，再按訂閱並在 Apple 確認；已有訂閱請使用恢復購買。"
     }
@@ -311,28 +318,30 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
 
 struct LiteNativeSessionView: View {
     @ObservedObject var session: LiteNativeSession
+    @Environment(\.locale) private var locale
+    private func copy(_ source: String) -> String { LiteServiceCopy.text(source, locale: locale) }
     var body: some View {
         Form {
-            Section("服務連線") {
-                Text("先核對裝置，再登入同一服務帳號。此入口不會自動開啟研究上傳或清除手機紀錄。")
-                Text(session.message).font(.footnote)
+            Section(copy("服務連線")) {
+                Text(copy("先核對裝置，再登入同一服務帳號。此入口不會自動開啟研究上傳或清除手機紀錄。"))
+                Text(copy(session.message)).font(.footnote)
                 if session.registration == .required {
-                    Button("核對裝置登記（不傳照片）") { Task { await session.registerDevice() } }
+                    Button(copy("核對裝置登記（不傳照片）")) { Task { await session.registerDevice() } }
                         .disabled(session.registering)
                 } else if session.registration == .unreadable {
-                    Button("重讀原裝置登記") { Task { await session.checkExistingRegistration() } }
+                    Button(copy("重讀原裝置登記")) { Task { await session.checkExistingRegistration() } }
                         .disabled(session.registering)
                 }
             }
             if session.registration == .confirmed, let account = try? session.accountView() {
-                NavigationLink("服務帳號與刪除") { account }
+                NavigationLink(copy("服務帳號與刪除")) { account }
             } else {
-                Text("可先查看方案。完成裝置登記後，可登入服務帳號使用訂閱或恢復購買。")
+                Text(copy("可先查看方案。完成裝置登記後，可登入服務帳號使用訂閱或恢復購買。"))
             }
-            NavigationLink("Plus 方案與價格") { LiteNativePurchaseView(session: session) }
-            Text("拍攝後可自行選擇個人雲端辨識。使用個人服務或恢復購買不會開啟研究上傳。")
+            NavigationLink(copy("Plus 方案與價格")) { LiteNativePurchaseView(session: session) }
+            Text(copy("拍攝後可自行選擇個人雲端辨識。使用個人服務或恢復購買不會開啟研究上傳。"))
                 .font(.footnote).foregroundStyle(.secondary)
-        }.navigationTitle("個人服務")
+        }.navigationTitle(copy("個人服務"))
         .task { await session.checkExistingRegistration() }
     }
 }

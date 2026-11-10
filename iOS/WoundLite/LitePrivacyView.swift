@@ -2,30 +2,36 @@ import SwiftUI
 import WebKit
 
 struct LiteTermsLink: View {
+    @Environment(\.locale) private var locale
+    private func copy(_ source: String) -> String { LiteServiceCopy.text(source, locale: locale) }
     var body: some View {
-        Link("Apple 標準使用條款", destination: URL(string: "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/")!)
+        Link(copy("Apple 標準使用條款"), destination: URL(string: "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/")!)
             .accessibilityIdentifier("lite.legal.terms")
     }
 }
 
 struct LitePrivacyLink: View {
+    @Environment(\.locale) private var locale
+    private func copy(_ source: String) -> String { LiteServiceCopy.text(source, locale: locale) }
     var body: some View {
-        NavigationLink("隱私權政策", destination: LitePrivacyView())
+        NavigationLink(copy("隱私權政策"), destination: LitePrivacyView())
             .accessibilityIdentifier("lite.legal.privacy")
     }
 }
 
 private struct LitePrivacyView: View {
+    @Environment(\.locale) private var locale
+    private func copy(_ source: String) -> String { LiteServiceCopy.text(source, locale: locale) }
     var body: some View {
         Group {
             if let url = Bundle.main.url(forResource: "woundlite", withExtension: "html"),
                let html = try? String(contentsOf: url, encoding: .utf8) {
                 LitePrivacyDocument(html: html)
             } else {
-                Text("此版本缺少隱私權政策，請聯絡資料處理支援。")
+                Text(copy("此版本缺少隱私權政策，請聯絡資料處理支援。"))
             }
         }
-        .navigationTitle("隱私權政策")
+        .navigationTitle(copy("隱私權政策"))
         .navigationBarTitleDisplayMode(.inline)
     }
 }

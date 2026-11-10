@@ -171,16 +171,16 @@ struct LiteSettingsView: View {
                     if LiteNativeBuild.includesService { LiteAppleSubscriptionLink() }
                 }
                 if let accountManagement {
-                    Section("服務帳號") {
-                        NavigationLink("帳號與刪除") {accountManagement}
+                    Section(LiteServiceCopy.text("服務帳號")) {
+                        NavigationLink(LiteServiceCopy.text("帳號與刪除")) {accountManagement}
                     }
                 }
                 if let nativeSession {
-                    Section("個人服務") {
-                        NavigationLink("服務登入、訂閱與刪帳") { LiteNativeSessionView(session:nativeSession) }
+                    Section(LiteServiceCopy.text("個人服務")) {
+                        NavigationLink(LiteServiceCopy.text("服務登入、訂閱與刪帳")) { LiteNativeSessionView(session:nativeSession) }
                     }
                 } else if let nativeSetupNotice {
-                    Section("個人服務") {
+                    Section(LiteServiceCopy.text("個人服務")) {
                         switch nativeSetupNotice {
                         case .missingConfiguration:
                             Text("此測試版本的服務網址尚未設定完成。您仍可使用本機紀錄。")
@@ -308,7 +308,7 @@ struct LiteSettingsView: View {
                     }
                 }
             }
-            .navigationTitle("設定")
+            .navigationTitle(LiteServiceCopy.text("設定"))
             .sheet(isPresented: $reviewingResearchChoice) {
                 LiteConsentView { agreed in
                     reviewingResearchChoice = false

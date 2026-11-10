@@ -64,6 +64,21 @@ private actor DeletionJournal:LiteServiceJournal {
 }
 
 @MainActor final class LiteAccountDeletionTests:XCTestCase {
+    func testChangingDisplayLanguageDoesNotWriteOrResendDeletion() async throws {
+        let (s, _, j, model) = fixture()
+        await model.requestConfirmed()
+        let record = model.record, rows = await j.rows(), requests = s.requests, statuses = s.statuses
+        let english = model.presentationMessage(locale: Locale(identifier: "en_US"))
+        XCTAssertTrue(english.contains("cloud accepted")); XCTAssertTrue(english.contains("deletion is not complete"))
+        XCTAssertEqual(model.presentationMessage(locale: Locale(identifier: "zh_Hant_TW")), model.message)
+        let after = await j.rows()
+        XCTAssertEqual(model.record, record); XCTAssertEqual(after, rows)
+        XCTAssertEqual(s.requests, requests); XCTAssertEqual(s.statuses, statuses)
+        s.fail = true
+        await model.retry()
+        let failure = model.presentationMessage(locale: Locale(identifier: "en_US"))
+        XCTAssertTrue(failure.contains("not been confirmed complete")); XCTAssertFalse(failure.contains("cloud accepted"))
+    }
     private func fixture()->(DeletionService,DeletionIdentity,DeletionJournal,LiteAccountDeletionStore){
         let s=DeletionService(),i=DeletionIdentity(),j=DeletionJournal()
         return(s,i,j,LiteAccountDeletionStore(service:s,identity:i,journal:j,pauseResearch:{},now:{Date(timeIntervalSince1970:1000)}))

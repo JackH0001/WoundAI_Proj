@@ -1,9 +1,39 @@
 import XCTest
 
 final class NativeEntryUITests: XCTestCase {
+    private func application(language: String = "zh-Hant") -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(\(language))", "-AppleLocale", language == "en" ? "en_US" : "zh_Hant_TW"]
+        return app
+    }
+
+    #if !LITE_QA_ORDINARY && !LITE_QA_MISSING_BINDING
+    @MainActor func testEnglishSubscriptionEntryExplainsQuotaAndDoesNotOpenAPurchase() throws {
+        continueAfterFailure = false
+        let app = application(language: "en")
+        app.launch()
+        let gate = app.buttons["Settings and data withdrawal"]
+        let settings = gate.waitForExistence(timeout: 3) ? gate : app.buttons["Settings"].firstMatch
+        XCTAssertTrue(settings.waitForExistence(timeout: 8)); settings.tap()
+        let entry = app.buttons["Sign-in, subscriptions and account deletion"]
+        XCTAssertTrue(entry.waitForExistence(timeout: 5)); entry.tap()
+        XCTAssertTrue(app.buttons["Verify device registration (no photo sent)"].waitForExistence(timeout: 5))
+        app.buttons["Plus plan and price"].tap()
+        XCTAssertTrue(app.navigationBars["Plus plan and price"].waitForExistence(timeout: 5))
+        let quota = app.staticTexts["lite.offer.quota"]
+        XCTAssertTrue(quota.label.contains("2 successful")); XCTAssertTrue(quota.label.contains("total of 10"))
+        let button = app.buttons["lite.offer.signIn"]
+        for _ in 0..<8 where !button.isHittable { app.swipeUp() }
+        XCTAssertTrue(button.isHittable); XCTAssertEqual(button.label, "Sign in and continue to Plus")
+        XCTAssertFalse(app.buttons["lite.offer.buy"].exists)
+        XCTAssertFalse(app.buttons["Restore purchases"].exists)
+        XCTAssertTrue(app.staticTexts["lite.offer.preparationStatus"].label.contains("does not charge"))
+        attach(app, "english-subscription-before-registration")
+    }
+    #endif
     @MainActor func testUnmatchedHelpKeepsOfflineTopicsAndDoesNotRetainTheQuestion() throws {
         continueAfterFailure = false
-        let app = XCUIApplication()
+        let app = application()
         func openGuide() {
             app.launch()
             let gate = app.buttons["設定與資料撤回"]
@@ -36,7 +66,7 @@ final class NativeEntryUITests: XCTestCase {
 
     @MainActor func testOperationGuideFindsReportWithoutAccountOrResearchRegistration() throws {
         continueAfterFailure = false
-        let app = XCUIApplication()
+        let app = application()
         app.launch()
         let gate = app.buttons["設定與資料撤回"]
         let settings = gate.waitForExistence(timeout: 3) ? gate : app.buttons["設定"].firstMatch
@@ -58,7 +88,7 @@ final class NativeEntryUITests: XCTestCase {
 
     @MainActor func testPrivacyPolicyOpensFromSettingsWithoutRegistrationAndReturns() throws {
         continueAfterFailure = false
-        let app = XCUIApplication()
+        let app = application()
         app.launch()
         let gate = app.buttons["設定與資料撤回"]
         let settings = gate.waitForExistence(timeout: 3) ? gate : app.buttons["設定"].firstMatch
@@ -80,7 +110,7 @@ final class NativeEntryUITests: XCTestCase {
     #if LITE_QA_PHOTO_FIXTURE
     @MainActor func testLocalWoundPhotosOpenInTimeOrderAndReturnToTimeline() throws {
         continueAfterFailure = false
-        let app = XCUIApplication()
+        let app = application()
         app.launch()
         let local = app.buttons["查看既有紀錄"]
         let history = local.waitForExistence(timeout: 3) ? local : app.buttons["紀錄"].firstMatch
@@ -111,7 +141,7 @@ final class NativeEntryUITests: XCTestCase {
     #if LITE_QA_SAVED_FIXTURE || LITE_QA_EXTERNAL_FIXTURE
     @MainActor func testSelectedWoundTimelineOffersDateRangePhotosAndSystemSharing() throws {
         continueAfterFailure = false
-        let app = XCUIApplication()
+        let app = application()
         app.launch()
         let local = app.buttons["查看既有紀錄"]
         let history = local.waitForExistence(timeout:3) ? local : app.buttons["紀錄"].firstMatch
@@ -139,7 +169,7 @@ final class NativeEntryUITests: XCTestCase {
     /// This run uses a simulator without a registered Sandbox installation.
     @MainActor func testSavedRecordCanBeReadBeforeServiceRegistration() throws {
         continueAfterFailure = false
-        let app = XCUIApplication()
+        let app = application()
         app.launch()
         let offline = app.buttons["查看既有紀錄"]
         let history = offline.waitForExistence(timeout: 3) ? offline : app.buttons["紀錄"].firstMatch
@@ -177,7 +207,7 @@ final class NativeEntryUITests: XCTestCase {
     // The application always uses its compiled profile and signed bundle settings.
     @MainActor func testSettingsOpensTheExpectedBuildProfile() throws {
         continueAfterFailure = false
-        let app = XCUIApplication()
+        let app = application()
         app.launch()
         let gate = app.buttons["設定與資料撤回"]
         let settings = gate.waitForExistence(timeout: 3) ? gate : app.buttons["設定"].firstMatch
@@ -238,7 +268,7 @@ final class NativeEntryUITests: XCTestCase {
 
     @MainActor func testPersonalQuotaHasItsOwnEntryWithoutResearchOrDeviceRegistration() throws {
         continueAfterFailure = false
-        let app = XCUIApplication()
+        let app = application()
         app.launch()
         let gate=app.buttons["設定與資料撤回"]
         let settings=gate.waitForExistence(timeout:3) ? gate : app.buttons["設定"].firstMatch
@@ -265,7 +295,7 @@ final class NativeEntryUITests: XCTestCase {
     /// real Settings switch and persisted preference without taking a photo.
     @MainActor func testResearchSwitchRequiresConfirmedConsentAndPersistsTheChoice() throws {
         continueAfterFailure = false
-        let app = XCUIApplication()
+        let app = application()
         func openSettings() {
             app.launch()
             app.buttons["設定與資料撤回"].tap()

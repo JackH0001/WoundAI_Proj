@@ -63,11 +63,13 @@ struct LiteDispositionProgress: Codable, Equatable {
                   revision>p.revision || self==p else{throw LiteDeletionFailure.conflict}
         }
     }
-    var serviceText:String {
-        if service_state=="current_sealed" { return "目前結果已封存（\(service_sealed)/\(service_total)）" }
-        if blocked_lanes.contains("service_results") { return "服務結果暫待核對（已確認 \(service_sealed)/\(service_total)）" }
-        return service_state=="not_started" ? "尚未開始" : "處理中（\(service_sealed)/\(service_total)）"
+    var serviceCopy: LiteServiceCopy.Piece {
+        let counts = [String(service_sealed), String(service_total)]
+        if service_state=="current_sealed" { return .init("目前結果已封存（%@/%@）", counts) }
+        if blocked_lanes.contains("service_results") { return .init("服務結果暫待核對（已確認 %@/%@）", counts) }
+        return service_state=="not_started" ? .init("尚未開始") : .init("處理中（%@/%@）", counts)
     }
+    var serviceText: String { serviceCopy.source }
     var keyText:String {
         if grant_key_state=="backup_pending" { return "目前存取已停止；歷史加密副本仍待處理" }
         if grant_key_state=="unrecoverable" { return "已確認無法解密" }
@@ -226,6 +228,10 @@ struct LiteAccountDeletionCheckpoint: Codable, Equatable {
     @Published private(set) var record:LiteAccountDeletionCheckpoint?
     @Published private(set) var busy=false
     @Published private(set) var message="刪除帳號也會撤回連結的研究參與。如有 Apple 訂閱，請另行取消。"
+    private var displayMessage: LiteServiceCopy.Message?
+    func presentationMessage(locale: Locale) -> String {
+        displayMessage?.render(matching: message, locale: locale) ?? LiteServiceCopy.text(message, locale: locale)
+    }
     @Published private(set) var needsReview=false
     @Published private(set) var identityRequired=false
     let service:any LiteAccountDeletionService,identity:any LiteDeletionIdentity,journal:any LiteServiceJournal
@@ -380,11 +386,14 @@ struct LiteAccountDeletionCheckpoint: Codable, Equatable {
         let apple=reply.apple_revocation=="confirmed" ? "Apple 授權撤銷已確認。":"Apple 授權撤銷仍在處理或待核對。"
         if let progress=reply.disposition {
             let waiting=progress.blocked_lanes.isEmpty ? "":"有步驟尚待確認，可核對原進度，不會另建要求。"
-            message=["雲端已受理，帳號服務已關閉。",apple,"目前服務結果：",progress.serviceText,
-                "；Apple 憑證金鑰：",progress.keyText,"。",waiting,
-                "歷史版本、備份及研究等資料仍待處理，尚未完成刪除；手機紀錄保留。"].joined()
+            displayMessage = .init(pieces: [.init("雲端已受理，帳號服務已關閉。"), .init(apple),
+                .init("目前服務結果："), progress.serviceCopy, .init("；Apple 憑證金鑰："),
+                .init(progress.keyText), .init("。"), .init(waiting),
+                .init("歷史版本、備份及研究等資料仍待處理，尚未完成刪除；手機紀錄保留。")])
         } else {
-            message="雲端已受理，帳號服務已關閉。"+apple+"帳號資料清理尚未開始，尚未完成刪除；手機紀錄仍保留。"
+            displayMessage = .init(pieces: [.init("雲端已受理，帳號服務已關閉。"), .init(apple),
+                .init("帳號資料清理尚未開始，尚未完成刪除；手機紀錄仍保留。")])
         }
+        message = displayMessage?.source ?? message
     }
 }

@@ -176,14 +176,14 @@ struct LiteRootView: View {
                 else { lidarGate }
             }
             .tag(LiteRootTab.measure)
-            .tabItem { Label("量測", systemImage: "camera.metering.center.weighted") }
+            .tabItem { Label(LiteServiceCopy.text("量測"), systemImage: "camera.metering.center.weighted") }
             LiteHistoryView(store: store, recordToOpen: $savedRecordToOpen, nativeSession:nativeSession)
                 .tag(LiteRootTab.history)
-                .tabItem { Label("紀錄", systemImage: "chart.line.uptrend.xyaxis") }
+                .tabItem { Label(LiteServiceCopy.text("紀錄"), systemImage: "chart.line.uptrend.xyaxis") }
             LiteSettingsView(accountManagement:accountManagement,nativeSession:nativeSession,
                              nativeSetupNotice:nativeSetupNotice)
                 .tag(LiteRootTab.settings)
-                .tabItem { Label("設定", systemImage: "gearshape") }
+                .tabItem { Label(LiteServiceCopy.text("設定"), systemImage: "gearshape") }
         }
         .task { await resumeResearch() }
         .onChange(of: scenePhase) { _, value in if value == .active { Task { await resumeResearch() } } }
@@ -203,26 +203,26 @@ struct LiteRootView: View {
                 VStack(spacing: 18) {
                     Image(systemName: "camera.metering.unknown")
                         .font(.system(size: 48)).foregroundStyle(.secondary)
-                    Text("此裝置無法拍攝深度量測").font(.title3.bold())
-                    Text("本裝置未偵測到可用的 LiDAR 深度相機，無法拍攝新的傷口面積量測。")
+                    Text(LiteServiceCopy.text("此裝置無法拍攝深度量測")).font(.title3.bold())
+                    Text(LiteServiceCopy.text("本裝置未偵測到可用的 LiDAR 深度相機，無法拍攝新的傷口面積量測。"))
                         .foregroundStyle(.secondary)
-                    Text("您仍可查看此裝置已有的紀錄、設定、隱私說明與資料撤回。")
+                    Text(LiteServiceCopy.text("您仍可查看此裝置已有的紀錄、設定、隱私說明與資料撤回。"))
                     Button { selectedTab = .history } label: {
-                        Label("查看既有紀錄", systemImage: "chart.line.uptrend.xyaxis")
+                        Label(LiteServiceCopy.text("查看既有紀錄"), systemImage: "chart.line.uptrend.xyaxis")
                             .frame(maxWidth: .infinity, minHeight: 44)
                     }
                     .buttonStyle(.borderedProminent)
                     Button { selectedTab = .settings } label: {
-                        Label("設定與資料撤回", systemImage: "gearshape")
+                        Label(LiteServiceCopy.text("設定與資料撤回"), systemImage: "gearshape")
                             .frame(maxWidth: .infinity, minHeight: 44)
                     }
                     .buttonStyle(.bordered)
-                    NavigationLink("量測精確度與限制") { LiteMeasurementInfoView() }
+                    NavigationLink(LiteServiceCopy.text("量測精確度與限制")) { LiteMeasurementInfoView() }
                 }
                 .multilineTextAlignment(.center)
                 .padding(24)
             }
-            .navigationTitle("量測")
+            .navigationTitle(LiteServiceCopy.text("量測"))
         }
     }
 }
