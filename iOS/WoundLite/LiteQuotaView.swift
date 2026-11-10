@@ -27,6 +27,8 @@ struct LiteResearchQuotaReceipt: Equatable {
 /// Loading the existing registration reads local state only. This view cannot
 /// enroll a replacement identity or contact either recognition service.
 struct LiteResearchQuotaView: View {
+    @Environment(\.locale) private var locale
+    private var copy: LiteResearchCopy { LiteResearchCopy(locale: locale) }
     @ObservedObject private var usage = LiteUsageState.shared
     @Environment(\.scenePhase) private var phase
     @State private var owner: String?
@@ -37,12 +39,12 @@ struct LiteResearchQuotaView: View {
             let scope = try? LiteCaptureResearchScope.capture(server: AppSettings.backendURL(), consent: LitePrefs.researchConsent == true)
             VStack(alignment: .leading, spacing: 4) {
                 if phase == .active, registrationScope == scope, let quota = usage.receipt?.current(at: context.date, scope: scope, registeredOwner: owner) {
-                    Text("研究辨識剩餘 \(quota.remaining)／\(quota.limit) 次")
-                    Text("依最近一次研究服務回覆；\(quota.resetsAt.formatted(date: .abbreviated, time: .shortened)) 重置。")
+                    Text(copy.format("研究辨識剩餘 %@／%@ 次", String(quota.remaining), String(quota.limit)))
+                    Text(copy.format("依最近一次研究服務回覆；%@ 重置。", copy.date(quota.resetsAt)))
                         .foregroundStyle(.secondary)
                 } else {
-                    Text("研究辨識額度尚待服務確認")
-                    Text("研究服務會在辨識後回報本機研究登記的剩餘次數。")
+                    Text(copy.text("研究辨識額度尚待服務確認"))
+                    Text(copy.text("研究服務會在辨識後回報本機研究登記的剩餘次數。"))
                         .foregroundStyle(.secondary)
                 }
             }

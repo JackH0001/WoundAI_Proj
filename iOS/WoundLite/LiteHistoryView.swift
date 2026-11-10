@@ -338,10 +338,10 @@ struct LiteRecordDetailView: View {
                         DisclosureGroup("影像與深度保存詳情") {
                             if let binding = r.cloudSync?.binding,
                                let status = LiteWithdrawalJournal.standard.status(for: binding) {
-                                Text(status).font(.footnote).foregroundStyle(.secondary)
+                                Text(LiteResearchCopy(locale: locale).text(status)).font(.footnote).foregroundStyle(.secondary)
                             } else if let binding = r.cloudSync?.binding,
                                       let status = LiteStorageReceipt.message(imageStored: true, receipt: binding.storageReceipt) {
-                                Text(status).font(.footnote).foregroundStyle(.secondary)
+                                Text(LiteResearchCopy(locale: locale).text(status)).font(.footnote).foregroundStyle(.secondary)
                             }
                         }
                         if r.depthName == nil {

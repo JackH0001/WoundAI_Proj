@@ -7,6 +7,63 @@ final class NativeEntryUITests: XCTestCase {
         return app
     }
 
+    @MainActor func testEnglishResearchDisclosureDeclineKeepsUploadsOffAfterRelaunch() throws {
+        try verifyResearchDecline(language: "en")
+    }
+
+    @MainActor func testChineseResearchDisclosureDeclineKeepsUploadsOffAfterRelaunch() throws {
+        try verifyResearchDecline(language: "zh-Hant")
+    }
+
+    @MainActor private func verifyResearchDecline(language: String) throws {
+        continueAfterFailure = false
+        let english = language == "en", app = application(language: language)
+        func openSettings() {
+            app.launch()
+            let gate = app.buttons[english ? "Settings and data withdrawal" : "設定與資料撤回"]
+            let settings = gate.waitForExistence(timeout: 3) ? gate : app.buttons[english ? "Settings" : "設定"].firstMatch
+            XCTAssertTrue(settings.waitForExistence(timeout: 8)); settings.tap()
+        }
+        func reveal(_ item: XCUIElement) {
+            for _ in 0..<12 where !item.isHittable { app.swipeUp() }
+            XCTAssertTrue(item.isHittable)
+        }
+        openSettings()
+        let toggle = app.switches["lite.research.toggle"].firstMatch
+        reveal(toggle)
+        XCTAssertEqual(toggle.value as? String, "0", "The isolated simulator must begin with research uploads off")
+        XCTAssertTrue(toggle.isEnabled, "Use a fresh simulator; do not reset an existing withdrawal to exercise first consent")
+        toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.91, dy: 0.5)).tap()
+        let title = app.staticTexts["lite.research.consent.title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        #if LITE_QA_ORDINARY
+        XCTAssertEqual(title.label, english ? "Choose how to measure" : "選擇您的量測方式")
+        #else
+        XCTAssertEqual(title.label, english ? "Do you agree to research uploads?" : "是否同意上傳研究資料？")
+        #endif
+        attach(app, language + "-research-disclosure")
+        let depth = app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", english ? "entire depth map and camera parameters" : "整張深度圖和相機參數")).firstMatch
+        reveal(depth)
+        XCTAssertTrue(depth.label.contains(english ? "outside the outline" : "圈選外"))
+        XCTAssertTrue(depth.label.contains(english ? "link records" : "連結"))
+        attach(app, language + "-research-depth-scope")
+        let decline = app.buttons["lite.research.decline"]
+        reveal(decline)
+        XCTAssertTrue(app.buttons["lite.research.agree"].exists)
+        #if !LITE_QA_ORDINARY
+        XCTAssertEqual(decline.label, english ? "Continue without research uploads" : "不同意研究上傳，繼續使用")
+        #endif
+        attach(app, language + "-research-choice")
+        decline.tap()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertEqual(toggle.value as? String, "0")
+        app.terminate()
+        openSettings()
+        reveal(toggle)
+        XCTAssertEqual(toggle.value as? String, "0")
+        attach(app, language + "-research-off-after-relaunch")
+    }
+
     #if !LITE_QA_ORDINARY && !LITE_QA_MISSING_BINDING
     @MainActor func testEnglishSubscriptionEntryExplainsQuotaAndDoesNotOpenAPurchase() throws {
         continueAfterFailure = false

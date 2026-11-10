@@ -41,6 +41,8 @@ struct LitePersonalBalance: Decodable, Equatable {
 }
 
 struct LitePersonalBalanceView: View {
+    @Environment(\.locale) private var locale
+    private var copy: LiteResearchCopy { LiteResearchCopy(locale: locale) }
     let session: LiteNativeSession
     @ObservedObject private var identity: LiteAccountIdentityStore
     @Environment(\.scenePhase) private var phase
@@ -56,28 +58,28 @@ struct LitePersonalBalanceView: View {
 
     var body: some View {
         Form {
-            Section("今日個人辨識額度") {
+            Section(copy.text("今日個人辨識額度")) {
                 TimelineView(.periodic(from: .now, by: 15)) { clock in
                     if phase == .active, let value, verifiedGeneration == identity.generation, value.isFresh(at: clock.date) {
-                        LabeledContent("可用次數", value: value.attempt_limit_reached ? "今日嘗試已達上限" : "\(value.remaining) 次")
-                        LabeledContent("每日方案總額", value: "\(value.limit) 次")
-                        LabeledContent("已完成", value: "\(value.used) 次")
-                        if value.pending > 0 { LabeledContent("處理中或已預留", value: "\(value.pending) 次") }
-                        Text("核對於 \(Date(timeIntervalSince1970: Double(value.as_of)).formatted(date: .omitted, time: .shortened))；\(Date(timeIntervalSince1970: Double(value.resets_at)).formatted(date: .abbreviated, time: .shortened)) 重置。")
+                        LabeledContent(copy.text("可用次數"), value: value.attempt_limit_reached ? copy.text("今日嘗試已達上限") : copy.format("%@ 次", String(value.remaining)))
+                        LabeledContent(copy.text("每日方案總額"), value: copy.format("%@ 次", String(value.limit)))
+                        LabeledContent(copy.text("已完成"), value: copy.format("%@ 次", String(value.used)))
+                        if value.pending > 0 { LabeledContent(copy.text("處理中或已預留"), value: copy.format("%@ 次", String(value.pending))) }
+                        Text(copy.format("核對於 %@；%@ 重置。", copy.date(Date(timeIntervalSince1970: Double(value.as_of)), includesDate: false), copy.date(Date(timeIntervalSince1970: Double(value.resets_at)))))
                             .font(.footnote).foregroundStyle(.secondary)
                     } else if value != nil {
-                        Text("請重新核對目前帳號的今日額度。")
+                        Text(copy.text("請重新核對目前帳號的今日額度。"))
                     } else {
-                        Text(message)
+                        Text(copy.text(message))
                     }
                 }
-                Button(busy ? "正在核對…" : "核對今日額度") { Task { await refresh() } }
+                Button(copy.text(busy ? "正在核對…" : "核對今日額度")) { Task { await refresh() } }
                     .disabled(busy || phase != .active).accessibilityIdentifier("personalQuotaCheck")
-                Text("個人服務與研究上傳分開計算。核對額度不傳照片，也不會預留或扣除辨識次數。")
+                Text(copy.text("個人服務與研究上傳分開計算。核對額度不傳照片，也不會預留或扣除辨識次數。"))
                     .font(.footnote).foregroundStyle(.secondary)
             }
         }
-        .navigationTitle("個人辨識額度")
+        .navigationTitle(copy.text("個人辨識額度"))
         .onChange(of: identity.generation) { _, _ in value = nil; verifiedGeneration = nil }
         .onChange(of: phase) { _, state in if state != .active { value = nil; verifiedGeneration = nil } }
     }

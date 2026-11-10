@@ -2,6 +2,8 @@ import SwiftUI
 
 /// Optional research consent. Personal service recognition has its own explicit send action.
 struct LiteConsentView: View {
+    @Environment(\.locale) private var locale
+    private var copy: LiteResearchCopy { LiteResearchCopy(locale: locale) }
     let onChoose: (Bool) -> Void
     var renewingUnsentWithdrawal = false
     var renewingCompletedWithdrawal = false
@@ -10,15 +12,16 @@ struct LiteConsentView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text(LiteNativeBuild.includesService ? "是否同意上傳研究資料？" : "選擇您的量測方式").font(.title2).bold()
+                    Text(copy.text(LiteNativeBuild.includesService ? "是否同意上傳研究資料？" : "選擇您的量測方式")).font(.title2).bold()
+                        .accessibilityIdentifier("lite.research.consent.title")
                     if renewingUnsentWithdrawal {
-                        Text("您正在重新同意研究上傳。僅在確認撤回尚未送出、此服務沒有已登記身分或綁定紀錄後，才會取消這次未送出的撤回。原撤回與本次選擇會保留；舊服務紀錄不會移轉或重傳。")
+                        Text(copy.text("您正在重新同意研究上傳。僅在確認撤回尚未送出、此服務沒有已登記身分或綁定紀錄後，才會取消這次未送出的撤回。原撤回與本次選擇會保留；舊服務紀錄不會移轉或重傳。"))
                             .font(.subheadline)
                     }
                     if renewingCompletedWithdrawal {
-                        Text("先前撤回已完成，已清除的雲端影像與深度不會恢復。這次只重新同意之後新拍攝的資料上傳；舊紀錄、舊待傳及未上傳的本機照片都不會自動補送。沿用原裝置身分，並保留撤回與本次同意的稽核紀錄。")
+                        Text(copy.text("先前撤回已完成，已清除的雲端影像與深度不會恢復。這次只重新同意之後新拍攝的資料上傳；舊紀錄、舊待傳及未上傳的本機照片都不會自動補送。沿用原裝置身分，並保留撤回與本次同意的稽核紀錄。"))
                             .font(.subheadline)
-                        Text("必須取得雲端重新加入的確認，才會開啟研究上傳；中斷時保留同一次要求供核對。")
+                        Text(copy.text("必須取得雲端重新加入的確認，才會開啟研究上傳；中斷時保留同一次要求供核對。"))
                             .font(.footnote)
                     }
 
@@ -39,10 +42,10 @@ struct LiteConsentView: View {
                     ])
 
                     if LiteNativeBuild.includesService {
-                        Text("您可單獨撤回研究並保留服務帳號。若確認刪除服務帳號，會同時提出與該帳號連結的研究撤回；清理進度須另外核對。")
+                        Text(copy.text("您可單獨撤回研究並保留服務帳號。若確認刪除服務帳號，會同時提出與該帳號連結的研究撤回；清理進度須另外核對。"))
                             .font(.footnote).foregroundStyle(.secondary)
                     }
-                    Text(LiteNativeBuild.includesService ? "這項選擇只決定研究上傳。個人雲端辨識另行登入，由您決定是否送出照片。" : "兩種方式的量測數學完全相同；差別只在輪廓怎麼來、資料去不去雲端。")
+                    Text(copy.text(LiteNativeBuild.includesService ? "這項選擇只決定研究上傳。個人雲端辨識另行登入，由您決定是否送出照片。" : "兩種方式的量測數學完全相同；差別只在輪廓怎麼來、資料去不去雲端。"))
                         .font(.footnote).foregroundStyle(.secondary)
 
                     LitePrivacyLink()
@@ -50,18 +53,20 @@ struct LiteConsentView: View {
                     Button {
                         onChoose(true)
                     } label: {
-                        Text(renewingCompletedWithdrawal ? "重新同意：只啟用之後的新上傳" : renewingUnsentWithdrawal ? "重新同意並取消尚未送出的撤回" : LiteNativeBuild.includesService ? "同意研究上傳" : "同意研究上傳，使用自動辨識")
+                        Text(copy.text(renewingCompletedWithdrawal ? "重新同意：只啟用之後的新上傳" : renewingUnsentWithdrawal ? "重新同意並取消尚未送出的撤回" : LiteNativeBuild.includesService ? "同意研究上傳" : "同意研究上傳，使用自動辨識"))
                             .frame(maxWidth: .infinity).padding(.vertical, 6)
                     }
                     .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("lite.research.agree")
 
                     Button {
                         onChoose(false)
                     } label: {
-                        Text(declineTitle)
+                        Text(copy.text(declineTitle))
                             .frame(maxWidth: .infinity).padding(.vertical, 6)
                     }
                     .buttonStyle(.bordered)
+                    .accessibilityIdentifier("lite.research.decline")
                 }
                 .padding()
             }
@@ -81,9 +86,9 @@ struct LiteConsentView: View {
 
     private func box(title: String, tint: Color, lines: [String]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.headline)
+            Text(copy.text(title)).font(.headline)
             ForEach(lines, id: \.self) { l in
-                Text("・" + l).font(.subheadline)
+                Text("・" + copy.text(l)).font(.subheadline)
             }
         }
         .padding(12)
@@ -97,13 +102,15 @@ struct LiteConsentView: View {
 /// 2026-08-19 移除「進階（開發測試）」帳密區——雲端辨識已切換到匿名
 /// `lite/segment` 端點，民眾版不再有任何帳號概念（交辦清單第 5 項）。
 struct LiteSettingsView: View {
+    @Environment(\.locale) private var locale
+    private var copy: LiteResearchCopy { LiteResearchCopy(locale: locale) }
     /// Explicit candidate composition; ordinary shipping startup leaves this nil.
     var accountManagement:LiteAccountManagementView?=nil
     var nativeSession:LiteNativeSession?=nil
     var nativeSetupNotice: LiteNativeSetupNotice? = nil
     private var installedVersion: String {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "未知"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? copy.text("未知")
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? copy.text("未知")
         return "\(version)（\(build)）"
     }
     @AppStorage(LitePrefs.researchChoiceKey) private var storedChoice: Bool?
@@ -159,10 +166,10 @@ struct LiteSettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("App 資訊") {
+                Section(copy.text("App 資訊")) {
                     LabeledContent("App", value: "WoundAILite")
-                    LabeledContent("版本（建置號）", value: installedVersion)
-                    NavigationLink("操作指南") {
+                    LabeledContent(copy.text("版本（建置號）"), value: installedVersion)
+                    NavigationLink(copy.text("操作指南")) {
                         LiteOperationGuide(version: installedVersion, personal: LiteNativeBuild.includesService)
                     }.accessibilityIdentifier("lite.help.open")
                         .textSelection(.enabled)
@@ -183,128 +190,129 @@ struct LiteSettingsView: View {
                     Section(LiteServiceCopy.text("個人服務")) {
                         switch nativeSetupNotice {
                         case .missingConfiguration:
-                            Text("此測試版本的服務網址尚未設定完成。您仍可使用本機紀錄。")
+                            Text(copy.text("此測試版本的服務網址尚未設定完成。您仍可使用本機紀錄。"))
                         case .storageUnavailable(let retry):
-                            Text("服務資料暫時無法讀取。請解鎖裝置後再試。")
-                            Button("重新準備服務入口", action: retry)
+                            Text(copy.text("服務資料暫時無法讀取。請解鎖裝置後再試。"))
+                            Button(copy.text("重新準備服務入口"), action: retry)
                         }
                     }
                 }
                 #if DEBUG && targetEnvironment(simulator)
                 if ProcessInfo.processInfo.arguments.contains("-lite-commerce-lab") {
-                    Section("內部驗證") {
-                        NavigationLink("訂閱、廣告與固定收案（合成）") { LiteCommerceLab() }
+                    Section(copy.text("內部驗證")) {
+                        NavigationLink(copy.text("訂閱、廣告與固定收案（合成）")) { LiteCommerceLab() }
                     }
                 }
                 #endif
-                Section("研究上傳") {
-                    Toggle(LiteNativeBuild.includesService ? "上傳資料供研究" : "上傳去識別資料供研究（啟用自動辨識）", isOn: Binding(
+                Section(copy.text("研究上傳")) {
+                    Toggle(copy.text(LiteNativeBuild.includesService ? "上傳資料供研究" : "上傳去識別資料供研究（啟用自動辨識）"), isOn: Binding(
                         get: { consent },
                         set: { requested in
                             if requested { reviewingResearchChoice = true }
                             else { LitePrefs.researchConsent = false }
                         }))
                         .id(consent)
+                        .accessibilityIdentifier("lite.research.toggle")
                         .disabled(LitePrefs.researchPausedForAccountDeletion || withdrawal.blocksUploads || withdrawal.busy)
-                    Text(consent && !LitePrefs.researchPausedForAccountDeletion
+                    Text(copy.text(consent && !LitePrefs.researchPausedForAccountDeletion
                          ? "研究送件可包含照片、整張深度圖、原始 AI 圈選與後續修訂，以及量測估算與側別部位。可隨時關閉。"
-                         : LiteNativeBuild.includesService ? "可在本機圈選，或登入後從量測頁選擇個人雲端辨識。個人服務和研究使用分開決定。" : "完全離線：照片與深度只留在手機，輪廓手動圈選。")
+                         : LiteNativeBuild.includesService ? "可在本機圈選，或登入後從量測頁選擇個人雲端辨識。個人服務和研究使用分開決定。" : "完全離線：照片與深度只留在手機，輪廓手動圈選。"))
                         .font(.footnote).foregroundStyle(.secondary)
                     if LitePrefs.researchPausedForAccountDeletion {
-                        Text("因刪帳要求，這部手機已暫停研究上傳。請至帳號刪除頁核對已連結資料的撤回進度。")
+                        Text(copy.text("因刪帳要求，這部手機已暫停研究上傳。請至帳號刪除頁核對已連結資料的撤回進度。"))
                             .font(.footnote)
                     } else if withdrawal.blocksUploads {
-                        Text("研究上傳已因撤回停用。請查看下方「資料與撤回」狀態；重試查核不會重新開啟研究上傳。")
+                        Text(copy.text("研究上傳已因撤回停用。請查看下方「資料與撤回」狀態；重試查核不會重新開啟研究上傳。"))
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
                 if !LiteNativeBuild.includesService && consent && !withdrawal.blocksUploads && !LitePrefs.researchPausedForAccountDeletion {
-                    Section("研究辨識額度") { LiteResearchQuotaView() }
+                    Section(copy.text("研究辨識額度")) { LiteResearchQuotaView() }
                 }
                 if let nativeSession {
-                    Section("個人雲端辨識") {
-                        NavigationLink("查看個人帳號今日額度") { LitePersonalBalanceView(session: nativeSession) }
-                        Text("免費追蹤 1 處，Plus 每帳戶最多同時追蹤 5 處。每日個人辨識總額為免費 2 次、Plus 10 次。本機圈選、保存及分享時間軸 PDF 不扣辨識次數。")
+                    Section(copy.text("個人雲端辨識")) {
+                        NavigationLink(copy.text("查看個人帳號今日額度")) { LitePersonalBalanceView(session: nativeSession) }
+                        Text(copy.text("免費追蹤 1 處，Plus 每帳戶最多同時追蹤 5 處。每日個人辨識總額為免費 2 次、Plus 10 次。本機圈選、保存及分享時間軸 PDF 不扣辨識次數。"))
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
-                Section("雲端連線核對") {
+                Section(copy.text("雲端連線核對")) {
                     #if DEBUG
-                    Text("此為本機開發簽章版，目前雲端只接受 TestFlight 或 App Store 版本。可使用本機量測與保存；雲端驗收須改用符合簽章要求的版本。")
+                    Text(copy.text("此為本機開發簽章版，目前雲端只接受 TestFlight 或 App Store 版本。可使用本機量測與保存；雲端驗收須改用符合簽章要求的版本。"))
                         .font(.footnote)
                     #else
-                    Button(checkingConnection ? "核對中…" : "核對裝置登記（不傳照片）") {
+                    Button(copy.text(checkingConnection ? "核對中…" : "核對裝置登記（不傳照片）")) {
                         Task { await checkConnection() }
                     }
                     .disabled(checkingConnection || LitePrefs.researchConsent != true || withdrawal.blocksUploads || withdrawal.busy)
-                    if let connectionMessage { Text(connectionMessage).font(.footnote) }
+                    if let connectionMessage { Text(copy.text(connectionMessage)).font(.footnote) }
                     if mayRepairRegistration {
-                        Button("修復尚未完成的裝置登記") { confirmRegistrationRepair = true }
+                        Button(copy.text("修復尚未完成的裝置登記")) { confirmRegistrationRepair = true }
                             .disabled(checkingConnection || LitePrefs.researchConsent != true || withdrawal.blocksUploads || withdrawal.busy)
-                            .confirmationDialog("核對並修復未完成的登記？", isPresented: $confirmRegistrationRepair,
+                            .confirmationDialog(copy.text("核對並修復未完成的登記？"), isPresented: $confirmRegistrationRepair,
                                                 titleVisibility: .visible) {
-                                Button("核對並修復") { Task { await checkConnection(repair: true) } }
-                                Button("取消", role: .cancel) { }
+                                Button(copy.text("核對並修復")) { Task { await checkConnection(repair: true) } }
+                                Button(copy.text("取消"), role: .cancel) { }
                             } message: {
-                                Text("先查詢原登記是否已成功；僅伺服器確認尚未完成登記、目前服務沒有綁定紀錄且研究上傳仍獲同意時，才建立新的驗證。原驗證與處置稽核會保留，不刪紀錄、不恢復已撤回資料，也不傳送照片。")
+                                Text(copy.text("先查詢原登記是否已成功；僅伺服器確認尚未完成登記、目前服務沒有綁定紀錄且研究上傳仍獲同意時，才建立新的驗證。原驗證與處置稽核會保留，不刪紀錄、不恢復已撤回資料，也不傳送照片。"))
                             }
                     }
                     #endif
                 }
-                Section("拍攝要領") {
-                    Text("・正對傷口拍攝（斜拍會造成面積誤差，App 會提醒）\n"
+                Section(copy.text("拍攝要領")) {
+                    Text(copy.text("・正對傷口拍攝（斜拍會造成面積誤差，App 會提醒）\n"
                          + "・距離 25–40 公分，等中央對焦框變綠再按快門\n"
                          + "・光線充足、避免反光與濕亮面\n"
                          + "・只拍傷口部位：請勿讓臉部、證件或可辨識個人的物品入鏡"
                          + "（尤其開啟研究上傳時）\n"
-                         + "・小於 1 cm² 的傷口誤差較大，數字僅供趨勢參考")
+                         + "・小於 1 cm² 的傷口誤差較大，數字僅供趨勢參考"))
                         .font(.footnote)
                 }
-                Section("量測結果怎麼讀") {
-                    Text("「傷口面積」使用 LiDAR 深度與圈選輪廓估算皮膚表面積。角度、光線、深度品質與圈選都會影響結果。"
-                         + "本 App 為健康參考工具，非醫療診斷；傷口有惡化跡象請就醫。")
+                Section(copy.text("量測結果怎麼讀")) {
+                    Text(copy.text("「傷口面積」使用 LiDAR 深度與圈選輪廓估算皮膚表面積。角度、光線、深度品質與圈選都會影響結果。"
+                         + "本 App 為健康參考工具，非醫療診斷；傷口有惡化跡象請就醫。"))
                         .font(.footnote)
-                    NavigationLink("精確度與限制") { LiteMeasurementInfoView() }
+                    NavigationLink(copy.text("精確度與限制")) { LiteMeasurementInfoView() }
                 }
-                Section("資料與撤回") {
-                    Text("手機紀錄、照片與深度資料設定排除系統備份。換機、刪除 App 或裝置遺失可能無法復原；研究上傳不等於個人備份。此設定不會清除過去已有的備份。")
+                Section(copy.text("資料與撤回")) {
+                    Text(copy.text("手機紀錄、照片與深度資料設定排除系統備份。換機、刪除 App 或裝置遺失可能無法復原；研究上傳不等於個人備份。此設定不會清除過去已有的備份。"))
                         .font(.footnote).foregroundStyle(.secondary)
-                    Text("關閉研究上傳只停止未來傳送，不會刪除已上傳資料。以下撤回適用於目前服務、此 App 保有可驗證身分的安裝；不刪除手機紀錄，也不代表其他服務或舊版匿名資料已刪除。")
+                    Text(copy.text("關閉研究上傳只停止未來傳送，不會刪除已上傳資料。以下撤回適用於目前服務、此 App 保有可驗證身分的安裝；不刪除手機紀錄，也不代表其他服務或舊版匿名資料已刪除。"))
                         .font(.footnote).foregroundStyle(.secondary)
                     if withdrawal.record != nil {
-                        Text(withdrawal.statusTitle)
+                        Text(copy.text(withdrawal.statusTitle))
                             .font(.subheadline).bold()
                     }
                     if let message = withdrawal.message {
-                        Text(message).font(.footnote).textSelection(.enabled)
+                        Text(copy.text(message)).font(.footnote).textSelection(.enabled)
                     }
-                    Text("歷史版本、備份、既有研究標註及已訓練模型的處理尚未完成驗證，不能保證全部刪除。撤回後本安裝維持離線，不會自動建立新身分或恢復研究上傳。")
+                    Text(copy.text("歷史版本、備份、既有研究標註及已訓練模型的處理尚未完成驗證，不能保證全部刪除。撤回後本安裝維持離線，不會自動建立新身分或恢復研究上傳。"))
                         .font(.footnote).foregroundStyle(.secondary)
                     if withdrawal.mayReviewUnsentCancellation {
-                        Button("閱讀說明並重新同意研究上傳") { reviewRenewedConsent = true }
+                        Button(copy.text("閱讀說明並重新同意研究上傳")) { reviewRenewedConsent = true }
                             .disabled(withdrawal.busy)
                     }
                     if withdrawal.mayReviewCompletedRenewal {
-                        Button("閱讀說明並重新加入研究") { reviewRenewedConsent = true }
+                        Button(copy.text("閱讀說明並重新加入研究")) { reviewRenewedConsent = true }
                             .disabled(withdrawal.busy)
-                        Text("重新加入只適用於之後的新拍攝，不會恢復已清除資料或補送舊紀錄。")
+                        Text(copy.text("重新加入只適用於之後的新拍攝，不會恢復已清除資料或補送舊紀錄。"))
                             .font(.footnote).foregroundStyle(.secondary)
                     }
-                    Button(withdrawal.busy ? "處理中…" : (withdrawal.record == nil || withdrawal.cancelledBeforeSubmission || withdrawal.renewed ? "撤回研究並要求清除雲端媒體" : "重試／查核撤回"), role: .destructive) {
+                    Button(copy.text(withdrawal.busy ? "處理中…" : (withdrawal.record == nil || withdrawal.cancelledBeforeSubmission || withdrawal.renewed ? "撤回研究並要求清除雲端媒體" : "重試／查核撤回")), role: .destructive) {
                         if withdrawal.record == nil || withdrawal.cancelledBeforeSubmission || withdrawal.renewed { confirmWithdrawal = true }
                         else { Task { await withdrawal.request(server: AppSettings.backendURL()) } }
                     }
                     .disabled(withdrawal.busy || withdrawal.finished)
-                    Link("聯絡資料處理支援", destination: URL(string: "mailto:jack.hou@gmail.com")!)
-                    .confirmationDialog("撤回研究並要求清除雲端媒體？", isPresented: $confirmWithdrawal,
+                    Link(copy.text("聯絡資料處理支援"), destination: URL(string: "mailto:jack.hou@gmail.com")!)
+                    .confirmationDialog(copy.text("撤回研究並要求清除雲端媒體？"), isPresented: $confirmWithdrawal,
                                         titleVisibility: .visible) {
-                        Button("確認撤回", role: .destructive) {
+                        Button(copy.text("確認撤回"), role: .destructive) {
                             LitePrefs.researchConsent = false
                             Task { await withdrawal.request(server: AppSettings.backendURL()) }
                         }
-                        Button("取消", role: .cancel) {}
+                        Button(copy.text("取消"), role: .cancel) {}
                     } message: {
-                        Text("先停止未來上傳，再送出撤回請求。既有影像與深度的可見媒體清除後無法復原；本機紀錄仍保留。若網路中斷，請回來重試查核。")
+                        Text(copy.text("先停止未來上傳，再送出撤回請求。既有影像與深度的可見媒體清除後無法復原；本機紀錄仍保留。若網路中斷，請回來重試查核。"))
                     }
                 }
             }
