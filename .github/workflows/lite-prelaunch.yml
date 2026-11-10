@@ -294,7 +294,9 @@ jobs:
           python -m unittest -v test_lite_bootstrap_iam > evidence/bootstrap-iam-tests.log 2>&1
           python tools/lite_bootstrap_iam_probe.py --output evidence/bootstrap-iam-probe.json
       - name: Bounded read-only source inventory (synthetic transport only)
-        run: python -m unittest -v test_lite_fresh_inventory > evidence/fresh-inventory-tests.log 2>&1
+        run: |
+          python -m unittest -v test_lite_fresh_inventory > evidence/fresh-inventory-tests.log 2>&1
+          python -m unittest -v test_lite_bootstrap_control_plane > evidence/control-plane-tests.log 2>&1
       - name: Restore synthetic service keys and preserve account purchase identity and quota
         run: |
           python -m unittest -v test_lite_operational_materials > evidence/operational-materials-tests.log 2>&1
