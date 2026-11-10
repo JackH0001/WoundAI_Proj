@@ -285,6 +285,10 @@ jobs:
           python -m unittest -v test_lite_fresh_bootstrap test_lite_fresh_bootstrap_factory test_lite_fresh_bootstrap_runner test_lite_bootstrap_package > evidence/fresh-bootstrap-tests.log 2>&1
           python tools/lite_fresh_bootstrap_probe.py --output evidence/fresh-bootstrap-probe.json
           python tools/lite_fresh_bootstrap_probe.py --factory --output evidence/fresh-bootstrap-factory-probe.json
+      - name: Bootstrap IAM boundaries and additive rollback rehearsal (no cloud calls)
+        run: |
+          python -m unittest -v test_lite_bootstrap_iam > evidence/bootstrap-iam-tests.log 2>&1
+          python tools/lite_bootstrap_iam_probe.py --output evidence/bootstrap-iam-probe.json
       - name: Bounded read-only source inventory (synthetic transport only)
         run: python -m unittest -v test_lite_fresh_inventory > evidence/fresh-inventory-tests.log 2>&1
       - name: Restore synthetic service keys and preserve account purchase identity and quota
