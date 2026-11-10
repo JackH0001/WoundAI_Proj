@@ -3,6 +3,88 @@ import PDFKit
 @testable import WoundLite
 
 final class LitePDFReportTests: XCTestCase {
+    private let english = Locale(identifier: "en_US")
+    private func normalized(_ document: PDFDocument) -> String {
+        (document.string ?? "").replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+    }
+    func testReportTranslationsKeepOriginalTablesAndFormatArguments() throws {
+        func table(_ language: String) throws -> [String: String] {
+            let url = try XCTUnwrap(Bundle.main.url(forResource: "LiteReport", withExtension: "strings", subdirectory: nil, localization: language))
+            return try XCTUnwrap(PropertyListSerialization.propertyList(from: Data(contentsOf: url), format: nil) as? [String: String])
+        }
+        let en = try table("en"), zh = try table("zh-Hant")
+        XCTAssertEqual(Set(en.keys), Set(zh.keys)); XCTAssertEqual(en.count, 136)
+        for (key,value) in zh { XCTAssertEqual(key,value) }
+        for (key,value) in en {
+            XCTAssertFalse(value.isEmpty)
+            XCTAssertEqual(key.components(separatedBy: "%@").count, value.components(separatedBy: "%@").count)
+        }
+    }
+    func testNumericWarningsAreTranslatedOnlyWhenTheEntireKnownMessageMatches() {
+        let copy = LiteReportCopy(locale: english)
+        let warning = "拍攝略斜（估計約 17°）。建議正對傷口拍攝，並確認圈選邊界。"
+        XCTAssertTrue(copy.warning(warning).contains("about 17°"))
+        XCTAssertEqual(copy.warning(warning + " 私人備註"), warning + " 私人備註")
+        XCTAssertTrue(copy.warning("距離偏遠（約 65 公分），建議 25–40 公分。").contains("about 65 cm"))
+        XCTAssertTrue(copy.warning("拍攝角度偏斜（估計約 30°），辨識邊界與面積誤差可能增加。結果僅供參考，建議正對傷口重拍。").contains("about 30°"))
+        XCTAssertEqual(copy.warning("My own 100% note %@"), "My own 100% note %@")
+    }
+    func testEnglishSingleReportPreservesNamesAreaSourceAndPrivacyWithoutMutatingRecord() throws {
+        var row = record(); row.woundName = "Personal name 手動圈選 %@"; row.source = "cloud"; row.contourOrigin = nil
+        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
+        let before = try encoder.encode(row)
+        let data = LitePDFReport.render(record: row, image: image(), locale: english)
+        let doc = try XCTUnwrap(PDFDocument(data: data)), text = normalized(doc)
+        for value in ["Personal name 手動圈選 %@", "Right, Heel", "LiDAR surface area estimate: 10.08", "Camera-projected area estimate: 9.91", "may be underestimated", "not diagnosis", "do not determine healing"] { XCTAssertTrue(text.contains(value), value) }
+        for value in ["private-", "9.87", "6.54", "appAccountToken"] { XCTAssertFalse(text.contains(value),value) }
+        XCTAssertEqual(before, try encoder.encode(row))
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "com.adobe.pdf")
+        attachment.name = "WoundAILite-English-single.pdf"; attachment.lifetime = .keepAlways; add(attachment)
+    }
+    func testLocaleDoesNotChangeTimelineDatesGroupMembershipOrOriginalValues() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Asia/Taipei"))
+        var row = record(); row.woundID = "A"
+        let day = try XCTUnwrap(LiteRecord.captureDate(row.dateISO))
+        let group = LiteWoundGroup(id: "A", name: "Original name")
+        let zh = try LiteTimelineSelection(group: group, records: [row], first: day, last: day, calendar: calendar)
+        let en = try LiteTimelineSelection(group: group, records: [row], first: day, last: day, calendar: calendar, locale: english)
+        XCTAssertEqual(zh.rows.map(\.id), en.rows.map(\.id)); XCTAssertEqual(zh.rows.map(\.surfaceCm2), en.rows.map(\.surfaceCm2))
+        XCTAssertEqual(zh.date(of: row), en.date(of: row)); XCTAssertEqual(zh.displayDate(row.dateISO), en.displayDate(row.dateISO))
+        XCTAssertEqual(en.period, "2026/10/28 to 2026/10/28")
+    }
+    func testEnglishTimelineKeepsChartAndPhotoDetailsWithSeparateProjection() throws {
+        var first = record(); first.id = "one"; first.woundID = "A"; first.woundName = "Paper target"
+        var second = first; second.id = "two"; second.dateISO = "2026-10-29T01:00:00Z"; second.surfaceCm2 = 8.25
+        second.projectedCm2 = 8.10
+        let group = LiteWoundGroup(id: "A", name: "Paper target", location: first.woundLocation)
+        let selection = try LiteTimelineSelection(group: group, records: [second,first], locale: english)
+        let file = try LiteTimelinePDF.export(selection, photos: true) { _ in self.image() }; defer { file.remove() }
+        let doc = try XCTUnwrap(PDFDocument(url: file.url)), text = normalized(doc)
+        for value in ["Observation index", "2 / 2 plotted", "10.08", "8.25", "Camera-projected area estimate", "Thin teal line", "not diagnosis", "do not determine healing"] { XCTAssertTrue(text.contains(value),value) }
+        XCTAssertEqual(doc.pageCount,3)
+        let attachment = XCTAttachment(data: try Data(contentsOf: file.url), uniformTypeIdentifier: "com.adobe.pdf")
+        attachment.name = "WoundAILite-English-timeline.pdf"; attachment.lifetime = .keepAlways; add(attachment)
+    }
+    func testEnglishTimelineMovesLongAndAdditionalQualityNotesWithoutLosingThem() throws {
+        var row = record(); row.woundID = "A"
+        row.measurementContext?.warnings = [String(repeating: "Original note about lighting. ", count: 16) + "END-FIRST", "Second original note END-SECOND"]
+        let selection = try LiteTimelineSelection(group: .init(id: "A", name: "Paper target"), records: [row], locale: english)
+        let file = try LiteTimelinePDF.export(selection, photos: true) { _ in self.image() }; defer { file.remove() }
+        let doc = try XCTUnwrap(PDFDocument(url: file.url)), text = normalized(doc)
+        for value in ["Full text: note", "Additional report notes", "END-FIRST", "END-SECOND"] { XCTAssertTrue(text.contains(value),value) }
+        XCTAssertGreaterThan(doc.pageCount,1)
+        let attachment = XCTAttachment(data: try Data(contentsOf: file.url), uniformTypeIdentifier: "com.adobe.pdf")
+        attachment.name = "WoundAILite-English-long-notes.pdf"; attachment.lifetime = .keepAlways; add(attachment)
+    }
+    func testEnglishRejectedAreaKeepsTheSavedMaskAndDoesNotInventAValue() throws {
+        var row = record(); row.measurementContext?.coverage = 0.1
+        let doc = try XCTUnwrap(PDFDocument(data: LitePDFReport.render(record: row, image: image(), locale: english)))
+        let text = normalized(doc)
+        XCTAssertTrue(text.contains("Too little depth data")); XCTAssertTrue(text.contains("thin teal line"))
+        XCTAssertFalse(text.contains("10.08")); XCTAssertEqual(row.surfaceCm2,10.08)
+        XCTAssertEqual(LitePDFReport.polygons(row, image: image())?.count,1)
+    }
     private func image() -> UIImage {
         let f = UIGraphicsImageRendererFormat(); f.scale = 1
         return UIGraphicsImageRenderer(size: CGSize(width: 800, height: 600), format: f).image { c in

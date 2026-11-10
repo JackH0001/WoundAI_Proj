@@ -30,31 +30,35 @@ enum LitePDFReport {
         return record.areaSeries
     }
 
-    static func areaLines(_ record: LiteRecord, image: UIImage?) -> [String] {
-        areaLines(record, polygons: polygons(record, image: image))
+    static func areaLines(_ record: LiteRecord, image: UIImage?, locale: Locale = LiteReportCopy.originalLocale) -> [String] {
+        areaLines(record, polygons: polygons(record, image: image), locale: locale)
     }
 
-    static func areaLines(_ record: LiteRecord, polygons: [[[Int]]]?) -> [String] {
+    static func areaLines(_ record: LiteRecord, polygons: [[[Int]]]?, locale: Locale = LiteReportCopy.originalLocale) -> [String] {
+        let copy = LiteReportCopy(locale: locale)
         let area = record.savedArea
-        if case .unavailable(let reason) = area { return ["未提供面積：" + reason] }
+        if case .unavailable(let reason) = area { return [copy.format("未提供面積：%@", copy.warning(reason))] }
         guard let series = areaSeries(record, polygons: polygons) else {
-            return ["未提供面積：本筆的尺度、影像或圈選資料無法核對。"]
+            return [copy.text("未提供面積：本筆的尺度、影像或圈選資料無法核對。")]
         }
         if series == .legacy {
-            return [String(format: "舊版 LiDAR 表面積：%.2f cm²", record.surfaceCm2),
-                    String(format: "舊版相機方向投影：%.2f cm²", record.projectedCm2),
-                    "沿用拍攝時保存的數值，舊版拍攝品質資料不完整。"]
+            return [copy.format("舊版 LiDAR 表面積：%@ cm²", copy.decimal(record.surfaceCm2)),
+                    copy.format("舊版相機方向投影：%@ cm²", copy.decimal(record.projectedCm2)),
+                    copy.text("沿用拍攝時保存的數值，舊版拍攝品質資料不完整。")]
         }
         guard case .current(let verdict) = area, let c = record.measurementContext else {
-            return ["未提供面積：保存的面積來源無法核對。"]
+            return [copy.text("未提供面積：保存的面積來源無法核對。")]
         }
-        var lines = [String(format: "LiDAR 表面積估算：%.2f cm²", record.surfaceCm2),
-                     String(format: "相機方向投影估算：%.2f cm²", record.projectedCm2),
-                     "來源：免貼紙 LiDAR 深度估算；不同於貼紙校正面積。",
-                     "資料對應檢查不代表實物精度驗證；尚無固定誤差保證。"]
-        for warning in c.warnings + verdict.warnings where !lines.contains(warning) { lines.append(warning) }
+        var lines = [copy.format("LiDAR 表面積估算：%@ cm²", copy.decimal(record.surfaceCm2)),
+                     copy.format("相機方向投影估算：%@ cm²", copy.decimal(record.projectedCm2)),
+                     copy.text("來源：免貼紙 LiDAR 深度估算；不同於貼紙校正面積。"),
+                     copy.text("資料對應檢查不代表實物精度驗證；尚無固定誤差保證。")]
+        for warning in c.warnings + verdict.warnings {
+            let translated = copy.warning(warning)
+            if !lines.contains(translated) { lines.append(translated) }
+        }
         if record.quality != "ok", c.warnings.isEmpty, verdict.warnings.isEmpty {
-            lines.append("原紀錄有拍攝品質注意事項，請回 App 查看。")
+            lines.append(copy.text("原紀錄有拍攝品質注意事項，請回 App 查看。"))
         }
         return lines
     }
@@ -104,10 +108,11 @@ enum LitePDFReport {
         }
     }
 
-    static func render(record: LiteRecord, image: UIImage?) -> Data {
+    static func render(record: LiteRecord, image: UIImage?, locale: Locale = LiteReportCopy.originalLocale) -> Data {
+        let copy = LiteReportCopy(locale: locale)
         let page = CGRect(x: 0, y: 0, width: 595.28, height: 841.89)
         let format = UIGraphicsPDFRendererFormat()
-        format.documentInfo = [kCGPDFContextTitle as String: "WoundAILite 個人影像紀錄",
+        format.documentInfo = [kCGPDFContextTitle as String: copy.text("WoundAILite 個人影像紀錄"),
                                kCGPDFContextCreator as String: "WoundAILite"]
         return UIGraphicsPDFRenderer(bounds: page, format: format).pdfData { ctx in
             var y: CGFloat = 0
@@ -115,13 +120,13 @@ enum LitePDFReport {
             func newPage() {
                 ctx.beginPage(); number += 1; y = 36
                 UIColor.white.setFill(); ctx.cgContext.fill(page)
-                ("WoundAILite · 個人紀錄 · 第 \(number) 頁" as NSString).draw(
+                (copy.format("WoundAILite · 個人紀錄 · 第 %@ 頁", String(number)) as NSString).draw(
                     in: CGRect(x: 36, y: 807, width: 523, height: 20),
                     withAttributes: [.font: UIFont.systemFont(ofSize: 10), .foregroundColor: UIColor.darkGray])
             }
             func text(_ value: String, size: CGFloat = 13, bold: Bool = false) {
                 // Bound corrupted/legacy free text without hiding normal warnings.
-                let safe = value.count > 700 ? String(value.prefix(700)) + "…（完整內容請回 App 查看）" : value
+                let safe = value.count > 700 ? String(value.prefix(700)) + copy.text("…（完整內容請回 App 查看）") : value
                 let style = NSMutableParagraphStyle(); style.lineSpacing = 3
                 let attrs: [NSAttributedString.Key: Any] = [
                     .font: bold ? UIFont.boldSystemFont(ofSize: size) : UIFont.systemFont(ofSize: size),
@@ -133,9 +138,9 @@ enum LitePDFReport {
                 y += height + 5
             }
             newPage()
-            text("WoundAILite｜個人影像紀錄", size: 22, bold: true)
-            text("拍攝時間：" + record.dateISO + "（原紀錄時間，Z 表示 UTC）", size: 11)
-            text((record.woundName ?? "未分組紀錄") + " · " + (record.woundLocation?.label ?? "位置未填寫"))
+            text(copy.text("WoundAILite｜個人影像紀錄"), size: 22, bold: true)
+            text(copy.format("拍攝時間：%@（原紀錄時間，Z 表示 UTC）", record.dateISO), size: 11)
+            text((record.woundName ?? copy.text("未分組紀錄")) + " · " + copy.location(record.woundLocation))
             if let image, image.size.width > 0, image.size.height > 0 {
                 if y + 350 > 780 { newPage() }
                 let scale = min(523 / image.size.width, 330 / image.size.height)
@@ -147,14 +152,14 @@ enum LitePDFReport {
                 }
                 y += size.height + 12
                 text(polygons(record, image: image) == nil
-                     ? "照片保留；圈選座標無法核對，未疊加輪廓。"
-                     : "青色細線標示本筆保存的傷口輪廓。", size: 11)
-            } else { text("本機照片已不存在或暫時無法讀取；未從雲端補下載。") }
-            text("原始圈選：" + (record.contourOrigin?.label ?? "圈選版本未確認"))
-            if let notice = record.contourUncertaintyNotice { text(notice, size: 11) }
-            for line in areaLines(record, image: image) { text(line) }
-            text(disclaimer, size: 12)
-            text("本報告只含所選單筆紀錄，不含深度／體積、帳號或雲端識別碼。分享由您自行選擇接收對象。", size: 10)
+                     ? copy.text("照片保留；圈選座標無法核對，未疊加輪廓。")
+                     : copy.text("青色細線標示本筆保存的傷口輪廓。"), size: 11)
+            } else { text(copy.text("本機照片已不存在或暫時無法讀取；未從雲端補下載。")) }
+            text(copy.format("原始圈選：%@", copy.text(record.contourOrigin?.label ?? "圈選版本未確認")))
+            if let notice = record.contourUncertaintyNotice { text(copy.warning(notice), size: 11) }
+            for line in areaLines(record, image: image, locale: locale) { text(line) }
+            text(copy.text(disclaimer), size: 12)
+            text(copy.text("本報告只含所選單筆紀錄，不含深度／體積、帳號或雲端識別碼。分享由您自行選擇接收對象。"), size: 10)
         }
     }
 }

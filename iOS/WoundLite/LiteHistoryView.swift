@@ -5,6 +5,8 @@ import Charts
  本地紀錄＋同一傷口的面積變化；量測變化不能單獨判定癒合。
  */
 struct LiteHistoryView: View {
+    @Environment(\.locale) private var locale
+    private var reportCopy: LiteReportCopy { LiteReportCopy(locale: locale) }
     @ObservedObject var store: LiteStore
     @Binding var recordToOpen: String?
     let nativeSession: LiteNativeSession?
@@ -75,7 +77,7 @@ struct LiteHistoryView: View {
                                 Label("比較最近兩次照片", systemImage: "rectangle.split.2x1")
                             }.accessibilityIdentifier("lite.timeline.compare")
                             Button { reportWound = wound } label: {
-                                Label("匯出此傷口時間軸 PDF",systemImage:"square.and.arrow.up")
+                                Label(reportCopy.text("匯出此傷口時間軸 PDF"),systemImage:"square.and.arrow.up")
                             }.accessibilityIdentifier("lite.timeline.export")
                         }
                         Section("LiDAR 表面積估算趨勢（cm²）") {
@@ -271,6 +273,8 @@ struct LiteContourChangeSummary: Equatable {
 }
 
 struct LiteRecordDetailView: View {
+    @Environment(\.locale) private var locale
+    private var reportCopy: LiteReportCopy { LiteReportCopy(locale: locale) }
     @ObservedObject private var withdrawal = LiteWithdrawalModel.shared
     let recordId: String
     @ObservedObject var store: LiteStore
@@ -313,24 +317,24 @@ struct LiteRecordDetailView: View {
                         Button {
                             pdfError = nil; pdfBusy = true
                             // Freeze the saved record; export never edits or syncs it.
-                            let snapshot = r, photo = image
+                            let snapshot = r, photo = image, reportLocale = locale
                             Task { @MainActor in
                                 await Task.yield()
                                 defer { pdfBusy = false }
                                 do {
-                                    let copy = try LitePDFShare(data: LitePDFReport.render(record: snapshot, image: photo))
+                                    let copy = try LitePDFShare(data: LitePDFReport.render(record: snapshot, image: photo, locale: reportLocale))
                                     pdfCopy = copy; pdfShare = copy
                                 } catch { pdfError = "PDF 暫時無法產生；原照片、紀錄與同步狀態未變更。" }
                             }
                         } label: {
-                            Label(pdfBusy ? "正在產生 PDF…" : "分享此筆 PDF 紀錄", systemImage: "square.and.arrow.up")
+                            Label(pdfBusy ? reportCopy.text("正在產生 PDF…") : reportCopy.text("分享此筆 PDF 紀錄"), systemImage: "square.and.arrow.up")
                         }
                         .buttonStyle(.bordered)
                         .disabled(busy || pdfBusy || !imageLoadFinished)
                         .accessibilityIdentifier("lite.report.share")
-                        Text("只在本機製作，不重新辨識或扣額度。PDF 含照片與位置，分享前請確認接收對象。")
+                        Text(reportCopy.text("只在本機製作，不重新辨識或扣額度。PDF 含照片與位置，分享前請確認接收對象。"))
                             .font(.caption).foregroundStyle(.secondary)
-                        if let pdfError { Text(pdfError).font(.footnote).foregroundStyle(.orange) }
+                        if let pdfError { Text(reportCopy.text(pdfError)).font(.footnote).foregroundStyle(.orange) }
                         DisclosureGroup("影像與深度保存詳情") {
                             if let binding = r.cloudSync?.binding,
                                let status = LiteWithdrawalJournal.standard.status(for: binding) {
