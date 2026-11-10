@@ -153,9 +153,19 @@ def run(raw, native_raw, request_raw, *, expected_config, expected_native,
         # Bucket policy is freshly checked with the active transport; all core
         # mutations are now inside the reserved allocation. Inspect never allocates.
         x = build(**args,state_factory=factory)
-        result = x.inspect() if request['mode'] == 'inspect' else x.execute(request['command'],inner=request['inner'])
-        return dict(schema='lite-bootstrap-runner-receipt/1',mode=request['mode'],plan=digest(c['plan']),
+        inspection = None
+        if request['mode'] == 'inspect':
+            result = x.inspect()
+            quota, release = x.rollout._read(), x.reader.snapshot()
+            if x.inspect() != result:
+                raise StateUnavailable('bootstrap changed during inspection; inspect again')
+            inspection = dict(observed_at=int(clock()), quota=quota[1] if quota else None,
+                              release=release[1] if release else None)
+        else:
+            result = x.execute(request['command'],inner=request['inner'])
+        return dict(schema='lite-bootstrap-runner-receipt/2',mode=request['mode'],plan=digest(c['plan']),
                     request=expected_request,source=expected_source,image=expected_image,result=result,
+                    inspection=inspection,
                     allocation=None if allocation is None else allocation.name,
                     provider_mutation_requested=request['mode']=='execute',customer_ingress_changed=False,
                     audit_preserved=True,automatic_recovery=False)
