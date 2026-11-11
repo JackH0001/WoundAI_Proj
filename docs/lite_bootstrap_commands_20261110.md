@@ -37,6 +37,11 @@ Outputs are create-only files with mode 0600 in an owner-private, nonsymlink
 directory. The passphrase and private seeds are not arguments or output. As with
 the existing custody implementation, this is not a memory-zeroization guarantee.
 
+The 11/11 [role custody extension](lite_role_custody_20261111.md) also accepts an
+operator-only encrypted package with the same manifest and original seed. The
+observer package cannot sign operator commands. Combined owner backups remain
+compatible; actual two-person custody is still an operational prerequisite.
+
 ## Recovery boundaries
 
 - Inspection must be no more than 60 seconds old when preparing **and** signing.

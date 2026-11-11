@@ -14,6 +14,7 @@ from PIL import Image
 
 import lite_bootstrap_commands as commands
 import lite_operational_materials as custody
+import lite_role_custody as role_custody
 from lite_attest_state import StateUnavailable
 from lite_fresh_bootstrap import FreshBootstrapExecutor
 from lite_service_release import ServiceReleaseController
@@ -59,6 +60,23 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(before,self.snapshot());self.assertEqual(calls,self.providers.connected)
         self.assertFalse(draft['observer_created']);self.assertEqual(request['mode'],'execute')
         self.assertNotIn('signature',draft['command']);self.assertNotIn('inner_sha256',draft['command'])
+    def test_operator_only_restoration_signs_identically_to_original_bundle(self):
+        draft=self.prepare('subscription');expected=self.sign(draft);before=self.snapshot()
+        password=secrets.token_urlsafe(32);raw=role_custody.seal(self.material,'operator',password)
+        restored,pin=role_custody.restore_for_role(raw,password,canonical(role_custody.receipt(raw)),'operator')
+        self.assertEqual(set(restored.keys),{'operator'});self.assertEqual(pin,self.pin)
+        self.assertEqual(self.sign(draft,material=restored),expected);self.assertEqual(self.snapshot(),before)
+        self.assertEqual(self.invoke(expected)['result']['status'],'complete')
+    def test_observer_only_cannot_sign_and_changes_no_state(self):
+        draft=self.prepare('subscription');before=self.snapshot()
+        observer=role_custody.RoleMaterial(self.material.manifest(),'observer',self.material.keys['observer'])
+        with self.assertRaisesRegex(ValueError,'operator material required'):self.sign(draft,material=observer)
+        self.assertEqual(before,self.snapshot())
+    def test_operator_only_still_requires_independent_observation(self):
+        self.material=role_custody.RoleMaterial(self.material.manifest(),'operator',self.material.keys['operator'])
+        request=self.sign(self.prepare('subscription'))
+        with patch.object(self.f.observer,'load',return_value=None),self.assertRaises(StateUnavailable):self.invoke(request)
+        self.assertEqual(rows(self.states['subscription']),[])
     def test_three_reviewed_steps_and_http_replay_are_one_model_one_debit(self):
         old=self.f.untouched()
         for stage in ('subscription','quota','release'):self.assertEqual(self.step(stage)['result']['stage'],stage)

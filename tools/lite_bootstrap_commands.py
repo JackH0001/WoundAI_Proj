@@ -13,6 +13,7 @@ import time
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import lite_operational_materials as custody
+import lite_role_custody as role_custody
 from lite_fresh_bootstrap import STAGES
 from lite_fresh_bootstrap_runner import checked, preflight, read_regular
 from lite_subscription_executor import canonical
@@ -112,6 +113,7 @@ def sign(draft, raw, native_raw, receipt_raw, *, material, expected_manifest, ke
     require(0<=now-receipt['inspection']['observed_at']<=60, 'inspect again before signing')
     native=checked(native_raw,draft['native'],256*1024)
     material.validate();_hex(expected_manifest)
+    require('operator' in material.keys, 'operator material required; observer cannot sign this command')
     require(digest(material.manifest())==expected_manifest, 'independent custody manifest differs')
     scope=material.scope
     require(scope['environment']=='owner-sandbox' and scope['project']==native['deployment']['project']
@@ -159,8 +161,10 @@ def main():
             action=draft['command']['action'],expires_at=draft['command']['expires_at']),sort_keys=True),flush=True)
         require(input('Type SIGN_BOOTSTRAP for this reviewed single step: ')=='SIGN_BOOTSTRAP','signing cancelled')
         backup=custody.read_private(a.backup)
-        pin=custody.check_receipt(backup,custody.read_private(a.custody_receipt))
-        material=custody.restore(backup,custody.password_prompt('Recovery passphrase: '),expected_manifest_sha256=pin)
+        custody_receipt=custody.read_private(a.custody_receipt)
+        role_custody.check_role_receipt(backup,custody_receipt,'operator')
+        material,pin=role_custody.restore_for_role(backup,custody.password_prompt('Recovery passphrase: '),
+            custody_receipt,'operator')
         result=sign(draft,raw,native,inspection,material=material,expected_manifest=pin,key_id=a.key_id)
     value=canonical(result);custody._write_exclusive(a.output,value)
     require(custody.read_private(a.output)==value,'output readback differs; preserve file')
