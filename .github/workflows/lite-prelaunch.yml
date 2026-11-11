@@ -127,6 +127,10 @@ jobs:
           python -m unittest -v test_lite_prelaunch_economics test_lite_prelaunch_quota_probe > evidence/new-tests.log 2>&1
           python tools/lite_prelaunch_economics.py --output evidence/economics.json
           python tools/lite_prelaunch_quota_probe.py --output evidence/quota-probe.json
+      - name: Shared KEK bounded rewrap preparation and drain limits (synthetic only)
+        run: |
+          python -m unittest -v test_lite_shared_kek_preparation > evidence/shared-kek-preparation-tests.log 2>&1
+          python tools/lite_shared_kek_preparation_probe.py --output evidence/shared-kek-preparation-probe.json
       - name: Exact service history generations and interrupted audit recovery (synthetic only)
         run: |
           python -m unittest -v test_lite_service_history > evidence/service-history-tests.log 2>&1

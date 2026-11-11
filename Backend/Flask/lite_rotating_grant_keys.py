@@ -135,11 +135,33 @@ class RotatingGrantCipher(AccountGrantCipher):
         return row
 
     def _save(self, person, generation, c):
+        if c['phase'] == 'ready': self._require_write_version(c['version'])
         self.immutable(self.audit, self._proof_key(c), self._proof(c))
         try: self.store.compare_exchange(self._key(person), generation, c)
         except StateUnavailable: pass
         # A lost response is not permission to recreate keys or overwrite peers.
         return self._read(person)
+
+    def _write_fence_key(self, version):
+        self.provider._name(version)
+        return key('shared-kek-write-fence', digest([self.scope, version]))
+
+    def _require_write_version(self, version):
+        # An append-only operator fence stops *new* wraps/publications by this
+        # runtime. It is NOT a distributed drain: an RPC already beyond this
+        # check can still finish. Retirement requires separate complete inventory
+        # and drained-writer evidence, never this check alone. Reads stay usable.
+        if self.audit.load(self._write_fence_key(version)) is not None:
+            raise StateUnavailable('shared write version fenced; retain original state')
+
+    def fence_write_version(self, version, *, target, rotation):
+        """Private, monotonic write fence. Does not disable or destroy a KMS key."""
+        self.provider._name(version); self.provider._name(target); _hex(rotation)
+        if target != self.provider.write_version or int(target.rsplit('/',1)[1]) <= int(version.rsplit('/',1)[1]):
+            raise ValueError('later pinned write version required')
+        value = dict(v=1, scope=self.scope, version=version, target=target, rotation=rotation)
+        self.immutable(self.audit, self._write_fence_key(version), value)
+        return value
 
     def _dependencies(self, person):
         row = self.store.load(key('shared-grant-key-dependencies',digest([self.scope,person])))
@@ -161,6 +183,7 @@ class RotatingGrantCipher(AccountGrantCipher):
         # Otherwise deleting the current key row could overlook a pending V2
         # proposal still decryptable after the committed V1 is retired.
         self.provider._name(version)
+        self._require_write_version(version)
         k = key('shared-grant-key-dependencies',digest([self.scope,person]))
         for _ in range(CAS_ATTEMPTS):
             self._require_no_destroy_intent(person)
@@ -291,6 +314,7 @@ class RotatingGrantCipher(AccountGrantCipher):
                 self._reserve_version(person, version)
                 plain = os.urandom(32)
                 c['wrapped_dek'] = self.provider.wrap(version, plain, self._aad_for(c)); del plain
+                self._require_write_version(version)
                 self._require_no_destroy_intent(person)
                 self.immutable(self.audit, self._proof_key(c), self._proof(c))
                 try: self.store.compare_exchange(pk, 0, c)
@@ -380,6 +404,7 @@ class RotatingGrantCipher(AccountGrantCipher):
         check = self.provider.unwrap(target, updated['wrapped_dek'], self._aad_for(updated))
         if check != dek: raise StateUnavailable('rewrapped key differs')
         del check, dek
+        self._require_write_version(target)
         self.lifecycle.require_active(person); self._require_current(person, c)
         # Keep the retryable wrapped target in the key store, not in audit.
         # A proposal cannot authorize an account or bypass its closure intent.
