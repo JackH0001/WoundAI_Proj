@@ -466,6 +466,77 @@ final class NativeEntryUITests: XCTestCase {
         checkValue("0")
     }
 
+    #if LITE_QA_EDITOR_FIXTURE
+    @MainActor func testEnglishCameraPermissionDescriptionIsLocalized() throws {
+        continueAfterFailure = false
+        let app = application(language: "en"); app.launch()
+        XCTAssertTrue(app.buttons["qa.camera"].waitForExistence(timeout: 8)); app.buttons["qa.camera"].tap()
+        let system = XCUIApplication(bundleIdentifier:"com.apple.springboard")
+        let message = "Take photos and LiDAR depth to outline and estimate area. Research upload requires separate consent."
+        let description = system.staticTexts.matching(NSPredicate(format:"label == %@",message)).firstMatch
+        XCTAssertTrue(description.waitForExistence(timeout: 8))
+        attach(app,"en-system-camera-permission")
+        let deny = system.alerts.buttons.matching(NSPredicate(format:"label IN %@",["不允許","Don’t Allow","Don't Allow"])).firstMatch
+        XCTAssertTrue(deny.exists); deny.tap()
+        let error = "Camera access is not allowed. Enable it in iOS Settings → WoundAILite."
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format:"label == %@",error)).firstMatch.waitForExistence(timeout: 5))
+        app.buttons["camera.cancel"].tap()
+        XCTAssertEqual(app.staticTexts["qa.captures"].label,"0"); app.terminate()
+    }
+    @MainActor func testEnglishCameraEditorControlsPreserveOutline() throws { try verifyCameraEditor(language: "en") }
+    @MainActor func testChineseCameraEditorControlsPreserveOutline() throws { try verifyCameraEditor(language: "zh-Hant") }
+    @MainActor private func verifyCameraEditor(language: String) throws {
+        continueAfterFailure = false
+        let en = language == "en", app = application(language: language)
+        app.launch()
+        let status = app.staticTexts["qa.status"]
+        XCTAssertTrue(app.buttons["qa.empty"].waitForExistence(timeout: 8))
+        app.buttons["qa.empty"].tap()
+        let done = app.buttons["editor.done"], cancel = app.buttons["editor.cancel"]
+        XCTAssertTrue(done.waitForExistence(timeout: 5)); XCTAssertFalse(done.isEnabled)
+        XCTAssertEqual(done.label, en ? "Done outlining" : "完成圈選")
+        attach(app, language + "-empty-editor")
+        cancel.tap(); XCTAssertTrue(status.waitForExistence(timeout: 5)); XCTAssertEqual(status.label, "cancelled")
+        app.buttons["qa.edit"].tap()
+        let preview = app.buttons["editor.originalPreview"]
+        XCTAssertTrue(preview.waitForExistence(timeout: 5)); preview.tap()
+        XCTAssertEqual(preview.value as? String, en ? "Original photo; painting paused" : "原圖，暫停塗抹")
+        XCTAssertFalse(app.sliders.firstMatch.isEnabled)
+        let canvas = app.otherElements["editor.canvas"]
+        XCTAssertTrue(canvas.exists)
+        canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        attach(app, language + "-original-preview")
+        preview.tap()
+        let undo = app.buttons[en ? "Undo" : "復原"]
+        XCTAssertFalse(undo.isEnabled)
+        app.buttons[en ? "Erase" : "擦除"].tap()
+        canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(undo.isEnabled)
+        attach(app, language + "-edited-outline")
+        undo.tap(); XCTAssertFalse(undo.isEnabled)
+        done.tap(); XCTAssertTrue(status.waitForExistence(timeout: 5)); XCTAssertEqual(status.label, "unchanged")
+        app.buttons["qa.edit"].tap(); XCTAssertTrue(done.waitForExistence(timeout: 5))
+        app.buttons[en ? "Erase" : "擦除"].tap()
+        canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(undo.isEnabled); done.tap()
+        XCTAssertTrue(status.waitForExistence(timeout: 5)); XCTAssertEqual(status.label, "changed")
+        app.buttons["qa.camera"].tap()
+        let cameraCancel = app.buttons["camera.cancel"]
+        XCTAssertTrue(cameraCancel.waitForExistence(timeout: 8))
+        XCTAssertFalse(app.buttons["camera.shutter"].isEnabled)
+        let noDepth = en ? "No LiDAR depth is available. Sticker-free area estimation is unavailable." : "目前沒有可用 LiDAR 深度；本次無法提供免貼紙面積估算。"
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format:"label == %@",noDepth)).firstMatch.exists)
+        let noCamera = en ? "No camera is available. Try on a device with a camera. Cancel keeps the previous photo and outline." : "找不到可用相機。請在有相機的裝置重試；取消會保留先前的照片與圈選。"
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format:"label == %@",noCamera)).firstMatch.waitForExistence(timeout: 8))
+        attach(app, language + "-unavailable-camera")
+        cameraCancel.tap()
+        XCTAssertTrue(status.waitForExistence(timeout: 5)); XCTAssertEqual(status.label, "camera-cancelled")
+        XCTAssertEqual(app.staticTexts["qa.completions"].label,"2")
+        XCTAssertEqual(app.staticTexts["qa.captures"].label,"0")
+        app.terminate()
+    }
+    #endif
+
     @MainActor private func attach(_ app: XCUIApplication, _ name: String) {
         let item = XCTAttachment(screenshot: app.screenshot())
         item.name = name

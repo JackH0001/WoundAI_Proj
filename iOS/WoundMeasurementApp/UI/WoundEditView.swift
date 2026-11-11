@@ -860,6 +860,8 @@ struct WoundEditView: View {
     /// 醫療概念與文案，保留雙指縮放平移、筆刷、undo、亮青邊界線——兩個 App 的
     /// 畫布操作因此完全一致（2026-08-18 使用者要求）。
     let boundaryOnly: Bool
+    let displayText: (String) -> String
+    private func text(_ source: String) -> String { boundaryOnly ? displayText(source) : source }
     let onCancel: () -> Void
     let onDone: (_ edited: [[Int]], _ all: [[[Int]]], _ correctionIou: Double?,
                  _ newArea: Double?, _ tissue: [String: Double], _ raster: EditRaster) -> Void
@@ -871,6 +873,7 @@ struct WoundEditView: View {
          resume: EditRaster?, wbGains: [Double]?,
          boundaryOnly: Bool = false,
          planarCalibration: PlanarAreaCalibration? = nil,
+         displayText: @escaping (String) -> String = { $0 },
          onCancel: @escaping () -> Void,
          onDone: @escaping (_ edited: [[Int]], _ all: [[[Int]]], _ correctionIou: Double?,
                             _ newArea: Double?, _ tissue: [String: Double],
@@ -885,6 +888,7 @@ struct WoundEditView: View {
         self.resume = resume
         self.wbGains = wbGains
         self.boundaryOnly = boundaryOnly
+        self.displayText = displayText
         self.onCancel = onCancel
         self.onDone = onDone
         _m = StateObject(wrappedValue: EditCanvasModel(
@@ -926,6 +930,7 @@ struct WoundEditView: View {
                 .onChange(of: geo.size) { _, s in m.boxSize = s; m.ensureInitialFit() }
             }
             .clipped()
+            .accessibilityIdentifier("editor.canvas")
             .background(Color.black.opacity(0.05))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -944,10 +949,10 @@ struct WoundEditView: View {
     /// 民眾版標頭：白話操作說明，不出現面積/PUSH/GT/ArUco 等醫療與技術詞彙。
     @ViewBuilder
     private var liteHeader: some View {
-        Text("圈選傷口範圍").font(.subheadline).bold()
-        Text("單指塗抹・雙指縮放與移動・畫錯用「擦除」或「復原」。亮青色線＝目前圈選的邊界。")
+        Text(text("圈選傷口範圍")).font(.subheadline).bold()
+        Text(text("單指塗抹・雙指縮放與移動・畫錯用「擦除」或「復原」。亮青色線＝目前圈選的邊界。"))
             .font(.caption).foregroundStyle(.secondary)
-        Text("請把整個傷口塗滿（不必沿邊描線，整片塗滿即可）")
+        Text(text("請把整個傷口塗滿（不必沿邊描線，整片塗滿即可）"))
             .font(.caption).foregroundStyle(.red)
             .lineLimit(2, reservesSpace: true)
             .opacity(m.st.maskCount == 0 ? 1 : 0)
@@ -1054,8 +1059,8 @@ struct WoundEditView: View {
                 m.setOriginalPreview(!m.peeking)
             }
             .accessibilityIdentifier("editor.originalPreview")
-            .accessibilityValue(m.peeking ? "原圖，暫停塗抹" : "顯示圈選結果")
-            .accessibilityHint("點一下切換原圖與圈選結果")
+            .accessibilityValue(text(m.peeking ? "原圖，暫停塗抹" : "顯示圈選結果"))
+            .accessibilityHint(text("點一下切換原圖與圈選結果"))
         }
     }
 
@@ -1087,7 +1092,7 @@ struct WoundEditView: View {
 
     private var brushRow: some View {
         HStack(spacing: 6) {
-            Text("筆刷").font(.caption)
+            Text(text("筆刷")).font(.caption)
             Slider(value: $m.brushScreen, in: 6...48)
                 .disabled(m.peeking || m.tool == .pan)
             Text("\(Int(m.brushScreen))").font(.caption).frame(width: 26)
@@ -1107,15 +1112,17 @@ struct WoundEditView: View {
 
     private var bottomRow: some View {
         HStack(spacing: 10) {
-            Button("取消") { onCancel() }
+            Button(text("取消")) { onCancel() }
+                .accessibilityIdentifier("editor.cancel")
                 .buttonStyle(.bordered)
                 .frame(maxWidth: .infinity)
-            Button(boundaryOnly ? "完成圈選" : "完成修邊") {
+            Button(text(boundaryOnly ? "完成圈選" : "完成修邊")) {
                 if let r = m.finish() {
                     onDone(r.poly, r.all, r.iou, r.area, r.frac, r.raster)
                 }
             }
             .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("editor.done")
             .frame(maxWidth: .infinity)
             // seeding 中不可完成：此刻 tissue 還是預設類佔位，送出去就是假 GT。
             .disabled(m.st.maskCount == 0 || m.seeding)
@@ -1129,7 +1136,7 @@ struct WoundEditView: View {
         Button(action: action) {
             VStack(spacing: 3) {
                 Image(systemName: symbol).font(.system(size: 17, weight: .medium))
-                Text(title).font(.caption).lineLimit(1).minimumScaleFactor(0.8)
+                Text(text(title)).font(.caption).lineLimit(1).minimumScaleFactor(0.8)
             }
             .frame(maxWidth: .infinity, minHeight: 48)
             .contentShape(RoundedRectangle(cornerRadius: 10))
@@ -1140,7 +1147,7 @@ struct WoundEditView: View {
             .fill(selected ? Color.blue.opacity(0.20) : Color.secondary.opacity(0.12)))
         .overlay(RoundedRectangle(cornerRadius: 10)
             .stroke(selected ? Color.blue : Color.clear, lineWidth: 1))
-        .accessibilityLabel(title)
+        .accessibilityLabel(text(title))
         .disabled(!enabled)
     }
 }

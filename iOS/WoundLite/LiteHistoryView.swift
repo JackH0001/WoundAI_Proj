@@ -420,6 +420,7 @@ struct LiteRecordDetailView: View {
                 WoundEditView(image: img, initialPolygons: session.polygons, originalArea: nil,
                               tissueFrac: [:], exudate: nil, mmPerPx: nil, resume: nil,
                               wbGains: nil, boundaryOnly: true,
+                              displayText: LiteCaptureControlsCopy(locale: locale).text,
                               onCancel: { _ = editFlow.finish(session.id) },
                               onDone: { _, all, iou, _, _, _ in
                                   guard let baseline = editFlow.finish(session.id) else { return }

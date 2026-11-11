@@ -19,7 +19,7 @@
 | 獨立 Lite 後台與 MMH／Demo 隔離 | 兩個檢視服務已存在，先前負向驗收；本輪唯讀再次確認 | 本人登入、正向資料檢視、最小有效權限與資料源隔離驗收尚未執行 |
 | 廣告及成本驗證 | 已同意的混合營運方向及原型 | 真實廣告收入／SDK、同意與廣告分離及盈虧驗收仍未完成 |
 | AI 使用輔助與離線操作指南 | `LiteOperationGuide` 已有可選的 Apple 裝置端主題分類，僅顯示內建說明；不傳照片或使用雲端辨識額度 | 11/10 Mac 合成分類驗收發現誤分，見 `lite_help_acceptance_20261110.md`；不能宣稱可靠客服已完成，iPhone 模型與真人操作驗收仍待完成 |
-| 多市場與多語 | 政策有中英文版本；11/10 服務登入／訂閱／刪帳 169 組、單筆／時間軸 PDF 與匯出選項 136 組；研究選擇／撤回／額度另 134 組；11/11 歷史／照片對照／追蹤與修訂提示另 171 組；量測／保存／精確度說明另126組，最新兩種 Release 各621項通過、1項既有略過，歷史中英文 UI 2 項及保存讀回通過（研究與服務前批 UI 各 2 項）；見 `lite_service_localization_20261110.md`、`lite_report_localization_20261110.md`、`lite_research_localization_20261110.md`、`lite_history_localization_20261111.md`、`lite_capture_localization_20261111.md` | 相機／修邊工具列、指南等剩餘翻譯、各市場商品／政策核對仍未完成；不因局部英文可用而稱全球完成 |
+| 多市場與多語 | 政策有中英文版本；11/10 服務登入／訂閱／刪帳 169 組、單筆／時間軸 PDF 與匯出選項 136 組；研究選擇／撤回／額度另 134 組；11/11 歷史／照片對照／追蹤與修訂提示另 171 組；量測／保存／精確度說明另126組，相機／修邊工具列另30組及系統權限說明1組，最新兩種 Release 各626項通過、1項既有略過，歷史中英文 UI 2 項及保存讀回通過（研究與服務前批 UI 各 2 項）；見 `lite_service_localization_20261110.md`、`lite_report_localization_20261110.md`、`lite_research_localization_20261110.md`、`lite_history_localization_20261111.md`、`lite_capture_localization_20261111.md`、`lite_camera_editor_localization_20261111.md` | 指南等剩餘翻譯、各市場商品／政策核對仍未完成；不因局部英文可用而稱全球完成 |
 
 廣告與多人照護不能混淆：Plus 五傷口已納入本版；**多人檔案**仍是另外的後續擴充。
 內測不接真實廣告不代表廣告方案已上線。數字面積是參考值，不能聲稱醫療級或診斷功能。
@@ -40,7 +40,7 @@
 
 ## 11/10 已核對狀態
 
-- 初始盤點以 `3d76b38` 為基準；後續已授權同步至 `8bd06ce`，GitHub PR #37 保持 draft、未合併。後續多語修正已獲授權推送至 `0c75c4f`，CI 證據另行核對。11/11 歷史頁3fdc0f2已授權推送，8個run／12個job全部成功；量測頁是後續本機候選，尚未推送。
+- 初始盤點以 `3d76b38` 為基準；後續已授權同步至 `8bd06ce`，GitHub PR #37 保持 draft、未合併。後續多語修正已獲授權推送至 `0c75c4f`，CI 證據另行核對。11/11 歷史頁3fdc0f2已授權推送，8個run／12個job全部成功；量測頁與相機／圈選工具列是後續本機候選，尚未推送。
 - 11/10 metadata GET：只有 Lite research candidate 與兩個 review 服務；個人服務未存在。
 - 規劃 native-state／release-audit 桶、native／dispose 身分與 native KMS keyring 均未存在。
 - Apple login／iap Secret 各有第1版且均 DISABLED；只讀 metadata，未取金鑰內容。

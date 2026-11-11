@@ -806,6 +806,7 @@ struct LiteMeasureView: View {
                     // 「只拍傷口」不只是構圖建議，是去識別化的一環：協定層去得掉 EXIF 與
                     // 檔名身分，去不掉畫面裡的臉、證件與環境——那只能靠拍攝當下不要入鏡。
                     hintText: copy.text("請正對傷口、距離 25–40 公分，框變綠再拍。畫面只拍傷口部位，避免臉部或可辨識個人的物品入鏡。"),
+                    displayText: LiteCaptureControlsCopy(locale: locale).camera,
                     onCapture: { img, dep in
                         showCamera = false
                         selectLastWound()
@@ -828,6 +829,7 @@ struct LiteMeasureView: View {
                                   originalArea: nil, tissueFrac: [:], exudate: nil,
                                   mmPerPx: nil, resume: nil, wbGains: nil,
                                   boundaryOnly: true,
+                                  displayText: LiteCaptureControlsCopy(locale: locale).text,
                                   onCancel: { showTrace = false },
                                   onDone: { _, all, iou, _, _, _ in
                                       showTrace = false
