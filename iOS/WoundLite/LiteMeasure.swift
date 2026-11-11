@@ -661,6 +661,8 @@ func liteVerdict(_ e: DepthAreaResult) -> LiteVerdict {
 // MARK: - 量測頁
 
 struct LiteMeasureView: View {
+    @Environment(\.locale) private var locale
+    private var copy: LiteCaptureCopy { LiteCaptureCopy(locale: locale) }
     @ObservedObject var store: LiteStore
     var onSaved: (String) -> Void = { _ in }
     @StateObject private var vm: LiteMeasureVM
@@ -698,40 +700,40 @@ struct LiteMeasureView: View {
                         if vm.image != nil, vm.savedId == nil { confirmRetake = true }
                         else { showCamera = true }
                     } label: {
-                        Label(vm.captureButtonTitle, systemImage: "camera.fill")
+                        Label(copy.text(vm.captureButtonTitle), systemImage: "camera.fill")
                             .frame(maxWidth: .infinity).padding(.vertical, 10)
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(vm.busy)
                     .accessibilityIdentifier("lite.capture")
 
-                    Text("正對傷口、距離 25–40 公分，等中央對焦框變綠再拍。")
+                    Text(copy.text("正對傷口、距離 25–40 公分，等中央對焦框變綠再拍。"))
                         .font(.footnote).foregroundStyle(.secondary)
 
                     if let nativeSession {
-                        NavigationLink("個人服務登入") { LiteNativeSessionView(session: nativeSession) }
+                        NavigationLink(copy.text("個人服務登入")) { LiteNativeSessionView(session: nativeSession) }
                         if !vm.pendingCaptures.isEmpty {
-                            Menu("繼續尚未存入的拍攝（\(vm.pendingCaptures.count)）") {
+                            Menu(copy.format("繼續尚未存入的拍攝（%@）", String(vm.pendingCaptures.count))) {
                                 ForEach(vm.pendingCaptures) { item in
                                     Menu(item.createdAt.formatted(date: .numeric, time: .shortened)) {
-                                        Button("繼續圈選或辨識") { Task { await vm.restoreDraft(item.id, in: store) } }
-                                        Button("捨棄這次拍攝", role: .destructive) { discardCaptureID = item.id }
+                                        Button(copy.text("繼續圈選或辨識")) { Task { await vm.restoreDraft(item.id, in: store) } }
+                                        Button(copy.text("捨棄這次拍攝"), role: .destructive) { discardCaptureID = item.id }
                                     }
                                 }
                             }.disabled(vm.busy || store.needsReload)
                         }
                         if let notice = vm.draftNotice {
-                            Text(notice).font(.footnote).foregroundStyle(.orange)
-                            Button("重新核對本機拍攝") { Task { await vm.reloadDrafts(in: store) } }.disabled(vm.busy)
+                            Text(copy.message(notice)).font(.footnote).foregroundStyle(.orange)
+                            Button(copy.text("重新核對本機拍攝")) { Task { await vm.reloadDrafts(in: store) } }.disabled(vm.busy)
                         }
                     } else if !LiteNativeBuild.includesService, LitePrefs.researchConsent == true {
                         LiteResearchQuotaView()
                     }
                     if vm.busy {
-                        HStack(spacing: 8) { ProgressView(); Text(vm.busyHint).font(.footnote) }
+                        HStack(spacing: 8) { ProgressView(); Text(copy.message(vm.busyHint)).font(.footnote) }
                     }
                     if let n = vm.note {
-                        Text(n).font(.footnote)
+                        Text(copy.message(n)).font(.footnote)
                             .padding(10).frame(maxWidth: .infinity, alignment: .leading)
                             .background(Color.orange.opacity(0.15)).cornerRadius(8)
                     }
@@ -741,7 +743,7 @@ struct LiteMeasureView: View {
                                     imageW: vm.imageW, imageH: vm.imageH)
                         if vm.usesServiceDraft { nativeRecognition }
                         if vm.depth != nil {
-                            Button(vm.polys.isEmpty ? "圈選傷口" : "修正圈選") { showTrace = true }
+                            Button(copy.text(vm.polys.isEmpty ? "圈選傷口" : "修正圈選")) { showTrace = true }
                                 .buttonStyle(.bordered)
                                 .disabled(vm.busy || (vm.usesServiceDraft && vm.draft == nil))
                         }
@@ -749,7 +751,7 @@ struct LiteMeasureView: View {
 
                     if let e = vm.estimate {
                         if let notice = vm.contourOrigin.uncertaintyNotice {
-                            Text(notice).font(.footnote).foregroundStyle(.orange)
+                            Text(copy.message(notice)).font(.footnote).foregroundStyle(.orange)
                         }
                         LiteResultCard(e: e, verdict: liteVerdict(e))
                         saveRow(e: e)
@@ -758,27 +760,27 @@ struct LiteMeasureView: View {
                 .padding()
             }
             .disabled(checkingWound)
-            .navigationTitle("量測")
-            .alert("重新拍攝？", isPresented: $confirmRetake) {
-                Button("保留目前量測", role: .cancel) { }
-                Button("重新拍攝") { showCamera = true }
+            .navigationTitle(copy.text("量測"))
+            .alert(copy.text("重新拍攝？"), isPresented: $confirmRetake) {
+                Button(copy.text("保留目前量測"), role: .cancel) { }
+                Button(copy.text("重新拍攝")) { showCamera = true }
             } message: {
-                Text("目前量測尚未存入紀錄。拍下新照片後會取代這個畫面；已存入的紀錄不受影響。取消相機可回到目前量測。")
+                Text(copy.text("目前量測尚未存入紀錄。拍下新照片後會取代這個畫面；已存入的紀錄不受影響。取消相機可回到目前量測。"))
             }
             .onAppear { if vm.image == nil { selectLastWound() } }
             .task(id: nativeSession.map(ObjectIdentifier.init)) {
                 vm.attachNativeSession(nativeSession)
                 await vm.reloadDrafts(in: store)
             }
-            .confirmationDialog("捨棄尚未存入的拍攝？", isPresented: Binding(
+            .confirmationDialog(copy.text("捨棄尚未存入的拍攝？"), isPresented: Binding(
                 get: { discardCaptureID != nil }, set: { if !$0 { discardCaptureID = nil } }), titleVisibility: .visible) {
-                Button("捨棄草稿照片與深度", role: .destructive) {
+                Button(copy.text("捨棄草稿照片與深度"), role: .destructive) {
                     if let id = discardCaptureID { Task { await vm.discardDraft(id, in: store) } }
                     discardCaptureID = nil
                 }
-                Button("保留", role: .cancel) { discardCaptureID = nil }
+                Button(copy.text("保留"), role: .cancel) { discardCaptureID = nil }
             } message: {
-                Text("此操作無法復原，不退還已使用的辨識額度，也不會撤回已傳送的研究資料。服務回執仍保留供核對。")
+                Text(copy.text("此操作無法復原，不退還已使用的辨識額度，也不會撤回已傳送的研究資料。服務回執仍保留供核對。"))
             }
             .task(id: nativeSession != nil && scenePhase == .active) {
                 guard nativeSession != nil, scenePhase == .active else { return }
@@ -787,24 +789,23 @@ struct LiteMeasureView: View {
                     await vm.resumePendingRecognition()
                 }
             }
-            .alert("以辨識結果取代目前圈選？", isPresented: $confirmServiceReplacement) {
-                Button("保留目前圈選", role: .cancel) { }
-                Button("套用已保存的辨識結果") { Task { await vm.replaceWithNativeResult() } }
+            .alert(copy.text("以辨識結果取代目前圈選？"), isPresented: $confirmServiceReplacement) {
+                Button(copy.text("保留目前圈選"), role: .cancel) { }
+                Button(copy.text("套用已保存的辨識結果")) { Task { await vm.replaceWithNativeResult() } }
             } message: {
-                Text("這會取代這次拍攝尚未存入紀錄的圈選，不會重新辨識或使用額度。")
+                Text(copy.text("這會取代這次拍攝尚未存入紀錄的圈選，不會重新辨識或使用額度。"))
             }
-            .alert("確認傷口位置", isPresented: $showSaveConfirmation, presenting: saveTarget) { target in
-                Button("返回修改", role: .cancel) { saveTarget = nil }
-                Button("確認並存入") { saveConfirmed(target) }
+            .alert(copy.text("確認傷口位置"), isPresented: $showSaveConfirmation, presenting: saveTarget) { target in
+                Button(copy.text("返回修改"), role: .cancel) { saveTarget = nil }
+                Button(copy.text("確認並存入")) { saveConfirmed(target) }
             } message: { target in
-                Text(target.confirmationMessage)
+                Text(copy.confirmation(target))
             }
             .fullScreenCover(isPresented: $showCamera) {
                 CameraCaptureView(
                     // 「只拍傷口」不只是構圖建議，是去識別化的一環：協定層去得掉 EXIF 與
                     // 檔名身分，去不掉畫面裡的臉、證件與環境——那只能靠拍攝當下不要入鏡。
-                    hintText: "請正對傷口、距離 25–40 公分，框變綠再拍。畫面只拍傷口部位，"
-                        + "避免臉部或可辨識個人的物品入鏡。",
+                    hintText: copy.text("請正對傷口、距離 25–40 公分，框變綠再拍。畫面只拍傷口部位，避免臉部或可辨識個人的物品入鏡。"),
                     onCapture: { img, dep in
                         showCamera = false
                         selectLastWound()
@@ -840,25 +841,25 @@ struct LiteMeasureView: View {
     @ViewBuilder
     private var nativeRecognition: some View {
         if vm.draft == nil, vm.depth != nil {
-            Button("重試保存這次拍攝") { Task { await vm.retryDraftSave(); await vm.reloadDrafts(in: store) } }
+            Button(copy.text("重試保存這次拍攝")) { Task { await vm.retryDraftSave(); await vm.reloadDrafts(in: store) } }
                 .disabled(vm.busy)
         } else if vm.draft != nil {
-            Button("捨棄這次拍攝", role: .destructive) { discardCaptureID = vm.draft?.id }.disabled(vm.busy)
-            Text("個人雲端辨識會傳送這張照片並核對免費／訂閱額度；研究上傳另需同意。也可直接自行圈選。")
+            Button(copy.text("捨棄這次拍攝"), role: .destructive) { discardCaptureID = vm.draft?.id }.disabled(vm.busy)
+            Text(copy.text("個人雲端辨識會傳送這張照片並核對免費／訂閱額度；研究上傳另需同意。也可直接自行圈選。"))
                 .font(.footnote).foregroundStyle(.secondary)
             if vm.serviceUnreadable {
-                Text("辨識回執無法核對，暫停雲端處理；仍可保存本機圈選。")
+                Text(copy.text("辨識回執無法核對，暫停雲端處理；仍可保存本機圈選。"))
                     .font(.footnote).foregroundStyle(.orange)
             } else if vm.serviceResult?.note == "confirmed" {
                 if vm.hasManualContour || vm.polys.isEmpty {
-                    Button("套用已保存的辨識圈選") { confirmServiceReplacement = true }
+                    Button(copy.text("套用已保存的辨識圈選")) { confirmServiceReplacement = true }
                         .disabled(vm.busy)
                 }
             } else if vm.serviceResult?.canResubmit == true {
-                Button("預留已逾時：重新送出") { Task { await vm.recognizeNative(resubmit: true) } }
+                Button(copy.text("預留已逾時：重新送出")) { Task { await vm.recognizeNative(resubmit: true) } }
                     .disabled(vm.busy)
             } else if vm.serviceResult?.next != "none" {
-                Button(vm.serviceResult == nil ? "使用個人雲端辨識" : "續接這次辨識（不重建工作）") {
+                Button(copy.text(vm.serviceResult == nil ? "使用個人雲端辨識" : "續接這次辨識（不重建工作）")) {
                     Task { await vm.recognizeNative() }
                 }.buttonStyle(.borderedProminent).disabled(vm.busy)
                     .accessibilityIdentifier("lite.capture.personalRecognition")
@@ -882,15 +883,15 @@ struct LiteMeasureView: View {
                             saveNotice = nil
                         } label: {
                             if !addingNewWound && woundID == wound.id {
-                                Label(wound.trackingLabel, systemImage: "checkmark")
+                                Label(copy.history.trackingLabel(wound), systemImage: "checkmark")
                             } else {
-                                Text(wound.trackingLabel)
+                                Text(copy.history.trackingLabel(wound))
                             }
                         }
                     }
                 } label: {
                     HStack {
-                        Text(addingNewWound ? "選擇已紀錄傷口" : (selected?.name ?? "選擇已紀錄傷口"))
+                        Text(addingNewWound ? copy.text("選擇已紀錄傷口") : (selected?.name ?? copy.text("選擇已紀錄傷口")))
                             .multilineTextAlignment(.leading)
                         Image(systemName: "chevron.down")
                     }
@@ -899,13 +900,13 @@ struct LiteMeasureView: View {
                     .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
                 }
                 .disabled(availableGroups.isEmpty)
-                .accessibilityLabel("選擇已紀錄傷口")
+                .accessibilityLabel(copy.text("選擇已紀錄傷口"))
                 Button {
                     addingNewWound = true
                     woundSide = ""; woundSite = ""
                     saveNotice = nil
                 } label: {
-                    Text("新增紀錄傷口＋")
+                    Text(copy.text("新增紀錄傷口＋"))
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .padding(.horizontal, 10)
@@ -918,21 +919,21 @@ struct LiteMeasureView: View {
             .buttonStyle(.plain)
             .disabled(vm.savedId != nil || vm.busy)
             if !addingNewWound, let existingLocation = selected?.location {
-                Label(existingLocation.label, systemImage: "mappin.and.ellipse")
+                Label(copy.history.location(existingLocation), systemImage: "mappin.and.ellipse")
                     .font(.subheadline)
-                Text("沿用此傷口的位置，不需重填。")
+                Text(copy.text("沿用此傷口的位置，不需重填。"))
                     .font(.caption).foregroundStyle(.secondary)
             } else if addingNewWound || selected != nil {
                 LiteLocationFields(side: $woundSide, site: $woundSite)
                     .disabled(vm.savedId != nil || vm.busy)
-                Text(addingNewWound ? "側別與詳細部位皆為必填。" : "此傷口的位置尚未齊全；補填會套用到同組舊紀錄。")
+                Text(copy.text(addingNewWound ? "側別與詳細部位皆為必填。" : "此傷口的位置尚未齊全；補填會套用到同組舊紀錄。"))
                     .font(.caption).foregroundStyle(.secondary)
             } else {
-                Text("請選擇已紀錄傷口，或點右側「新增紀錄傷口＋」。")
+                Text(copy.text("請選擇已紀錄傷口，或點右側「新增紀錄傷口＋」。"))
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let nativeSession {
-                Button("核對帳戶正在追蹤的傷口") {
+                Button(copy.text("核對帳戶正在追蹤的傷口")) {
                     checkingWound = true
                     Task { @MainActor in
                         defer { checkingWound = false }
@@ -944,11 +945,11 @@ struct LiteMeasureView: View {
                     }
                 }
             }
-            Text("追蹤同一處傷口時，請選擇原有傷口；不同傷口的紀錄會分開顯示。")
+            Text(copy.text("追蹤同一處傷口時，請選擇原有傷口；不同傷口的紀錄會分開顯示。"))
                 .font(.caption).foregroundStyle(.secondary)
-            if let error = store.storageError { Text(error).font(.footnote).foregroundStyle(.orange) }
-            if let saveNotice { Text(saveNotice).font(.footnote).foregroundStyle(.orange) }
-            Button(vm.savedId == nil ? "存入紀錄" : "✓ 已存入紀錄") {
+            if let error = store.storageError { Text(copy.message(error)).font(.footnote).foregroundStyle(.orange) }
+            if let saveNotice { Text(roster?.summary == saveNotice ? copy.history.roster(roster) : copy.message(saveNotice)).font(.footnote).foregroundStyle(.orange) }
+            Button(copy.text(vm.savedId == nil ? "存入紀錄" : "✓ 已存入紀錄")) {
                 guard let target = currentSaveTarget else { return }
                 saveTarget = target
                 showSaveConfirmation = true
@@ -956,7 +957,7 @@ struct LiteMeasureView: View {
             .buttonStyle(.bordered)
             .disabled(vm.savedId != nil || vm.busy || target == nil || store.needsReload)
             if let message = vm.uploadMessage {
-                Text(message).font(.footnote).foregroundStyle(.secondary)
+                Text(copy.message(message)).font(.footnote).foregroundStyle(.secondary)
             }
         }
     }
@@ -1048,35 +1049,36 @@ struct LitePreview: View {
 // MARK: - 結果卡（表面積為主）
 
 struct LiteResultCard: View {
+    @Environment(\.locale) private var locale
+    private var copy: LiteCaptureCopy { LiteCaptureCopy(locale: locale) }
     let e: DepthAreaResult
     let verdict: LiteVerdict
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if verdict.usable {
-                Text(String(format: "LiDAR 表面積估算：%.2f cm²", e.surfaceAreaCm2))
+                Text(copy.format("LiDAR 表面積估算：%@ cm²", copy.history.decimal(e.surfaceAreaCm2)))
                     .font(.title3).bold()
-                Text("（LiDAR 輔助表面積估算，僅供個人紀錄參考）")
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(copy.text("（LiDAR 輔助表面積估算，僅供個人紀錄參考）"))
                     .font(.caption).foregroundStyle(.secondary)
                 LiteVolumeReferenceView(volume: e.volumeMl, depth: e.maxDepthMm)
-                Text(String(format: "相機方向投影估算 %.2f cm²・攝距 %.0f cm・深度覆蓋 %d%%",
-                            e.projectedAreaCm2, e.medianDistanceM * 100,
-                            Int(e.coverage * 100)))
+                Text(copy.projection(e))
                     .font(.caption2).foregroundStyle(.secondary)
-                Text("免貼紙深度估算；投影面積與表面積不同。深度覆蓋完整也不代表小凹凸已量準。")
+                Text(copy.text("免貼紙深度估算；投影面積與表面積不同。深度覆蓋完整也不代表小凹凸已量準。"))
                     .font(.caption).foregroundStyle(.secondary)
                 ForEach(verdict.warnings, id: \.self) { w in
-                    Text("⚠ " + w).font(.footnote).foregroundStyle(.orange)
+                    Text("⚠ " + copy.message(w)).font(.footnote).foregroundStyle(.orange)
                 }
             } else {
-                Text("這次拍攝品質不足，未計算面積").font(.headline)
+                Text(copy.text("這次拍攝品質不足，未計算面積")).font(.headline)
                 if let b = verdict.blocker {
-                    Text(b).font(.footnote).foregroundStyle(.orange)
+                    Text(copy.message(b)).font(.footnote).foregroundStyle(.orange)
                 }
             }
-            Text("健康參考工具，非醫療診斷。傷口惡化、發燒或大量滲液請就醫。")
+            Text(copy.text("健康參考工具，非醫療診斷。傷口惡化、發燒或大量滲液請就醫。"))
                 .font(.caption2).foregroundStyle(.secondary)
-            NavigationLink("精確度與限制") { LiteMeasurementInfoView() }
+            NavigationLink(copy.text("精確度與限制")) { LiteMeasurementInfoView() }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -171,6 +171,42 @@ final class NativeEntryUITests: XCTestCase {
     @MainActor func testEnglishWoundHistoryPhotosAndTrackingKeepOriginalNames() throws {
         try verifyHistory(language: "en")
     }
+    @MainActor func testEnglishCaptureAndAccuracyUseReadOnlyCopy() throws {
+        try verifyCaptureLanguage(language: "en")
+    }
+    @MainActor func testChineseCaptureAndAccuracyKeepExistingCopy() throws {
+        try verifyCaptureLanguage(language: "zh-Hant")
+    }
+    @MainActor private func verifyCaptureLanguage(language: String) throws {
+        continueAfterFailure = false
+        let en = language == "en", app = application(language: language)
+        app.launch()
+        let local = app.buttons[en ? "View existing records" : "查看既有紀錄"]
+        if local.waitForExistence(timeout: 4) { local.tap() }
+        let measure = app.tabBars.buttons[en ? "Measure" : "量測"]
+        XCTAssertTrue(measure.waitForExistence(timeout: 8)); measure.tap()
+        XCTAssertTrue(app.buttons["lite.capture"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons["lite.capture"].label, en ? "Photograph wound" : "拍攝傷口")
+        attach(app, language + "-capture-start")
+        let settings = app.tabBars.buttons[en ? "Settings" : "設定"]
+        XCTAssertTrue(settings.exists); settings.tap()
+        let info = app.buttons[en ? "Accuracy and limitations" : "精確度與限制"]
+        for _ in 0..<8 where !info.isHittable { app.swipeUp() }
+        XCTAssertTrue(info.isHittable); info.tap()
+        XCTAssertTrue(app.navigationBars[en ? "Accuracy and limitations" : "精確度與限制"].waitForExistence(timeout: 5))
+        let precision = en
+            ? "Two decimal places do not mean accuracy to 0.01 cm². Small changes may come from capture or outline differences rather than a change in the wound."
+            : "顯示到小數點後兩位，不代表精確到 0.01 cm²。小幅數值變化可能來自拍攝或圈選差異，不一定是傷口真的改變。"
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label == %@", precision)).firstMatch.exists)
+        attach(app, language + "-capture-accuracy")
+        let endText = en ? "This app provides a reference for personal records, not a medical diagnosis. Seek medical care if the wound worsens, you develop a fever, or drainage is heavy." : "本 App 提供個人紀錄參考，不提供醫療診斷。若傷口惡化、發燒或大量滲液，請尋求醫療協助。"
+        let end = app.staticTexts.matching(NSPredicate(format: "label == %@", endText)).firstMatch
+        for _ in 0..<10 where !end.isHittable { app.swipeUp() }
+        XCTAssertTrue(end.isHittable)
+        app.swipeUp() // Bring the final paragraph above the floating tab bar.
+        XCTAssertTrue(end.isHittable)
+        attach(app, language + "-capture-accuracy-limits")
+    }
     @MainActor private func verifyHistory(language: String) throws {
         continueAfterFailure = false
         let english = language == "en", app = application(language: language)
