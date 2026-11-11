@@ -33,6 +33,8 @@ struct LiteWoundLocation: Codable, Equatable {
 }
 
 struct LiteLocationFields: View {
+    @Environment(\.locale) private var locale
+    private var copy: LiteHistoryCopy { LiteHistoryCopy(locale: locale) }
     @Binding var side: String
     @Binding var site: String
 
@@ -43,7 +45,7 @@ struct LiteLocationFields: View {
                 VStack(alignment: .leading, spacing: 8) { sideButtons; siteMenu }
             }
             if !side.isEmpty, !site.isEmpty, !LiteWoundLocation(side: side, site: site).isComplete {
-                Text("這個部位請選左側或右側。")
+                Text(copy.text("這個部位請選左側或右側。"))
                     .font(.caption).foregroundStyle(.orange)
             }
         }
@@ -52,23 +54,23 @@ struct LiteLocationFields: View {
         HStack(spacing: 4) {
             ForEach(LiteWoundLocation.sides, id: \.0) { code, title in
                 Button { side = code } label: {
-                    Text(title).font(.caption).fixedSize()
+                    Text(copy.text(title)).font(.caption).fixedSize()
                         .padding(.horizontal, 8).frame(minHeight: 44)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(side == code ? Color.blue : Color.primary)
                 .background(RoundedRectangle(cornerRadius: 8).fill(side == code ? Color.blue.opacity(0.18) : Color.secondary.opacity(0.10)))
-                .accessibilityLabel("側別：\(title)")
+                .accessibilityLabel(copy.format("側別：%@", copy.text(title)))
                 .accessibilityAddTraits(side == code ? .isSelected : [])
             }
         }
     }
     private var siteMenu: some View {
-        Picker("詳細部位", selection: $site) {
-            Text("選擇詳細部位").tag("")
-            ForEach(LiteWoundLocation.sites, id: \.0) { code, title in Text(title).tag(code) }
+        Picker(copy.text("詳細部位"), selection: $site) {
+            Text(copy.text("選擇詳細部位")).tag("")
+            ForEach(LiteWoundLocation.sites, id: \.0) { code, title in Text(copy.text(title)).tag(code) }
         }
         .pickerStyle(.menu)
-        .accessibilityLabel("傷口詳細部位")
+        .accessibilityLabel(copy.text("傷口詳細部位"))
     }
 }

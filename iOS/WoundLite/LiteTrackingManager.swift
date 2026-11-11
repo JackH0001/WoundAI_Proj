@@ -2,6 +2,8 @@ import SwiftUI
 
 /// Only opaque group identifiers are shared across devices. Locations and timelines remain on this device.
 struct LiteTrackingManager: View {
+  @Environment(\.locale) private var locale
+  private var copy: LiteHistoryCopy { LiteHistoryCopy(locale: locale) }
   @ObservedObject var store: LiteStore
   let session: LiteNativeSession?
   @State private var roster: LiteWoundRoster?
@@ -26,45 +28,43 @@ struct LiteTrackingManager: View {
     NavigationStack {
       List {
         Section {
-          Text(
-            roster?.summary
-              ?? "免費可追蹤 1 處，Plus 每帳戶最多 5 處。")
-          Text("結束追蹤只會釋出名額，歷史紀錄與 PDF 仍可使用。其他裝置只會取得傷口識別碼，照片與位置保存在原裝置。")
+          Text(copy.roster(roster))
+          Text(copy.text("結束追蹤只會釋出名額，歷史紀錄與 PDF 仍可使用。其他裝置只會取得傷口識別碼，照片與位置保存在原裝置。"))
             .font(.footnote)
-          Button("重新核對名額") { Task { await load() } }.disabled(busy)
-          if let notice { Text(notice).font(.footnote).foregroundStyle(.secondary) }
+          Button(copy.text("重新核對名額")) { Task { await load() } }.disabled(busy)
+          if let notice { Text(copy.message(notice)).font(.footnote).foregroundStyle(.secondary) }
         }
         ForEach(groups) { group in
           VStack(alignment: .leading, spacing: 6) {
-            Text(group.trackingLabel)
+            Text(copy.trackingLabel(group))
             let isActive = tracking(group)
             if let roster, let wire = try? LiteWoundRoster.wireID(group.id), isActive,
               !roster.active.prefix(roster.limit).contains(wire)
             {
-              Text("訂閱到期後暫停續記，歷史時間軸保留。").font(.footnote)
+              Text(copy.text("訂閱到期後暫停續記，歷史時間軸保留。")).font(.footnote)
             }
-            Button(isActive ? "結束追蹤" : "重新追蹤") {
+            Button(copy.text(isActive ? "結束追蹤" : "重新追蹤")) {
               ending = isActive
               selection = group
             }.disabled(
               busy || !loaded || (group.account != nil && group.account != roster?.account_sha256))
           }
         }
-      }.navigationTitle("管理追蹤傷口")
-        .toolbar { Button("關閉") { dismiss() }.disabled(busy) }
+      }.navigationTitle(copy.text("管理追蹤傷口"))
+        .toolbar { Button(copy.text("關閉")) { dismiss() }.disabled(busy) }
         .interactiveDismissDisabled(busy)
         .task { await load() }
         .confirmationDialog(
-          ending ? "結束追蹤這處傷口？" : "使用名額追蹤這處傷口？",
+          copy.text(ending ? "結束追蹤這處傷口？" : "使用名額追蹤這處傷口？"),
           isPresented: Binding(
             get: { selection != nil }, set: { if !$0 { selection = nil } }),
           titleVisibility: .visible,
           presenting: selection
         ) { group in
-          Button(ending ? "確認結束追蹤" : "確認追蹤") { Task { await update(group, finish: ending) } }
-          Button("取消", role: .cancel) {}
+          Button(copy.text(ending ? "確認結束追蹤" : "確認追蹤")) { Task { await update(group, finish: ending) } }
+          Button(copy.text("取消"), role: .cancel) {}
         } message: { group in
-          Text(group.trackingLabel + "。原時間軸與照片會保留。")
+          Text(copy.format("%@。原時間軸與照片會保留。", copy.trackingLabel(group)))
         }
     }
   }

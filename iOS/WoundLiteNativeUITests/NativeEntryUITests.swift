@@ -166,32 +166,54 @@ final class NativeEntryUITests: XCTestCase {
     }
     #if LITE_QA_PHOTO_FIXTURE
     @MainActor func testLocalWoundPhotosOpenInTimeOrderAndReturnToTimeline() throws {
+        try verifyHistory(language: "zh-Hant")
+    }
+    @MainActor func testEnglishWoundHistoryPhotosAndTrackingKeepOriginalNames() throws {
+        try verifyHistory(language: "en")
+    }
+    @MainActor private func verifyHistory(language: String) throws {
         continueAfterFailure = false
-        let app = application()
+        let english = language == "en", app = application(language: language)
         app.launch()
-        let local = app.buttons["查看既有紀錄"]
-        let history = local.waitForExistence(timeout: 3) ? local : app.buttons["紀錄"].firstMatch
+        let local = app.buttons[english ? "View existing records" : "查看既有紀錄"]
+        let history = local.waitForExistence(timeout: 3) ? local : app.buttons[english ? "Records" : "紀錄"].firstMatch
         XCTAssertTrue(history.waitForExistence(timeout: 8))
         history.tap()
         let compare = app.buttons["lite.timeline.compare"]
         XCTAssertTrue(compare.waitForExistence(timeout: 5))
         compare.tap()
-        XCTAssertTrue(app.navigationBars["前後照片"].waitForExistence(timeout: 5))
-        let previous = app.images["前次照片"]
-        let latest = app.images["最近一次照片"]
+        XCTAssertTrue(app.navigationBars[english ? "Photo comparison" : "前後照片"].waitForExistence(timeout: 5))
+        let previous = app.images[english ? "Previous photo" : "前次照片"]
+        let latest = app.images[english ? "Latest photo" : "最近一次照片"]
         XCTAssertTrue(previous.waitForExistence(timeout: 8))
         XCTAssertTrue(latest.waitForExistence(timeout: 8))
-        XCTAssertTrue(app.staticTexts["合成紙上標靶・右・膝後"].exists)
+        XCTAssertTrue(app.staticTexts[english ? "合成紙上標靶, Right, Back of knee" : "合成紙上標靶・右・膝後"].exists)
         XCTAssertFalse(app.staticTexts["獨立對照"].exists)
         if app.frame.width >= 650 {
             XCTAssertLessThan(previous.frame.midX, latest.frame.midX)
         } else {
             XCTAssertLessThan(previous.frame.midY, latest.frame.midY)
         }
-        attach(app, "local-two-photo-comparison")
-        app.buttons["完成"].tap()
+        attach(app, language + "-local-two-photo-comparison")
+        app.buttons[english ? "Done" : "完成"].tap()
         XCTAssertTrue(compare.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["lite.timeline.export"].exists)
+        let row = app.buttons["lite.record.qa-photo-1"]
+        for _ in 0..<5 where !row.isHittable { app.swipeUp() }
+        XCTAssertTrue(row.isHittable); row.tap()
+        XCTAssertTrue(app.navigationBars[english ? "Measurement record" : "量測紀錄"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons[english ? "Reset view" : "重設檢視"].exists)
+        XCTAssertTrue(app.staticTexts[english ? "Current LiDAR surface area" : "本版 LiDAR 表面積"].exists)
+        XCTAssertTrue(app.staticTexts[english ? "Saved only on this device" : "僅存於此手機"].exists)
+        XCTAssertFalse(app.buttons["lite.revision.retry"].exists)
+        attach(app, language + "-local-record-detail")
+        app.buttons[english ? "Close" : "關閉"].tap()
+        let tracking = app.buttons[english ? "Manage tracking" : "管理追蹤"]
+        XCTAssertTrue(tracking.waitForExistence(timeout: 5)); tracking.tap()
+        XCTAssertTrue(app.navigationBars[english ? "Manage wound tracking" : "管理追蹤傷口"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts[english ? "Free accounts can track 1 wound at a time; Plus allows up to 5 per account." : "免費可追蹤 1 處，Plus 每帳戶最多 5 處。"].exists)
+        attach(app, language + "-local-tracking")
+        app.buttons[english ? "Close" : "關閉"].tap()
     }
     #endif
 

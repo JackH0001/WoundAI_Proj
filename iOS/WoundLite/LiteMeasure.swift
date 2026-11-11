@@ -1032,13 +1032,16 @@ struct LiteMeasureView: View {
 // MARK: - 影像＋輪廓預覽
 
 struct LitePreview: View {
+    @Environment(\.locale) private var locale
     let image: UIImage
     let polys: [[[Int]]]
     let imageW: Int
     let imageH: Int
 
     var body: some View {
-        WoundImagePreview(image: image, polygons: polys, imageW: imageW, imageH: imageH, height: 280)
+        let copy = LiteHistoryCopy(locale: locale)
+        WoundImagePreview(image: image, polygons: polys, imageW: imageW, imageH: imageH, height: 280,
+                          gestureHint: copy.text("雙指縮放與移動，檢查圈選邊界。"), resetTitle: copy.text("重設檢視"))
     }
 }
 
