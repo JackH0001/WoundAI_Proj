@@ -89,12 +89,20 @@ final class NativeEntryUITests: XCTestCase {
     }
     #endif
     @MainActor func testUnmatchedHelpKeepsOfflineTopicsAndDoesNotRetainTheQuestion() throws {
+        try verifyUnmatchedHelp(language: "zh-Hant")
+    }
+
+    @MainActor func testEnglishUnmatchedHelpKeepsOfflineTopicsAndDoesNotRetainTheQuestion() throws {
+        try verifyUnmatchedHelp(language: "en")
+    }
+
+    @MainActor private func verifyUnmatchedHelp(language: String) throws {
         continueAfterFailure = false
-        let app = application()
+        let english = language == "en", app = application(language: language)
         func openGuide() {
             app.launch()
-            let gate = app.buttons["設定與資料撤回"]
-            let settings = gate.waitForExistence(timeout: 3) ? gate : app.buttons["設定"].firstMatch
+            let gate = app.buttons[english ? "Settings and data withdrawal" : "設定與資料撤回"]
+            let settings = gate.waitForExistence(timeout: 3) ? gate : app.buttons[english ? "Settings" : "設定"].firstMatch
             XCTAssertTrue(settings.waitForExistence(timeout: 8))
             settings.tap()
             let guide = app.buttons["lite.help.open"]
@@ -106,20 +114,46 @@ final class NativeEntryUITests: XCTestCase {
         XCTAssertTrue(query.waitForExistence(timeout: 5))
         query.tap()
         query.typeText("zxqv help acceptance")
-        XCTAssertTrue(app.staticTexts["沒有相符的關鍵字，可從下方挑選主題。"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts[english ? "No matching keywords. Choose a topic below." : "沒有相符的關鍵字，可從下方挑選主題。"].waitForExistence(timeout: 5))
         let report = app.buttons["lite.help.topic.report"]
         for _ in 0..<6 where !report.isHittable { app.swipeUp() }
         XCTAssertTrue(report.isHittable)
         report.tap()
-        XCTAssertTrue(app.staticTexts["紀錄 → 選一處傷口 → 匯出此傷口時間軸 PDF"].waitForExistence(timeout: 5))
-        attach(app, "unmatched-help-offline-report")
+        XCTAssertTrue(app.staticTexts[english ? "Records → Select a wound → Export this wound timeline as PDF" : "紀錄 → 選一處傷口 → 匯出此傷口時間軸 PDF"].waitForExistence(timeout: 5))
+        attach(app, language + "-unmatched-help-offline-report")
         app.terminate()
         openGuide()
         XCTAssertTrue(query.waitForExistence(timeout: 5))
         let value = query.value as? String ?? ""
         XCTAssertFalse(value.contains("zxqv"), "An operation question must not become saved app history")
-        attach(app, "help-query-not-retained-after-relaunch")
+        attach(app, language + "-help-query-not-retained-after-relaunch")
     }
+
+    #if !LITE_QA_ORDINARY && !LITE_QA_MISSING_BINDING
+    @MainActor func testEnglishGuideSeparatesResearchRestoreAndAccountDeletionWithoutTakingActions() throws {
+        continueAfterFailure = false
+        let app = application(language: "en")
+        for (query, id, expected) in [("research", "research", "Records on your phone are retained"),
+                                      ("restore purchases", "subscription", "Signing in does not charge"),
+                                      ("cancel renewal", "billing", "cancel renewal"),
+                                      ("close account", "deletion", "requests withdrawal")] {
+            app.launch()
+            let gate = app.buttons["Settings and data withdrawal"]
+            let settings = gate.waitForExistence(timeout: 3) ? gate : app.buttons["Settings"].firstMatch
+            XCTAssertTrue(settings.waitForExistence(timeout: 8)); settings.tap()
+            let guide = app.buttons["lite.help.open"]; XCTAssertTrue(guide.waitForExistence(timeout: 5)); guide.tap()
+            let field = app.textFields["lite.help.question"]; XCTAssertTrue(field.waitForExistence(timeout: 5))
+            XCTAssertFalse((field.value as? String ?? "").contains("close account"))
+            field.tap(); field.typeText(query)
+            let topic = app.buttons["lite.help.topic." + id]; XCTAssertTrue(topic.waitForExistence(timeout: 5)); topic.tap()
+            let steps = app.staticTexts["lite.help.steps"]; XCTAssertTrue(steps.waitForExistence(timeout: 5))
+            XCTAssertTrue(steps.label.contains(expected))
+            XCTAssertFalse(app.buttons["lite.offer.buy"].exists)
+            attach(app, "en-guide-" + id)
+            app.terminate()
+        }
+    }
+    #endif
 
     @MainActor func testOperationGuideFindsReportWithoutAccountOrResearchRegistration() throws {
         continueAfterFailure = false

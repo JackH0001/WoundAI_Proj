@@ -52,9 +52,11 @@ final class LiteOperationGuideTests: XCTestCase {
     }
 
     func testEmptyAndOversizeInputsDoNotStartAModelSession() async {
-        for query in ["", "   ", String(repeating: "測", count: 181)] {
-            let result = await LiteHelpLookup.suggest(query, topics: LiteHelpTopic.topics(personal: true))
-            XCTAssertEqual(result, .noMatch)
+        for locale in [Locale(identifier: "en_US"), Locale(identifier: "zh_Hant_TW")] {
+            for query in ["", "   ", String(repeating: "測", count: 181)] {
+                let result = await LiteHelpLookup.suggest(query, topics: LiteHelpTopic.topics(personal: true, locale: locale), locale: locale)
+                XCTAssertEqual(result, .noMatch)
+            }
         }
     }
 }
