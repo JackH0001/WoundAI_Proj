@@ -139,6 +139,10 @@ jobs:
         run: |
           python -m unittest -v test_lite_key_lifecycle_dispatch > evidence/key-lifecycle-dispatch-tests.log 2>&1
           python tools/lite_key_lifecycle_dispatch_probe.py --output evidence/key-lifecycle-dispatch-probe.json
+      - name: Selected-source retirement admission and recovery copies (synthetic only)
+        run: |
+          python -m unittest -v test_lite_shared_key_retirement > evidence/shared-key-retirement-tests.log 2>&1
+          python tools/lite_shared_key_retirement_probe.py --output evidence/shared-key-retirement-probe.json
       - name: Exact service history generations and interrupted audit recovery (synthetic only)
         run: |
           python -m unittest -v test_lite_service_history > evidence/service-history-tests.log 2>&1

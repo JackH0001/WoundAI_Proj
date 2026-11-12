@@ -230,6 +230,7 @@ class SharedKeyInventory:
         require(crc32c(raw)==expected,'pinned generation checksum differs')
         classified=self._classify(raw,item['name'])
         return dict(classified,object_name_sha256=hashlib.sha256(item['name'].encode()).hexdigest(),
+            object_slot=item['name'].rsplit('/',1)[1][:-5],
             generation=item['generation'],payload_sha256=hashlib.sha256(raw).hexdigest(),
             noncurrent=bool(item.get('timeDeleted')),held=bool(item.get('temporaryHold') or item.get('eventBasedHold') or item.get('retention')))
 
@@ -251,6 +252,7 @@ class SharedKeyInventory:
                 require(before==after,'bucket policy changed')
                 require(active==after_active and soft==after_soft,'object inventory changed; repeat after real drain')
                 report.update(stable_listing=True,policy_sha256=digest(before),active_snapshot_sha256=digest(active),
+                    retention_guarded=bool(before.get('retentionPolicy') or before.get('defaultEventBasedHold')),
                     soft_count=None if soft is None else len(soft),soft_snapshot_sha256=None if soft is None else digest(soft))
                 report['material_inventory_complete']=soft==[]
                 report['status']='scoped_material_observed' if soft==[] else 'soft_payloads_unreadable' if soft else 'soft_inventory_unknown'
