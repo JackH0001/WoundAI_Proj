@@ -303,7 +303,7 @@ final class LiteWithdrawalModel: ObservableObject {
             message = "已確認重新加入。僅新的拍攝可研究上傳；先前撤回、舊待傳版本與手機紀錄保留，不會自動重傳。"
             return true
         } catch {
-            message = (error as? LiteWithdrawalFailure)?.localizedDescription ?? LiteWithdrawalFailure.renewalUnconfirmed.localizedDescription
+            message = LiteReconsentFailure.explanation(error)
             return false
         }
     }

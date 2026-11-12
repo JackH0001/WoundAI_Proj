@@ -122,6 +122,11 @@ struct LiteSettingsView: View {
     @StateObject private var withdrawal = LiteWithdrawalModel.shared
     @State private var confirmWithdrawal = false
     @State private var reviewRenewedConsent = false
+    @State private var confirmedRenewalChoice = false
+    @State private var submittingRenewal = false
+    @State private var showRenewalResult = false
+    @State private var renewalSucceeded = false
+    @State private var renewalResult: String?
     @State private var checkingConnection = false
     @State private var connectionMessage: String?
     @State private var mayRepairRegistration = false
@@ -143,13 +148,16 @@ struct LiteSettingsView: View {
         do {
             guard let origin = URL(string: server) else { throw LiteAttestFailure.invalidConfiguration }
             let client = try await LiteAttestClients.shared.client(origin: origin, audience: "woundlite-research-v1")
+            let usingSavedRegistration = try await client.existingInstallation() != nil
             if repair {
                 _ = try await client.recoverUnregisteredIdentity(allowRecovery: {
                     try await Self.recoveryAllowed(server: server)
                 })
             }
             _ = try await client.registeredInstallation()
-            connectionMessage = "裝置登記已確認。本次沒有傳送照片；影像與深度仍須逐筆取得雲端保存確認。"
+            connectionMessage = usingSavedRegistration && !repair
+                ? "已讀到這次安裝保存的裝置登記；本次未重新測試雲端功能，也沒有傳送照片。研究同意與每筆上傳仍須各自確認。"
+                : "裝置登記已確認。本次沒有傳送照片；影像與深度仍須逐筆取得雲端保存確認。"
         } catch {
             if error as? LiteAttestFailure == .registrationRejected {
                 mayRepairRegistration = (try? Self.recoveryAllowed(server: server)) == true
@@ -160,6 +168,35 @@ struct LiteSettingsView: View {
                 connectionMessage = (error as? LiteAttestFailure)?.captureFailureMessage
                     ?? "雲端登記尚未確認，已保留原身分與紀錄。請稍後再核對，不用重拍。"
             }
+        }
+    }
+
+    // Begin only after the disclosure sheet has dismissed, so its presentation
+    // cannot hide the completion alert. Swiping away/declining sends nothing.
+    @MainActor private func submitConfirmedRenewal() {
+        guard confirmedRenewalChoice, !submittingRenewal else { return }
+        confirmedRenewalChoice = false
+        submittingRenewal = true
+        renewalResult = nil
+        let server = AppSettings.backendURL()
+        Task {
+            defer { submittingRenewal = false }
+            let restored: Bool
+            if withdrawal.mayReviewCompletedRenewal {
+                restored = await withdrawal.reconsentCompletedWithdrawal(server: server)
+            } else {
+                restored = await withdrawal.reconsentUnsentWithdrawal(server: server,
+                    consentVersion: LitePrefs.consentVersion, hasBoundRecords: {
+                        let store = LiteStore()
+                        guard store.storageError == nil, !store.needsReload,
+                              AppSettings.backendURL() == server else { throw LiteWithdrawalFailure.invalidState }
+                        return try LiteWithdrawalModel.hasBoundRecords(store.records, server: server)
+                    })
+            }
+            if restored { LitePrefs.researchConsent = true }
+            renewalSucceeded = restored
+            renewalResult = withdrawal.message ?? LiteWithdrawalFailure.renewalUnconfirmed.localizedDescription
+            showRenewalResult = true
         }
     }
 
@@ -237,6 +274,8 @@ struct LiteSettingsView: View {
                     }
                 }
                 Section(copy.text("雲端連線核對")) {
+                    Text(copy.text("裝置登記用於核對這次安裝的防偽身分，協助上傳與撤回對應同一安裝。它不是研究同意、訂閱或深度校正；已有登記時可能只讀取手機保存的身分，不代表所有雲端功能目前可用。"))
+                        .font(.footnote).foregroundStyle(.secondary)
                     #if DEBUG
                     Text(copy.text("此為本機開發簽章版，目前雲端只接受 TestFlight 或 App Store 版本。可使用本機量測與保存；雲端驗收須改用符合簽章要求的版本。"))
                         .font(.footnote)
@@ -289,14 +328,23 @@ struct LiteSettingsView: View {
                     Text(copy.text("歷史版本、備份、既有研究標註及已訓練模型的處理尚未完成驗證，不能保證全部刪除。撤回後本安裝維持離線，不會自動建立新身分或恢復研究上傳。"))
                         .font(.footnote).foregroundStyle(.secondary)
                     if withdrawal.mayReviewUnsentCancellation {
-                        Button(copy.text("閱讀說明並重新同意研究上傳")) { reviewRenewedConsent = true }
-                            .disabled(withdrawal.busy)
+                        Button(copy.text("閱讀說明並重新同意研究上傳")) { confirmedRenewalChoice = false; reviewRenewedConsent = true }
+                            .disabled(withdrawal.busy || submittingRenewal)
                     }
                     if withdrawal.mayReviewCompletedRenewal {
-                        Button(copy.text("閱讀說明並重新加入研究")) { reviewRenewedConsent = true }
-                            .disabled(withdrawal.busy)
+                        Button(copy.text("閱讀說明並重新加入研究")) { confirmedRenewalChoice = false; reviewRenewedConsent = true }
+                            .accessibilityIdentifier("lite.research.rejoin")
+                            .disabled(withdrawal.busy || submittingRenewal)
                         Text(copy.text("重新加入只適用於之後的新拍攝，不會恢復已清除資料或補送舊紀錄。"))
                             .font(.footnote).foregroundStyle(.secondary)
+                    }
+                    if submittingRenewal {
+                        ProgressView(copy.text("正在核對重新加入；取得確認前，研究上傳保持關閉。"))
+                            .accessibilityIdentifier("lite.research.rejoin.progress")
+                    }
+                    if let renewalResult {
+                        Text(copy.text(renewalResult)).font(.footnote).textSelection(.enabled)
+                            .accessibilityIdentifier("lite.research.rejoin.result")
                     }
                     Button(copy.text(withdrawal.busy ? "處理中…" : (withdrawal.record == nil || withdrawal.cancelledBeforeSubmission || withdrawal.renewed ? "撤回研究並要求清除雲端媒體" : "重試／查核撤回")), role: .destructive) {
                         if withdrawal.record == nil || withdrawal.cancelledBeforeSubmission || withdrawal.renewed { confirmWithdrawal = true }
@@ -323,32 +371,17 @@ struct LiteSettingsView: View {
                     if agreed && !withdrawal.busy { LitePrefs.researchConsent = true }
                 }
             }
-            .sheet(isPresented: $reviewRenewedConsent) {
+            .sheet(isPresented: $reviewRenewedConsent, onDismiss: submitConfirmedRenewal) {
                 LiteConsentView(onChoose: { choice in
+                    confirmedRenewalChoice = choice
                     reviewRenewedConsent = false
-                    guard choice else { return }
-                    let server = AppSettings.backendURL()
-                    Task {
-                        let restored: Bool
-                        if withdrawal.mayReviewCompletedRenewal {
-                            restored = await withdrawal.reconsentCompletedWithdrawal(server: server)
-                        } else {
-                        restored = await withdrawal.reconsentUnsentWithdrawal(server: server,
-                            consentVersion: LitePrefs.consentVersion, hasBoundRecords: {
-                                // Reload on both sides of the asynchronous identity check.
-                                // An unreadable index must never be treated as an empty one.
-                                let store = LiteStore()
-                                guard store.storageError == nil, !store.needsReload,
-                                      AppSettings.backendURL() == server else { throw LiteWithdrawalFailure.invalidState }
-                                return try LiteWithdrawalModel.hasBoundRecords(store.records, server: server)
-                            })
-                        }
-                        if restored {
-                            LitePrefs.researchConsent = true
-                        }
-                    }
                 }, renewingUnsentWithdrawal: withdrawal.mayReviewUnsentCancellation,
                     renewingCompletedWithdrawal: withdrawal.mayReviewCompletedRenewal)
+            }
+            .alert(copy.text(renewalSucceeded ? "已確認重新加入研究" : "重新加入尚未完成"), isPresented: $showRenewalResult) {
+                Button(copy.text("確定"), role: .cancel) { }
+            } message: {
+                Text(copy.text(renewalResult ?? LiteWithdrawalFailure.renewalUnconfirmed.localizedDescription))
             }
         }
     }

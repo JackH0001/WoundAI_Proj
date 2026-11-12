@@ -1,6 +1,45 @@
 import Foundation
 import CryptoKit
 
+/// Rejoining is a separate privacy action, not device registration or media upload.
+/// Keep the durable intent intact on every failure; only a matching receipt can
+/// activate the new epoch. HTTP errors must not look like a successful toggle.
+enum LiteReconsentFailure: LocalizedError, Equatable {
+    case endpointUnavailable, authorizationRejected, connectionUnavailable, identityUnavailable, capacityUnavailable
+    var errorDescription: String? {
+        switch self {
+        case .endpointUnavailable:
+            return "目前研究服務無法提供重新加入功能。研究上傳仍關閉；需待服務修復後再核對。原撤回紀錄與這次同意要求已保留，不必重拍或重新登記裝置。"
+        case .authorizationRejected:
+            return "研究服務未接受這次重新加入的驗證。研究上傳仍關閉，原身分與同意要求保留。請聯絡支援核對 App 版本與服務設定，不要刪除 App 或重建身分。"
+        case .connectionUnavailable:
+            return "連線中斷，尚未取得重新加入確認。研究上傳仍關閉，這次要求已保留；網路恢復後可核對同一次要求，不必重拍。"
+        case .identityUnavailable:
+            return "找不到先前撤回使用的安裝身分，無法核對重新加入。原紀錄保留，研究上傳仍關閉；請聯絡支援，不要重新登記裝置。"
+        case .capacityUnavailable:
+            return "研究服務暫忙，尚未確認重新加入。研究上傳仍關閉，這次要求已保留；請稍後核對，不必重拍或重新登記裝置。"
+        }
+    }
+
+    static func explanation(_ error: Error) -> String {
+        if let failure = error as? Self { return failure.localizedDescription }
+        if error is ResearchCapacityWait { return Self.capacityUnavailable.localizedDescription }
+        if error is URLError { return Self.connectionUnavailable.localizedDescription }
+        if let failure = error as? LiteAttestFailure {
+            switch failure {
+            case .http(401), .http(403), .registrationRejected:
+                return Self.authorizationRejected.localizedDescription
+            default: break
+            }
+        }
+        if let failure = error as? LiteWithdrawalFailure {
+            if case .noIdentity = failure { return Self.identityUnavailable.localizedDescription }
+            return failure.localizedDescription
+        }
+        return LiteWithdrawalFailure.renewalUnconfirmed.localizedDescription
+    }
+}
+
 /// Pin participation when the camera result arrives, before asynchronous image
 /// processing. Renewed consent cannot reclassify an already-processing capture.
 struct LiteCaptureResearchScope: Codable, Equatable, Sendable {
@@ -132,6 +171,20 @@ extension LiteWithdrawalJournal {
 }
 
 extension LiteSignedCloudTransport {
+    static func rejoinReceipt(_ bytes: Data, response: HTTPURLResponse,
+                              intent: LiteReconsentIntent) throws -> LiteReconsentReceipt {
+        try ResearchCapacityWait.check(response, data: bytes)
+        switch response.statusCode {
+        case 404, 405: throw LiteReconsentFailure.endpointUnavailable
+        case 401, 403: throw LiteReconsentFailure.authorizationRejected
+        default: break
+        }
+        guard response.statusCode == 200,
+              let receipt = try? JSONDecoder().decode(LiteReconsentReceipt.self, from: bytes),
+              receipt.validates(intent.request) else { throw LiteWithdrawalFailure.renewalUnconfirmed }
+        return receipt
+    }
+
     func rejoin(_ intent: LiteReconsentIntent) async throws -> LiteReconsentReceipt {
         let client = try await resolve()
         guard try await client.existingInstallation() == intent.request.anon_id else { throw LiteWithdrawalFailure.noIdentity }
@@ -143,10 +196,6 @@ extension LiteSignedCloudTransport {
         // Caller persists an intentional renewal before invoking this method.
         let (bytes, response) = try await client.send(request, installation: intent.request.anon_id,
             requestID: UUID(), allowSending: { true })
-        try ResearchCapacityWait.check(response, data: bytes)
-        guard response.statusCode == 200,
-              let receipt = try? JSONDecoder().decode(LiteReconsentReceipt.self, from: bytes),
-              receipt.validates(intent.request) else { throw LiteWithdrawalFailure.renewalUnconfirmed }
-        return receipt
+        return try Self.rejoinReceipt(bytes, response: response, intent: intent)
     }
 }

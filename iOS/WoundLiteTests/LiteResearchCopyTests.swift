@@ -122,4 +122,17 @@ import XCTest
         XCTAssertEqual(en.text("取消"), "Cancel")
         XCTAssertEqual(LiteResearchCopy(locale: Locale(identifier: "fr_FR")).text("研究上傳"), "研究上傳")
     }
+
+    func testRejoinFailureTranslationsKeepUploadsOffAndIdentityIntact() {
+        for failure in [LiteReconsentFailure.endpointUnavailable, .authorizationRejected, .connectionUnavailable,
+                        .identityUnavailable, .capacityUnavailable] {
+            let source = failure.localizedDescription
+            XCTAssertNotEqual(en.text(source), source)
+            XCTAssertTrue(en.text(source).contains("stay off"))
+            XCTAssertEqual(zh.text(source), source)
+        }
+        let saved = en.text("已讀到這次安裝保存的裝置登記；本次未重新測試雲端功能，也沒有傳送照片。研究同意與每筆上傳仍須各自確認。")
+        XCTAssertTrue(saved.contains("saved registration")); XCTAssertTrue(saved.contains("not retested"))
+        XCTAssertTrue(saved.contains("no photos"))
+    }
 }
