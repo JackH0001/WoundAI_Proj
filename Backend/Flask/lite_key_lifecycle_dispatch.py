@@ -24,10 +24,12 @@ class LifecycleRejected(ValueError):pass
 
 
 class PinnedKeyLifecycle:
-    """Exact version only, no retries, redirects, enable/import/create or crypto.
+    """Exact version only, one session call, no enable/import/create or crypto.
 
     KMS offers no generation condition on these requests. A matching pre-read
     is not an atomic precondition. Dedicated IAM + independent drain are required.
+    An injected session is trusted and may replay internally. Real operations
+    must use with_access_token(), which owns the no-replay HTTP transport.
     """
     def __init__(self,*,session,version,protected_version):
         pattern=r'projects/[a-z0-9-]+/locations/[a-z0-9-]+/keyRings/[A-Za-z0-9_-]+/cryptoKeys/[A-Za-z0-9_-]+/cryptoKeyVersions/[1-9][0-9]{0,9}'
@@ -38,6 +40,19 @@ class PinnedKeyLifecycle:
                 or int(version.rsplit('/',1)[1])>=int(protected_version.rsplit('/',1)[1])):
             raise ValueError('one older version and a protected later version required')
         self.session,self.version,self.protected=session,version,protected_version
+
+    @classmethod
+    def with_access_token(cls,*,version,protected_version,access_token,expires_at,clock=time.time):
+        from lite_key_lifecycle_transport import SingleAttemptKMSTransport
+        transport=SingleAttemptKMSTransport(version=version,access_token=access_token,expires_at=expires_at,clock=clock)
+        try:return cls(session=transport,version=version,protected_version=protected_version)
+        except Exception:
+            transport.close()
+            raise
+
+    def close(self):
+        close=getattr(self.session,'close',None)
+        if close is not None:close()
 
     def _call(self,method,*,action='',body=None):
         response=None

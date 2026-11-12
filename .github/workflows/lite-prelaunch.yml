@@ -143,6 +143,10 @@ jobs:
         run: |
           python -m unittest -v test_lite_shared_key_retirement > evidence/shared-key-retirement-tests.log 2>&1
           python tools/lite_shared_key_retirement_probe.py --output evidence/shared-key-retirement-probe.json
+      - name: Single-attempt lifecycle HTTP and lost-response recovery (loopback only)
+        run: |
+          python -m unittest -v test_lite_key_lifecycle_transport > evidence/key-lifecycle-http-tests.log 2>&1
+          python tools/lite_key_lifecycle_transport_probe.py --output evidence/key-lifecycle-http-probe.json
       - name: Exact service history generations and interrupted audit recovery (synthetic only)
         run: |
           python -m unittest -v test_lite_service_history > evidence/service-history-tests.log 2>&1
