@@ -8,6 +8,7 @@ on:
       - 'Backend/LiteKeyWorker/**'
       - 'Backend/LiteDisposition/**'
       - 'Backend/LiteBootstrap/**'
+      - 'Backend/LiteRetirement/**'
       - 'engineering/phase2/test_lite*.py'
       - 'engineering/phase2/requirements-commerce-test.txt'
       - 'tools/*lite*.py'
@@ -15,6 +16,31 @@ on:
 permissions:
   contents: read
 jobs:
+  retirement-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Stage and build private retirement runner without credentials
+        run: |
+          python3 tools/stage_lite_retirement_candidate.py --repo . --output /tmp/lite-retirement-context
+          chmod -R u=rwX,go= /tmp/lite-retirement-context
+          docker build --tag lite-retirement-ci /tmp/lite-retirement-context
+      - name: Refuse unconfigured execution without network
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges lite-retirement-ci --help
+          set +e
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges lite-retirement-ci > /tmp/lite-retirement-boot.log 2>&1
+          result=$?
+          set -e
+          test "$result" = 2
+          python3 - <<'PY'
+          from pathlib import Path
+          text=Path('/tmp/lite-retirement-boot.log').read_text()
+          assert 'required' in text and 'Traceback' not in text
+          PY
   bootstrap-image:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -147,6 +173,10 @@ jobs:
         run: |
           python -m unittest -v test_lite_key_lifecycle_transport > evidence/key-lifecycle-http-tests.log 2>&1
           python tools/lite_key_lifecycle_transport_probe.py --output evidence/key-lifecycle-http-probe.json
+      - name: Pinned private retirement runner and sealed package (synthetic only)
+        run: |
+          python -m unittest -v test_lite_shared_retirement_runner test_lite_retirement_package > evidence/shared-retirement-runner-tests.log 2>&1
+          python tools/lite_shared_retirement_runner_probe.py --output evidence/shared-retirement-runner-probe.json
       - name: Exact service history generations and interrupted audit recovery (synthetic only)
         run: |
           python -m unittest -v test_lite_service_history > evidence/service-history-tests.log 2>&1

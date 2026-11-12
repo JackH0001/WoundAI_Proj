@@ -13,7 +13,7 @@ from lite_attest_state import StateUnavailable
 
 
 class SingleAttemptKMSTransport:
-    def __init__(self,*,version,access_token,expires_at,clock=time.time):
+    def __init__(self,*,version,access_token,expires_at,clock=time.time,allocation=None):
         pattern=r'projects/[a-z0-9-]+/locations/[a-z0-9-]+/keyRings/[A-Za-z0-9_-]+/cryptoKeys/[A-Za-z0-9_-]+/cryptoKeyVersions/[1-9][0-9]{0,9}'
         if (type(version) is not str or not re.fullmatch(pattern,version)
                 or type(access_token) is not str or not re.fullmatch(r'[A-Za-z0-9._~+/=-]{16,8192}',access_token)
@@ -25,6 +25,10 @@ class SingleAttemptKMSTransport:
         self._session=requests.Session();self._session.trust_env=False
         self._session.adapters.clear()
         self._session.mount('https://',HTTPAdapter(max_retries=Retry(total=0,connect=0,read=0,redirect=0,status=0,other=0)))
+        self._metered=None
+        if allocation is not None:
+            from lite_provider_transport import BudgetedSession
+            self._metered=BudgetedSession(self._session,allocation,provider='kms',response_limit=32768)
         self._closed=False
 
     def _check(self):
@@ -54,9 +58,10 @@ class SingleAttemptKMSTransport:
         try:
             # Plain requests.Session: there is no credential refresh recursion.
             # TLS verification remains enabled; an unsuccessful response is final.
-            return self._session.request(method,url,params=params,json=json,timeout=(5,10),
-                allow_redirects=False,stream=True,verify=True,
+            kw=dict(params=params,json=json,timeout=(5,10),allow_redirects=False,stream=True,
                 headers={'Authorization':'Bearer '+self._token,'Accept':'application/json'})
+            if self._metered is not None:return self._metered.request(method,url,**kw)
+            return self._session.request(method,url,verify=True,**kw)
         except Exception:
             raise StateUnavailable('lifecycle HTTP outcome unavailable; do not repeat mutation') from None
 

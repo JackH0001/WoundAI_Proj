@@ -42,9 +42,10 @@ class PinnedKeyLifecycle:
         self.session,self.version,self.protected=session,version,protected_version
 
     @classmethod
-    def with_access_token(cls,*,version,protected_version,access_token,expires_at,clock=time.time):
+    def with_access_token(cls,*,version,protected_version,access_token,expires_at,clock=time.time,allocation=None):
         from lite_key_lifecycle_transport import SingleAttemptKMSTransport
-        transport=SingleAttemptKMSTransport(version=version,access_token=access_token,expires_at=expires_at,clock=clock)
+        transport=SingleAttemptKMSTransport(version=version,access_token=access_token,expires_at=expires_at,
+            clock=clock,allocation=allocation)
         try:return cls(session=transport,version=version,protected_version=protected_version)
         except Exception:
             transport.close()
