@@ -127,7 +127,9 @@ jobs:
           PY
   offline-acceptance:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 089fbb1 reached the final disposition checks at the old 15-minute limit.
+    # Keep every test/cleanup step; allow bounded headroom for hosted-runner variance.
+    timeout-minutes: 25
     env:
       PYTHONDONTWRITEBYTECODE: '1'
       PYTHONPATH: tools:engineering/phase2:Backend/Flask:.
