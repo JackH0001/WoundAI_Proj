@@ -31,6 +31,7 @@ class WireFixture:
         self.h = None
         self.events = []
         self.completed = []
+        self.revoke_before_service = False
         self.server = make_server('127.0.0.1', 0, self, request_handler=QuietHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
@@ -61,6 +62,7 @@ class WireFixture:
             self.privacy = rows(self.h.h.privacy.store)
             self.image_hash = hashlib.sha256(self.h.f.jpeg).hexdigest()
             self.events = []
+            self.revoke_before_service = False
             return dict(owner=self.h.owner, now=self.h.h.clock(),
                         jpeg=base64.b64encode(self.h.f.jpeg).decode())
         if not self.h: raise ValueError('reset required')
@@ -86,6 +88,9 @@ class WireFixture:
         if kind == 'restart':
             h.backend = h.h.compose(); h.app = h.backend.create_app(); h.client = h.app.test_client()
             return dict(restarted=True)
+        if kind == 'revoke-before-service':
+            self.revoke_before_service = True
+            return dict(armed=True)
         if kind == 'snapshot': return self.snapshot()
         if kind == 'finish':
             result = self.snapshot(); result['name'] = body['name']; self.completed.append(result)
@@ -111,6 +116,10 @@ class WireFixture:
         if not self.h or not request.path.startswith('/api/v1/lite/'):
             return Response(status=404)(env, start_response)
         path = request.path
+        if self.revoke_before_service and path == '/api/v1/lite/service/prepare':
+            self.revoke_before_service = False
+            session = self.h.backend.identity.status(self.h.owner)
+            self.h.backend.identity.logout(self.h.owner, session['operation'])
         purpose = 'withdraw' if '/account/deletion/' in path else 'assert'
         headers = self.h.headers(path, raw, request.content_type, purpose=purpose)
         for k, v in headers.items(): env['HTTP_' + k.upper().replace('-', '_')] = v

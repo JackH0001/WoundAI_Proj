@@ -5,11 +5,30 @@ import AuthenticationServices
 
 /// One explicit Sandbox composition. Ordinary startup does not construct this.
 /// Account/revocation requests remain usable when ordinary service is fenced.
+struct LiteSandboxPermit: Equatable, Sendable {
+    let generation: Int
+    let session: LiteAccountSession
+}
+
 @MainActor final class LiteSandboxAccess {
     weak var identity: LiteAccountIdentityStore?
-    func permits(_ ordinary: Bool) async -> Bool {
-        if !ordinary { return true }
-        return await identity?.canUseService() ?? false
+    func authorize(owner: String, ordinary: Bool) async throws -> LiteSandboxPermit? {
+        if !ordinary { return nil }
+        guard let identity else { throw LiteAccountFailure.unavailable }
+        let generation = identity.generation
+        // Fresh remote admission (and renewal if needed) for EACH request.
+        guard await identity.canUseService(),
+              let session = await identity.dispatchSession(for: owner),
+              identity.generation == generation else { throw LiteAccountFailure.conflict }
+        return LiteSandboxPermit(generation: generation, session: session)
+    }
+    func matches(_ permit: LiteSandboxPermit, owner: String) async -> Bool {
+        guard let identity, identity.generation == permit.generation else { return false }
+        // This response belongs to the same locally active session, not merely
+        // any session that happens to be signed in now. No second status HTTP
+        // call: the backend separately authorizes the protected request itself.
+        let current = await identity.dispatchSession(for: owner)
+        return current == permit.session && identity.generation == permit.generation
     }
 }
 
@@ -17,7 +36,8 @@ private struct LiteSandboxScopeTransport: LiteAuthenticatedTransport {
     let origin: URL
     let base: any LiteAuthenticatedTransport
     let paths: Set<String>
-    let permits: @Sendable () async -> Bool
+    let access: LiteSandboxAccess
+    let ordinary: Bool
     func installation() async throws -> String {
         // Reading the already registered installation never enrolls or renews.
         // Admission is checked around HTTP, not repeatedly for local identity reads.
@@ -26,9 +46,13 @@ private struct LiteSandboxScopeTransport: LiteAuthenticatedTransport {
     func send(_ request: URLRequest, installation owner: String) async throws -> (Data, HTTPURLResponse) {
         guard let url = request.url, request.httpMethod == "POST", paths.contains(url.path),
               url == origin.appendingPathComponent(String(url.path.dropFirst())),
-              try await installation() == owner, await permits() else { throw LiteAccountFailure.conflict }
+              try await installation() == owner else { throw LiteAccountFailure.conflict }
+        let permit = try await access.authorize(owner: owner, ordinary: ordinary)
         let reply = try await base.send(request, installation: owner)
-        guard reply.1.url == url, try await installation() == owner, await permits() else { throw LiteAccountFailure.conflict }
+        guard reply.1.url == url, try await installation() == owner else { throw LiteAccountFailure.conflict }
+        if ordinary {
+            guard let permit, await access.matches(permit, owner: owner) else { throw LiteAccountFailure.conflict }
+        }
         return reply
     }
 }
@@ -128,7 +152,7 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
         func scoped(_ prefix: String, _ actions: [String], ordinary: Bool) -> LiteSandboxScopeTransport {
             LiteSandboxScopeTransport(origin: origin, base: transport,
                 paths: Set(actions.map { "/api/v1/lite/" + prefix + "/" + $0 }),
-                permits: { await access.permits(ordinary) })
+                access: access, ordinary: ordinary)
         }
         func storage(_ purpose: String) -> LiteSandboxJournal {
             LiteSandboxJournal(base: journal, scope: origin.absoluteString + "\0" + purpose)
@@ -172,7 +196,7 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
             if Bundle.main.object(forInfoDictionaryKey: "LiteResearchCaptureEnabled") as? String == "YES" {
                 let native = LiteSandboxScopeTransport(origin: client.origin,
                     base: LiteSandboxSignedTransport(client: client, access: access),
-                    paths: ["/api/v1/lite/service/research-source"], permits: { await access.permits(true) })
+                    paths: ["/api/v1/lite/service/research-source"], access: access, ordinary: true)
                 session.researchDelivery = LiteResearchCaptureDelivery(source: native,
                     currentAccount: { [identity = session.identity] in try await identity.savedResearchContext() },
                     researchOwner: { server in

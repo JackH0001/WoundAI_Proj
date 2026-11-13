@@ -138,6 +138,7 @@ private actor NativeWire: LiteAuthenticatedTransport {
         XCTAssertEqual(final.model_calls, 3); XCTAssertEqual(final.used, 3); XCTAssertEqual(final.attempts, 3)
         XCTAssertEqual(final.routes.filter { $0.path.hasSuffix("purchase/confirm") }.count,
                        beforeWrongAccount.routes.filter { $0.path.hasSuffix("purchase/confirm") }.count)
+        XCTAssertEqual(final.routes.filter { $0.path.hasSuffix("account/status") }.count, 25)
         XCTAssertTrue(final.research_unchanged); XCTAssertTrue(final.image_unchanged)
     }
 
@@ -164,6 +165,27 @@ private actor NativeWire: LiteAuthenticatedTransport {
         XCTAssertEqual(final.routes.filter { $0.path.hasSuffix("service/run") }.count, 1)
         XCTAssertEqual(final.routes.filter { $0.path.hasSuffix("service/status") }.count, 1)
         XCTAssertEqual(final.routes.filter { $0.path.hasSuffix("account/renew") && $0.status == 200 }.count, 1)
+        // The lost run response never reached the old post-response check, so
+        // this scenario eliminates three status calls (nine -> six), not four.
+        XCTAssertEqual(final.routes.filter { $0.path.hasSuffix("account/status") }.count, 6)
+        XCTAssertTrue(final.research_unchanged); XCTAssertTrue(final.image_unchanged)
+    }
+
+    func testServerRevocationAfterPreflightRejectsRunWithoutDebit() async throws {
+        let cfg = try config()
+        let seed = try JSONDecoder().decode(WireSeed.self, from: await NativeWire.control(cfg, "reset"))
+        let image = try XCTUnwrap(Data(base64Encoded: seed.jpeg))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let wire = NativeWire(cfg, owner: seed.owner), apple = WireApple(cfg), kit = WireStoreKit(cfg)
+        let r = try session(wire, apple, kit, directory, seed.now)
+        await r.identity.signIn()
+        _ = try await NativeWire.control(cfg, "revoke-before-service")
+        let result = try await r.recognizeSaved(recordID: "00000000-0000-0000-0000-000000000001", jpeg: image)
+        XCTAssertEqual(result.note, "unavailable")
+        let final = try await finish(cfg, "revoked-after-preflight")
+        XCTAssertEqual(final.model_calls, 0); XCTAssertEqual(final.used, 0); XCTAssertEqual(final.attempts, 0)
+        XCTAssertEqual(final.routes.filter { $0.path.hasSuffix("service/prepare") && $0.status == 401 }.count, 1)
+        XCTAssertEqual(final.routes.filter { $0.path.hasSuffix("service/run") }.count, 0)
         XCTAssertTrue(final.research_unchanged); XCTAssertTrue(final.image_unchanged)
     }
 }

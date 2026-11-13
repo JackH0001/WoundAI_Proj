@@ -61,6 +61,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
     var owner = "synthetic-native-service", registrations = 0
     var paths = [String](), session: [String: Any]?, ended = false, closed = false
     var production = false, lostConfirmation = false, lostRun = false
+    var statusUnavailable = false, woundResponseCode = 200
     var afterContext: (@Sendable () async -> Void)?
     var activeWounds = [String](), woundRevision = 0
     var afterWoundSnapshot: (@Sendable () async -> Void)?
@@ -80,6 +81,8 @@ private actor SessionWire: LiteAuthenticatedTransport {
     func onContext(_ closure: @escaping @Sendable () async -> Void) { afterContext = closure }
     func onWoundRead(_ closure: @escaping @Sendable () async -> Void) { afterWoundSnapshot = closure }
     func changeOwner() { owner = "other-installation" }
+    func failStatus() { statusUnavailable = true }
+    func rejectWoundResponse() { woundResponseCode = 401 }
     func send(_ request: URLRequest, installation: String) async throws -> (Data, HTTPURLResponse) {
         XCTAssertEqual(installation, owner)
         let path = request.url!.path.replacingOccurrences(of: "/api/v1/lite/", with: "")
@@ -98,10 +101,11 @@ private actor SessionWire: LiteAuthenticatedTransport {
                 "account_sha256": sessionHash, "app_account_token": sessionToken, "expires_at": sessionTime + 900]
             result = session!
         case "account/status":
-            guard !ended, !closed, let current = session else { throw LiteAccountFailure.unavailable }
+            guard !ended, !closed, !statusUnavailable, let current = session else { throw LiteAccountFailure.unavailable }
             result = current
         case "account/logout": ended = true; result = ["v": 1, "state": "signed_out", "installation": owner, "operation": operation]
         case "service/wounds":
+            code = woundResponseCode
             XCTAssertEqual(body["account_sha256"] as? String, sessionHash)
             let action = body["action"] as? String
             var decision: String?
@@ -168,6 +172,87 @@ private actor SessionWire: LiteAuthenticatedTransport {
         XCTAssertEqual(before, ["registration": 0]); XCTAssertTrue(rows.isEmpty); XCTAssertEqual(kit.buys, 0)
         XCTAssertNil(LiteRootView(lidarAvailable: false).nativeSession)
         XCTAssertTrue(LiteRootView(lidarAvailable: false, nativeSession: r).nativeSession === r)
+    }
+
+    private func scopedWoundRequest(_ session: LiteNativeSession) async throws -> (Data, HTTPURLResponse) {
+        var request = URLRequest(url: origin.appendingPathComponent("api/v1/lite/service/wounds"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["anon_id":"synthetic-native-service",
+            "account_sha256":sessionHash, "action":"status"])
+        return try await session.woundTransport.send(request, installation: "synthetic-native-service")
+    }
+
+    func testEachProtectedRequestChecksRemoteStatusOnceWithoutCachingAcrossRequests() async throws {
+        let wire = try SessionWire(), session = try runtime(wire, SessionJournal())
+        await session.identity.signIn()
+        _ = try await scopedWoundRequest(session)
+        let first = await wire.counts()
+        XCTAssertEqual(first["account/status"], 1)
+        _ = try await scopedWoundRequest(session)
+        let second = await wire.counts()
+        XCTAssertEqual(second["account/status"], 2)
+        XCTAssertEqual(second["service/wounds"], 2)
+    }
+
+    func testUnavailablePreflightStillStopsProtectedRequestBeforeDispatch() async throws {
+        let wire = try SessionWire(), session = try runtime(wire, SessionJournal())
+        await session.identity.signIn(); await wire.failStatus()
+        do { _ = try await scopedWoundRequest(session); XCTFail("unverified session sent request") } catch { }
+        let counts = await wire.counts(); XCTAssertNil(counts["service/wounds"])
+    }
+
+    func testReplyCannotCrossLogoutAndReloginEvenToSameAccount() async throws {
+        let wire = try SessionWire(), session = try runtime(wire, SessionJournal())
+        await session.identity.signIn()
+        await wire.onWoundRead { await session.identity.signOut(); await session.identity.signIn() }
+        do { _ = try await scopedWoundRequest(session); XCTFail("old response crossed new login") } catch { }
+        // The rejection fences only the old request, not the valid new session.
+        _ = try await scopedWoundRequest(session)
+        let counts = await wire.counts(); XCTAssertEqual(counts["service/wounds"], 2)
+    }
+
+    func testDeletionDuringReplyKeepsIntentAndRejectsOldResponse() async throws {
+        let wire = try SessionWire(), journal = SessionJournal(), session = try runtime(wire, journal)
+        await session.identity.signIn()
+        let deletion = session.deletion(pauseResearch: {})
+        await wire.onWoundRead { await deletion.requestConfirmed() }
+        do { _ = try await scopedWoundRequest(session); XCTFail("deleted session accepted old response") } catch { }
+        XCTAssertNotNil(deletion.record?.receipt)
+        let old = await journal.snapshot()
+        do { _ = try await scopedWoundRequest(session); XCTFail("deletion intent reopened service") } catch { }
+        let after = await journal.snapshot(); XCTAssertEqual(old, after)
+        let counts = await wire.counts(); XCTAssertEqual(counts["service/wounds"], 1)
+    }
+
+    func testRevokedAppleCredentialStillRejectsResponse() async throws {
+        let wire = try SessionWire(), apple = SessionApple(), session = try runtime(wire, SessionJournal(), apple: apple)
+        await session.identity.signIn()
+        await wire.onWoundRead { await MainActor.run { apple.allowed = false } }
+        do { _ = try await scopedWoundRequest(session); XCTFail("revoked Apple credential accepted reply") } catch { }
+    }
+
+    func testChangedInstallationStillRejectsResponse() async throws {
+        let wire = try SessionWire(), session = try runtime(wire, SessionJournal())
+        await session.identity.signIn(); await wire.onWoundRead { await wire.changeOwner() }
+        do { _ = try await scopedWoundRequest(session); XCTFail("other installation accepted reply") } catch { }
+    }
+
+    func testBackendRejectionRemainsRejectionAfterSuccessfulPreflight() async throws {
+        let wire = try SessionWire(), session = try runtime(wire, SessionJournal())
+        await session.identity.signIn(); await wire.rejectWoundResponse()
+        let reply = try await scopedWoundRequest(session)
+        XCTAssertEqual(reply.1.statusCode, 401)
+        let counts = await wire.counts(); XCTAssertEqual(counts["account/status"], 1)
+    }
+
+    func testStatusOutageAfterReplyDoesNotDiscardReplyButNextRequestRechecks() async throws {
+        let wire = try SessionWire(), session = try runtime(wire, SessionJournal())
+        await session.identity.signIn(); await wire.onWoundRead { await wire.failStatus() }
+        let first = try await scopedWoundRequest(session); XCTAssertEqual(first.1.statusCode, 200)
+        do { _ = try await scopedWoundRequest(session); XCTFail("new request skipped remote check") } catch { }
+        let counts = await wire.counts()
+        XCTAssertEqual(counts["account/status"], 2); XCTAssertEqual(counts["service/wounds"], 1)
     }
 
     #if WOUND_LITE_NATIVE_SANDBOX

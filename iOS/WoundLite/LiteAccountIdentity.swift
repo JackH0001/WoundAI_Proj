@@ -14,7 +14,7 @@ struct LiteAccountChallenge: Codable, Equatable {
     }
 }
 
-struct LiteAccountSession: Codable, Equatable {
+struct LiteAccountSession: Codable, Equatable, Sendable {
     let v: Int, state: String, installation: String, operation: String, account_sha256: String, app_account_token: String
     let expires_at: Int
     var renewal_generation:Int?=nil,renewed_at:Int?=nil,family_expires_at:Int?=nil
