@@ -32,6 +32,8 @@ private struct WireSnapshot: Decodable {
     let registered_installations: Int
     let research_unchanged, image_unchanged: Bool
     struct Route: Decodable { let path: String, status: Int; let revision: Int? }
+    struct SubscriptionQuery: Decodable { let phase, original_sha256, transaction_sha256: String; let status: Int; let renewal_present: Bool }
+    let subscription_queries: [SubscriptionQuery]
     let routes: [Route]
 }
 private struct DeletionReadback: Decodable, Equatable {
@@ -571,6 +573,82 @@ private struct PrivacyReadback: Decodable, Equatable {
         XCTAssertEqual(final.routes.filter {$0.path.hasSuffix("annotation/revision")}.compactMap(\.revision),[1,1,2])
         XCTAssertTrue(final.research_unchanged); XCTAssertTrue(final.image_unchanged)
     }
+    func testRenewalGraceExpiryAndProviderOutageKeepUsageAndSavedResult() async throws {
+        let cfg = try config()
+        let seed = try JSONDecoder().decode(WireSeed.self, from: await NativeWire.control(cfg,"reset"))
+        let image = try XCTUnwrap(Data(base64Encoded:seed.jpeg))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let wire = NativeWire(cfg,owner:seed.owner), apple = WireApple(cfg), kit = WireStoreKit(cfg)
+        let clock = WireClock(seed.now)
+        let r = try session(wire,apple,kit,directory,seed.now,clock:{clock.date()})
+        await r.identity.signIn()
+        func id(_ n:Int)->String { String(format:"20000000-0000-0000-0000-%012x",n) }
+        func phase(_ name:String) async throws {
+            _ = try await NativeWire.control(cfg,"advance",JSONEncoder().encode(["seconds":31]))
+            clock.advance(31)
+            _ = try await NativeWire.control(cfg,"subscription-phase",JSONEncoder().encode(["phase":name]))
+        }
+        func snapshot() async throws -> WireSnapshot {
+            try JSONDecoder().decode(WireSnapshot.self,from:await NativeWire.control(cfg,"snapshot"))
+        }
+        for n in 1...2 {
+            let result = try await r.recognizeSaved(recordID:id(n),jpeg:image)
+            XCTAssertEqual(result.note,"confirmed",result.message)
+        }
+        await r.purchases.loadOffer(); await r.purchases.purchase(accepting:kit.quote)
+        let third = try await r.recognizeSaved(recordID:id(3),jpeg:image)
+        XCTAssertEqual(third.note,"confirmed",third.message)
+        let original = try await r.service.stored(third.captureID)
+        try await phase("renewed")
+        let renewed = try await r.personalBalance()
+        XCTAssertEqual(renewed.limit,10); XCTAssertEqual(renewed.used,3); XCTAssertEqual(renewed.remaining,7)
+        try await phase("grace")
+        let grace = try await r.personalBalance()
+        XCTAssertEqual(grace.limit,10); XCTAssertEqual(grace.used,3)
+        await wire.loseRunResponse()
+        let lost = try await r.recognizeSaved(recordID:id(4),jpeg:image)
+        XCTAssertEqual(lost.note,"unavailable"); XCTAssertEqual(lost.next,"status")
+        try await phase("unavailable")
+        let beforeRead = try await snapshot()
+        let recoveredResult = try await r.recognizeSaved(recordID:id(4),jpeg:image)
+        XCTAssertEqual(recoveredResult.note,"confirmed",recoveredResult.message)
+        XCTAssertEqual(recoveredResult.operation,lost.operation)
+        let afterRead = try await snapshot()
+        XCTAssertEqual(afterRead.subscription_queries.count,beforeRead.subscription_queries.count)
+        XCTAssertEqual(afterRead.model_calls,4); XCTAssertEqual(afterRead.used,4)
+        XCTAssertEqual(afterRead.routes.filter{$0.path.hasSuffix("service/status")}.count,
+                       beforeRead.routes.filter{$0.path.hasSuffix("service/status")}.count+1)
+        do { _ = try await r.personalBalance(); XCTFail("provider outage became a free balance") }
+        catch LiteAccountFailure.unavailable { }
+        try await phase("missing-grace")
+        do { _ = try await r.personalBalance(); XCTFail("missing renewal proof became a free balance") }
+        catch LiteAccountFailure.unavailable { }
+        try await phase("expired")
+        let expired = try await r.personalBalance()
+        XCTAssertEqual(expired.limit,2); XCTAssertEqual(expired.used,4); XCTAssertEqual(expired.remaining,0)
+        let denied = try await r.recognizeSaved(recordID:id(5),jpeg:image)
+        XCTAssertEqual(denied.note,"quota")
+        try await phase("recovered")
+        _ = try await NativeWire.control(cfg,"restart")
+        await r.purchases.restore(); await r.purchases.restore()
+        let restored = try await r.personalBalance()
+        XCTAssertEqual(restored.limit,10); XCTAssertEqual(restored.used,4); XCTAssertEqual(restored.remaining,6)
+        let fifth = try await r.recognizeSaved(recordID:id(6),jpeg:image)
+        XCTAssertEqual(fifth.note,"confirmed",fifth.message)
+        let finalBalance = try await r.personalBalance()
+        XCTAssertEqual(finalBalance.used,5); XCTAssertEqual(finalBalance.remaining,5)
+        let preserved = try await r.service.stored(third.captureID)
+        XCTAssertEqual(preserved,original)
+        let final = try await finish(cfg,"subscription-renewal-grace-expiry")
+        XCTAssertEqual(final.model_calls,5); XCTAssertEqual(final.used,5); XCTAssertEqual(final.attempts,5)
+        XCTAssertEqual(kit.buys,1); XCTAssertEqual(kit.restores,2); XCTAssertEqual(apple.signIns,1)
+        XCTAssertEqual(Set(final.subscription_queries.map(\.original_sha256)).count,1)
+        XCTAssertEqual(Set(final.subscription_queries.map(\.transaction_sha256)).count,3)
+        XCTAssertTrue(final.subscription_queries.contains{$0.phase=="grace" && $0.status==4 && $0.renewal_present})
+        XCTAssertTrue(final.subscription_queries.contains{$0.phase=="missing-grace" && !$0.renewal_present})
+        XCTAssertTrue(final.research_unchanged); XCTAssertTrue(final.image_unchanged)
+    }
+
     func testRealHTTPFreePlusRestoreAndWrongAccountDoNotMixQuota() async throws {
         let cfg = try config()
         let seed = try JSONDecoder().decode(WireSeed.self, from: await NativeWire.control(cfg, "reset"))

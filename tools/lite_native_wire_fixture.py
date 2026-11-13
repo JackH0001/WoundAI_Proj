@@ -51,6 +51,9 @@ class WireFixture:
         self.research_checks = []
         self.privacy_checks = []
         self.deletion_checks = []
+        self.subscription_queries = []
+        self.subscription_phase = 'active'
+        self.subscription_renewal = None
         self.events = []
         self.completed = []
         self.clients = {}
@@ -138,7 +141,43 @@ class WireFixture:
                     research_readbacks=list(self.research_checks),
                     privacy_readbacks=list(self.privacy_checks),
                     deletion_readbacks=list(self.deletion_checks),
+                    subscription_queries=list(self.subscription_queries),
                     routes=list(self.events))
+
+    def subscription_response(self, original):
+        """Synthetic Apple transport only; normal JWS verification is unchanged."""
+        a = self.h.h.release.n.a
+        self.subscription_queries.append(dict(phase=self.subscription_phase, status=a.status,
+            now=a.now, transaction_sha256=hashlib.sha256(a.payload['transactionId'].encode()).hexdigest(),
+            original_sha256=hashlib.sha256(original.encode()).hexdigest(),
+            renewal_present=self.subscription_renewal is not None))
+        if self.subscription_phase == 'unavailable': raise TimeoutError('synthetic Apple timeout')
+        result = a.fetch(original)
+        if self.subscription_renewal is not None:
+            result.data[0].lastTransactions[0].signedRenewalInfo = a.sign(self.subscription_renewal)
+        return result
+
+    def subscription_change(self, phase):
+        allowed = {'renewed', 'grace', 'missing-grace', 'expired', 'recovered', 'unavailable'}
+        if type(phase) is not str or phase not in allowed:
+            raise ValueError('fixed synthetic subscription phase required')
+        a = self.h.h.release.n.a
+        self.subscription_phase = phase
+        self.subscription_renewal = None
+        if phase in {'renewed', 'recovered'}:
+            a.status = 1
+            a.payload.update(transactionId='100000000003' if phase == 'renewed' else '100000000004',
+                purchaseDate=(a.now-100)*1000, signedDate=a.now*1000, expiresDate=(a.now+900)*1000)
+        elif phase in {'grace', 'missing-grace', 'expired'}:
+            a.status = 2 if phase == 'expired' else 4
+            a.payload.update(expiresDate=(a.now-10)*1000, signedDate=a.now*1000)
+            if phase == 'grace':
+                self.subscription_renewal = dict(originalTransactionId=a.payload['originalTransactionId'],
+                    productId=a.payload['productId'], environment=a.payload['environment'],
+                    appAccountToken=a.payload['appAccountToken'], gracePeriodExpiresDate=(a.now+90)*1000,
+                    signedDate=a.now*1000, isInBillingRetryPeriod=True, autoRenewStatus=1,
+                    autoRenewProductId=a.payload['productId'])
+        return dict(phase=phase, status=a.status, now=a.now)
 
     def deletion_readback(self, operation):
         if type(operation) is not str or re.fullmatch('[0-9a-f]{32}', operation) is None:
@@ -199,6 +238,10 @@ class WireFixture:
             self.research_checks = []
             self.privacy_checks = []
             self.deletion_checks = []
+            self.subscription_queries = []
+            self.subscription_phase = 'active'
+            self.subscription_renewal = None
+            self.h.h.release.n.a.client.get_all_subscription_statuses = self.subscription_response
             self.clients = {self.h.owner:self.h}
             self.revoke_before_service = False
             return dict(owner=self.h.owner, now=self.h.h.clock(),
@@ -241,6 +284,9 @@ class WireFixture:
             self.revoke_before_service = True
             return dict(armed=True)
         if kind == 'snapshot': return self.snapshot()
+        if kind == 'subscription-phase':
+            if set(body) != {'phase'}: raise ValueError('exact synthetic phase only')
+            return self.subscription_change(body['phase'])
         if kind == 'deletion-readback': return self.deletion_readback(body.get('operation'))
         if kind == 'deletion-worker':
             # Test-only, one grant at a time. The production HTTP perimeter has

@@ -102,3 +102,9 @@ tests. It covers lost intake acknowledgement, reopening both client and backend,
 both installations losing ordinary service access, and explicit bounded fake
 Apple revocation. See `lite_deletion_wire_acceptance_20261113.md`. It does not
 claim that all account data or linked research backups have been erased.
+
+The subscription lifecycle extension requires eight native tests and fourteen
+fixture tests. It connects renewal, signed billing grace, provider outage,
+confirmed expiry and repeated restoration to native balance/result readback.
+See `lite_subscription_lifecycle_wire_20261113.md`; real Apple Sandbox remains
+a separate acceptance gate.

@@ -23,6 +23,35 @@ class NativeWireFixtureTests(unittest.TestCase):
         self.assertEqual(self.post('/fixture/reset', token=False).status_code, 403)
         self.assertIsNone(self.fixture.h)
 
+    def test_subscription_phase_is_bounded_and_cannot_replace_account_or_signed_payload(self):
+        self.post('/fixture/reset'); h=self.fixture.h; h.login()
+        original=dict(h.h.release.n.a.payload)
+        for value in ({'phase':'unknown'},{'phase':True},{'phase':'grace','token':'other'}):
+            self.assertEqual(self.post('/fixture/subscription-phase',json.dumps(value).encode()).status_code,500)
+            self.assertEqual(h.h.release.n.a.payload,original)
+        for phase,status in [('renewed',1),('grace',4),('missing-grace',4),('expired',2),('recovered',1)]:
+            response=self.post('/fixture/subscription-phase',json.dumps({'phase':phase}).encode())
+            self.assertEqual(response.status_code,200,response.json)
+            self.assertEqual(response.json['status'],status)
+            for key in ('originalTransactionId','appAccountToken','productId','environment'):
+                self.assertEqual(h.h.release.n.a.payload[key],original[key])
+
+    def test_grace_response_uses_verified_signed_renewal_and_outage_keeps_state(self):
+        self.post('/fixture/reset'); h=self.fixture.h; h.login()
+        self.post('/fixture/subscription-phase',b'{"phase":"grace"}')
+        a=h.h.release.n.a
+        response=self.fixture.subscription_response(a.payload['originalTransactionId'])
+        signed=response.data[0].lastTransactions[0].signedRenewalInfo
+        renewal=a.verifier.verify_and_decode_renewal_info(signed)
+        self.assertEqual(renewal.appAccountToken,a.payload['appAccountToken'])
+        self.assertEqual(renewal.originalTransactionId,a.payload['originalTransactionId'])
+        before=h.h.snapshot()
+        self.post('/fixture/subscription-phase',b'{"phase":"unavailable"}')
+        with self.assertRaises(TimeoutError):self.fixture.subscription_response(a.payload['originalTransactionId'])
+        self.assertEqual(before,h.h.snapshot())
+        report=self.post('/fixture/snapshot').get_data(as_text=True)
+        self.assertNotIn(signed,report);self.assertNotIn(a.payload['appAccountToken'],report)
+
     def test_bad_method_or_oversized_payload_rejected_before_state(self):
         self.assertEqual(self.client.get('/fixture/reset', headers={'X-Synthetic-Wire':self.fixture.token},
                          environ_overrides={'REMOTE_ADDR':'127.0.0.1'}).status_code, 400)
