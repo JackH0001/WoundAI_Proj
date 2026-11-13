@@ -42,5 +42,29 @@ class NativeWireFixtureTests(unittest.TestCase):
         self.assertEqual(invalid.status_code, 500)
         self.assertEqual(self.fixture.h.h.clock(), old)
 
+    def test_two_registered_keys_resolve_same_human_without_patched_accounts(self):
+        self.post('/fixture/reset')
+        h = self.fixture.h; h.login()
+        peer_seed = self.post('/fixture/second-installation')
+        self.assertEqual(peer_seed.status_code, 200, peer_seed.json)
+        peer = self.fixture.clients[peer_seed.json['owner']]; peer.login()
+        self.assertNotEqual(peer.key, h.key); self.assertNotEqual(peer.owner, h.owner)
+        self.assertEqual(peer.login_result['account_sha256'], h.login_result['account_sha256'])
+        self.assertEqual(peer.login_result['app_account_token'], h.login_result['app_account_token'])
+        account = h.login_result['account_sha256']
+        first = h.post('service/wounds', account_sha256=account, action='open', wound_id='a'*32, revision=0)
+        seen = peer.post('service/wounds', account_sha256=account, action='status')
+        self.assertEqual(seen.json['active'], first.json['active'])
+        self.assertEqual(self.post('/fixture/second-installation').status_code, 500)
+        self.assertEqual(len(self.fixture.clients), 2)
+
+    def test_second_signing_key_cannot_name_first_installation_in_body(self):
+        self.post('/fixture/reset'); self.fixture.h.login()
+        seed = self.post('/fixture/second-installation').json
+        peer = self.fixture.clients[seed['owner']]; peer.login()
+        reply = peer.post('service/wounds', anon_id=self.fixture.h.owner,
+                          account_sha256=peer.login_result['account_sha256'], action='status')
+        self.assertEqual(reply.status_code, 403)
+
 
 if __name__ == '__main__': unittest.main()

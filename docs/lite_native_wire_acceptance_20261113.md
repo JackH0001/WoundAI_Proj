@@ -81,3 +81,14 @@ review ZIP. Native cloud initialization still requires the owner-created encrypt
 operational materials and separately authorized fixed deployment/IAM plan.
 Actual Apple sign-in, purchase, restore and provider failure recovery remain
 explicit external acceptance steps.
+
+## Later extension on the same day
+
+Request-scoped admission was subsequently fixed in `089fbb1`; its separate
+regressions retain revocation and logout/relogin fences while reducing redundant
+status calls. See `lite_request_admission_20261113.md` for the before/after counts.
+The harness now also covers two separately registered installations, shared
+five-wound limits and downgrade/restoration with local timeline preservation.
+Its current four native / five fixture tests and explicit synthetic boundaries
+are documented in `lite_wound_wire_acceptance_20261113.md`; the two-test figures
+above describe the original run, not the latest harness.

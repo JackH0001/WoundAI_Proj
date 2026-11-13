@@ -5,6 +5,7 @@ unchanged through real TCP; a test-only middleware adds synthetic App Attest
 assertions, which the normal backend verifies. This is NOT Apple Sandbox/TLS QA.
 """
 import base64
+import copy
 import hashlib
 import io
 import json
@@ -17,7 +18,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'Backend/Flask'), str(ROOT / 'engineering/phase2')]
 from werkzeug.serving import make_server, WSGIRequestHandler
 from werkzeug.wrappers import Request, Response
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 from test_lite_native_backend import NativeBackendTests, rows
+from test_lite_signed_client import b64
 
 
 class QuietHandler(WSGIRequestHandler):
@@ -31,6 +35,7 @@ class WireFixture:
         self.h = None
         self.events = []
         self.completed = []
+        self.clients = {}
         self.revoke_before_service = False
         self.server = make_server('127.0.0.1', 0, self, request_handler=QuietHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -53,7 +58,32 @@ class WireFixture:
                     attempts=quota.get('attempts', 0),
                     research_unchanged=rows(h.h.privacy.store) == self.privacy,
                     image_unchanged=hashlib.sha256(h.f.jpeg).hexdigest() == self.image_hash,
+                    registered_installations=len(self.clients),
                     routes=list(self.events))
+
+    def add_installation(self):
+        """Register a second real synthetic attestation key against the same server.
+
+        Reuse only test trust roots; the installation, private signing key and
+        assertion counter are independent. No account resolver is patched.
+        """
+        h = self.h
+        if len(self.clients) != 1: raise ValueError('one additional installation only')
+        peer = NativeBackendTests()
+        peer.h = h.h; peer.backend = h.backend; peer.app = h.app; peer.client = h.app.test_client()
+        peer.f = h.f; peer.image_hash = h.image_hash; peer.login_serial = 200
+        peer.e = copy.copy(h.e); peer.e.r = copy.copy(h.e.r)
+        peer.e.r.key = ec.generate_private_key(ec.SECP256R1())
+        peer.e.r.point = peer.e.r.key.public_key().public_bytes(
+            serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+        peer.e.key_id = peer.e.r.key_id = hashlib.sha256(peer.e.r.point).digest()
+        peer.e.challenge = h.e.service.issue_challenge(peer.e.key_id)
+        peer.e.encoded = peer.e.make_proof()
+        peer.key = b64(peer.e.key_id); peer.counter = 0
+        peer.register()
+        assert peer.owner != h.owner and peer.key != h.key
+        self.clients[peer.owner] = peer
+        return dict(owner=peer.owner, now=h.h.clock(), jpeg=base64.b64encode(h.f.jpeg).decode())
 
     def control(self, kind, body):
         if kind == 'reset':
@@ -62,11 +92,13 @@ class WireFixture:
             self.privacy = rows(self.h.h.privacy.store)
             self.image_hash = hashlib.sha256(self.h.f.jpeg).hexdigest()
             self.events = []
+            self.clients = {self.h.owner:self.h}
             self.revoke_before_service = False
             return dict(owner=self.h.owner, now=self.h.h.clock(),
                         jpeg=base64.b64encode(self.h.f.jpeg).decode())
         if not self.h: raise ValueError('reset required')
         h = self.h
+        if kind == 'second-installation': return self.add_installation()
         if kind == 'identity':
             c = body['challenge']; sub = 'apple-human-1'
             person = h.backend.identity.events.identity(sub)
@@ -87,7 +119,14 @@ class WireFixture:
             return dict(now=h.h.clock())
         if kind == 'restart':
             h.backend = h.h.compose(); h.app = h.backend.create_app(); h.client = h.app.test_client()
+            for client in self.clients.values():
+                client.backend = h.backend; client.app = h.app; client.client = h.app.test_client()
             return dict(restarted=True)
+        if kind == 'subscription-status':
+            status = body.get('status')
+            if type(status) is not int or status not in (1, 5): raise ValueError('active/refunded fixture only')
+            h.h.release.n.a.status = status
+            return dict(status=status)
         if kind == 'revoke-before-service':
             self.revoke_before_service = True
             return dict(armed=True)
@@ -116,17 +155,20 @@ class WireFixture:
         if not self.h or not request.path.startswith('/api/v1/lite/'):
             return Response(status=404)(env, start_response)
         path = request.path
+        client = self.clients.get(request.headers.get('X-Synthetic-Installation', self.h.owner))
+        if client is None: return Response(status=403)(env, start_response)
         if self.revoke_before_service and path == '/api/v1/lite/service/prepare':
             self.revoke_before_service = False
             session = self.h.backend.identity.status(self.h.owner)
             self.h.backend.identity.logout(self.h.owner, session['operation'])
         purpose = 'withdraw' if '/account/deletion/' in path else 'assert'
-        headers = self.h.headers(path, raw, request.content_type, purpose=purpose)
+        headers = client.headers(path, raw, request.content_type, purpose=purpose)
         for k, v in headers.items(): env['HTTP_' + k.upper().replace('-', '_')] = v
         env['wsgi.input'] = io.BytesIO(raw)
         # The actual production Flask router receives the native Swift bytes.
         def capture(status, response_headers, exc_info=None):
             self.events.append(dict(path=path, status=int(status.split()[0]),
+                                    installation_sha256=hashlib.sha256(client.owner.encode()).hexdigest(),
                                     body_sha256=hashlib.sha256(raw).hexdigest(), bytes=len(raw)))
             return start_response(status, response_headers, exc_info)
         return self.h.app(env, capture)

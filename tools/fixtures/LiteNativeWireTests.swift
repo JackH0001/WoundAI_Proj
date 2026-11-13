@@ -5,19 +5,43 @@ import XCTest
 
 private struct WireConfig: Decodable { let url: URL, token: String }
 private struct WireSeed: Decodable { let owner: String, now: Int, jpeg: String }
+private final class WireClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Int
+    init(_ value: Int) { self.value = value }
+    func date() -> Date {
+        lock.lock(); defer { lock.unlock() }
+        return Date(timeIntervalSince1970: Double(value))
+    }
+    func advance(_ seconds: Int) {
+        lock.lock(); defer { lock.unlock() }
+        value += seconds
+    }
+}
 private struct WireSnapshot: Decodable {
     let model_calls, used, attempts: Int
+    let registered_installations: Int
     let research_unchanged, image_unchanged: Bool
     struct Route: Decodable { let path: String, status: Int }
     let routes: [Route]
 }
 
+private actor WirePairBarrier {
+    var waiting: CheckedContinuation<Void, Never>?
+    func arrive() async {
+        if let first = waiting { waiting = nil; first.resume(); return }
+        await withCheckedContinuation { waiting = $0 }
+    }
+}
+
 private actor NativeWire: LiteAuthenticatedTransport {
     let config: WireConfig, owner: String
     var dropRun = false
+    var woundStatusBarrier: WirePairBarrier?
     init(_ config: WireConfig, owner: String) { self.config = config; self.owner = owner }
     func installation() -> String { owner }
     func loseRunResponse() { dropRun = true }
+    func holdNextWoundStatus(_ barrier: WirePairBarrier) { woundStatusBarrier = barrier }
     static func control(_ config: WireConfig, _ path: String, _ body: Data = Data("{}".utf8)) async throws -> Data {
         var request = URLRequest(url: config.url.appendingPathComponent("fixture/" + path))
         request.httpMethod = "POST"; request.httpBody = body
@@ -33,8 +57,15 @@ private actor NativeWire: LiteAuthenticatedTransport {
         var request = original
         request.url = config.url.appendingPathComponent(String(original.url!.path.dropFirst()))
         request.setValue(config.token, forHTTPHeaderField: "X-Synthetic-Wire")
+        request.setValue(owner, forHTTPHeaderField: "X-Synthetic-Installation")
         let (data, response) = try await URLSession.shared.data(for: request)
         let http = try XCTUnwrap(response as? HTTPURLResponse)
+        if original.url?.lastPathComponent == "wounds",
+           let raw = original.httpBody, let body = try? JSONSerialization.jsonObject(with: raw) as? [String:Any],
+           body["action"] as? String == "status", let barrier = woundStatusBarrier {
+            woundStatusBarrier = nil
+            await barrier.arrive()
+        }
         if dropRun && original.url?.lastPathComponent == "run" {
             dropRun = false; throw URLError(.networkConnectionLost)
         }
@@ -86,12 +117,13 @@ private actor NativeWire: LiteAuthenticatedTransport {
         return try JSONDecoder().decode(WireConfig.self, from: Data(contentsOf: url))
     }
     private func session(_ wire: NativeWire, _ apple: WireApple, _ kit: WireStoreKit,
-                         _ directory: URL, _ time: Int) throws -> LiteNativeSession {
+                         _ directory: URL, _ time: Int,
+                         clock: (@Sendable () -> Date)? = nil) throws -> LiteNativeSession {
         try LiteNativeSession(origin: URL(string: "https://native-wire.invalid")!, transport: wire,
             identityProvider: apple, purchaseProvider: kit,
             journal: LiteServiceFileJournal(directory: directory.appendingPathComponent("journal")),
             captures: LiteCaptureDraftStore(directory: directory.appendingPathComponent("captures")),
-            register: { await wire.installation() }, now: { Date(timeIntervalSince1970: Double(time)) })
+            register: { await wire.installation() }, now: clock ?? { Date(timeIntervalSince1970: Double(time)) })
     }
     private func finish(_ config: WireConfig, _ name: String) async throws -> WireSnapshot {
         try JSONDecoder().decode(WireSnapshot.self, from: await NativeWire.control(config, "finish",
@@ -187,5 +219,102 @@ private actor NativeWire: LiteAuthenticatedTransport {
         XCTAssertEqual(final.routes.filter { $0.path.hasSuffix("service/prepare") && $0.status == 401 }.count, 1)
         XCTAssertEqual(final.routes.filter { $0.path.hasSuffix("service/run") }.count, 0)
         XCTAssertTrue(final.research_unchanged); XCTAssertTrue(final.image_unchanged)
+    }
+
+    func testTwoInstallationsShareFiveSlotsAndKeepTimelineThroughDowngrade() async throws {
+        let cfg = try config()
+        let first = try JSONDecoder().decode(WireSeed.self, from: await NativeWire.control(cfg, "reset"))
+        let second = try JSONDecoder().decode(WireSeed.self, from: await NativeWire.control(cfg, "second-installation"))
+        XCTAssertNotEqual(first.owner, second.owner)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let image = try XCTUnwrap(Data(base64Encoded: first.jpeg))
+        let wa = NativeWire(cfg, owner: first.owner), wb = NativeWire(cfg, owner: second.owner)
+        let aa = WireApple(cfg), ab = WireApple(cfg), ka = WireStoreKit(cfg), kb = WireStoreKit(cfg)
+        let clock = WireClock(first.now)
+        let a = try session(wa, aa, ka, directory.appendingPathComponent("a"), first.now, clock: { clock.date() })
+        let b = try session(wb, ab, kb, directory.appendingPathComponent("b"), first.now, clock: { clock.date() })
+        await a.identity.signIn(); await b.identity.signIn()
+        let ca = try await a.identity.savedResearchContext(), cb = try await b.identity.savedResearchContext()
+        XCTAssertEqual(ca.account, cb.account)
+        func id(_ n: Int) -> String { String(format:"10000000-0000-0000-0000-%012x", n) }
+        for (r,n) in [(a,1),(b,2)] {
+            let result = try await r.recognizeSaved(recordID:id(100+n),jpeg:image)
+            XCTAssertEqual(result.note,"confirmed",result.message)
+        }
+        let sharedFree = try await b.personalBalance()
+        XCTAssertEqual(sharedFree.used,2); XCTAssertEqual(sharedFree.limit,2)
+        _ = try await a.woundPermit(id:id(1),owner:nil)
+        do { _ = try await b.woundPermit(id:id(2),owner:nil); XCTFail("second free slot accepted") }
+        catch LiteWoundTrackingError.full(let n) { XCTAssertEqual(n,1) }
+        await a.purchases.loadOffer(); await a.purchases.purchase(accepting:ka.quote)
+        let plus = try await b.personalBalance()
+        XCTAssertEqual(plus.limit,10); XCTAssertEqual(plus.used,2)
+        for n in 2...4 { _ = try await (n % 2 == 0 ? b : a).woundPermit(id:id(n),owner:nil) }
+        let barrier = WirePairBarrier()
+        await wa.holdNextWoundStatus(barrier); await wb.holdNextWoundStatus(barrier)
+        func compete(_ session: LiteNativeSession, _ n: Int) async throws -> Bool {
+            do { _ = try await session.woundPermit(id:id(n),owner:nil); return true }
+            catch LiteWoundTrackingError.changed { return false }
+        }
+        async let left = compete(a,5)
+        async let right = compete(b,6)
+        let won = try await (left,right)
+        XCTAssertNotEqual(won.0,won.1)
+        let rosterValue = try await a.woundList()
+        let roster = try XCTUnwrap(rosterValue)
+        XCTAssertEqual(roster.active.count,5); XCTAssertEqual(roster.revision,5)
+        let rowsURL = directory.appendingPathComponent("records.json")
+        let store = LiteStore(fileURL:rowsURL)
+        for (index,wireID) in roster.active.enumerated() {
+            let woundID = try XCTUnwrap(LiteWoundRoster.localID(wireID))
+            let row = LiteRecord(id:id(200+index),dateISO:"2026-11-13T01:00:00Z",surfaceCm2:3,
+                projectedCm2:3,tiltDeg:0,volumeMl:nil,maxDepthMm:nil,quality:"synthetic",
+                imageName:"preserved-synthetic.jpg",source:"manual",polysJson:"[]",depthName:"preserved-depth.bin",
+                woundID:woundID,woundName:"Synthetic \(index)",woundAccount:ca.account,woundEnded:false)
+            XCTAssertTrue(store.add(row))
+        }
+        func stableRows(_ rows:[LiteRecord]) throws -> Data {
+            let encoder=JSONEncoder();encoder.outputFormatting = [.sortedKeys]
+            return try encoder.encode(rows.map { row in var copy=row;copy.woundEnded=nil;return copy })
+        }
+        let originalRows = try stableRows(store.records)
+        let ended = try XCTUnwrap(store.wounds.first { $0.id == id(1) })
+        _ = try await b.finishTracking(ended)
+        _ = try await store.refreshTracking(from:a)
+        XCTAssertTrue(try XCTUnwrap(store.wounds.first { $0.id == id(1) }).ended)
+        do { _ = try await a.woundPermit(id:id(1),owner:ca.account); XCTFail("stale device reopened ended wound") }
+        catch LiteWoundTrackingError.ended { }
+        _ = try await b.woundPermit(id:id(7),owner:nil)
+        let swappedValue = try await a.woundList()
+        let swapped = try XCTUnwrap(swappedValue)
+        XCTAssertEqual(swapped.active.count,5); XCTAssertEqual(swapped.revision,7)
+        _ = try await NativeWire.control(cfg,"subscription-status",JSONEncoder().encode(["status":5]))
+        _ = try await NativeWire.control(cfg,"advance",JSONEncoder().encode(["seconds":31]))
+        clock.advance(31)
+        let downgradedValue = try await a.woundList()
+        let downgraded = try XCTUnwrap(downgradedValue)
+        XCTAssertEqual(downgraded.limit,1); XCTAssertEqual(downgraded.active,swapped.active)
+        XCTAssertEqual(downgraded.selectableGroups(in:store.wounds).count,1)
+        let pausedID = try XCTUnwrap(LiteWoundRoster.localID(downgraded.active[1]))
+        do { _ = try await b.woundPermit(id:pausedID,owner:ca.account); XCTFail("downgraded extra slot accepted") }
+        catch LiteWoundTrackingError.full(let n) { XCTAssertEqual(n,1) }
+        _ = try await store.refreshTracking(from:a)
+        XCTAssertEqual(try stableRows(store.records),originalRows)
+        let timeline = try LiteTimelineSelection(group:ended,records:store.records)
+        XCTAssertEqual(timeline.rows.count,1); XCTAssertEqual(timeline.rows.first?.woundID,id(1))
+        _ = try await NativeWire.control(cfg,"subscription-status",JSONEncoder().encode(["status":1]))
+        _ = try await NativeWire.control(cfg,"advance",JSONEncoder().encode(["seconds":31]))
+        clock.advance(31)
+        let restoredValue = try await b.woundList()
+        let restored = try XCTUnwrap(restoredValue)
+        XCTAssertEqual(restored.limit,5); XCTAssertEqual(restored.active,swapped.active)
+        let balance = try await b.personalBalance(); XCTAssertEqual(balance.used,2)
+        let reopened = LiteStore(fileURL:rowsURL)
+        XCTAssertEqual(try stableRows(reopened.records),originalRows)
+        let final = try await finish(cfg,"two-installation-wound-tracking")
+        XCTAssertEqual(final.registered_installations,2)
+        XCTAssertEqual(final.model_calls,2); XCTAssertEqual(final.used,2); XCTAssertEqual(final.attempts,2)
+        XCTAssertTrue(final.research_unchanged); XCTAssertTrue(final.image_unchanged)
+        XCTAssertEqual(ka.buys,1); XCTAssertEqual(kb.buys,0)
     }
 }
