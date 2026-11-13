@@ -96,3 +96,9 @@ five native tests and eight fixture tests; see
 extension requires six native tests and ten fixture tests; see
 `lite_research_privacy_wire_acceptance_20261113.md`. Earlier counts above describe
 their original runs, not the latest harness.
+
+The next account-deletion extension runs seven native tests and twelve fixture
+tests. It covers lost intake acknowledgement, reopening both client and backend,
+both installations losing ordinary service access, and explicit bounded fake
+Apple revocation. See `lite_deletion_wire_acceptance_20261113.md`. It does not
+claim that all account data or linked research backups have been erased.

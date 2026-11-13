@@ -4,7 +4,7 @@ This extends the opt-in Swift/Python HTTP harness. Product App and backend
 sources are unchanged. The earlier native research test covered capture receipt
 recovery and annotation revision order; withdrawal/rejoin previously had separate
 Swift scripted-transport and Python HTTP tests. This scenario joins those paths
-through the real `LiteWithdrawalModel`, encrypted journal,
+through the real `LiteWithdrawalModel`, persisted JSON journal with iOS file protection,
 `LiteSignedCloudTransport`, `LiteAttestClient`, research delivery and two composed
 backend routers, with synthetic device proofs and storage.
 

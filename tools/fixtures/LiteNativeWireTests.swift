@@ -34,6 +34,11 @@ private struct WireSnapshot: Decodable {
     struct Route: Decodable { let path: String, status: Int; let revision: Int? }
     let routes: [Route]
 }
+private struct DeletionReadback: Decodable, Equatable {
+    let operation, inventory_sha256, phase, service_store_sha256, audit_sha256: String
+    let requested_at, grant_total, scan, revoked, apple_revoke_calls: Int
+    let research_requested: Bool
+}
 
 private actor WirePairBarrier {
     var waiting: CheckedContinuation<Void, Never>?
@@ -50,6 +55,7 @@ private actor NativeWire: LiteAuthenticatedTransport {
     var dropCapture = false
     var dropRevision = false
     var dropRejoin = false
+    var dropDeletion = false
     var woundStatusBarrier: WirePairBarrier?
     init(_ config: WireConfig, owner: String, research: Bool = false) {
         self.config = config; self.owner = owner; self.research = research
@@ -59,6 +65,7 @@ private actor NativeWire: LiteAuthenticatedTransport {
     func loseCaptureResponse() { dropCapture = true }
     func loseRevisionResponse() { dropRevision = true }
     func loseRejoinResponse() { dropRejoin = true }
+    func loseDeletionResponse() { dropDeletion = true }
     func holdNextWoundStatus(_ barrier: WirePairBarrier) { woundStatusBarrier = barrier }
     static func control(_ config: WireConfig, _ path: String, _ body: Data = Data("{}".utf8)) async throws -> Data {
         var request = URLRequest(url: config.url.appendingPathComponent("fixture/" + path))
@@ -96,6 +103,9 @@ private actor NativeWire: LiteAuthenticatedTransport {
         }
         if dropRejoin && original.url?.path == "/api/v1/lite/research/rejoin" && http.statusCode == 200 {
             dropRejoin = false; throw URLError(.networkConnectionLost)
+        }
+        if dropDeletion && original.url?.path == "/api/v1/lite/account/deletion/request" && http.statusCode == 202 {
+            dropDeletion = false; throw URLError(.networkConnectionLost)
         }
         // Only the QA transport maps HTTPS origin to loopback; production origin
         // checks and all request/response parsing remain unchanged.
@@ -198,6 +208,126 @@ private struct PrivacyReadback: Decodable, Equatable {
     private func finish(_ config: WireConfig, _ name: String) async throws -> WireSnapshot {
         try JSONDecoder().decode(WireSnapshot.self, from: await NativeWire.control(config, "finish",
             JSONEncoder().encode(["name":name])))
+    }
+    func testDeletionLostAcceptanceResumesSameIntentAndPreservesLocalRecords() async throws {
+        let cfg = try config()
+        let seed = try JSONDecoder().decode(WireSeed.self,from:await NativeWire.control(cfg,"reset"))
+        let peerSeed = try JSONDecoder().decode(WireSeed.self,from:await NativeWire.control(cfg,"second-installation"))
+        let clock = WireClock(seed.now), image = try XCTUnwrap(Data(base64Encoded:seed.jpeg))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let wire = NativeWire(cfg,owner:seed.owner), peerWire = NativeWire(cfg,owner:peerSeed.owner)
+        let apple = WireApple(cfg), peerApple = WireApple(cfg), kit = WireStoreKit(cfg)
+        let native = try session(wire,apple,kit,root.appendingPathComponent("first"),seed.now,clock:{clock.date()})
+        let peer = try session(peerWire,peerApple,WireStoreKit(cfg),root.appendingPathComponent("peer"),seed.now,clock:{clock.date()})
+        await native.identity.signIn(); await peer.identity.signIn()
+        let id = UUID()
+        let result = try await native.recognizeSaved(recordID:id.uuidString,jpeg:image)
+        XCTAssertEqual(result.note,"confirmed")
+        let store = LiteStore(fileURL:root.appendingPathComponent("index.json"),now:{clock.date()})
+        defer {
+            for row in store.records {
+                store.images.delete(row.imageName)
+                if let name = row.depthName { store.images.delete(name) }
+            }
+            try? FileManager.default.removeItem(at:root)
+        }
+        var depth = DepthCapture(map:Array(repeating:0.3,count:64),width:8,height:8,
+            fx:50,fy:50,cx:32,cy:32,refWidth:64,refHeight:64,accuracy:"absolute",filtered:false,
+            rgbWidth:64,rgbHeight:64,sourceExifOrientation:1)
+        depth.captureProvenance = .init(id:id,observedAt:clock.date())
+        let row = LiteRecord(id:id.uuidString,dateISO:"2026-11-13T01:00:00Z",surfaceCm2:4,projectedCm2:4,
+            quality:"synthetic",imageName:try XCTUnwrap(store.images.save(jpeg:image)),source:"manual",
+            polysJson:"[[[5,5],[5,50],[50,50]]]",depthName:try XCTUnwrap(store.saveDepth(depth,matchingJPEG:image)),
+            manuallyConfirmed:true)
+        let saved = try XCTUnwrap(store.saveMeasurement(row,selectedWoundID:"",
+            enteredLocation:.init(side:"right",site:"heel"),queueResearchSync:false),store.storageError ?? "not saved")
+        let index = try Data(contentsOf:root.appendingPathComponent("index.json"))
+        let beforeDepth = try XCTUnwrap(store.loadDepth(try XCTUnwrap(saved.depthName),matchingImage:saved.imageName))
+        var researchPaused = false
+        let deletion = native.deletion(pauseResearch:{researchPaused=true})
+        await wire.loseDeletionResponse()
+        await deletion.requestConfirmed()
+        XCTAssertTrue(researchPaused)
+        let checkpoint = try XCTUnwrap(deletion.record)
+        XCTAssertNil(checkpoint.receipt) // The server accepted; this client has no receipt yet.
+        XCTAssertTrue(checkpoint.researchWithdrawalConfirmed == true)
+        func readback(_ operation:String) async throws -> DeletionReadback {
+            try JSONDecoder().decode(DeletionReadback.self,from:await NativeWire.control(cfg,"deletion-readback",
+                JSONEncoder().encode(["operation":operation])))
+        }
+        let accepted = try await readback(checkpoint.operation)
+        XCTAssertEqual(accepted.phase,"closing"); XCTAssertEqual(accepted.grant_total,2)
+        XCTAssertTrue(accepted.research_requested); XCTAssertEqual(accepted.apple_revoke_calls,0)
+        let beforeRestart = try JSONDecoder().decode(WireSnapshot.self,from:await NativeWire.control(cfg,"snapshot"))
+        _ = try await NativeWire.control(cfg,"restart")
+        let reopened = try session(wire,apple,kit,root.appendingPathComponent("first"),seed.now,clock:{clock.date()})
+        let resumed = reopened.deletion(pauseResearch:{researchPaused=true})
+        await resumed.reload()
+        XCTAssertEqual(resumed.record,checkpoint)
+        let afterReload = try JSONDecoder().decode(WireSnapshot.self,from:await NativeWire.control(cfg,"snapshot"))
+        XCTAssertEqual(beforeRestart.routes.count,afterReload.routes.count) // Reload is not a new deletion.
+        await resumed.retry()
+        let receipt = try XCTUnwrap(resumed.record?.receipt,resumed.message)
+        XCTAssertEqual(resumed.record?.operation,checkpoint.operation)
+        XCTAssertEqual(receipt.inventory_sha256,accepted.inventory_sha256)
+        XCTAssertEqual(receipt.requested_at,accepted.requested_at)
+        XCTAssertEqual(receipt.research_withdrawal,"requested")
+        XCTAssertFalse(receipt.account_deleted); XCTAssertFalse(receipt.subscription_cancelled)
+        XCTAssertTrue(receipt.local_records_preserved)
+        let afterRetry = try await readback(checkpoint.operation)
+        XCTAssertEqual(afterRetry,accepted) // No new plan, grant revocation, data or audit on replay.
+
+        let firstAllowed = await reopened.identity.canUseService()
+        let peerAllowed = await peer.identity.canUseService()
+        XCTAssertFalse(firstAllowed); XCTAssertFalse(peerAllowed)
+        let blocked = try await peer.recognizeSaved(recordID:UUID().uuidString,jpeg:image)
+        XCTAssertEqual(blocked.note,"unavailable")
+        let wrongOperation = String(repeating:"f",count:32)
+        do {
+            _ = try await reopened.deletionService.status(operation:wrongOperation,installation:seed.owner)
+            XCTFail("unrelated deletion operation accepted")
+        } catch LiteDeletionFailure.identity {} // Backend must not substitute the actual request.
+        let unchanged = try await readback(checkpoint.operation)
+        XCTAssertEqual(unchanged,accepted)
+
+        // Only an explicit trusted test worker advances fake Apple revocations;
+        // ordinary HTTP intake and polling must not dispatch this work.
+        struct Worker: Encodable { let operation:String,limit:Int }
+        let body = try JSONEncoder().encode(Worker(operation:checkpoint.operation,limit:1))
+        let half = try JSONDecoder().decode(DeletionReadback.self,from:await NativeWire.control(cfg,"deletion-worker",body))
+        XCTAssertEqual(half.revoked,1); XCTAssertEqual(half.apple_revoke_calls,1)
+        await resumed.retry()
+        XCTAssertEqual(resumed.record?.receipt?.apple_revocation,"in_progress")
+        _ = try await NativeWire.control(cfg,"deletion-worker",body)
+        await resumed.retry()
+        let progress = try XCTUnwrap(resumed.record?.receipt)
+        XCTAssertEqual(progress.apple_revocation,"confirmed")
+        XCTAssertFalse(progress.account_deleted); XCTAssertFalse(progress.subscription_cancelled)
+        XCTAssertEqual(progress.data_disposition,"pending")
+        XCTAssertEqual(progress.disposition?.service_state,"not_started")
+        XCTAssertEqual(progress.disposition?.grant_key_state,"not_started")
+        XCTAssertTrue(resumed.message.contains("尚未完成刪除"))
+        let completed = try await readback(checkpoint.operation)
+        XCTAssertEqual(completed.revoked,2); XCTAssertEqual(completed.apple_revoke_calls,2)
+        XCTAssertEqual(completed.service_store_sha256,accepted.service_store_sha256)
+        await resumed.retry()
+        XCTAssertEqual(resumed.record?.receipt,progress)
+        let duplicate = try JSONDecoder().decode(DeletionReadback.self,from:await NativeWire.control(cfg,"deletion-worker",body))
+        XCTAssertEqual(duplicate,completed)
+        XCTAssertEqual(try Data(contentsOf:root.appendingPathComponent("index.json")),index)
+        XCTAssertEqual(store.records.first?.id,saved.id)
+        XCTAssertEqual(store.records.first?.woundID,saved.woundID)
+        XCTAssertEqual(store.records.first?.polysJson,saved.polysJson)
+        XCTAssertEqual(store.images.rawBytes(saved.imageName),image)
+        XCTAssertEqual(store.loadDepth(try XCTUnwrap(saved.depthName),matchingImage:saved.imageName)?.map.map(\.bitPattern),
+                       beforeDepth.map.map(\.bitPattern))
+        XCTAssertEqual(apple.signIns,1); XCTAssertEqual(peerApple.signIns,1)
+        let final = try await finish(cfg,"deletion-lost-acceptance")
+        XCTAssertEqual(final.model_calls,1); XCTAssertEqual(final.used,1); XCTAssertEqual(final.attempts,1)
+        XCTAssertEqual(final.registered_installations,2)
+        XCTAssertEqual(final.routes.filter {$0.path.hasSuffix("account/deletion/request")}.map(\.status),[202,202])
+        XCTAssertEqual(final.routes.filter {$0.path.hasSuffix("service/run")}.count,1)
+        XCTAssertTrue(final.image_unchanged); XCTAssertTrue(final.research_unchanged)
     }
     func testResearchWithdrawalRejoinKeepsOldEpochClosedAndPersonalServiceAvailable() async throws {
         let cfg = try config()

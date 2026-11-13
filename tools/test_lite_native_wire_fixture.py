@@ -141,5 +141,45 @@ class NativeWireFixtureTests(unittest.TestCase):
         self.assertTrue(self.fixture.flow.privacy.is_withdrawn(seed['research_owner']))
         self.assertEqual(reply.json['live_payloads_remaining'],0)
 
+    def test_deletion_readback_requires_accepted_exact_request_and_never_dispatches_worker(self):
+        self.post('/fixture/reset'); h = self.fixture.h; h.login(); h.complete()
+        operation = 'd'*32
+        for bad in (operation, None, '../escape'):
+            self.assertEqual(self.post('/fixture/deletion-readback',json.dumps({'operation':bad}).encode()).status_code,500)
+        accepted = h.post('account/deletion/request', operation=operation,
+                          confirmation='delete_account_and_withdraw_linked_research_v1')
+        self.assertEqual(accepted.status_code,202,accepted.json)
+        raw = json.dumps({'operation':operation}).encode()
+        first = self.post('/fixture/deletion-readback',raw)
+        self.assertEqual(first.status_code,200,first.json)
+        self.assertEqual(first.json['phase'],'closing')
+        self.assertTrue(first.json['research_requested'])
+        self.assertEqual(first.json['apple_revoke_calls'],0)
+        self.assertEqual(self.post('/fixture/deletion-readback',raw).json,first.json)
+        self.assertEqual(self.post('/fixture/snapshot').json['used'],1)
+        for forbidden in ('refresh_token','private_key','authorizationCode',self.fixture.token):
+            self.assertNotIn(forbidden,first.get_data(as_text=True))
+
+    def test_synthetic_worker_is_explicit_bounded_and_replay_does_not_revoke_twice(self):
+        self.post('/fixture/reset'); h = self.fixture.h; h.login(); h.complete()
+        operation = 'd'*32
+        self.assertEqual(h.post('account/deletion/request',operation=operation,
+            confirmation='delete_account_and_withdraw_linked_research_v1').status_code,202)
+        original = self.fixture.deletion_readback(operation)
+        for limit in (0,2,True,None):
+            raw = json.dumps({'operation':operation,'limit':limit}).encode()
+            self.assertEqual(self.post('/fixture/deletion-worker',raw).status_code,500)
+            self.assertEqual(self.fixture.deletion_readback(operation),original)
+        wrong = json.dumps({'operation':'f'*32,'limit':1}).encode()
+        self.assertEqual(self.post('/fixture/deletion-worker',wrong).status_code,500)
+        raw = json.dumps({'operation':operation,'limit':1}).encode()
+        first = self.post('/fixture/deletion-worker',raw)
+        self.assertEqual(first.status_code,200,first.json)
+        self.assertEqual((first.json['revoked'],first.json['apple_revoke_calls']),(1,1))
+        self.assertEqual(first.json['service_store_sha256'],original['service_store_sha256'])
+        self.assertEqual(self.post('/fixture/deletion-worker',raw).json,first.json)
+        status = h.post('account/deletion/status',operation=operation)
+        self.assertFalse(status.json['account_deleted']); self.assertFalse(status.json['subscription_cancelled'])
+
 
 if __name__ == '__main__': unittest.main()

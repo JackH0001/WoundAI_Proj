@@ -21,7 +21,7 @@ from werkzeug.serving import make_server, WSGIRequestHandler
 from werkzeug.wrappers import Request, Response
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from test_lite_native_backend import NativeBackendTests, rows
+from test_lite_native_backend import NativeBackendTests, rows, free_grant
 from test_lite_signed_client import b64
 from test_lite_research_ingest_flow import ResearchIngestFlowTests
 from lite_raw_depth_store import unpack
@@ -32,6 +32,16 @@ class QuietHandler(WSGIRequestHandler):
     def log_request(self, *args): pass
 
 
+def stored_rows_hash(store):
+    # Preserve exact SQLite key/data bytes and revision in comparison evidence;
+    # neither decoded grant contents nor private material enters the report.
+    def binary(value):
+        if isinstance(value, bytes): return {'bytes_hex': value.hex()}
+        raise TypeError('unsupported stored evidence type')
+    return hashlib.sha256(json.dumps(rows(store), sort_keys=True,
+        separators=(',', ':'), default=binary).encode()).hexdigest()
+
+
 class WireFixture:
     def __init__(self):
         NativeBackendTests.setUpClass()
@@ -40,6 +50,7 @@ class WireFixture:
         self.flow = None
         self.research_checks = []
         self.privacy_checks = []
+        self.deletion_checks = []
         self.events = []
         self.completed = []
         self.clients = {}
@@ -111,8 +122,14 @@ class WireFixture:
 
     def snapshot(self):
         h = self.h
-        confirmed = any(r['path'] == '/api/v1/lite/account/confirm' and r['status'] == 200 for r in self.events)
-        quota = h.quota() if confirmed else {}
+        # Evidence may be read after closure. Inspect the original registration
+        # and ledger directly; never restore ordinary account authorization.
+        registration = h.h.release.n.accounts.registration(h.owner, required=False)
+        if registration is not None:
+            subject = registration['subject']
+            quota = h.h.release.ledger.snapshot(subject, h.h.clock() // 86400, free_grant(subject, h.h.clock()))
+        else:
+            quota = {}
         return dict(model_calls=h.h.model_calls, used=quota.get('used', 0),
                     attempts=quota.get('attempts', 0),
                     research_unchanged=rows(h.h.privacy.store) == self.privacy,
@@ -120,7 +137,28 @@ class WireFixture:
                     registered_installations=len(self.clients),
                     research_readbacks=list(self.research_checks),
                     privacy_readbacks=list(self.privacy_checks),
+                    deletion_readbacks=list(self.deletion_checks),
                     routes=list(self.events))
+
+    def deletion_readback(self, operation):
+        if type(operation) is not str or re.fullmatch('[0-9a-f]{32}', operation) is None:
+            raise ValueError('exact deletion operation required')
+        h = self.h
+        deletion = h.backend.deletion
+        person = deletion._owner(h.owner, operation)
+        plan = deletion._plan(person)
+        job = deletion._read(person, plan)
+        if job is None: raise ValueError('accepted deletion required')
+        from lite_apple_oauth import REVOKE_URL
+        result = dict(operation=plan['operation'], requested_at=plan['requested_at'],
+            inventory_sha256=plan['inventory_sha256'], phase=deletion.lifecycle._read(person)[1]['phase'],
+            grant_total=plan['total'], scan=job[1]['scan'], revoked=job[1]['revoked'],
+            apple_revoke_calls=h.h.grant.calls.count(REVOKE_URL),
+            research_requested=deletion.research_confirmation(person, h.owner, operation),
+            service_store_sha256=stored_rows_hash(h.h.stores['operations']),
+            audit_sha256=stored_rows_hash(h.h.stores['deletion_audit']))
+        self.deletion_checks.append(result)
+        return result
 
     def add_installation(self):
         """Register a second real synthetic attestation key against the same server.
@@ -160,6 +198,7 @@ class WireFixture:
             self.events = []
             self.research_checks = []
             self.privacy_checks = []
+            self.deletion_checks = []
             self.clients = {self.h.owner:self.h}
             self.revoke_before_service = False
             return dict(owner=self.h.owner, now=self.h.h.clock(),
@@ -202,6 +241,16 @@ class WireFixture:
             self.revoke_before_service = True
             return dict(armed=True)
         if kind == 'snapshot': return self.snapshot()
+        if kind == 'deletion-readback': return self.deletion_readback(body.get('operation'))
+        if kind == 'deletion-worker':
+            # Test-only, one grant at a time. The production HTTP perimeter has
+            # no worker route. This fixture uses fake Apple/KMS exclusively.
+            if body.get('limit') != 1 or type(body.get('limit')) is not int:
+                raise ValueError('one synthetic grant per explicit worker call')
+            evidence = self.deletion_readback(body.get('operation'))
+            person = h.backend.deletion._owner(h.owner, evidence['operation'])
+            h.backend.deletion.advance(person, limit=1)
+            return self.deletion_readback(evidence['operation'])
         if kind == 'finish':
             result = self.snapshot(); result['name'] = body['name']; self.completed.append(result)
             return result

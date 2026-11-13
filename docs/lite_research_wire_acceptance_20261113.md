@@ -4,7 +4,7 @@ This is test-only integration evidence. Product sources are unchanged from
 `089fbb138cb734f6103331994d793284091e55bb`. Previously native research delivery
 used scripted transport responses, while real Python routes were exercised by
 a Python client. This extension connects the actual Swift service recognition,
-research delivery, encrypted local record store and revision sender to both
+research delivery, file-protected local record index and revision sender to both
 composed HTTP applications on loopback. Neither JSON nor multipart bodies are
 rewritten by the test forwarding layer.
 
@@ -31,8 +31,9 @@ Float32 little-endian depths with varying values. Stored metadata preserves
 capture identity/time source, camera intrinsics, dimensions, orientation,
 filter flag and RGB/depth hashes. Both artificial response losses occur after
 the real server returns HTTP 200. No recognition retry is used to repair a
-research receipt. The annotation payload and first revision survive encrypted
-index reloads; unchanged completion emits no request.
+research receipt. The annotation payload and first revision survive local
+index reloads; unchanged completion emits no request. The JSON index uses iOS
+file protection and backup exclusion; photo/depth files separately use AES-GCM.
 
 The request byte counts describe this tiny fixture, not typical photos or a
 cloud billing estimate. Synthetic 4→5 cm² values exercise serialization and
