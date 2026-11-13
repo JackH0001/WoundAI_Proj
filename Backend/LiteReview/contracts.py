@@ -18,6 +18,22 @@ READER_URLS = frozenset({
 BOOTSTRAP_READER_URL = 'https://woundai-lite-review-reader-bootstrap.run.app'
 CAPS = frozenset({'lite.review.metadata', 'lite.review.media'})
 
+# Only these fixed codes may cross the reader/BFF boundary. Never expose an
+# upstream exception, request URL, object path, identity or credential as UI copy.
+PUBLIC_ERRORS = {
+    'review_sign_in_required': 401, 'review_permission_denied': 403,
+    'record_not_found': 404, 'record_not_in_review_snapshot': 404,
+    'invalid_review_request': 400, 'invalid_filter': 400,
+    'invalid_or_expired_cursor': 400, 'invalid_revision': 400,
+    'revision_not_in_snapshot': 400,
+    'review_catalogue_refresh_required': 503,
+    'source_changed_refresh_snapshot': 409, 'source_not_live_or_unverified': 409,
+    'consent_changed_refresh_required': 409, 'media_access_blocked': 410,
+    'review_audit_unavailable': 503, 'review_state_unavailable': 503,
+    'review_source_unavailable': 503, 'review_data_unverified': 503,
+    'consent_state_missing': 503, 'image_content_unverified': 503,
+}
+
 class ReviewError(Exception):
     def __init__(self, code, status=503):
         self.code, self.status = code, status
