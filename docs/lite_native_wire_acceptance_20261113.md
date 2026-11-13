@@ -92,5 +92,7 @@ five-wound limits and downgrade/restoration with local timeline preservation.
 The four-native / five-fixture run is documented in
 `lite_wound_wire_acceptance_20261113.md`. The latest research RGB-D extension has
 five native tests and eight fixture tests; see
-`lite_research_wire_acceptance_20261113.md`. Earlier counts above describe their
-original runs, not the latest harness.
+`lite_research_wire_acceptance_20261113.md`. The subsequent withdrawal/rejoin
+extension requires six native tests and ten fixture tests; see
+`lite_research_privacy_wire_acceptance_20261113.md`. Earlier counts above describe
+their original runs, not the latest harness.

@@ -9,6 +9,7 @@ import copy
 import hashlib
 import io
 import json
+import re
 from pathlib import Path
 import secrets
 import sys
@@ -24,6 +25,7 @@ from test_lite_native_backend import NativeBackendTests, rows
 from test_lite_signed_client import b64
 from test_lite_research_ingest_flow import ResearchIngestFlowTests
 from lite_raw_depth_store import unpack
+from lite_reconsent import Reconsent, epoch
 
 
 class QuietHandler(WSGIRequestHandler):
@@ -37,6 +39,7 @@ class WireFixture:
         self.h = None
         self.flow = None
         self.research_checks = []
+        self.privacy_checks = []
         self.events = []
         self.completed = []
         self.clients = {}
@@ -59,11 +62,12 @@ class WireFixture:
         elif self.h: self.h.doCleanups()
         self.flow = None; self.h = None
 
-    def research_readback(self):
+    def research_readback(self, requested_epoch='legacy'):
         if not self.flow: raise ValueError('research fixture required')
         f = self.flow
-        media = f.privacy.media(f.r.h.owner)
-        refs = f.privacy.objects.list_refs(f.r.h.owner, kind='rgbd')
+        privacy = f.privacy.scoped(epoch(requested_epoch))
+        media = privacy.media(f.r.h.owner)
+        refs = privacy.objects.list_refs(f.r.h.owner, kind='rgbd')
         if len(refs) != 1: raise ValueError('exactly one capture required')
         ref = refs[0]; iid = ref.identifier
         key = 'lite_raw/' + f.r.h.owner + '/' + iid + '.rgbd'
@@ -75,9 +79,34 @@ class WireFixture:
             metadata_sha256=hashlib.sha256(packet['metadata_bytes']).hexdigest(),
             metadata=packet['metadata'], ai_polygons=meta['ai_polygons'],
             index_rows=len(media.read_lines_fresh('lite_index.jsonl')),
-            labels=[json.loads(line) for line in media.read_lines_fresh('lite_labels.jsonl')],
-            media_generation=str(f.bucket.live[f.privacy.objects.name(ref)][0]))
+            # Object enumeration order is not annotation order. Keep every row
+            # and normalize only presentation; HTTP events below prove ordering.
+            labels=sorted((json.loads(line) for line in media.read_lines_fresh('lite_labels.jsonl')),
+                          key=lambda row: (row['image_id'], row['revision'])),
+            media_generation=str(f.bucket.live[privacy.objects.name(ref)][0]),
+            epoch=requested_epoch)
         self.research_checks.append(result)
+        return result
+
+    def privacy_readback(self, requested_epochs):
+        if not self.flow or type(requested_epochs) is not list or not 1 <= len(requested_epochs) <= 3:
+            raise ValueError('bounded research epochs required')
+        f = self.flow; owner = f.r.h.owner
+        values = []
+        for value in requested_epochs:
+            privacy = f.privacy.scoped(epoch(value))
+            objects = []
+            for ref in privacy.objects.list_refs(owner):
+                saved = privacy.objects._snapshot(ref)
+                payload = privacy.objects._read(ref, saved)
+                objects.append(dict(kind=ref.kind, state=saved.state, bytes=len(payload),
+                    sha256=hashlib.sha256(payload).hexdigest()))
+            values.append(dict(epoch=value, withdrawn=privacy.is_withdrawn(owner), objects=objects))
+        generation, current, audit = Reconsent(f.privacy).load(owner)
+        result = dict(current=current, generation=generation, epochs=values,
+            audit_sha256=None if audit is None else hashlib.sha256(
+                json.dumps(audit, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
+        self.privacy_checks.append(result)
         return result
 
     def snapshot(self):
@@ -90,6 +119,7 @@ class WireFixture:
                     image_unchanged=hashlib.sha256(h.f.jpeg).hexdigest() == self.image_hash,
                     registered_installations=len(self.clients),
                     research_readbacks=list(self.research_checks),
+                    privacy_readbacks=list(self.privacy_checks),
                     routes=list(self.events))
 
     def add_installation(self):
@@ -129,6 +159,7 @@ class WireFixture:
             self.image_hash = hashlib.sha256(self.h.f.jpeg).hexdigest()
             self.events = []
             self.research_checks = []
+            self.privacy_checks = []
             self.clients = {self.h.owner:self.h}
             self.revoke_before_service = False
             return dict(owner=self.h.owner, now=self.h.h.clock(),
@@ -136,7 +167,8 @@ class WireFixture:
                         jpeg=base64.b64encode(self.h.f.jpeg).decode())
         if not self.h: raise ValueError('reset required')
         h = self.h
-        if kind == 'research-readback': return self.research_readback()
+        if kind == 'research-readback': return self.research_readback(body.get('epoch', 'legacy'))
+        if kind == 'research-privacy': return self.privacy_readback(body.get('epochs'))
         if kind == 'second-installation': return self.add_installation()
         if kind == 'identity':
             c = body['challenge']; sub = 'apple-human-1'
@@ -180,7 +212,10 @@ class WireFixture:
         if env.get('REMOTE_ADDR') != '127.0.0.1' or not secrets.compare_digest(
                 request.headers.get('X-Synthetic-Wire', ''), self.token):
             return Response(status=403)(env, start_response)
-        if request.method != 'POST' or request.content_length is None or request.content_length > 2 * 1024 * 1024:
+        privacy_delete = request.method == 'DELETE' and re.fullmatch(
+            r'/api/v1/lite/data/[0-9a-f]{32}(?:/[0-9a-f]{32})?', request.path)
+        if ((request.method != 'POST' and not privacy_delete) or request.content_length is None
+                or request.content_length > 2 * 1024 * 1024 or (privacy_delete and request.content_length != 0)):
             return Response(status=400)(env, start_response)
         raw = request.get_data(cache=True)
         if request.path.startswith('/fixture/'):
@@ -205,15 +240,19 @@ class WireFixture:
             self.revoke_before_service = False
             session = self.h.backend.identity.status(self.h.owner)
             self.h.backend.identity.logout(self.h.owner, session['operation'])
-        purpose = 'withdraw' if '/account/deletion/' in path else 'assert'
-        headers = client.headers(path, raw, request.content_type, purpose=purpose)
+        purpose = 'withdraw' if privacy_delete or '/account/deletion/' in path else 'assert'
+        headers = client.headers(path, raw, request.content_type or '', method=request.method, purpose=purpose)
         for k, v in headers.items(): env['HTTP_' + k.upper().replace('-', '_')] = v
         env['wsgi.input'] = io.BytesIO(raw)
         # The actual production Flask router receives the native Swift bytes.
         def capture(status, response_headers, exc_info=None):
-            self.events.append(dict(path=path, status=int(status.split()[0]),
+            event = dict(path=path, status=int(status.split()[0]),
                                     service=service,
                                     installation_sha256=hashlib.sha256(client.owner.encode()).hexdigest(),
-                                    body_sha256=hashlib.sha256(raw).hexdigest(), bytes=len(raw)))
+                                    body_sha256=hashlib.sha256(raw).hexdigest(), bytes=len(raw))
+            if path == '/api/v1/lite/annotation/revision':
+                value = json.loads(raw)
+                event['revision'] = value.get('revision')
+            self.events.append(event)
             return start_response(status, response_headers, exc_info)
         return client.app(env, capture)

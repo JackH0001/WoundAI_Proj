@@ -31,7 +31,7 @@ private struct WireSnapshot: Decodable {
     let model_calls, used, attempts: Int
     let registered_installations: Int
     let research_unchanged, image_unchanged: Bool
-    struct Route: Decodable { let path: String, status: Int }
+    struct Route: Decodable { let path: String, status: Int; let revision: Int? }
     let routes: [Route]
 }
 
@@ -49,6 +49,7 @@ private actor NativeWire: LiteAuthenticatedTransport {
     var dropRun = false
     var dropCapture = false
     var dropRevision = false
+    var dropRejoin = false
     var woundStatusBarrier: WirePairBarrier?
     init(_ config: WireConfig, owner: String, research: Bool = false) {
         self.config = config; self.owner = owner; self.research = research
@@ -57,6 +58,7 @@ private actor NativeWire: LiteAuthenticatedTransport {
     func loseRunResponse() { dropRun = true }
     func loseCaptureResponse() { dropCapture = true }
     func loseRevisionResponse() { dropRevision = true }
+    func loseRejoinResponse() { dropRejoin = true }
     func holdNextWoundStatus(_ barrier: WirePairBarrier) { woundStatusBarrier = barrier }
     static func control(_ config: WireConfig, _ path: String, _ body: Data = Data("{}".utf8)) async throws -> Data {
         var request = URLRequest(url: config.url.appendingPathComponent("fixture/" + path))
@@ -92,11 +94,56 @@ private actor NativeWire: LiteAuthenticatedTransport {
         if dropRevision && original.url?.path == "/api/v1/lite/annotation/revision" && http.statusCode == 200 {
             dropRevision = false; throw URLError(.networkConnectionLost)
         }
+        if dropRejoin && original.url?.path == "/api/v1/lite/research/rejoin" && http.statusCode == 200 {
+            dropRejoin = false; throw URLError(.networkConnectionLost)
+        }
         // Only the QA transport maps HTTPS origin to loopback; production origin
         // checks and all request/response parsing remain unchanged.
         return (data, try XCTUnwrap(HTTPURLResponse(url: original.url!, statusCode: http.statusCode,
             httpVersion: nil, headerFields: http.allHeaderFields as? [String: String])))
     }
+}
+
+// Only the device proof is synthetic. The real Swift privacy transport builds
+// and parses its requests/receipts; the loopback middleware supplies the normal
+// backend verifier with an independent synthetic signing key, as above.
+private actor WireIdentityMemory: LiteAttestPersistence {
+    var bytes: Data?
+    init(_ bytes: Data) { self.bytes = bytes }
+    func load() -> Data? { bytes }
+    func save(_ value: Data) { bytes = value }
+    func remove() { bytes = nil }
+}
+private struct WireProofDevice: LiteAttestDevice {
+    func supported() async -> Bool { true }
+    func generateKey() async throws -> String { throw LiteAttestFailure.unsupported }
+    func attest(key: String, hash: Data) async throws -> Data { throw LiteAttestFailure.unsupported }
+    func assertion(key: String, hash: Data) async throws -> Data { hash }
+}
+private struct WirePrivacyHTTP: LiteAttestTransport {
+    let wire: NativeWire, owner: String, clock: WireClock
+    func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        if request.url?.path == "/api/v1/lite/attest/challenge" {
+            let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String:String]
+            guard request.httpMethod == "POST", Set(body?.keys.map {$0} ?? []) == ["key_id","purpose"],
+                  ["assert","withdraw"].contains(body?["purpose"] ?? "") else { throw LiteAttestFailure.invalidRequest }
+            let data = try JSONSerialization.data(withJSONObject:[
+                "challenge_id":UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased(),
+                "challenge":Data(repeating:9,count:32).base64EncodedString(),
+                "expires_at":Int(clock.date().timeIntervalSince1970)+120,"audience":"wire-privacy"])
+            return (data,HTTPURLResponse(url:request.url!,statusCode:200,httpVersion:nil,headerFields:nil)!)
+        }
+        return try await wire.send(request,installation:owner)
+    }
+}
+private struct PrivacyReadback: Decodable, Equatable {
+    let current: String, generation: Int, audit_sha256: String?
+    struct Epoch: Decodable, Equatable {
+        let epoch: String, withdrawn: Bool
+        struct Object: Decodable, Equatable { let kind, state, sha256: String; let bytes: Int }
+        let objects: [Object]
+    }
+    let epochs: [Epoch]
 }
 
 @MainActor private final class WireApple: LiteAppleIdentityProvider {
@@ -151,6 +198,146 @@ private actor NativeWire: LiteAuthenticatedTransport {
     private func finish(_ config: WireConfig, _ name: String) async throws -> WireSnapshot {
         try JSONDecoder().decode(WireSnapshot.self, from: await NativeWire.control(config, "finish",
             JSONEncoder().encode(["name":name])))
+    }
+    func testResearchWithdrawalRejoinKeepsOldEpochClosedAndPersonalServiceAvailable() async throws {
+        let cfg = try config()
+        let seed = try JSONDecoder().decode(WireSeed.self,from:await NativeWire.control(cfg,"reset-research"))
+        let owner = try XCTUnwrap(seed.research_owner), clock = WireClock(seed.now)
+        let wire = NativeWire(cfg,owner:seed.owner), research = NativeWire(cfg,owner:owner,research:true)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let native = try session(wire,WireApple(cfg),WireStoreKit(cfg),directory,seed.now,clock:{clock.date()})
+        await native.identity.signIn()
+        let origin = "https://research-wire.invalid"
+        let identity = LiteAttestClient.Identity(origin:origin,audience:"wire-privacy",
+            key:Data(repeating:7,count:32).base64EncodedString(),phase:"registered",installation:owner)
+        let memory = WireIdentityMemory(try JSONEncoder().encode(identity))
+        let client = try LiteAttestClient(origin:URL(string:origin)!,audience:"wire-privacy",device:WireProofDevice(),
+            persistence:memory,transport:WirePrivacyHTTP(wire:research,owner:owner,clock:clock),now:{clock.date()})
+        let privacy = LiteSignedCloudTransport(client:client,consent:{false})
+        let journal = LiteWithdrawalJournal(url:directory.appendingPathComponent("withdrawal/request.json"))
+        var consent = true
+        func withdrawal() -> LiteWithdrawalModel {
+            LiteWithdrawalModel(journal:journal,accountPaused:{_ in false},stopUploads:{consent=false},
+                owner:{_ in try await privacy.withdrawalOwner()},
+                send:{try await privacy.withdraw(server:$0,owner:$1)},
+                sendScoped:{try await privacy.withdraw(server:$0,owner:$1,epoch:$2)})
+        }
+        let delivery = LiteResearchCaptureDelivery(source:wire,currentAccount:{try await native.identity.activeServiceContext()},
+            researchOwner:{_ in
+                let value = try await privacy.withdrawalOwner()
+                return try XCTUnwrap(value)
+            },
+            permits:{$0.permits(server:origin,consent:consent,journal:journal)},
+            researchTransport:{_,allowed in LiteSignedCloudTransport(client:client,consent:allowed)})
+        let image = try XCTUnwrap(Data(base64Encoded:seed.jpeg))
+        let store = LiteStore(fileURL:directory.appendingPathComponent("index.json"),now:{clock.date()})
+        defer {
+            for row in store.records {
+                store.images.delete(row.imageName)
+                if let name = row.depthName { store.images.delete(name) }
+            }
+            try? FileManager.default.removeItem(at:directory)
+        }
+        func save(_ id:UUID,recognized:LiteServiceRecord? = nil) async throws -> LiteRecord {
+            let scope = try XCTUnwrap(LiteCaptureResearchScope.capture(server:origin,consent:consent,journal:journal))
+            let pinned = await delivery.pin(scope)
+            let pin = try XCTUnwrap(pinned)
+            var depth = DepthCapture(map:Array(repeating:0.3,count:64),width:8,height:8,
+                fx:50,fy:50,cx:32,cy:32,refWidth:64,refHeight:64,accuracy:"absolute",filtered:false,
+                rgbWidth:64,rgbHeight:64,sourceExifOrientation:1)
+            depth.captureProvenance = .init(id:id,observedAt:clock.date())
+            let capture = LitePendingResearchCapture(pin:pin,captureID:id.uuidString.lowercased(),
+                imageHash:LiteServiceBytes.hash(image),operation:recognized?.operation,
+                resultHash:recognized?.reply?.receipt?.result_sha256,width:64,height:64)
+            let row = LiteRecord(id:id.uuidString,dateISO:"2026-11-13T01:00:00Z",surfaceCm2:4,projectedCm2:4,
+                quality:"synthetic",imageName:try XCTUnwrap(store.images.save(jpeg:image)),source:"manual",
+                polysJson:"[[[5,5],[5,50],[50,50]]]",depthName:try XCTUnwrap(store.saveDepth(depth,matchingJPEG:image)),
+                researchCapture:capture,manuallyConfirmed:true)
+            return try XCTUnwrap(store.saveMeasurement(row,selectedWoundID:store.wounds.first?.id ?? "",
+                enteredLocation:.init(side:"right",site:"heel"),queueResearchSync:true),store.storageError ?? "not saved")
+        }
+        func state(_ epochs:[String]) async throws -> PrivacyReadback {
+            try JSONDecoder().decode(PrivacyReadback.self,from:await NativeWire.control(cfg,"research-privacy",
+                JSONEncoder().encode(["epochs":epochs])))
+        }
+        let firstID = UUID()
+        let result = try await native.recognizeSaved(recordID:firstID.uuidString,jpeg:image)
+        XCTAssertEqual(result.note,"confirmed")
+        let old = try await save(firstID,recognized:result)
+        await delivery.resume(old.id,store:store)
+        let oldBinding = try XCTUnwrap(store.records.first?.cloudSync?.binding)
+        let originalIndex = try Data(contentsOf:directory.appendingPathComponent("index.json"))
+        let originalDepth = try XCTUnwrap(store.loadDepth(try XCTUnwrap(old.depthName),matchingImage:old.imageName))
+        let model = withdrawal()
+        await model.request(server:origin)
+        XCTAssertTrue(model.finished,model.message ?? "withdrawal not complete")
+        XCTAssertFalse(consent); XCTAssertTrue(journal.blocksUploads)
+        let sealed = try await state(["legacy"])
+        XCTAssertTrue(sealed.epochs[0].withdrawn)
+        XCTAssertFalse(sealed.epochs[0].objects.isEmpty)
+        XCTAssertTrue(sealed.epochs[0].objects.allSatisfy {$0.state=="sealed" && $0.bytes==0})
+        XCTAssertEqual(try Data(contentsOf:directory.appendingPathComponent("index.json")),originalIndex)
+        let offlineID = UUID().uuidString
+        let serviceOnly = try await native.recognizeSaved(recordID:offlineID,jpeg:image)
+        XCTAssertEqual(serviceOnly.note,"confirmed")
+        XCTAssertNil(try LiteCaptureResearchScope.capture(server:origin,consent:consent,journal:journal))
+        let balance = try await native.personalBalance(); XCTAssertEqual(balance.used,2)
+        await research.loseRejoinResponse()
+        let uncertain = await model.reconsentCompletedWithdrawal(server:origin,sendRenewal:privacy.rejoin)
+        XCTAssertFalse(uncertain); XCTAssertTrue(journal.blocksUploads); XCTAssertFalse(consent)
+        let intent = try journal.prepareRenewal(try XCTUnwrap(model.record))
+        let remote = try await state(["legacy",intent.request.new_epoch])
+        XCTAssertEqual(remote.current,intent.request.new_epoch)
+        let reopened = withdrawal()
+        let confirmed = await reopened.reconsentCompletedWithdrawal(server:origin,sendRenewal:privacy.rejoin)
+        XCTAssertTrue(confirmed,reopened.message ?? "rejoin not confirmed")
+        XCTAssertTrue(reopened.renewed); XCTAssertFalse(journal.blocksUploads)
+        let restoredState = try await state(["legacy",intent.request.new_epoch])
+        XCTAssertEqual(restoredState,remote)
+        consent = true // The test's explicit renewed-consent action, never a purchase callback.
+        XCTAssertFalse(journal.permits(oldBinding))
+        let beforeOldRetry = try JSONDecoder().decode(WireSnapshot.self,from:await NativeWire.control(cfg,"snapshot"))
+        await delivery.resume(old.id,store:store,explicit:true)
+        await store.syncRevision(recordID:old.id,consent:{consent},bindingAllowed:journal.permits,
+            send:{_,_ in XCTFail("old epoch must not dispatch")})
+        let afterOldRetry = try JSONDecoder().decode(WireSnapshot.self,from:await NativeWire.control(cfg,"snapshot"))
+        XCTAssertEqual(afterOldRetry.routes.count,beforeOldRetry.routes.count)
+        let fresh = try await save(UUID()) // A new manual capture; no third inference or quota debit.
+        await delivery.resume(fresh.id,store:store)
+        let newBinding = try XCTUnwrap(store.records.first(where:{$0.id==fresh.id})?.cloudSync?.binding)
+        XCTAssertEqual(newBinding.researchEpoch,intent.request.new_epoch)
+        XCTAssertTrue(journal.permits(newBinding))
+        let beforeLateDelete = try await state(["legacy",intent.request.new_epoch])
+        XCTAssertTrue(beforeLateDelete.epochs[1].objects.contains {$0.kind=="rgbd" && $0.bytes>0})
+        // A request already in flight can bypass the local journal fence. The
+        // server must reject its retired epoch without touching the new one.
+        let pending = try XCTUnwrap(store.records.first(where:{$0.id==old.id})?.cloudSync?.pending)
+        let backend = BackendClient(baseUrl:origin,liteTransport:LiteSignedCloudTransport(client:client,consent:{true}))
+        do {
+            try await backend.liteRevision(bindingAnonID:oldBinding.anonID,imageID:oldBinding.imageID,
+                revision:pending.revision,payloadJSON:pending.payloadJSON,digest:pending.digest,
+                researchEpoch:oldBinding.researchEpoch)
+            XCTFail("retired epoch revision accepted")
+        } catch { /* HTTP status and unchanged storage are checked below. */ }
+        let afterLateRevision = try await state(["legacy",intent.request.new_epoch])
+        XCTAssertEqual(afterLateRevision,beforeLateDelete)
+        let repeated = try await privacy.withdraw(server:origin,owner:owner)
+        XCTAssertEqual(repeated,.liveMediaRemoved)
+        let afterLateDelete = try await state(["legacy",intent.request.new_epoch])
+        XCTAssertEqual(afterLateDelete,beforeLateDelete)
+        XCTAssertEqual(store.images.rawBytes(old.imageName),image)
+        XCTAssertEqual(store.loadDepth(try XCTUnwrap(old.depthName),matchingImage:old.imageName)?.map.map(\.bitPattern),
+            originalDepth.map.map(\.bitPattern))
+        XCTAssertEqual(store.records.first(where:{$0.id==old.id})?.polysJson,old.polysJson)
+        let final = try await finish(cfg,"research-withdraw-rejoin")
+        XCTAssertEqual(final.model_calls,2); XCTAssertEqual(final.used,2); XCTAssertEqual(final.attempts,2)
+        XCTAssertEqual(final.routes.filter {$0.path.hasSuffix("research/rejoin")}.count,2)
+        XCTAssertEqual(final.routes.filter {$0.path.hasSuffix("research/capture")}.count,2)
+        XCTAssertEqual(final.routes.filter {$0.path.contains("/data/")}.count,2)
+        XCTAssertEqual(final.routes.filter {$0.path.hasSuffix("annotation/revision")}.map(\.status),[409])
+        XCTAssertTrue(final.research_unchanged)
+        let finalOwner = try await privacy.withdrawalOwner()
+        XCTAssertEqual(finalOwner,owner)
     }
     func testResearchRGBDLostRepliesPreserveMediaAndTwoRevisionOrder() async throws {
         let cfg = try config()
@@ -251,6 +438,7 @@ private actor NativeWire: LiteAuthenticatedTransport {
         XCTAssertEqual(final.routes.filter {$0.path.hasSuffix("research/capture/status")}.count,2)
         XCTAssertEqual(final.routes.filter {$0.path.hasSuffix("research/capture")}.count,1)
         XCTAssertEqual(final.routes.filter {$0.path.hasSuffix("annotation/revision")}.count,3)
+        XCTAssertEqual(final.routes.filter {$0.path.hasSuffix("annotation/revision")}.compactMap(\.revision),[1,1,2])
         XCTAssertTrue(final.research_unchanged); XCTAssertTrue(final.image_unchanged)
     }
     func testRealHTTPFreePlusRestoreAndWrongAccountDoNotMixQuota() async throws {

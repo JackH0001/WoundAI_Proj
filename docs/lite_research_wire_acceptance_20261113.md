@@ -69,3 +69,8 @@ xcresult, parsed summary/tree, body-hash HTTP observations and source hashes.
 package includes exact source, patch, evidence, SHA-256 manifest and an offline
 verifier. It validates saved evidence; it is not a new test run or an external
 provider attestation. No deployment or store upload was performed.
+
+Later same-day extension: the current runner additionally requires native
+withdrawal/rejoin with retired-epoch protection, for six native and ten fixture
+tests. See `lite_research_privacy_wire_acceptance_20261113.md`; the counts and
+non-coverage above describe this original capture/revision run.

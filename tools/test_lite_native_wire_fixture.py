@@ -103,5 +103,43 @@ class NativeWireFixtureTests(unittest.TestCase):
         self.assertEqual(reply.json['labels'],[])
         self.assertEqual(before,f.bucket.live)
 
+    def test_privacy_readback_has_bounded_epochs_and_never_mutates_media(self):
+        self.post('/fixture/reset-research')
+        f = self.fixture.flow; f.n.login(); f.n.complete()
+        ticket = f.n.post('service/research-source',**f.fields)
+        self.assertEqual(f.upload(ticket.json).status_code,200)
+        before = dict(f.bucket.live)
+        read = lambda values:self.post('/fixture/research-privacy',json.dumps({'epochs':values}).encode())
+        first = read(['legacy']); self.assertEqual(first.status_code,200,first.json)
+        self.assertEqual(first.json['current'],'legacy')
+        self.assertTrue(any(x['kind']=='rgbd' and x['bytes']>0 for x in first.json['epochs'][0]['objects']))
+        self.assertEqual(before,f.bucket.live)
+        for invalid in ([],['legacy']*4,['../escape'],None):
+            self.assertEqual(read(invalid).status_code,500)
+            self.assertEqual(before,f.bucket.live)
+        self.assertEqual(f.r.delete().status_code,200)
+        sealed = read(['legacy']).json['epochs'][0]
+        self.assertTrue(sealed['withdrawn'])
+        self.assertTrue(all(x['state']=='sealed' and x['bytes']==0 for x in sealed['objects']))
+        self.assertEqual(len(sealed['objects']),len(first.json['epochs'][0]['objects']))
+
+    def test_delete_requires_exact_privacy_path_empty_body_and_matching_owner(self):
+        seed = self.post('/fixture/reset-research').json
+        headers = {'X-Synthetic-Wire':self.fixture.token,'X-Synthetic-Service':'research',
+                   'X-Synthetic-Installation':seed['research_owner'],'Content-Length':'0'}
+        path = '/api/v1/lite/data/'+seed['research_owner']
+        def request(url, data=b'', extra=None):
+            return self.client.delete(url,data=data,headers=headers | (extra or {}),
+                                      environ_overrides={'REMOTE_ADDR':'127.0.0.1',
+                                                         'CONTENT_LENGTH':str(len(data))})
+        self.assertEqual(request('/fixture/reset').status_code,400)
+        self.assertEqual(request(path,b'nonempty').status_code,400)
+        self.assertEqual(request(path,extra={'X-Synthetic-Installation':seed['owner']}).status_code,403)
+        self.assertFalse(self.fixture.flow.privacy.is_withdrawn(seed['research_owner']))
+        reply = request(path)
+        self.assertEqual(reply.status_code,200,reply.json)
+        self.assertTrue(self.fixture.flow.privacy.is_withdrawn(seed['research_owner']))
+        self.assertEqual(reply.json['live_payloads_remaining'],0)
+
 
 if __name__ == '__main__': unittest.main()
