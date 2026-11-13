@@ -22,6 +22,8 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from test_lite_native_backend import NativeBackendTests, rows
 from test_lite_signed_client import b64
+from test_lite_research_ingest_flow import ResearchIngestFlowTests
+from lite_raw_depth_store import unpack
 
 
 class QuietHandler(WSGIRequestHandler):
@@ -33,6 +35,8 @@ class WireFixture:
         NativeBackendTests.setUpClass()
         self.token = secrets.token_hex(32)
         self.h = None
+        self.flow = None
+        self.research_checks = []
         self.events = []
         self.completed = []
         self.clients = {}
@@ -48,7 +52,33 @@ class WireFixture:
         self.server.shutdown()
         self.thread.join(timeout=5)
         self.server.server_close()
-        if self.h: self.h.doCleanups()
+        self.cleanup_state()
+
+    def cleanup_state(self):
+        if self.flow: self.flow.doCleanups()
+        elif self.h: self.h.doCleanups()
+        self.flow = None; self.h = None
+
+    def research_readback(self):
+        if not self.flow: raise ValueError('research fixture required')
+        f = self.flow
+        media = f.privacy.media(f.r.h.owner)
+        refs = f.privacy.objects.list_refs(f.r.h.owner, kind='rgbd')
+        if len(refs) != 1: raise ValueError('exactly one capture required')
+        ref = refs[0]; iid = ref.identifier
+        key = 'lite_raw/' + f.r.h.owner + '/' + iid + '.rgbd'
+        bundle = media.get_blob(key); packet = unpack(bundle)
+        meta = media.get_json(f'lite/{f.r.h.owner}/{iid}.json')
+        result = dict(image_id=iid, bundle_sha256=hashlib.sha256(bundle).hexdigest(),
+            rgb_sha256=hashlib.sha256(packet['jpeg']).hexdigest(),
+            depth_sha256=hashlib.sha256(packet['raw_depth']).hexdigest(),
+            metadata_sha256=hashlib.sha256(packet['metadata_bytes']).hexdigest(),
+            metadata=packet['metadata'], ai_polygons=meta['ai_polygons'],
+            index_rows=len(media.read_lines_fresh('lite_index.jsonl')),
+            labels=[json.loads(line) for line in media.read_lines_fresh('lite_labels.jsonl')],
+            media_generation=str(f.bucket.live[f.privacy.objects.name(ref)][0]))
+        self.research_checks.append(result)
+        return result
 
     def snapshot(self):
         h = self.h
@@ -59,6 +89,7 @@ class WireFixture:
                     research_unchanged=rows(h.h.privacy.store) == self.privacy,
                     image_unchanged=hashlib.sha256(h.f.jpeg).hexdigest() == self.image_hash,
                     registered_installations=len(self.clients),
+                    research_readbacks=list(self.research_checks),
                     routes=list(self.events))
 
     def add_installation(self):
@@ -86,18 +117,26 @@ class WireFixture:
         return dict(owner=peer.owner, now=h.h.clock(), jpeg=base64.b64encode(h.f.jpeg).decode())
 
     def control(self, kind, body):
-        if kind == 'reset':
-            if self.h: self.h.doCleanups()
-            self.h = NativeBackendTests(); self.h.setUp()
+        if kind in ('reset', 'reset-research'):
+            self.cleanup_state()
+            if kind == 'reset-research':
+                self.flow = ResearchIngestFlowTests(); self.flow.setUp()
+                self.h = self.flow.n
+                self.h.app = self.h.client.application
+            else:
+                self.h = NativeBackendTests(); self.h.setUp()
             self.privacy = rows(self.h.h.privacy.store)
             self.image_hash = hashlib.sha256(self.h.f.jpeg).hexdigest()
             self.events = []
+            self.research_checks = []
             self.clients = {self.h.owner:self.h}
             self.revoke_before_service = False
             return dict(owner=self.h.owner, now=self.h.h.clock(),
+                        research_owner=self.flow.r.h.owner if self.flow else None,
                         jpeg=base64.b64encode(self.h.f.jpeg).decode())
         if not self.h: raise ValueError('reset required')
         h = self.h
+        if kind == 'research-readback': return self.research_readback()
         if kind == 'second-installation': return self.add_installation()
         if kind == 'identity':
             c = body['challenge']; sub = 'apple-human-1'
@@ -155,7 +194,12 @@ class WireFixture:
         if not self.h or not request.path.startswith('/api/v1/lite/'):
             return Response(status=404)(env, start_response)
         path = request.path
-        client = self.clients.get(request.headers.get('X-Synthetic-Installation', self.h.owner))
+        service = request.headers.get('X-Synthetic-Service', 'native')
+        owner = request.headers.get('X-Synthetic-Installation', self.h.owner)
+        if service == 'research':
+            client = self.flow.r.h if self.flow and owner == self.flow.r.h.owner else None
+        elif service == 'native': client = self.clients.get(owner)
+        else: client = None
         if client is None: return Response(status=403)(env, start_response)
         if self.revoke_before_service and path == '/api/v1/lite/service/prepare':
             self.revoke_before_service = False
@@ -168,7 +212,8 @@ class WireFixture:
         # The actual production Flask router receives the native Swift bytes.
         def capture(status, response_headers, exc_info=None):
             self.events.append(dict(path=path, status=int(status.split()[0]),
+                                    service=service,
                                     installation_sha256=hashlib.sha256(client.owner.encode()).hexdigest(),
                                     body_sha256=hashlib.sha256(raw).hexdigest(), bytes=len(raw)))
             return start_response(status, response_headers, exc_info)
-        return self.h.app(env, capture)
+        return client.app(env, capture)

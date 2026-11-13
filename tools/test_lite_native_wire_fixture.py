@@ -1,5 +1,6 @@
 """Safety boundary of the opt-in loopback fixture (no cloud or Xcode needed)."""
 import json
+import hashlib
 import unittest
 from werkzeug.test import Client
 from werkzeug.wrappers import Response
@@ -65,6 +66,42 @@ class NativeWireFixtureTests(unittest.TestCase):
         reply = peer.post('service/wounds', anon_id=self.fixture.h.owner,
                           account_sha256=peer.login_result['account_sha256'], action='status')
         self.assertEqual(reply.status_code, 403)
+
+    def test_research_adapter_requires_distinct_registered_owner_and_service(self):
+        seed = self.post('/fixture/reset-research')
+        self.assertEqual(seed.status_code, 200, seed.json)
+        self.assertNotEqual(seed.json['owner'], seed.json['research_owner'])
+        for service, owner in [('research', seed.json['owner']), ('unknown', seed.json['owner'])]:
+            reply = self.client.post('/api/v1/lite/research/capture/status', data=b'{}',
+                content_type='application/json', headers={'X-Synthetic-Wire':self.fixture.token,
+                    'X-Synthetic-Service':service,'X-Synthetic-Installation':owner},
+                environ_overrides={'REMOTE_ADDR':'127.0.0.1'})
+            self.assertEqual(reply.status_code,403)
+        self.assertEqual(self.fixture.flow.bucket.live,{})
+        self.assertEqual(self.post('/fixture/research-readback').status_code,500)
+        self.assertEqual(self.post('/fixture/reset').status_code,200)
+        self.assertIsNone(self.fixture.flow)
+
+    def test_native_request_cannot_reach_research_receiver(self):
+        self.post('/fixture/reset-research')
+        reply = self.post('/api/v1/lite/research/capture/status')
+        self.assertEqual(reply.status_code,404)
+        self.assertEqual(self.fixture.flow.bucket.live,{})
+
+    def test_readback_decodes_stored_packet_not_request_and_preserves_generation(self):
+        self.post('/fixture/reset-research')
+        f = self.fixture.flow
+        f.n.login(); self.assertEqual(f.n.complete().status_code,200)
+        ticket = f.n.post('service/research-source',**f.fields)
+        self.assertEqual(f.upload(ticket.json).status_code,200)
+        before = dict(f.bucket.live)
+        reply = self.post('/fixture/research-readback')
+        self.assertEqual(reply.status_code,200,reply.json)
+        self.assertEqual(reply.json['rgb_sha256'],hashlib.sha256(f.n.f.jpeg).hexdigest())
+        self.assertEqual(reply.json['depth_sha256'],hashlib.sha256(f.r.f.raw).hexdigest())
+        self.assertEqual(reply.json['index_rows'],1)
+        self.assertEqual(reply.json['labels'],[])
+        self.assertEqual(before,f.bucket.live)
 
 
 if __name__ == '__main__': unittest.main()

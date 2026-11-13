@@ -66,9 +66,10 @@ research consent or original TestFlight records are accessed.
 ## Reproduction and evidence
 
 Run the commands in `lite_native_wire_acceptance_20261113.md`; the runner now
-requires exactly four passing native tests and four backend snapshots. It copies
-tracked application sources to a separate QA project and records every source
-hash. `tools/test_lite_native_wire_fixture.py` has five boundary tests.
+required exactly four passing native tests and four backend snapshots for this
+run. It copies tracked application sources to a separate QA project and records
+every source hash. The subsequent RGB-D extension now requires five native
+tests and eight fixture tests; see `lite_research_wire_acceptance_20261113.md`.
 
 Local evidence is in `woundailite-wound-wire-20261113/`: `attempt1` preserves the
 clock failure; `attempt2` contains original xcresult, JSON test tree/summary,

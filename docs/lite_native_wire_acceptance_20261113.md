@@ -89,6 +89,8 @@ regressions retain revocation and logout/relogin fences while reducing redundant
 status calls. See `lite_request_admission_20261113.md` for the before/after counts.
 The harness now also covers two separately registered installations, shared
 five-wound limits and downgrade/restoration with local timeline preservation.
-Its current four native / five fixture tests and explicit synthetic boundaries
-are documented in `lite_wound_wire_acceptance_20261113.md`; the two-test figures
-above describe the original run, not the latest harness.
+The four-native / five-fixture run is documented in
+`lite_wound_wire_acceptance_20261113.md`. The latest research RGB-D extension has
+five native tests and eight fixture tests; see
+`lite_research_wire_acceptance_20261113.md`. Earlier counts above describe their
+original runs, not the latest harness.

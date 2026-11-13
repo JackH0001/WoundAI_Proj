@@ -4,7 +4,16 @@ import XCTest
 @testable import WoundLite
 
 private struct WireConfig: Decodable { let url: URL, token: String }
-private struct WireSeed: Decodable { let owner: String, now: Int, jpeg: String }
+private struct WireSeed: Decodable { let owner: String, now: Int, jpeg: String; let research_owner: String? }
+private struct ResearchReadback: Decodable {
+    let image_id, bundle_sha256, rgb_sha256, depth_sha256, metadata_sha256, media_generation: String
+    let index_rows: Int
+    let ai_polygons: [[[Double]]]
+    struct Label: Decodable {
+        let revision: Int, polygons: [[[Int]]], surface_cm2: Double
+    }
+    let labels: [Label]
+}
 private final class WireClock: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Int
@@ -36,11 +45,18 @@ private actor WirePairBarrier {
 
 private actor NativeWire: LiteAuthenticatedTransport {
     let config: WireConfig, owner: String
+    let research: Bool
     var dropRun = false
+    var dropCapture = false
+    var dropRevision = false
     var woundStatusBarrier: WirePairBarrier?
-    init(_ config: WireConfig, owner: String) { self.config = config; self.owner = owner }
+    init(_ config: WireConfig, owner: String, research: Bool = false) {
+        self.config = config; self.owner = owner; self.research = research
+    }
     func installation() -> String { owner }
     func loseRunResponse() { dropRun = true }
+    func loseCaptureResponse() { dropCapture = true }
+    func loseRevisionResponse() { dropRevision = true }
     func holdNextWoundStatus(_ barrier: WirePairBarrier) { woundStatusBarrier = barrier }
     static func control(_ config: WireConfig, _ path: String, _ body: Data = Data("{}".utf8)) async throws -> Data {
         var request = URLRequest(url: config.url.appendingPathComponent("fixture/" + path))
@@ -52,12 +68,13 @@ private actor NativeWire: LiteAuthenticatedTransport {
         return data
     }
     func send(_ original: URLRequest, installation: String) async throws -> (Data, HTTPURLResponse) {
-        guard installation == owner, original.url?.host == "native-wire.invalid",
+        guard installation == owner, original.url?.host == (research ? "research-wire.invalid" : "native-wire.invalid"),
               original.url?.path.hasPrefix("/api/v1/lite/") == true else { throw LiteAccountFailure.invalid }
         var request = original
         request.url = config.url.appendingPathComponent(String(original.url!.path.dropFirst()))
         request.setValue(config.token, forHTTPHeaderField: "X-Synthetic-Wire")
         request.setValue(owner, forHTTPHeaderField: "X-Synthetic-Installation")
+        request.setValue(research ? "research" : "native", forHTTPHeaderField: "X-Synthetic-Service")
         let (data, response) = try await URLSession.shared.data(for: request)
         let http = try XCTUnwrap(response as? HTTPURLResponse)
         if original.url?.lastPathComponent == "wounds",
@@ -68,6 +85,12 @@ private actor NativeWire: LiteAuthenticatedTransport {
         }
         if dropRun && original.url?.lastPathComponent == "run" {
             dropRun = false; throw URLError(.networkConnectionLost)
+        }
+        if dropCapture && original.url?.path == "/api/v1/lite/research/capture" && http.statusCode == 200 {
+            dropCapture = false; throw URLError(.networkConnectionLost)
+        }
+        if dropRevision && original.url?.path == "/api/v1/lite/annotation/revision" && http.statusCode == 200 {
+            dropRevision = false; throw URLError(.networkConnectionLost)
         }
         // Only the QA transport maps HTTPS origin to loopback; production origin
         // checks and all request/response parsing remain unchanged.
@@ -128,6 +151,107 @@ private actor NativeWire: LiteAuthenticatedTransport {
     private func finish(_ config: WireConfig, _ name: String) async throws -> WireSnapshot {
         try JSONDecoder().decode(WireSnapshot.self, from: await NativeWire.control(config, "finish",
             JSONEncoder().encode(["name":name])))
+    }
+    func testResearchRGBDLostRepliesPreserveMediaAndTwoRevisionOrder() async throws {
+        let cfg = try config()
+        let seed = try JSONDecoder().decode(WireSeed.self, from: await NativeWire.control(cfg,"reset-research"))
+        let owner = try XCTUnwrap(seed.research_owner), clock = WireClock(seed.now)
+        XCTAssertNotEqual(owner,seed.owner)
+        let wire = NativeWire(cfg,owner:seed.owner), research = NativeWire(cfg,owner:owner,research:true)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let native = try session(wire,WireApple(cfg),WireStoreKit(cfg),directory,seed.now,clock:{clock.date()})
+        await native.identity.signIn()
+        let image = try XCTUnwrap(Data(base64Encoded:seed.jpeg)), recordID = UUID().uuidString
+        let recognized = try await native.recognizeSaved(recordID:recordID,jpeg:image)
+        XCTAssertEqual(recognized.note,"confirmed",recognized.message)
+        let result = try XCTUnwrap(recognized.reply?.result)
+        let context = try await native.identity.activeServiceContext()
+        let delivery = LiteResearchCaptureDelivery(source:wire,
+            currentAccount:{try await native.identity.activeServiceContext()},
+            researchOwner:{_ in owner}, permits:{_ in true}, researchTransport:{_,_ in research})
+        let pinValue = await delivery.pin(.init(origin:"https://research-wire.invalid",epoch:nil))
+        let pin = try XCTUnwrap(pinValue)
+        XCTAssertEqual(pin.account,context)
+        var depth = DepthCapture(map:(0..<64).map {0.3 + Float($0)*0.0001},width:8,height:8,
+            fx:50,fy:50,cx:32,cy:32,refWidth:64,refHeight:64,
+            accuracy:"absolute",filtered:false,rgbWidth:64,rgbHeight:64,sourceExifOrientation:1)
+        depth.captureProvenance = .init(id:UUID(),observedAt:clock.date())
+        let packet = try LiteRawDepthPacket.make(depth:depth,jpeg:image)
+        let store = LiteStore(fileURL:directory.appendingPathComponent("index.json"),now:{clock.date()})
+        let job = LitePendingResearchCapture(pin:pin,captureID:depth.captureProvenance!.id.uuidString.lowercased(),
+            imageHash:LiteServiceBytes.hash(image),operation:recognized.operation,
+            resultHash:recognized.reply?.receipt?.result_sha256,width:64,height:64)
+        let row = LiteRecord(id:recordID,dateISO:"2026-11-13T01:00:00Z",surfaceCm2:4,projectedCm2:4,
+            quality:"synthetic",imageName:try XCTUnwrap(store.images.save(jpeg:image)),source:"manual",
+            polysJson:"[[[5,5],[5,50],[50,50]]]",depthName:try XCTUnwrap(store.saveDepth(depth,matchingJPEG:image)),
+            researchCapture:job,manuallyConfirmed:true)
+        defer {
+            store.images.delete(row.imageName)
+            if let name = row.depthName { store.images.delete(name) }
+            try? FileManager.default.removeItem(at:directory)
+        }
+        let saved = try XCTUnwrap(store.saveMeasurement(row,selectedWoundID:"",
+            enteredLocation:.init(side:"right",site:"heel"),queueResearchSync:true))
+        let frozen = try XCTUnwrap(saved.researchCapture?.firstRevision)
+        await research.loseCaptureResponse()
+        await delivery.resume(recordID,store:store)
+        XCTAssertNil(store.records.first?.cloudSync)
+        XCTAssertNotNil(store.records.first?.researchCapture?.encryptedTicket)
+        func readback() async throws -> ResearchReadback {
+            try JSONDecoder().decode(ResearchReadback.self,from:await NativeWire.control(cfg,"research-readback"))
+        }
+        let uploaded = try await readback()
+        XCTAssertEqual(uploaded.rgb_sha256,LiteServiceBytes.hash(image))
+        XCTAssertEqual(uploaded.depth_sha256,LiteServiceBytes.hash(packet.rawDepth))
+        XCTAssertEqual(uploaded.bundle_sha256,packet.bundleDigest)
+        XCTAssertEqual(uploaded.ai_polygons,result.wound_polygons)
+        XCTAssertEqual(uploaded.labels.count,0)
+        var edit = try XCTUnwrap(store.records.first)
+        edit.surfaceCm2 = 5; edit.polysJson = "[[[5,5],[6,45],[50,49]]]"
+        XCTAssertTrue(store.update(edit))
+        _ = try await NativeWire.control(cfg,"advance",JSONEncoder().encode(["seconds":65]))
+        clock.advance(65)
+        let reopened = LiteStore(fileURL:directory.appendingPathComponent("index.json"),now:{clock.date()})
+        await delivery.resume(recordID,store:reopened)
+        let sync = try XCTUnwrap(reopened.records.first?.cloudSync,
+            reopened.records.first?.researchCapture?.notice ?? "no research receipt")
+        XCTAssertEqual(sync.pending?.payloadJSON,frozen)
+        XCTAssertEqual(sync.binding.imageID,uploaded.image_id)
+        XCTAssertEqual(sync.binding.storageReceipt?.rawDepthReceipt?.depth_sha256,uploaded.depth_sha256)
+        let client = BackendClient(baseUrl:pin.scope.origin,liteTransport:research)
+        func send(_ binding:LiteCloudBinding,_ pending:LitePendingRevision) async throws {
+            try await client.liteRevision(bindingAnonID:binding.anonID,imageID:binding.imageID,
+                revision:pending.revision,payloadJSON:pending.payloadJSON,digest:pending.digest,
+                researchEpoch:binding.researchEpoch)
+        }
+        await research.loseRevisionResponse()
+        await reopened.syncRevision(recordID:recordID,consent:{true},bindingAllowed:{_ in true},send:send)
+        XCTAssertEqual(reopened.records.first?.cloudSync?.pending?.revision,1)
+        let first = try await readback(); XCTAssertEqual(first.labels.map(\.revision),[1])
+        let restarted = LiteStore(fileURL:directory.appendingPathComponent("index.json"),now:{clock.date()})
+        await restarted.syncRevision(recordID:recordID,consent:{true},bindingAllowed:{_ in true},send:send)
+        XCTAssertEqual(restarted.records.first?.cloudSync?.acknowledgedRevision,2)
+        XCTAssertNil(restarted.records.first?.cloudSync?.pending)
+        let finalMedia = try await readback()
+        XCTAssertEqual(finalMedia.labels.map(\.revision),[1,2])
+        XCTAssertEqual(finalMedia.labels.map(\.surface_cm2),[4,5])
+        XCTAssertEqual(finalMedia.labels.map(\.polygons),[[[[5,5],[5,50],[50,50]]],[[[5,5],[6,45],[50,49]]]])
+        XCTAssertEqual(finalMedia.index_rows,1); XCTAssertEqual(finalMedia.media_generation,uploaded.media_generation)
+        XCTAssertEqual(finalMedia.bundle_sha256,uploaded.bundle_sha256)
+        XCTAssertEqual(finalMedia.metadata_sha256,uploaded.metadata_sha256)
+        XCTAssertEqual(finalMedia.ai_polygons,result.wound_polygons)
+        let before = try JSONDecoder().decode(WireSnapshot.self,from:await NativeWire.control(cfg,"snapshot"))
+        await restarted.syncRevision(recordID:recordID,consent:{true},bindingAllowed:{_ in true},send:send)
+        XCTAssertEqual(restarted.images.rawBytes(row.imageName),image)
+        XCTAssertEqual(restarted.loadDepth(try XCTUnwrap(row.depthName),matchingImage:row.imageName)?.map.map(\.bitPattern),depth.map.map(\.bitPattern))
+        let final = try await finish(cfg,"research-media-revisions")
+        XCTAssertEqual(final.routes.count,before.routes.count)
+        XCTAssertEqual(final.model_calls,1); XCTAssertEqual(final.used,1); XCTAssertEqual(final.attempts,1)
+        XCTAssertEqual(final.routes.filter {$0.path.hasSuffix("service/research-source")}.count,1)
+        XCTAssertEqual(final.routes.filter {$0.path.hasSuffix("research/capture/status")}.count,2)
+        XCTAssertEqual(final.routes.filter {$0.path.hasSuffix("research/capture")}.count,1)
+        XCTAssertEqual(final.routes.filter {$0.path.hasSuffix("annotation/revision")}.count,3)
+        XCTAssertTrue(final.research_unchanged); XCTAssertTrue(final.image_unchanged)
     }
     func testRealHTTPFreePlusRestoreAndWrongAccountDoNotMixQuota() async throws {
         let cfg = try config()
