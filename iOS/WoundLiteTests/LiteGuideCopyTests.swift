@@ -11,7 +11,7 @@ final class LiteGuideCopyTests: XCTestCase {
             return try XCTUnwrap(PropertyListSerialization.propertyList(from: Data(contentsOf: url), format: nil) as? [String: String])
         }
         let a = try table("en"), b = try table("zh-Hant")
-        XCTAssertEqual(a.count, 55); XCTAssertEqual(Set(a.keys), Set(b.keys))
+        XCTAssertEqual(a.count, 56); XCTAssertEqual(Set(a.keys), Set(b.keys))
         for (key, value) in a {
             XCTAssertEqual(b[key], key); XCTAssertFalse(value.isEmpty)
             XCTAssertEqual(key.components(separatedBy: "%@").count, value.components(separatedBy: "%@").count)

@@ -54,3 +54,5 @@
 "操作步驟" = "Steps";
 "Apple 帳單與訂閱支援" = "Apple billing and subscription support";
 "來源：WoundAILite %@ 內建操作指南" = "Source: built-in WoundAILite %@ operation guide";
+
+"這裡只查找操作說明，不判斷病況，也不會代為取消訂閱或刪帳。" = "This searches operation instructions only. It does not assess your condition, cancel subscriptions or delete accounts for you.";

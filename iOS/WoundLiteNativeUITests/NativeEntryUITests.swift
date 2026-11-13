@@ -130,6 +130,37 @@ final class NativeEntryUITests: XCTestCase {
     }
 
     #if !LITE_QA_ORDINARY && !LITE_QA_MISSING_BINDING
+    @MainActor func testEnglishGuidePrioritizesCancelRenewalBeforePhotos() throws {
+        try verifyGuideOperationRanking(language: "en", query: "Turn off automatic renewal, keep photos", topic: "billing", pathFragment: "Subscriptions")
+    }
+
+    @MainActor func testChineseGuidePrioritizesReportBeforeCamera() throws {
+        try verifyGuideOperationRanking(language: "zh-Hant", query: "匯出相機照片與時間軸 PDF", topic: "report", pathFragment: "匯出此傷口時間軸 PDF")
+    }
+
+    @MainActor private func verifyGuideOperationRanking(language: String, query: String, topic: String, pathFragment: String) throws {
+        continueAfterFailure = false
+        let english = language == "en", app = application(language: language)
+        app.launch()
+        let gate = app.buttons[english ? "Settings and data withdrawal" : "設定與資料撤回"]
+        let settings = gate.waitForExistence(timeout: 3) ? gate : app.buttons[english ? "Settings" : "設定"].firstMatch
+        XCTAssertTrue(settings.waitForExistence(timeout: 8)); settings.tap()
+        let guide = app.buttons["lite.help.open"]; XCTAssertTrue(guide.waitForExistence(timeout: 5)); guide.tap()
+        let field = app.textFields["lite.help.question"]; XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap(); field.typeText(query)
+        let first = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "lite.help.topic.")).firstMatch
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        XCTAssertEqual(first.identifier, "lite.help.topic." + topic)
+        XCTAssertTrue(app.staticTexts["lite.help.scope"].exists)
+        XCTAssertTrue(app.buttons["lite.help.suggest"].exists || app.staticTexts["lite.help.modelUnavailable"].exists)
+        first.tap()
+        let path = app.staticTexts["lite.help.path"]; XCTAssertTrue(path.waitForExistence(timeout: 5))
+        XCTAssertTrue(path.label.contains(pathFragment), path.label)
+        XCTAssertFalse(app.buttons["lite.offer.buy"].exists)
+        attach(app, language + "-guide-operation-ranking")
+        app.terminate()
+    }
+
     @MainActor func testEnglishGuideSeparatesResearchRestoreAndAccountDeletionWithoutTakingActions() throws {
         continueAfterFailure = false
         let app = application(language: "en")
