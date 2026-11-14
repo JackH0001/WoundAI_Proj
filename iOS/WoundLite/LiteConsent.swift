@@ -212,6 +212,8 @@ struct LiteSettingsView: View {
                         .textSelection(.enabled)
                     LitePrivacyLink()
                     LiteTermsLink()
+                    NavigationLink(LiteReminderCopy(locale: locale).text("本機紀錄提醒")) { LiteReminderView() }
+                        .accessibilityIdentifier("lite.reminder.open")
                     if LiteNativeBuild.includesService { LiteAppleSubscriptionLink() }
                 }
                 if let accountManagement {

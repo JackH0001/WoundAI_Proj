@@ -185,8 +185,8 @@ struct LiteRootView: View {
                 .tag(LiteRootTab.settings)
                 .tabItem { Label(LiteServiceCopy.text("設定"), systemImage: "gearshape") }
         }
-        .task { await resumeResearch() }
-        .onChange(of: scenePhase) { _, value in if value == .active { Task { await resumeResearch() } } }
+        .task { await LiteReminderModel.shared.refresh(); await resumeResearch() }
+        .onChange(of: scenePhase) { _, value in if value == .active { Task { await LiteReminderModel.shared.refresh(); await resumeResearch() } } }
         .onReceive(retryTimer) { _ in if scenePhase == .active { Task { await resumeResearch() } } }
         .onAppear { if lidarOK, LitePrefs.researchConsent == nil { askConsent = true } }
         .fullScreenCover(isPresented: $askConsent) {

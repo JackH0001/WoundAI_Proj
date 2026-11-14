@@ -27,6 +27,8 @@ struct LiteHelpTopic: Identifiable {
                   steps: (personal ? "免費可同時追蹤 1 處，Plus 每帳戶最多 5 處。在另一台裝置調整後，可重新核對名額。" : "使用本機免費名額可追蹤 1 處。") + "結束追蹤可空出名額，原時間軸及 PDF 仍可查看。", terms: ["多傷口", "名額", "追蹤", "時間軸", "五處", "另一處", "track"]),
             .init(id: "research", title: "怎麼停止研究上傳或撤回？", path: "設定 → 研究上傳／資料與撤回",
                   steps: "關閉研究上傳可停止未來送件。若要撤回已送資料，請到「資料與撤回」閱讀範圍，確認後查看進度。手機上的紀錄仍保留。", terms: ["撤回", "研究", "同意", "停止上傳", "withdraw", "consent"]),
+            .init(id: "reminder", title: "如何設定或關閉紀錄提醒？", path: "設定 → 本機紀錄提醒",
+                  steps: "選擇每天的時間並按啟用，首次需允許 iOS 通知。可隨時關閉；提醒只在這部裝置，不需登入、不上傳、不扣額度。這不是換藥或治療時程；系統設定可能延後或隱藏通知。", terms: ["提醒", "通知", "reminder", "notification"]),
         ]
         if personal {
             topics += [

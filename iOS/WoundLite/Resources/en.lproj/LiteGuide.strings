@@ -56,3 +56,6 @@
 "來源：WoundAILite %@ 內建操作指南" = "Source: built-in WoundAILite %@ operation guide";
 
 "這裡只查找操作說明，不判斷病況，也不會代為取消訂閱或刪帳。" = "This searches operation instructions only. It does not assess your condition, cancel subscriptions or delete accounts for you.";
+"如何設定或關閉紀錄提醒？" = "How do I set or turn off a record reminder?";
+"設定 → 本機紀錄提醒" = "Settings → Local record reminder";
+"選擇每天的時間並按啟用，首次需允許 iOS 通知。可隨時關閉；提醒只在這部裝置，不需登入、不上傳、不扣額度。這不是換藥或治療時程；系統設定可能延後或隱藏通知。" = "Choose a daily time and enable it; allow iOS notifications the first time. You can turn it off anytime. Reminders stay on this device, need no sign-in and use no uploads or credits. This is not a dressing-change or treatment schedule. System settings may delay or hide notifications.";

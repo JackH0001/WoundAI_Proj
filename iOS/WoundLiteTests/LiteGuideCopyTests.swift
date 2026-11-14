@@ -11,7 +11,7 @@ final class LiteGuideCopyTests: XCTestCase {
             return try XCTUnwrap(PropertyListSerialization.propertyList(from: Data(contentsOf: url), format: nil) as? [String: String])
         }
         let a = try table("en"), b = try table("zh-Hant")
-        XCTAssertEqual(a.count, 56); XCTAssertEqual(Set(a.keys), Set(b.keys))
+        XCTAssertEqual(a.count, 59); XCTAssertEqual(Set(a.keys), Set(b.keys))
         for (key, value) in a {
             XCTAssertEqual(b[key], key); XCTAssertFalse(value.isEmpty)
             XCTAssertEqual(key.components(separatedBy: "%@").count, value.components(separatedBy: "%@").count)
@@ -23,7 +23,7 @@ final class LiteGuideCopyTests: XCTestCase {
         for personal in [false, true] {
             let a = LiteHelpTopic.topics(personal: personal, locale: en)
             let b = LiteHelpTopic.topics(personal: personal, locale: zh)
-            XCTAssertEqual(a.count, personal ? 11 : 7); XCTAssertEqual(a.map(\.id), b.map(\.id))
+            XCTAssertEqual(a.count, personal ? 12 : 8); XCTAssertEqual(a.map(\.id), b.map(\.id))
             for (english, chinese) in zip(a, b) {
                 XCTAssertEqual(english.terms, chinese.terms)
                 for value in [english.title, english.path, english.steps] {
@@ -40,7 +40,7 @@ final class LiteGuideCopyTests: XCTestCase {
         let cases = ["take a picture": "camera", "focus": "camera", "depth missing": "area",
                      "correct boundary": "outline", "compare photos": "photos", "export PDF": "report",
                      "end tracking": "wounds", "stop research uploads": "research", "ＰＤＦ": "report",
-                     "我要修邊": "outline", "撤回研究": "research"]
+                     "我要修邊": "outline", "撤回研究": "research", "關閉提醒": "reminder", "record reminder": "reminder"]
         for locale in [en, zh] {
             for personal in [false, true] {
                 let topics = LiteHelpTopic.topics(personal: personal, locale: locale)
