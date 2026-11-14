@@ -124,7 +124,7 @@ class AccountGrantCipher:
     immutable = staticmethod(SubscriptionRuntime.immutable)
 
     def __init__(self, *, provider, lifecycle, store, audit_store, readiness=None):
-        if not isinstance(provider,GoogleGrantKeyProvider) or not isinstance(lifecycle,AccountLifecycle):
+        if type(provider) is not GoogleGrantKeyProvider or not isinstance(lifecycle,AccountLifecycle):
             raise ValueError('explicit account lifecycle and key provider required')
         if store is audit_store or (getattr(store,'path',None) is not None
                 and getattr(store,'path',None)==getattr(audit_store,'path',None)):
@@ -172,9 +172,20 @@ class AccountGrantCipher:
     def _aad(self, person):
         return encoded(dict(v=1,scope=self.scope,person=person,version=self.provider.version(self.scope,person)))
 
-    def _dek(self, person, *, create=False):
+    def _require_no_destroy_intent(self, person):
         if self.audit.load(key('account-grant-key-destroy-intent',digest([self.scope,person]))) is not None:
             raise StateUnavailable('durable account key destruction intent fences all copies')
+
+    def _require_current(self, person, record):
+        live = self._read(person)
+        if live is None or live[1] != record:
+            raise StateUnavailable('account key changed during use')
+        # The worker writes this intent before changing the mutable key row.
+        # Recheck it at handoff even when the row still matches the snapshot.
+        self._require_no_destroy_intent(person)
+
+    def _dek(self, person, *, create=False):
+        self._require_no_destroy_intent(person)
         row = self._read(person)
         if row is None:
             if not create: raise StateUnavailable('account data key missing; never recreate for decryption')
@@ -210,9 +221,7 @@ class AccountGrantCipher:
         # No plaintext key cache. Python cannot guarantee zeroization of memory;
         # deployment additionally requires bounded worker drain before erasure.
         del dek
-        live = self._read(person)
-        if live is None or live[1] != c:
-            raise StateUnavailable('account key changed during sealing')
+        self._require_current(person,c)
         return dict(v=2,scope=self.scope,person=person,version=c['version'],nonce=b64(nonce),ciphertext=b64(encrypted))
 
     def prepare(self, context):
@@ -222,8 +231,9 @@ class AccountGrantCipher:
         if self.readiness is not None and self._read(person) is None:
             self.readiness.ensure(context,self.provider.version(self.scope,person))
             self.lifecycle.require_active(person)
-        _,dek = self._dek(person,create=True)
+        c,dek = self._dek(person,create=True)
         del dek
+        self._require_current(person,c)
 
     def open(self, envelope, context):
         try:
@@ -237,9 +247,9 @@ class AccountGrantCipher:
             c,dek = self._dek(person)
             aad = encoded(dict(v=2,scope=self.scope,person=person,version=c['version'],context=context))
             plain = AESGCM(dek).decrypt(nonce,encrypted,aad);del dek
-            live = self._read(person)
-            if live is None or live[1] != c: raise ValueError()
-            return loads_json_object_strict(plain.decode('utf-8'))
+            tokens = loads_json_object_strict(plain.decode('utf-8'))
+            self._require_current(person,c)
+            return tokens
         except Exception: raise StateUnavailable('account grant authentication failed; no legacy fallback') from None
 
     def destroy_after_revocation(self, deletion, person):

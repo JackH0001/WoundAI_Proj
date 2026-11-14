@@ -230,13 +230,23 @@ class AccountIdentityBridge:
         except (ValueError, TypeError, KeyError) as exc: raise StateUnavailable('identity state corrupt; never reset') from exc
         return row
 
+    def _sign_in_registration(self, installation):
+        registration = self.registry.registration(installation, required=False)
+        if registration is not None:
+            if self.lifecycle is not None:
+                if not registration['subject'].startswith('apple-'):
+                    raise IdentityRejected('verified Apple account required')
+                self.lifecycle.require_active(registration['subject'][6:])
+            if self.runtime.links.confirmed_registration(registration):
+                return registration, True
+        if self.runtime.service_release is not None:
+            self.runtime.service_release.require_active()
+        return registration, False
+
     def challenge(self, installation, operation):
         _hex(operation,32)
         self._lifecycle_required()
-        if self.lifecycle is not None and self.registry.store.load(self.registry.key(installation)) is not None:
-            a = self.registry.registration(installation)
-            if not a['subject'].startswith('apple-'): raise IdentityRejected('verified Apple account required')
-            self.lifecycle.require_active(a['subject'][6:])
+        self._sign_in_registration(installation)
         for _ in range(CAS_ATTEMPTS):
             old = self._read(installation)
             if old and old[1]['operation'] == operation:
@@ -262,7 +272,15 @@ class AccountIdentityBridge:
         if self.grants is not None: result['authorization_code_required'] = True
         return result
 
-    def confirm(self, installation, operation, signed, state, authorization_code=None):
+    @staticmethod
+    def matches_account(account, expected):
+        return hmac.compare_digest(digest(account['subject']), expected)
+
+    def existing_account_pin(self, installation):
+        registration = self.registry.registration(installation, required=False)
+        return digest(registration['subject']) if registration is not None else None
+
+    def confirm(self, installation, operation, signed, state, authorization_code=None, *, internal_account_sha256=None):
         _hex(operation,32)
         self._lifecycle_required()
         if type(signed) is not str or not 1 <= len(signed) <= 16000: raise IdentityRejected('bounded identity required')
@@ -272,12 +290,17 @@ class AccountIdentityBridge:
             rev,c=row
             if (c['state'] != state or c['phase'] == 'ended' or
                     self.audit.load(key('human-logout',digest([self.namespace,installation,operation]))) is not None): raise IdentityRejected('sign-in state rejected')
+            existing, provisioned = self._sign_in_registration(installation)
             token_hash=digest(signed)
             if c['phase'] == 'challenge':
                 if self.now() >= c['expires_at']: raise IdentityRejected('sign-in expired')
                 claims=self.verifier.verify(signed,c['nonce'])
                 if claims['issued'] < c['created_at']-30: raise IdentityRejected('token predates challenge')
                 identity=hmac.new(self.secret, (self.namespace+'\0'+self.verifier.issuer+'\0'+claims['sub']).encode(),hashlib.sha256).hexdigest()
+                if existing is not None and existing['subject'] != 'apple-'+identity:
+                    raise IdentityRejected('installation belongs to another account; no implicit switch')
+                if internal_account_sha256 is not None and not hmac.compare_digest(digest('apple-'+identity), internal_account_sha256):
+                    raise IdentityRejected('not eligible for this internal service')
                 if self.lifecycle is not None:
                     self.lifecycle.initialize_new(identity,existing_account=self.store.load(key('human-account',identity)) is not None)
                 if self.events is not None:
@@ -301,13 +324,13 @@ class AccountIdentityBridge:
                 continue
             if c['token_sha256'] != token_hash or self.now() >= c['session_expires_at']:
                 raise IdentityRejected('saved sign-in differs or expired')
+            if internal_account_sha256 is not None and not self.matches_account(c['account'],internal_account_sha256):
+                raise IdentityRejected('not eligible for this internal service')
             if self.lifecycle is not None: self.lifecycle.require_active(c['account']['identity_sha256'])
             if self.grants is not None:
                 self.grants.capture(installation, operation, c['nonce'], signed, authorization_code)
             a=c['account'];proof=digest(['apple-device-binding/1',self.namespace,installation,a])
-            registration=self.registry.store.load(self.registry.key(installation))
-            if registration is not None:
-                existing=self.registry.registration(installation)
+            if existing is not None:
                 if existing['subject']!=a['subject'] or existing['token']!=a['token']:
                     raise IdentityRejected('installation belongs to another account; no implicit switch')
                 proof=existing['proof']
@@ -315,7 +338,8 @@ class AccountIdentityBridge:
                 app_account_token=a['token'],identity_token_sha256=token_hash,registration_proof=proof,
                 session_expires_at=c['session_expires_at'])
             self.immutable(self.audit,key('human-verified',digest([self.namespace,installation,operation])),evidence)
-            self.registry.provision(installation,a['subject'],a['token'],None,proof)
+            if not provisioned:
+                self.registry.provision(installation,a['subject'],a['token'],None,proof)
             # Logout/new challenge may race with provisioning. The immutable
             # mapping may remain, but it cannot authorize an ended session.
             if c['phase']=='verified':
@@ -399,7 +423,7 @@ class AccountIdentityBridge:
         raise StateUnavailable('logout unconfirmed')
 
 
-def blueprint(bridge):
+def blueprint(bridge, *, internal_account_sha256=None):
     if not isinstance(bridge,AccountIdentityBridge): raise ValueError('trusted identity bridge required')
     bp=Blueprint('lite_account_identity',__name__)
     def action(kind):
@@ -412,7 +436,10 @@ def blueprint(bridge):
             if kind == 'renew': fields |= {'renewal_operation','expected_generation'}
             if request.mimetype!='application/json' or set(body)!=fields: raise IdentityRejected('exact account fields required')
             if body['anon_id']!=admission.installation:return jsonify(error='lite_owner_mismatch'),403
-            if kind=='confirm':result=bridge.confirm(admission.installation,body['operation'],body['identity_token'],body['state'],body.get('authorization_code'))
+            if kind=='confirm':
+                pin=getattr(g,'lite_previous_account_sha256',internal_account_sha256)
+                result=bridge.confirm(admission.installation,body['operation'],body['identity_token'],body['state'],
+                                      body.get('authorization_code'),internal_account_sha256=pin)
             elif kind=='renew':result=bridge.renew(admission.installation,body['operation'],body['renewal_operation'],body['expected_generation'])
             elif kind=='status':result=bridge.status(admission.installation)
             else:result=getattr(bridge,kind)(admission.installation,body['operation'])

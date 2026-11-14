@@ -8,7 +8,9 @@ import hashlib
 import io
 import json
 import math
+import re
 import secrets
+import threading
 import time
 from lite_usage_ledger import UsageLedger, UsageConflict, UsageLimit, Ticket, free_grant, digest, _subject, _hex
 from lite_subscription_authority import ServiceBinding
@@ -106,10 +108,12 @@ class ServiceAccounts:
         if self.bootstrap is not None:self.bootstrap(installation)
         self.require_active(value)
 
-    def registration(self,installation):
+    def registration(self,installation,*,required=True):
         """Immutable trusted installation mapping, without a subscription overlay."""
         row=self.store.load(self.key(installation))
-        if row is None:raise StateUnavailable('verified service account not provisioned')
+        if row is None:
+            if required:raise StateUnavailable('verified service account not provisioned')
+            return None
         v=row[1]
         try:
             if (type(v) is not dict or set(v)!={'v','installation_hash','subject','token','original_transaction','proof'}
@@ -142,27 +146,7 @@ class ServiceAccounts:
         return self.authority.grant(ServiceBinding(account['subject'],account['token'],account['original_transaction']))
 
 
-def validate_result(result):
-    if (type(result) is not dict or set(result)!={'image_w','image_h','wound_polygons','confidence','route'}
-            or any(type(result[k]) is not int or not 1<=result[k]<=8192 for k in ('image_w','image_h'))
-            or result['image_w']*result['image_h']>16000000
-            or type(result['confidence']) not in (int,float) or not math.isfinite(result['confidence'])
-            or not 0<=result['confidence']<=1
-            or type(result['route']) is not str or not 1<=len(result['route'])<=64):
-        raise StateUnavailable('invalid bounded inference result')
-    polys=result['wound_polygons']
-    if type(polys) is not list or len(polys)>32:raise StateUnavailable('polygon bound')
-    total=0
-    for poly in polys:
-        if type(poly) is not list or not 3<=len(poly)<=512:raise StateUnavailable('polygon points')
-        total+=len(poly)
-        for point in poly:
-            if (type(point) is not list or len(point)!=2 or
-                    any(type(v) not in (int,float) or not math.isfinite(v) for v in point)
-                    or not 0<=point[0]<result['image_w'] or not 0<=point[1]<result['image_h']):
-                raise StateUnavailable('polygon coordinate')
-    if total>512 or len(_encode(result))>8192:raise StateUnavailable('result size')
-    return result
+from lite_result_contract import validate_result
 
 
 class RasterInference:
@@ -199,8 +183,11 @@ class RasterInference:
             if a.shape!=(h,w) or not np.isfinite(a).all() or not np.isin(a,[0,1]).all():
                 raise StateUnavailable('model mask contract')
             polys=_polygons_from_mask(a);confidence=float(a.mean()) if polys else 0.
-        return validate_result(dict(image_w=w,image_h=h,wound_polygons=polys,
-                                    confidence=confidence,route=info.get('route') or 'student'))
+        result = dict(image_w=w, image_h=h, wound_polygons=polys, confidence=confidence,
+                      route=info.get('route') or 'student')
+        if info.get('student_output_contract') is not None:
+            result['student_output_contract'] = info['student_output_contract']
+        return validate_result(result)
 
 
 class ServiceOperations:
@@ -209,6 +196,9 @@ class ServiceOperations:
             raise ValueError('trusted service components required')
         _hex(model_version)
         self.ledger,self.accounts,self.store,self.inference,self.model_version,self.clock=ledger,accounts,store,inference,model_version,clock
+        # The native worker has two HTTP threads. Leave one available for status
+        # and account requests while the other decodes an image or runs the model.
+        self._model_slot = threading.Lock()
         self.recovery=None
         if recovery_store is not None:
             from lite_service_recovery import ServiceRecovery
@@ -270,6 +260,65 @@ class ServiceOperations:
                 raise StateUnavailable('existing service operation lacks verified catalog membership')
         return row
 
+    def current_balance(self, installation, expected_account):
+        _hex(expected_account)
+        account = self.accounts.resolve(installation)
+        subject = account['subject']
+        if digest(subject) != expected_account:
+            raise UsageConflict('service account differs')
+        grant = self.accounts.grant(account, self.now())
+        balance = self.ledger.current_balance(subject, grant)
+        self.accounts.require_active(account)
+        return balance
+
+    def wound_roster(self, installation, expected_account, action, wound=None, version=None):
+        """An account owns up to five opaque active IDs. Photos and locations stay local."""
+        account = self.accounts.resolve(installation)
+        subject = account['subject']
+        if digest(subject) != _hex(expected_account) or action not in ('status','open','finish'):
+            raise UsageConflict('wrong account or wound action')
+        life = self.accounts.lifecycle
+        if life is None or not life.service_catalog or not subject.startswith('apple-'):
+            raise StateUnavailable('verified account lifecycle required')
+        if action != 'status':
+            _hex(wound,32)
+            if type(version) is not int or not 0 <= version < 2**53: raise UsageConflict('invalid roster revision')
+        grant = self.accounts.grant(account,self.now())
+        grant.validate(subject,self.now())
+        limit = 5 if grant.limit == 10 else 1
+        person = subject[6:]
+        from lite_attest_state import CAS_ATTEMPTS
+        for _ in range(CAS_ATTEMPTS):
+            rev, root = life.require_active(person)
+            roster = root.get('wounds', {'revision':0,'active':[]})
+            active = roster['active']
+            snapshot = dict(schema='lite.wounds/1',account_sha256=expected_account,
+                            revision=roster['revision'],active=active,limit=limit)
+            if action == 'status':
+                return snapshot
+            if (wound in active) == (action == 'open'):
+                if action == 'open' and wound not in active[:limit]:
+                    return dict(snapshot,decision='limit')
+                return dict(snapshot,decision='confirmed')
+            if version != roster['revision']:
+                return dict(snapshot,decision='changed')
+            if action == 'open' and len(active) >= limit:
+                return dict(snapshot,decision='limit')
+            updated = active+[wound] if action == 'open' else [w for w in active if w != wound]
+            grant.validate(subject,self.now())
+            next_roster = dict(revision=version+1,active=updated)
+            try:
+                won = life.store.compare_exchange(life._key(person),rev,dict(root,wounds=next_roster))
+            except StateUnavailable:
+                won = False
+            if not won: continue
+            # Re-read before reporting success, including a concurrent close.
+            _, latest = life.require_active(person)
+            observed = latest['wounds']
+            return dict(snapshot,revision=observed['revision'],active=observed['active'],
+                        decision='confirmed' if (wound in observed['active']) == (action=='open') else 'changed')
+        raise StateUnavailable('wound roster write unconfirmed')
+
     def prepare(self,installation,operation,image_sha256):
         _hex(image_sha256);account=self.accounts.resolve(installation);subject=account['subject']
         grant=None
@@ -313,11 +362,16 @@ class ServiceOperations:
             if self.recovery is not None and v['day'] < self.now()//86400:
                 return self.recovery.offer(subject,v)
             return dict(state='awaiting_reservation',operation=operation,day=v['day'],retry_action='prepare',research_stored=False)
+        if v['result'] is None and receipt['outcome'] in ('succeeded','empty','failed'):
+            # The worker writes its result before settling the separate usage
+            # ledger. Settlement can land between our two reads.
+            _,latest=self._require(subject,operation)
+            if latest['result'] is None or self.ticket(subject,latest)!=ticket or latest['worker']!=v['worker']:
+                raise StateUnavailable('result receipt mismatch')
+            v=latest
         if v['result'] is not None:
             outcome='succeeded' if v['result']['wound_polygons'] else 'empty'
             receipt=self.ledger.settle(ticket,v['worker'],outcome,v['result_sha256'])
-        elif receipt['outcome'] in ('succeeded','empty','failed'):
-            raise StateUnavailable('result receipt mismatch')
         state={'reserved':'ready','running':'pending','succeeded':'completed','empty':'completed','cancelled':'cancelled'}[receipt['outcome']]
         reply = dict(state=state,operation=operation,day=v['day'],receipt=receipt,result=v['result'],
                     result_json=None if v['result'] is None else json.dumps(v['result'],sort_keys=True,separators=(',', ':'),allow_nan=False),
@@ -342,15 +396,22 @@ class ServiceOperations:
             raise
         if receipt['outcome']!='reserved':return self.status(installation,operation)
         if v['model']!=self.model_version:raise UsageConflict('prepared model changed; explicit reconciliation required')
-        try:rgb=self.inference.decode(raw)
-        except ImageRejected:
-            self.ledger.cancel_unstarted(ticket,digest(['preflight_rejected',v['image_sha256']]))
-            raise
-        if not self.ledger.claim(ticket,v['worker']):return self.status(installation,operation)
-        # Any unexpected model or persistence exception remains pending. No
-        # second executor, automatic timeout release or guessed failure outcome.
-        self.accounts.require_active(account)
-        result=self.inference.infer(rgb);result_hash=digest(result)
+        if not self._model_slot.acquire(blocking=False):
+            # A simultaneous copy of this very request may have claimed or
+            # completed the ticket since we read it. Return its current state.
+            return self.status(installation,operation)
+        try:
+            try:rgb=self.inference.decode(raw)
+            except ImageRejected:
+                self.ledger.cancel_unstarted(ticket,digest(['preflight_rejected',v['image_sha256']]))
+                raise
+            if not self.ledger.claim(ticket,v['worker']):return self.status(installation,operation)
+            # A model failure after the claim leaves this operation pending.
+            self.accounts.require_active(account)
+            result=self.inference.infer(rgb)
+        finally:
+            self._model_slot.release()
+        result_hash=digest(result)
         self.accounts.require_active(account)
         for _ in range(CAS_ATTEMPTS):
             revision,current=self._require(subject,operation)

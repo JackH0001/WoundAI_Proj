@@ -36,6 +36,25 @@ class OAuthTests(unittest.TestCase):
         self.assertEqual(self.calls[0][1],dict(grant_type='refresh_token',refresh_token='retained-token',client_id='com.woundai.lite',client_secret='synthetic-client'))
     def test_refresh_accepts_explicit_rotation(self):
         self.assertEqual(self.p.refresh('old')['refresh_token'],'synthetic-refresh')
+
+    def test_exchange_and_refresh_accept_apple_bearer_case(self):
+        for token_type in ('bearer', 'BEARER', 'bEaReR'):
+            with self.subTest(token_type=token_type):
+                value = dict(self.payload, token_type=token_type)
+                self.response = (200, json.dumps(value).encode())
+                self.assertEqual(self.p.exchange('one-use'), value)
+                del value['refresh_token']
+                self.response = (200, json.dumps(value).encode())
+                self.assertEqual(self.p.refresh('original'), dict(value, refresh_token='original'))
+        self.assertEqual(len(self.calls), 6)
+
+    def test_bearer_case_handling_still_refuses_malformed_types(self):
+        for token_type in ('basic', ' bearer', 'bearer ', 'bearer\n', 'Ｂearer', '', None, 1, ['bearer']):
+            with self.subTest(token_type=token_type):
+                self.response = (200, json.dumps(dict(self.payload, token_type=token_type)).encode())
+                with self.assertRaises(GrantUncertain): self.p.exchange('one-use')
+                with self.assertRaises(GrantUncertain): self.p.refresh('original')
+
     def test_refresh_malformed_or_unknown_reply_is_not_retried(self):
         for response in [(200,b'{}'),(200,b'{"id_token":"a","id_token":"b"}'),OSError('secret')]:
             self.response=response

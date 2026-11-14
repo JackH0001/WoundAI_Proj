@@ -232,9 +232,13 @@ final class LiteAttestClientTests: XCTestCase {
         let stored = try JSONDecoder().decode(LiteAttestClient.Identity.self, from: await vault.load()!)
         XCTAssertEqual(stored.installation, owner); XCTAssertEqual(stored.phase, "registered")
         XCTAssertNil(stored.attestation); XCTAssertNil(stored.challengeID)
+        let before = await http.snapshot()
         let second = try client(device, vault, http)
         let restored = try await second.registeredInstallation(); XCTAssertEqual(restored, owner)
         let counts = await device.counts(); XCTAssertEqual(counts.0, 1); XCTAssertEqual(counts.1, 1)
+        let after = await http.snapshot()
+        XCTAssertEqual(after.0, before.0); XCTAssertEqual(after.1.count, before.1.count)
+        XCTAssertEqual(after.2, before.2, "Saved registration is not a live cloud health check")
     }
     func testLostRegistrationResponseRetriesExactProofAfterRestart() async throws {
         let device = AttestDeviceDouble(), vault = AttestMemory(), http = AttestHTTPDouble()

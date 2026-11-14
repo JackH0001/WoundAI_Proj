@@ -138,7 +138,7 @@ class StableSubscriptionLinks:
         self.immutable(self.audit_key('complete',digest(intent['plan'])),result)
         return result
 
-    def _read(self,subject,token,*,complete=True,require_policy=True):
+    def _read(self,subject,token,*,complete=True,require_policy=True,missing_receipt_ok=False):
         row=self.store.load(self.key(subject))
         if row is None:return None
         try:
@@ -153,9 +153,18 @@ class StableSubscriptionLinks:
             if g is None or digest(g[1])!=digest(guard):raise ValueError()
             if complete:
                 done=self.audit.load(self.audit_key('complete',r['plan']))
+                if done is None and missing_receipt_ok:return None
                 if done is None or digest(done[1])!=digest(self.receipt(intent)):raise ValueError()
         except (TypeError,ValueError,KeyError) as e:raise StateUnavailable('stable association incomplete or corrupt') from e
         return row
+
+    def confirmed_registration(self,account):
+        """Reauthentication needs the original completed binding, independent of new-work admission."""
+        row=self._read(account['subject'],account['token'],require_policy=False,missing_receipt_ok=True)
+        if row is None:return False
+        if account['original_transaction'] not in (None,row[1]['original_transaction']):
+            raise SubscriptionLinkConflict('existing registration and stable transaction differ')
+        return True
 
     def lookup(self,subject,token):
         ServiceBinding(subject,token,'0').validate()

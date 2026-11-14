@@ -19,6 +19,21 @@ def polygons(value, w, h):
             require(0<=point[0]<w and 0<=point[1]<h)
     return value
 
+def segmentation(meta):
+    """Describe the initial cloud output, not the later user's measurement.
+
+    Matching the documented route/contract identifies an interpretation version;
+    it is not evidence that the segmentation or LiDAR area is accurate.
+    """
+    def bounded(name, maximum):
+        value=meta.get(name)
+        return value if type(value) is str and 0<len(value.encode())<=maximum else None
+    route=bounded('route',64);contract=bounded('student_output_contract',128)
+    known=(contract=='student-onnx-logits-sigmoid-before-resize/v1' and
+           route in {'student','cloud_escalated(AU)'})
+    return dict(status='identified_contract' if known else 'unconfirmed_contract',
+                route=route,output_contract=contract,accuracy='not_verified')
+
 class Consent:
     def __init__(self, source): self.source=source
 
@@ -178,6 +193,7 @@ class Reader:
         elif receipt is not None:depth='receipt_present_bundle_missing_from_snapshot'
         result=dict(record_id=rid,status='active',image_id=row['image_id'],epoch=row['epoch'],source=row['source'],
             image_w=w,image_h=h,revisions=revisions,depth_status=depth,training_admission='not_evaluated',
+            segmentation=segmentation(meta),
             captured_at=self.catalogue.captured_at,media_allowed='lite.review.media' in viewer.capabilities,
             objects=[{k:o[k] for k in ('kind','generation','bytes','sha256')} for o in row['objects']])
         if result['media_allowed']:result['ai_polygons']=polygons(meta.get('ai_polygons',[]),w,h)

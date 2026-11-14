@@ -15,6 +15,7 @@ from lite_subscription_runtime import SubscriptionRuntime
 from lite_usage_ledger import digest, _hex
 from lite_deletion_identity import DeletionIdentity, DeletionIdentityExpired
 
+LINKED_WITHDRAWAL = 'delete_account_and_withdraw_linked_research_v1'
 PREFIX = '/api/v1/lite/account/deletion/'
 DELETION_ACTIONS = ('request','status','reauth/challenge','reauth/confirm')
 DELETION_PATHS = frozenset(PREFIX + s for s in DELETION_ACTIONS)
@@ -116,10 +117,35 @@ class AccountDeletion:
         self.lifecycle.progress(person, installation, operation)
         return person
 
-    def begin(self, installation, operation):
+    def research_confirmation(self, person, installation, operation, *, write=False):
+        value = dict(v=1, scope=self.scope, person=person, installation=installation,
+                     operation=operation, confirmation=LINKED_WITHDRAWAL)
+        receipt_key = key('deletion-research-confirmation', digest([self.scope, person, installation, operation]))
+        row = self.audit.load(receipt_key)
+        if row is None and write:
+            # Competing deliveries must preserve the time of the first acceptance.
+            try:
+                self.audit.compare_exchange(receipt_key, 0, dict(value, confirmed_at=self.lifecycle.now()))
+            except StateUnavailable:
+                pass  # A write may have committed before the response was lost.
+            row = self.audit.load(receipt_key)
+            if row is None:
+                raise StateUnavailable('research withdrawal confirmation not saved')
+        if row is None:
+            return False
+        saved = row[1]
+        at = saved.get('confirmed_at') if isinstance(saved, dict) else None
+        if type(at) is not int or at < 0 or saved != dict(value, confirmed_at=at):
+            raise StateUnavailable('research withdrawal confirmation differs')
+        return True
+
+    def begin(self, installation, operation, *, withdraw_research=False):
         if self.reauthentication is None: raise IdentityRejected('worker cannot accept account deletion')
         if not self.reauthentication.resume(installation,operation):
             self.bridge.begin_account_closure(installation, operation)
+        if withdraw_research:
+            person = self._owner(installation, operation)
+            self.research_confirmation(person, installation, operation, write=True)
         return self.status(installation, operation)
 
     def status(self, installation, operation):
@@ -137,9 +163,9 @@ class AccountDeletion:
                             revoked=c['revoked'], apple_revocation='confirmed' if c['phase']=='revoked' else 'pending')
             self.immutable(self.audit, key('account-deletion-scan', digest(evidence)), evidence)
 
-    @staticmethod
-    def _public(c):
+    def _public(self, c):
         p = c['plan']
+        confirmed = self.research_confirmation(p['person'], p['requester'], p['operation'])
         return dict(v=1, state='account_deletion_pending', operation=p['operation'],
                     installation=p['requester'], requested_at=p['requested_at'],
                     inventory_sha256=p['inventory_sha256'], grant_total=p['total'],
@@ -148,7 +174,8 @@ class AccountDeletion:
                         'pending' if c['phase']=='pending' else 'in_progress' if c['phase']=='running'
                         or c['remaining'] < p['total'] else 'not_started'),
                     data_disposition='not_started', account_deleted=False,
-                    subscription_cancelled=False, local_records_preserved=True)
+                    subscription_cancelled=False, local_records_preserved=True,
+                    research_withdrawal='requested' if confirmed else 'awaiting_confirmation')
 
     def advance(self, person, *, limit=20):
         """Trusted worker only. At most limit grants; no data cleanup or scheduler.
@@ -226,8 +253,12 @@ def blueprint(coordinator):
             if kind.startswith('reauth/'):
                 fields |= {'reauth_operation','account_sha256'}
                 fields |= {'confirmation'} if kind=='reauth/challenge' else {'identity_token','state'}
+            if kind == 'reauth/confirm' and 'research_confirmation' in b:
+                fields.add('research_confirmation')
+                if b['research_confirmation'] != LINKED_WITHDRAWAL:
+                    raise ValueError('invalid research withdrawal confirmation')
             if (request.mimetype != 'application/json' or set(b) != fields
-                    or kind == 'request' and b['confirmation'] != 'delete_account'
+                    or kind == 'request' and b['confirmation'] not in ('delete_account', LINKED_WITHDRAWAL)
                     or kind == 'reauth/challenge' and b['confirmation'] != 'continue_deletion'):
                 raise ValueError('explicit deletion confirmation required')
             if b['anon_id'] != admission.installation: return jsonify(error='lite_owner_mismatch'),403
@@ -235,8 +266,15 @@ def blueprint(coordinator):
                 args = (admission.installation,b['operation'],b['reauth_operation'],b['account_sha256'])
                 if kind == 'reauth/challenge':
                     return jsonify(coordinator.reauthentication.challenge(*args)),200
-                return jsonify(coordinator.reauthentication.confirm(*args,b['identity_token'],b['state'])),202
-            result = (coordinator.begin if kind=='request' else coordinator.status)(admission.installation,b['operation'])
+                result = coordinator.reauthentication.confirm(*args,b['identity_token'],b['state'])
+                if b.get('research_confirmation') == LINKED_WITHDRAWAL:
+                    result = coordinator.begin(admission.installation,b['operation'],withdraw_research=True)
+                return jsonify(result),202
+            if kind == 'request':
+                result = coordinator.begin(admission.installation,b['operation'],
+                                           withdraw_research=b['confirmation']==LINKED_WITHDRAWAL)
+            else:
+                result = coordinator.status(admission.installation,b['operation'])
             return jsonify(result),202
         except DeletionIdentityExpired: return jsonify(error='lite_deletion_reauth_expired',keep_local=True),410
         except IdentityRejected: return jsonify(error='lite_deletion_identity_required',keep_local=True),401

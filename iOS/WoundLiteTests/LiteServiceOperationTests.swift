@@ -1,5 +1,6 @@
 import XCTest
 import CryptoKit
+import UIKit
 @testable import WoundLite
 
 private struct ServiceRecoveryFixture: Decodable {
@@ -342,6 +343,42 @@ final class LiteServiceOperationTests: XCTestCase {
         for forbidden in ["raw_depth","consent_epoch","paid","research_consent"] { XCTAssertNil(body.range(of:Data(forbidden.utf8))) }
         let stored=try await client(w,m).stored(f.capture_id);XCTAssertEqual(stored,result)
     }
+
+    func testSavedPreviewRequiresTheExactCompletedPhotoEvenAtIdenticalDimensions() async throws {
+        let (fixture, wire, _, client) = try await setup()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = LocalImageStore(directory: directory)
+        let jpeg = fixture.image
+        let original = try XCTUnwrap(store.save(jpeg: jpeg))
+        let ready = try await client.stored(fixture.capture_id)
+        let pendingImage = await ImageLoadQueue.shared.verifiedServiceImage(journal: ready, store: store, name: original)
+        XCTAssertNil(pendingImage)
+        try await wire.plan(doneSteps(fixture))
+        let completed = try await client.resume(fixture.capture_id) { _ in jpeg }
+        let sameSize = CGSize(width: completed.width, height: completed.height)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let replacement = UIGraphicsImageRenderer(size: sameSize, format: format).image { ctx in
+            UIColor.cyan.setFill()
+            ctx.fill(CGRect(origin: .zero, size: sameSize))
+        }
+        let otherJPEG = try XCTUnwrap(replacement.jpegData(compressionQuality: 0.92))
+        let other = try XCTUnwrap(store.save(jpeg: otherJPEG))
+        XCTAssertNotEqual(LiteServiceBytes.hash(jpeg), LiteServiceBytes.hash(otherJPEG))
+        let originalImage = await ImageLoadQueue.shared.verifiedServiceImage(journal: completed, store: store, name: original)
+        let otherImage = await ImageLoadQueue.shared.verifiedServiceImage(journal: completed, store: store, name: other)
+        let missing = await ImageLoadQueue.shared.verifiedServiceImage(journal: completed, store: store, name: "missing")
+        XCTAssertNotNil(originalImage)
+        XCTAssertNil(otherImage)
+        XCTAssertNil(missing)
+        XCTAssertEqual(store.rawBytes(original), jpeg)
+        XCTAssertEqual(store.rawBytes(other), otherJPEG)
+        let reread = try await client.stored(fixture.capture_id)
+        XCTAssertEqual(reread, completed)
+        let sent = await wire.requests()
+        XCTAssertEqual(sent.map { $0.url?.lastPathComponent }, ["prepare", "run"])
+    }
     func testCompletedOperationIsLocalReadWithoutImageOrNetwork() async throws {
         let (f,w,m,c)=try await setup();try await w.plan(doneSteps(f));let image=f.image
         _=try await c.resume(f.capture_id) { _ in image }
@@ -439,6 +476,33 @@ final class LiteServiceOperationTests: XCTestCase {
         await w.plan([ServiceStep(action:"prepare",data:error("lite_service_budget"),code:429,wait:"inf")])
         let r=try await c.resume(f.capture_id) { _ in nil }
         XCTAssertEqual(r.note,"capacity");XCTAssertEqual(r.retryAt,1005)
+    }
+    func testBusyRunKeepsOriginalWorkAndQueriesStatusBeforeResendingPhoto() async throws {
+        let (fixture, wire, journal, service) = try await setup()
+        let jpeg = fixture.image
+        await wire.plan([
+            ServiceStep(action: "prepare", data: try fixture.bytes(fixture.prepare)),
+            ServiceStep(action: "run", data: error("lite_model_busy"), code: 429, wait: "5")
+        ])
+        let waiting = try await service.resume(fixture.capture_id) { _ in jpeg }
+        XCTAssertEqual(waiting.note, "capacity")
+        XCTAssertTrue(waiting.message.contains("不需重新拍攝"))
+        XCTAssertEqual(waiting.next, "status")
+        let beforeDue = try await client(wire, journal, 1004).resume(fixture.capture_id) { _ in
+            XCTFail("照片在等待期間不應重送"); return nil
+        }
+        XCTAssertEqual(beforeDue, waiting)
+        await wire.plan([
+            ServiceStep(action: "status", data: try fixture.bytes(fixture.prepare)),
+            ServiceStep(action: "run", data: try fixture.bytes(fixture.completed))
+        ])
+        let done = try await client(wire, journal, 1005).resume(fixture.capture_id) { _ in jpeg }
+        XCTAssertEqual(done.note, "confirmed")
+        XCTAssertEqual(done.operation, waiting.operation)
+        XCTAssertEqual(done.imageSHA256, waiting.imageSHA256)
+        let requests = await wire.requests()
+        XCTAssertEqual(requests.map { $0.url?.lastPathComponent }, ["prepare","run","status","run"])
+        XCTAssertNil(requests[2].httpBody?.range(of: jpeg))
     }
     func testOldSavedDeadlineIsShortenedWithoutSending() async throws {
         let (f,w,m,c)=try await setup()

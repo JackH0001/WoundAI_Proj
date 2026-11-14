@@ -150,6 +150,8 @@ struct WoundImagePreview: View {
     var markerPolygons: [[[Int]]] = []
     var height: CGFloat = 300
     var tissueOverlay: UIImage? = nil
+    var gestureHint = "雙指縮放與移動，檢查圈選邊界。"
+    var resetTitle = "重設檢視"
     @State private var resetToken = 0
 
     var body: some View {
@@ -160,10 +162,10 @@ struct WoundImagePreview: View {
                 .background(Color.black.opacity(0.05))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             HStack {
-                Text("雙指縮放與移動，檢查圈選邊界。")
+                Text(gestureHint)
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer(minLength: 4)
-                Button("重設檢視") { resetToken += 1 }
+                Button(resetTitle) { resetToken += 1 }
                     .font(.caption).frame(minHeight: 44)
             }
         }

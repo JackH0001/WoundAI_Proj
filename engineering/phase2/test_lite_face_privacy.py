@@ -67,6 +67,15 @@ class SignedPrivacyTests(unittest.TestCase):
         # The bounded attempt ledger and attestation counter may still advance.
         self.assertEqual(lite.quota_snapshot(self.f.h.owner, '127.0.0.1')[0]['used'], 0)
 
+    def test_late_jpeg_comment_refused_before_legacy_recognition_or_media(self):
+        photo = self.f.f.jpeg
+        self.f.f.jpeg = photo[:-2] + bytes.fromhex('fffe0004') + b'QA' + photo[-2:]
+        with patch.object(lite, '_SEGMENT') as model:
+            response = self.f.upload()
+            self.assertEqual((response.status_code, response.json['error']), (400, 'research_photo_metadata'))
+            model.assert_not_called()
+        self.assert_no_research_media()
+
     def test_missing_detector_blocks_signed_rgbd_before_inference_or_storage(self):
         actual_isfile = os.path.isfile
         def missing_cascade(path):

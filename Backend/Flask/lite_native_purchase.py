@@ -9,7 +9,7 @@ from audit_chain_contract import loads_json_object_strict
 from lite_attest_state import StateUnavailable
 from lite_usage_ledger import UsageConflict,digest,_hex
 from lite_subscription_runtime import SubscriptionRuntime
-from lite_subscription_authority import SubscriptionRejected
+from lite_subscription_authority import SubscriptionRejected, matches_apple_account_token
 from lite_subscription_executor import key
 
 PREFIX='/api/v1/lite/purchase/'
@@ -68,7 +68,8 @@ class NativePurchaseBridge:
             for k in ('transactionId','originalTransactionId','bundleId','environment','productId','appAccountToken','type','inAppOwnershipType'):
                 if type(raw.get(k)) is not str:raise ValueError()
             if (raw['bundleId']!=p.bundle or raw['environment']!=p.environment or raw['productId']!=p.product
-                    or raw['appAccountToken']!=c['app_account_token'] or raw['type']!='Auto-Renewable Subscription'
+                    or not matches_apple_account_token(raw['appAccountToken'], c['app_account_token'])
+                    or raw['type']!='Auto-Renewable Subscription'
                     or raw['inAppOwnershipType']!='PURCHASED' or raw.get('isUpgraded',False) is not False
                     or any(not raw[k].isascii() or not raw[k].isdigit() or not 1<=len(raw[k])<=32 for k in ('transactionId','originalTransactionId'))):
                 raise ValueError()

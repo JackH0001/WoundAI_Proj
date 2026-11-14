@@ -49,6 +49,35 @@ final class LiteReconsentTests: XCTestCase {
         XCTAssertTrue(journal.status(for: old)?.contains("不會自動重傳") == true)
         XCTAssertTrue(model().renewed); XCTAssertFalse(model().blocksUploads)
     }
+    func testAccountDeletionBlocksRejoinAndPreservesOriginalWithdrawal() async throws {
+        _ = try complete()
+        let before = try Data(contentsOf:journal.url)
+        let m = LiteWithdrawalModel(journal:journal, accountPaused:{ _ in true }, stopUploads:{ XCTFail() },
+                                    owner:{ _ in XCTFail(); return nil })
+        XCTAssertFalse(m.mayReviewCompletedRenewal)
+        let ok = await m.reconsentCompletedWithdrawal(server:server) { intent in
+            XCTFail("paused research cannot send a renewal"); return self.receipt(intent.request)
+        }
+        XCTAssertFalse(ok)
+        XCTAssertEqual(before, try Data(contentsOf:journal.url))
+    }
+    func testPauseDuringRenewalKeepsReceivedEpochWithoutEnablingUploads() async throws {
+        _ = try complete()
+        var paused = false
+        let m = LiteWithdrawalModel(journal:journal, accountPaused:{ _ in paused }, stopUploads:{ XCTFail() },
+                                    owner:{ _ in self.owner })
+        let ok = await m.reconsentCompletedWithdrawal(server:server) { intent in
+            paused = true
+            return self.receipt(intent.request)
+        }
+        XCTAssertFalse(ok)
+        XCTAssertEqual(try journal.load()?.phase, .reconsented)
+        XCTAssertNotNil(try journal.load()?.reconsentAudit)
+        XCTAssertTrue(m.message?.contains("暫停研究上傳") == true)
+        let reopened = LiteWithdrawalModel(journal:journal, accountPaused:{ _ in true })
+        XCTAssertTrue(reopened.statusTitle.contains("暫停上傳"))
+        XCTAssertTrue(reopened.message?.contains("已暫停") == true)
+    }
     func testHistoricalConsentRemainsReadableAndWithdrawableAfterTextUpdate() async throws {
         _ = try complete()
         let original = try Data(contentsOf: journal.url)
@@ -189,5 +218,84 @@ final class LiteReconsentTests: XCTestCase {
         XCTAssertNil(try LiteCaptureResearchScope.capture(server: server, consent: false, journal: journal))
         _ = try complete()
         XCTAssertNil(try LiteCaptureResearchScope.capture(server: server, consent: true, journal: journal))
+    }
+
+    private func response(_ status: Int) -> HTTPURLResponse {
+        HTTPURLResponse(url: URL(string: server + "/api/v1/lite/research/rejoin")!,
+                        statusCode: status, httpVersion: nil, headerFields: nil)!
+    }
+    func testMissingRejoinRouteIsDistinctFromAnUnconfirmedReceipt() throws {
+        let intent = try journal.prepareRenewal(complete())
+        for status in [404, 405] {
+            XCTAssertThrowsError(try LiteSignedCloudTransport.rejoinReceipt(Data("<html>Not Found</html>".utf8),
+                response: response(status), intent: intent)) {
+                XCTAssertEqual($0 as? LiteReconsentFailure, .endpointUnavailable)
+            }
+        }
+    }
+    func testAuthorizationRejectionCannotMasqueradeAsAValidReceipt() throws {
+        let intent = try journal.prepareRenewal(complete())
+        let valid = try JSONEncoder().encode(receipt(intent.request))
+        for status in [401, 403] {
+            XCTAssertThrowsError(try LiteSignedCloudTransport.rejoinReceipt(valid, response: response(status), intent: intent)) {
+                XCTAssertEqual($0 as? LiteReconsentFailure, .authorizationRejected)
+            }
+        }
+    }
+    func testCapacityResponseKeepsWaitSemanticsAndDoesNotBecomeMissingFeature() throws {
+        let intent = try journal.prepareRenewal(complete())
+        for status in [429, 503] {
+            XCTAssertThrowsError(try LiteSignedCloudTransport.rejoinReceipt(Data(), response: response(status), intent: intent)) {
+                XCTAssertTrue($0 is ResearchCapacityWait)
+                XCTAssertEqual(LiteReconsentFailure.explanation($0), LiteReconsentFailure.capacityUnavailable.localizedDescription)
+            }
+        }
+    }
+    func testOnlyMatchingSuccessfulHTTPReceiptCanActivateEpoch() throws {
+        let intent = try journal.prepareRenewal(complete())
+        let valid = try JSONEncoder().encode(receipt(intent.request))
+        let parsed = try LiteSignedCloudTransport.rejoinReceipt(valid, response: response(200), intent: intent)
+        XCTAssertTrue(parsed.validates(intent.request))
+        for status in [201, 409, 500] {
+            XCTAssertThrowsError(try LiteSignedCloudTransport.rejoinReceipt(valid, response: response(status), intent: intent))
+        }
+        for data in [Data("{}".utf8), try JSONEncoder().encode(receipt(intent.request, restored: true))] {
+            XCTAssertThrowsError(try LiteSignedCloudTransport.rejoinReceipt(data, response: response(200), intent: intent))
+        }
+    }
+    func testMissingRouteThenAuthorizationFailurePreservesIntentUntilExplicitSuccessfulRetry() async throws {
+        _ = try complete()
+        let original = try Data(contentsOf: journal.url)
+        var intents: [LiteReconsentIntent] = []
+        for status in [404, 403] {
+            let m = model()
+            let restored = await m.reconsentCompletedWithdrawal(server: server) { intent in
+                intents.append(intent)
+                return try LiteSignedCloudTransport.rejoinReceipt(Data(), response: self.response(status), intent: intent)
+            }
+            XCTAssertFalse(restored); XCTAssertFalse(m.busy); XCTAssertTrue(m.blocksUploads)
+            XCTAssertEqual(try Data(contentsOf: journal.url), original)
+            XCTAssertEqual(m.message, (status == 404 ? LiteReconsentFailure.endpointUnavailable : .authorizationRejected).localizedDescription)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("history").path))
+        }
+        XCTAssertEqual(intents.count, 2) // Only the two explicit calls; no automatic retry.
+        XCTAssertEqual(intents[0], intents[1])
+        let m = model()
+        let restored = await m.reconsentCompletedWithdrawal(server: server) { intent in
+            intents.append(intent)
+            return try LiteSignedCloudTransport.rejoinReceipt(JSONEncoder().encode(self.receipt(intent.request)),
+                response: self.response(200), intent: intent)
+        }
+        XCTAssertTrue(restored); XCTAssertFalse(m.blocksUploads)
+        XCTAssertEqual(intents.count, 3); XCTAssertEqual(intents[0], intents[2])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: folder.appendingPathComponent("history").path).count, 1)
+        XCTAssertFalse(journal.permits(LiteCloudBinding(server: server, anonID: owner, imageID: "old", imageW: 10, imageH: 10)))
+    }
+    func testRenewalErrorsDescribeRejoiningRatherThanClaimingWithdrawalWasNotSent() {
+        XCTAssertEqual(LiteReconsentFailure.explanation(LiteWithdrawalFailure.noIdentity), LiteReconsentFailure.identityUnavailable.localizedDescription)
+        XCTAssertEqual(LiteReconsentFailure.explanation(URLError(.timedOut)), LiteReconsentFailure.connectionUnavailable.localizedDescription)
+        XCTAssertEqual(LiteReconsentFailure.explanation(LiteAttestFailure.http(401)), LiteReconsentFailure.authorizationRejected.localizedDescription)
+        // A 404 from a challenge is not proof that the rejoin endpoint is missing.
+        XCTAssertEqual(LiteReconsentFailure.explanation(LiteAttestFailure.http(404)), LiteWithdrawalFailure.renewalUnconfirmed.localizedDescription)
     }
 }

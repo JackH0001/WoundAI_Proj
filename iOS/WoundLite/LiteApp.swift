@@ -37,27 +37,77 @@ struct WoundLiteApp: App {
     }
 }
 
+/// Device-local pause only. It does not assert that an anonymous research
+/// installation belongs to a service account or that remote media was removed.
+struct LiteAccountResearchPause {
+    let directory: URL
+    static let standard = Self(directory: FileManager.default.urls(for:.applicationSupportDirectory,
+        in:.userDomainMask)[0].appendingPathComponent("lite-account-research-pause"))
+
+    private func file(for server: String) throws -> URL {
+        let origin = try LiteWithdrawalJournal.origin(server)
+        return directory.appendingPathComponent(LiteServiceBytes.hash(Data(origin.utf8)))
+    }
+
+    private func marker(_ server: String) throws -> Data? {
+        let file = try file(for:server)
+        do { return try Data(contentsOf:file) }
+        catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError { return nil }
+    }
+
+    func blocks(_ server: String) -> Bool {
+        do { return try marker(server) != nil }
+        catch { return true }
+    }
+
+    func pause(_ server: String) throws {
+        let value = Data("account-deletion-device-upload-pause-v1".utf8)
+        if let prior = try marker(server) {
+            guard prior == value else { throw LiteDeletionFailure.invalid }
+            return
+        }
+        try HealthDataFiles.write(value, to:file(for:server))
+        guard try marker(server) == value else { throw LiteDeletionFailure.invalid }
+    }
+}
+
 /// 民眾版偏好設定。獨立於醫療版（不同 bundle 沙盒，天然隔離）。
 enum LitePrefs {
     private static let d = UserDefaults.standard
+    static let researchChoiceKey = "lite_research_consent"
+    // The server contract and signed historical receipts have their own version.
+    // This marker records which additional on-device notice the user reviewed.
+    static let noticeKey = "lite_research_notice_version"
+    static let noticeVersion = "2026-11-03.1"
+    static func reviewedChoice(_ choice: Bool?, notice: String?) -> Bool? {
+        choice == true && notice != noticeVersion ? nil : choice
+    }
     /// nil＝還沒問過（首啟要問）；true/false＝使用者的選擇，設定頁可改。
+    static var researchPausedForAccountDeletion: Bool {
+        LiteAccountResearchPause.standard.blocks(AppSettings.backendURL())
+    }
+    static func pauseResearchForAccountDeletion() throws {
+        try LiteAccountResearchPause.standard.pause(AppSettings.backendURL())
+    }
     static var researchConsent: Bool? {
         get {
-            guard !LiteWithdrawalJournal.standard.blocksUploads else { return false }
+            guard !researchPausedForAccountDeletion, !LiteWithdrawalJournal.standard.blocksUploads else { return false }
             // An old acceptance must not silently authorize the revised disclosure.
-            return LiteBackendConfiguration.consentChoice(
-                d.object(forKey: "lite_research_consent") as? Bool,
+            let choice = LiteBackendConfiguration.consentChoice(
+                d.object(forKey: researchChoiceKey) as? Bool,
                 savedVersion: d.string(forKey: "lite_consent_version"), requiredVersion: consentVersion,
                 savedOrigin: d.string(forKey: "lite_consent_origin"), currentOrigin: AppSettings.backendURL())
+            return reviewedChoice(choice, notice: d.string(forKey: noticeKey))
         }
         set {
-            d.set(newValue, forKey: "lite_research_consent")
+            if newValue == true && (researchPausedForAccountDeletion || LiteWithdrawalJournal.standard.blocksUploads) { return }
             d.set(newValue == nil ? nil : consentVersion, forKey: "lite_consent_version")
             d.set(newValue == nil ? nil : AppSettings.backendURL(), forKey: "lite_consent_origin")
+            d.set(newValue == true ? noticeVersion : nil, forKey: noticeKey)
+            d.set(newValue, forKey: researchChoiceKey)
         }
     }
-    /// 同意文案版本。**改了同意頁的實質內容就要遞增**——每筆上傳都帶著它，
-    /// 日後治理要能回答「這筆是在哪一版文案下同意的」。
+    /// Research upload contract. Changes to authorized use require a new server-accepted version.
     static let consentVersion = "2026-10-16.1"
 
     /// Legacy anonymous UUID, retained for old records/support only.
@@ -86,6 +136,12 @@ struct LiteRootView: View {
            let due = record.retryAt, due <= Date() {
             await withdrawal.request(server: record.server)
         }
+        if let delivery = nativeSession?.researchDelivery, LitePrefs.researchConsent == true {
+            let due = store.records.filter {
+                $0.cloudSync == nil && ($0.researchCapture?.retryAt.map { $0 <= store.revisionNow } ?? false)
+            }
+            for record in due { await delivery.resume(record.id, store: store) }
+        }
         await store.resumePendingRevisions()
     }
     @State private var askConsent = false
@@ -112,7 +168,7 @@ struct LiteRootView: View {
         TabView(selection: $selectedTab) {
             Group {
                 if lidarOK {
-                    LiteMeasureView(store: store) { id in
+                    LiteMeasureView(store: store, nativeSession: nativeSession) { id in
                         savedRecordToOpen = id
                         selectedTab = .history
                     }
@@ -120,17 +176,17 @@ struct LiteRootView: View {
                 else { lidarGate }
             }
             .tag(LiteRootTab.measure)
-            .tabItem { Label("量測", systemImage: "camera.metering.center.weighted") }
+            .tabItem { Label(LiteServiceCopy.text("量測"), systemImage: "camera.metering.center.weighted") }
             LiteHistoryView(store: store, recordToOpen: $savedRecordToOpen, nativeSession:nativeSession)
                 .tag(LiteRootTab.history)
-                .tabItem { Label("紀錄", systemImage: "chart.line.uptrend.xyaxis") }
+                .tabItem { Label(LiteServiceCopy.text("紀錄"), systemImage: "chart.line.uptrend.xyaxis") }
             LiteSettingsView(accountManagement:accountManagement,nativeSession:nativeSession,
                              nativeSetupNotice:nativeSetupNotice)
                 .tag(LiteRootTab.settings)
-                .tabItem { Label("設定", systemImage: "gearshape") }
+                .tabItem { Label(LiteServiceCopy.text("設定"), systemImage: "gearshape") }
         }
-        .task { await resumeResearch() }
-        .onChange(of: scenePhase) { _, value in if value == .active { Task { await resumeResearch() } } }
+        .task { await LiteReminderModel.shared.refresh(); await resumeResearch() }
+        .onChange(of: scenePhase) { _, value in if value == .active { Task { await LiteReminderModel.shared.refresh(); await resumeResearch() } } }
         .onReceive(retryTimer) { _ in if scenePhase == .active { Task { await resumeResearch() } } }
         .onAppear { if lidarOK, LitePrefs.researchConsent == nil { askConsent = true } }
         .fullScreenCover(isPresented: $askConsent) {
@@ -147,26 +203,26 @@ struct LiteRootView: View {
                 VStack(spacing: 18) {
                     Image(systemName: "camera.metering.unknown")
                         .font(.system(size: 48)).foregroundStyle(.secondary)
-                    Text("此裝置無法拍攝深度量測").font(.title3.bold())
-                    Text("本裝置未偵測到可用的 LiDAR 深度相機，無法拍攝新的傷口面積量測。")
+                    Text(LiteServiceCopy.text("此裝置無法拍攝深度量測")).font(.title3.bold())
+                    Text(LiteServiceCopy.text("本裝置未偵測到可用的 LiDAR 深度相機，無法拍攝新的傷口面積量測。"))
                         .foregroundStyle(.secondary)
-                    Text("您仍可查看此裝置已有的紀錄、設定、隱私說明與資料撤回。")
+                    Text(LiteServiceCopy.text("您仍可查看此裝置已有的紀錄、設定、隱私說明與資料撤回。"))
                     Button { selectedTab = .history } label: {
-                        Label("查看既有紀錄", systemImage: "chart.line.uptrend.xyaxis")
+                        Label(LiteServiceCopy.text("查看既有紀錄"), systemImage: "chart.line.uptrend.xyaxis")
                             .frame(maxWidth: .infinity, minHeight: 44)
                     }
                     .buttonStyle(.borderedProminent)
                     Button { selectedTab = .settings } label: {
-                        Label("設定與資料撤回", systemImage: "gearshape")
+                        Label(LiteServiceCopy.text("設定與資料撤回"), systemImage: "gearshape")
                             .frame(maxWidth: .infinity, minHeight: 44)
                     }
                     .buttonStyle(.bordered)
-                    NavigationLink("量測精確度與限制") { LiteMeasurementInfoView() }
+                    NavigationLink(LiteServiceCopy.text("量測精確度與限制")) { LiteMeasurementInfoView() }
                 }
                 .multilineTextAlignment(.center)
                 .padding(24)
             }
-            .navigationTitle("量測")
+            .navigationTitle(LiteServiceCopy.text("量測"))
         }
     }
 }

@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 import requests
 from .auth import IapVerifier,ReaderIdentity
-from .contracts import MEDIA,STATE,AUDIT,PORTAL_SA,READER_URLS,BOOTSTRAP_READER_URL,Catalogue,ReviewError,require,decode
+from .contracts import MEDIA,STATE,AUDIT,PORTAL_SA,READER_URLS,BOOTSTRAP_READER_URL,Catalogue,ReviewError,require,decode,PUBLIC_ERRORS
 from .web import portal_app,reader_app
 
 def config(role):
@@ -35,13 +35,23 @@ class Backend:
             # in Authorization for independent verification inside the reader.
             with self.http.get(self.url+path,params=params,headers={'Authorization':bearer,'X-Serverless-Authorization':bearer,
                 'X-Lite-Review-IAP':iap},timeout=(5,90),allow_redirects=False,stream=True) as response:
-                limit=12*1024*1024 if image else 4*1024*1024
+                # Error bodies contain a fixed code only. A provider HTML error
+                # or oversized payload must not be reflected into a human page.
+                limit=(12*1024*1024 if image else 4*1024*1024) if response.status_code==200 else 1024
                 body=bytearray()
                 for chunk in response.iter_content(65536):
                     require(len(body)+len(chunk)<=limit,'review_response_too_large')
                     body.extend(chunk)
                 if response.status_code!=200:
-                    raise ReviewError('review_reader_request_failed',response.status_code if response.status_code in (400,401,403,404,409,410,429) else 503)
+                    code='review_reader_request_failed'
+                    if response.headers.get('Content-Type','').split(';')[0]=='application/json':
+                        try:
+                            error=decode(bytes(body))
+                            if (type(error) is dict and set(error)=={'error'} and
+                                    type(error['error']) is str and PUBLIC_ERRORS.get(error['error'])==response.status_code):
+                                code=error['error']
+                        except ReviewError:pass
+                    raise ReviewError(code,response.status_code if response.status_code in (400,401,403,404,409,410,429) else 503)
                 require(response.headers.get('Content-Type','').split(';')[0]==('image/jpeg' if image else 'application/json'))
                 return bytes(body) if image else decode(bytes(body))
         except ReviewError:raise

@@ -230,6 +230,15 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
         for event in events { try event.validate(context) }
         for event in events { try await process(event, using: context) }
     }
+    func observePurchases(canManagePurchases: Bool) async {
+        if canManagePurchases {
+            startObserving()
+            await reconcile(reportEmpty: false)
+        } else {
+            listener?.cancel()
+            listener = nil
+        }
+    }
     func loadOffer() async {
         guard !busy, !loadingOffer else { return }
         loadingOffer = true
@@ -253,9 +262,19 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
             message = "目前無法核對 Apple 的商品與價格，尚未開始購買。"
             return
         }
+        let known: [LitePurchaseEvent]
+        do { known = try await provider.knownPurchases() }
+        catch {
+            message = "無法核對 Apple 的既有訂閱，尚未發起新的購買。請稍後再試。"
+            return
+        }
+        let c: LitePurchaseContext
+        do { c = try await context() }
+        catch {
+            message = "服務帳號尚未核對，尚未向 Apple 發起購買。請確認連線並登入原服務帳號後再試。"
+            return
+        }
         do {
-            let known = try await provider.knownPurchases()
-            let c=try await context()
             if !known.isEmpty {
                 try await reconcileKnown(known, using: c)
                 return
@@ -272,15 +291,31 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
     }
     func restore() async {
         guard !busy else{return};busy=true;defer{busy=false}
-        do {
-            let c=try await context();let events=try await provider.restore()
-            if events.isEmpty { message="沒有找到可恢復的訂閱；未建立新帳號或重設額度。" }
-            try await reconcileKnown(events, using: c)
-        } catch { failed(error) }
+        let c: LitePurchaseContext
+        do { c = try await context() }
+        catch {
+            message = "服務帳號尚未核對，尚未向 Apple 查詢既有訂閱。請確認連線並登入原服務帳號後再試。"
+            return
+        }
+        let events: [LitePurchaseEvent]
+        do { events = try await provider.restore() }
+        catch {
+            message = "未能確認 Apple 的既有訂閱。請稍後再按「恢復購買」。"
+            return
+        }
+        guard !events.isEmpty else {
+            message = "沒有找到可恢復的訂閱；未建立新帳號或重設額度。"
+            return
+        }
+        do { try await reconcileKnown(events, using: c) } catch { failed(error) }
     }
-    func reconcile() async {
+    func reconcile(reportEmpty: Bool = true) async {
         guard !busy else{return};busy=true;defer{busy=false}
-        do { for e in try await provider.unfinished() { try await process(e) } }
+        do {
+            let events = try await provider.unfinished()
+            if events.isEmpty && reportEmpty { message = "Apple 目前沒有待完成的交易。要查找既有訂閱，請按「恢復購買」。" }
+            for event in events { try await process(event) }
+        }
         catch { failed(error) }
     }
     func startObserving() {

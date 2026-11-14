@@ -35,17 +35,20 @@ struct LiteDeletionContext: Codable, Equatable {
 /// imply that historical media, research data or the entire account was erased.
 struct LiteDispositionProgress: Codable, Equatable {
     static let catalog="490147fc0741120d0f36252d2d6c03f15da67e1b89bd3bc217c6d1b6848fc891"
+    static let sharedCatalog="777efba0a2965937c94677a5d617a9ec134173eeb2736e339576fc6b57de0068"
+    static let sharedPending=pending+["shared_key_retirement"]
     static let pending=["historical_versions_backups","research_association_disposition",
                         "identity_subscription_retention","live_provider_device_acceptance"]
     let v:Int,catalog_sha256:String,revision:Int,service_total:Int,service_sealed:Int
     let service_state:String,grant_key_state:String,blocked_lanes:[String],pending_lanes:[String]
     func validate(apple:String,previous:Self?=nil)throws {
         let serviceOrder=["not_started":0,"pending":1,"current_sealed":2]
-        let keyOrder=["not_started":0,"destroy_scheduled":1,"unrecoverable":2]
-        guard v==1,catalog_sha256==Self.catalog,(0...1000000).contains(revision),
+        let shared=catalog_sha256==Self.sharedCatalog
+        let keyOrder=shared ? ["not_started":0,"backup_pending":1] : ["not_started":0,"destroy_scheduled":1,"unrecoverable":2]
+        guard v==1,(catalog_sha256==Self.catalog || shared),(0...1000000).contains(revision),
               (0...100000).contains(service_total),(0...service_total).contains(service_sealed),
               let sr=serviceOrder[service_state],let kr=keyOrder[grant_key_state],
-              pending_lanes==Self.pending,blocked_lanes==Array(Set(blocked_lanes)).sorted(),
+              pending_lanes==(shared ? Self.sharedPending : Self.pending),blocked_lanes==Array(Set(blocked_lanes)).sorted(),
               blocked_lanes.allSatisfy({["apple_revocation","service_results","grant_key"].contains($0)}),
               service_state != "not_started" || service_sealed==0,
               service_state != "pending" || service_sealed<service_total,
@@ -60,13 +63,18 @@ struct LiteDispositionProgress: Codable, Equatable {
                   revision>p.revision || self==p else{throw LiteDeletionFailure.conflict}
         }
     }
-    var serviceText:String {
-        service_state=="current_sealed" ? "目前結果已封存（\(service_sealed)/\(service_total)）" :
-        service_state=="not_started" ? "尚未開始" : "處理中（\(service_sealed)/\(service_total)）"
+    var serviceCopy: LiteServiceCopy.Piece {
+        let counts = [String(service_sealed), String(service_total)]
+        if service_state=="current_sealed" { return .init("目前結果已封存（%@/%@）", counts) }
+        if blocked_lanes.contains("service_results") { return .init("服務結果暫待核對（已確認 %@/%@）", counts) }
+        return service_state=="not_started" ? .init("尚未開始") : .init("處理中（%@/%@）", counts)
     }
+    var serviceText: String { serviceCopy.source }
     var keyText:String {
-        grant_key_state=="unrecoverable" ? "已確認無法解密" :
-        grant_key_state=="destroy_scheduled" ? "已排程，等待銷毀確認" : "尚未開始"
+        if grant_key_state=="backup_pending" { return "目前存取已停止；歷史加密副本仍待處理" }
+        if grant_key_state=="unrecoverable" { return "已確認無法解密" }
+        if grant_key_state=="destroy_scheduled" { return "已排程，等待銷毀確認" }
+        return blocked_lanes.contains("grant_key") ? "金鑰處理暫待核對，可稍後查看原進度" : "尚未開始"
     }
 }
 
@@ -77,6 +85,7 @@ struct LiteDeletionReceipt: Codable, Equatable {
     let apple_revocation:String, data_disposition:String
     let account_deleted:Bool, subscription_cancelled:Bool, local_records_preserved:Bool
     var disposition:LiteDispositionProgress?=nil
+    var research_withdrawal:String?=nil
     func validate(owner:String,operation:String,previous:Self?=nil) throws {
         guard [1,2].contains(v),state=="account_deletion_pending",self.operation==operation,LiteServiceBytes.hex(operation,32),
               installation==owner,requested_at>=0,LiteServiceBytes.hex(inventory_sha256),
@@ -85,6 +94,12 @@ struct LiteDeletionReceipt: Codable, Equatable {
               ["not_started","in_progress","pending","confirmed"].contains(apple_revocation),
               !account_deleted,!subscription_cancelled,local_records_preserved
         else {throw LiteDeletionFailure.invalid}
+        if let state=research_withdrawal, !["requested","awaiting_confirmation"].contains(state) {
+            throw LiteDeletionFailure.invalid
+        }
+        if previous?.research_withdrawal == "requested" && research_withdrawal != "requested" {
+            throw LiteDeletionFailure.conflict
+        }
         if v==1 {
             guard data_disposition=="not_started",disposition==nil else{throw LiteDeletionFailure.invalid}
         } else {
@@ -156,7 +171,7 @@ struct LiteSignedDeletionTransport: LiteAuthenticatedTransport {
     private func send(_ kind:String,_ operation:String,_ owner:String)async throws->LiteDeletionReceipt {
         guard LiteServiceBytes.hex(operation,32),try await installation()==owner else{throw LiteDeletionFailure.conflict}
         var body=["anon_id":owner,"operation":operation]
-        if kind=="request" {body["confirmation"]="delete_account"}
+        if kind=="request" {body["confirmation"]=LiteAccountDeletionCheckpoint.confirmation}
         let data=try await post(kind,owner:owner,body:body,expected:202)
         let r=try JSONDecoder().decode(LiteDeletionReceipt.self,from:data);try r.validate(owner:owner,operation:operation);return r
     }
@@ -170,7 +185,7 @@ struct LiteSignedDeletionTransport: LiteAuthenticatedTransport {
         try challenge.validate(context,operation:challenge.operation,attempt:challenge.reauth_operation)
         guard context.origin==origin.absoluteString,(1...16000).contains(identityToken.utf8.count) else{throw LiteDeletionFailure.invalid}
         let data=try await post("reauth/confirm",owner:context.installation,body:["anon_id":context.installation,"operation":challenge.operation,
-            "reauth_operation":challenge.reauth_operation,"account_sha256":context.account,"state":challenge.state,"identity_token":identityToken],expected:202)
+            "reauth_operation":challenge.reauth_operation,"account_sha256":context.account,"state":challenge.state,"identity_token":identityToken,"research_confirmation":LiteAccountDeletionCheckpoint.confirmation],expected:202)
         let r=try JSONDecoder().decode(LiteDeletionReceipt.self,from:data);try r.validate(owner:context.installation,operation:challenge.operation);return r
     }
     private func post(_ kind:String,owner:String,body:[String:String],expected:Int)async throws->Data {
@@ -190,6 +205,8 @@ struct LiteAccountDeletionCheckpoint: Codable, Equatable {
     let version:Int,context:LiteDeletionContext,operation:String,createdAt:Int
     var receipt:LiteDeletionReceipt?
     var recovery:LiteDeletionRecovery?
+    var researchWithdrawalConfirmed:Bool? = nil
+    static let confirmation = "delete_account_and_withdraw_linked_research_v1"
     static func key(origin:String,owner:String)->String {
         String(LiteServiceBytes.hash(Data((origin+"\0"+owner+"\0account-deletion").utf8)).prefix(32))
     }
@@ -210,13 +227,18 @@ struct LiteAccountDeletionCheckpoint: Codable, Equatable {
 @MainActor final class LiteAccountDeletionStore: ObservableObject {
     @Published private(set) var record:LiteAccountDeletionCheckpoint?
     @Published private(set) var busy=false
-    @Published private(set) var message="刪除帳號、取消 Apple 訂閱及研究撤回會分別處理。"
+    @Published private(set) var message="刪除帳號也會撤回連結的研究參與。如有 Apple 訂閱，請另行取消。"
+    private var displayMessage: LiteServiceCopy.Message?
+    func presentationMessage(locale: Locale) -> String {
+        displayMessage?.render(matching: message, locale: locale) ?? LiteServiceCopy.text(message, locale: locale)
+    }
     @Published private(set) var needsReview=false
     @Published private(set) var identityRequired=false
     let service:any LiteAccountDeletionService,identity:any LiteDeletionIdentity,journal:any LiteServiceJournal
     let now:()->Date
-    init(service:any LiteAccountDeletionService,identity:any LiteDeletionIdentity,journal:any LiteServiceJournal,now:@escaping()->Date=Date.init){
-        self.service=service;self.identity=identity;self.journal=journal;self.now=now
+    let pauseResearch:() throws -> Void
+    init(service:any LiteAccountDeletionService,identity:any LiteDeletionIdentity,journal:any LiteServiceJournal,pauseResearch:@escaping() throws -> Void=LitePrefs.pauseResearchForAccountDeletion,now:@escaping()->Date=Date.init){
+        self.service=service;self.identity=identity;self.journal=journal;self.now=now;self.pauseResearch=pauseResearch
     }
     private func read(_ owner:String)async throws->(Data?,LiteAccountDeletionCheckpoint?) {
         let raw=try await journal.load(LiteAccountDeletionCheckpoint.key(origin:service.origin.absoluteString,owner:owner))
@@ -247,14 +269,30 @@ struct LiteAccountDeletionCheckpoint: Codable, Equatable {
                 guard create else{return}
                 let c=try await identity.deletionContext();try c.validate()
                 guard c.installation==owner,c.origin==service.origin.absoluteString else{throw LiteDeletionFailure.conflict}
-                let next=LiteAccountDeletionCheckpoint(version:1,context:c,operation:UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased(),createdAt:Int(now().timeIntervalSince1970))
+                let next=LiteAccountDeletionCheckpoint(version:1,context:c,operation:UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased(),createdAt:Int(now().timeIntervalSince1970),researchWithdrawalConfirmed:true)
+                try pauseResearch()
                 raw=try await save(owner,nil,next);r=next // Persist before closing local admission or transmitting.
             }
-            guard var current=r,let old=raw else{throw LiteDeletionFailure.invalid}
+            else if create || r?.researchWithdrawalConfirmed == true {
+                try pauseResearch()
+            }
+            guard var current=r,var old=raw else{throw LiteDeletionFailure.invalid}
+            if current.researchWithdrawalConfirmed != true {
+                if create {
+                    current.researchWithdrawalConfirmed = true
+                    old=try await save(owner,old,current)
+                } else if current.receipt == nil {
+                    record=current
+                    message="請先確認原刪帳要求也包含撤回研究，再繼續傳送。"
+                    return
+                }
+            }
             record=current
             try await identity.suspendForDeletion(current.context,operation:current.operation)
             let reply:LiteDeletionReceipt
-            if current.receipt==nil {reply=try await pendingReply(current)}
+            if current.receipt == nil || (current.researchWithdrawalConfirmed == true && current.receipt?.research_withdrawal != "requested") {
+                reply=try await pendingReply(current)
+            }
             else {reply=try await service.status(operation:current.operation,installation:owner)}
             try reply.validate(owner:owner,operation:current.operation,previous:current.receipt)
             guard reply.requested_at<=Int(now().timeIntervalSince1970)+60 else{throw LiteDeletionFailure.invalid}
@@ -284,6 +322,10 @@ struct LiteAccountDeletionCheckpoint: Codable, Equatable {
         do {
             let owner=try await service.installation();let(raw,r)=try await read(owner)
             guard var current=r,var old=raw,current.receipt==nil else{return}
+            guard current.researchWithdrawalConfirmed == true else {
+                message="請先確認原刪帳要求也包含撤回研究。";return
+            }
+            try pauseResearch()
             record=current;try await identity.suspendForDeletion(current.context,operation:current.operation)
             // A server may already have accepted the original request/proof.
             do {
@@ -344,11 +386,14 @@ struct LiteAccountDeletionCheckpoint: Codable, Equatable {
         let apple=reply.apple_revocation=="confirmed" ? "Apple 授權撤銷已確認。":"Apple 授權撤銷仍在處理或待核對。"
         if let progress=reply.disposition {
             let waiting=progress.blocked_lanes.isEmpty ? "":"有步驟尚待確認，可核對原進度，不會另建要求。"
-            message=["雲端已受理，帳號服務已關閉。",apple,"目前服務結果：",progress.serviceText,
-                "；Apple 憑證金鑰：",progress.keyText,"。",waiting,
-                "歷史版本、備份及研究等資料仍待處理，尚未完成刪除；手機紀錄保留。"].joined()
+            displayMessage = .init(pieces: [.init("雲端已受理，帳號服務已關閉。"), .init(apple),
+                .init("目前服務結果："), progress.serviceCopy, .init("；Apple 憑證金鑰："),
+                .init(progress.keyText), .init("。"), .init(waiting),
+                .init("歷史版本、備份及研究等資料仍待處理，尚未完成刪除；手機紀錄保留。")])
         } else {
-            message="雲端已受理，帳號服務已關閉。"+apple+"帳號資料清理尚未開始，尚未完成刪除；手機紀錄仍保留。"
+            displayMessage = .init(pieces: [.init("雲端已受理，帳號服務已關閉。"), .init(apple),
+                .init("帳號資料清理尚未開始，尚未完成刪除；手機紀錄仍保留。")])
         }
+        message = displayMessage?.source ?? message
     }
 }

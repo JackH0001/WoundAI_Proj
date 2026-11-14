@@ -5,7 +5,11 @@ configuration blocks Lite, never falls back to anonymous access. Request bodies
 remain exactly the bytes signed; only verified ownership reaches business code.
 """
 import base64
+import hashlib
+import hmac
 import re
+from contextlib import contextmanager
+from dataclasses import dataclass
 from flask import Blueprint, current_app, g, jsonify, request
 from werkzeug.exceptions import BadRequest, RequestEntityTooLarge
 from audit_chain_contract import loads_json_object_strict
@@ -25,6 +29,33 @@ POST_PATHS = {PREFIX+'segment', PREFIX+'annotation', PREFIX+'annotation/revision
 MAX_BODY = 32 * 1024 * 1024
 
 
+@dataclass(frozen=True)
+class InternalOwner:
+    role: str
+    installation_sha256: str
+    account_sha256: str | None = None
+
+    def __post_init__(self):
+        pins = (self.installation_sha256, self.account_sha256) if self.role == 'native' else (self.installation_sha256,)
+        if (self.role not in ('native', 'research') or (self.role == 'research' and self.account_sha256 is not None)
+                or any(type(pin) is not str or not re.fullmatch(r'[0-9a-f]{64}', pin) for pin in pins)):
+            raise ValueError('incomplete internal owner binding')
+
+    @classmethod
+    def configured(cls, env, role):
+        mode = env.get('LITE_INTERNAL_OWNER_MODE')
+        pin = env.get('LITE_INTERNAL_INSTALLATION_SHA256')
+        account = env.get('LITE_INTERNAL_ACCOUNT_SHA256')
+        if mode is None and pin is None and account is None:
+            return None
+        if mode != 'owner-only':
+            raise ValueError('explicit internal owner mode required')
+        return cls(role, pin, account)
+
+    def permits_installation(self, installation):
+        return hmac.compare_digest(hashlib.sha256(installation.encode('utf-8')).hexdigest(), self.installation_sha256)
+
+
 def _b64(value, maximum, exact=None):
     if type(value) is not str or len(value) > ((maximum + 2) // 3) * 4:
         raise AdmissionRejected('invalid base64 size')
@@ -36,6 +67,46 @@ def _b64(value, maximum, exact=None):
             base64.b64encode(raw).decode('ascii') != value):
         raise AdmissionRejected('noncanonical base64')
     return raw
+
+
+def _challenge_limit_response(exc):
+    response = jsonify(error='lite_challenge_limit', retry_after=exc.retry_after)
+    response.headers['Retry-After'] = str(exc.retry_after)
+    return response, 429
+
+
+def _budget_limit_response(exc):
+    response = jsonify(error='lite_service_budget', retry_after=exc.retry_after)
+    response.headers['Retry-After'] = str(exc.retry_after)
+    return response, 429
+
+
+@contextmanager
+def _privacy_capacity(budget):
+    """Reserve once, directly before changing verified device state."""
+    budget.check_available(scope='withdraw')
+    reserved = False
+
+    def claim():
+        nonlocal reserved
+        if not reserved:
+            budget.reserve(scope='withdraw')
+            reserved = True
+
+    try:
+        yield claim
+    except (AdmissionRejected, AssertionRejected):
+        if not reserved:
+            try:
+                budget.reserve()
+            except BudgetExceeded:
+                # Already refused. Keep the authentication error (or the
+                # per-key challenge cooldown), rather than inviting a replay.
+                pass
+        raise
+    else:
+        if not reserved:
+            raise StateUnavailable('privacy capacity not confirmed')
 
 
 def _body(maximum):
@@ -64,9 +135,24 @@ def _json(raw):
         raise AdmissionRejected('invalid JSON') from exc
 
 
-def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerce=None, purchases=None, identity=None, deletion=None):
+def _signed_headers():
+    key = _b64(request.headers.get('X-Lite-Key-ID'), 32, 32)
+    assertion = _b64(request.headers.get('X-Lite-Assertion'), 4096)
+    challenge = request.headers.get('X-Lite-Challenge-ID', '')
+    operation = request.headers.get('X-Lite-Request-ID', '')
+    if (not re.fullmatch(r'[0-9a-f]{32}', challenge) or
+            not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', operation)):
+        raise AdmissionRejected('invalid signed request identifiers')
+    return key, challenge, assertion, operation
+
+
+def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerce=None, purchases=None, identity=None, deletion=None, link_signer=None, research_capture=None, research_source=None, internal_owner=None):
     if 'lite_attest_http' in app.extensions:
         raise ValueError('Lite security gate already installed')
+    if internal_owner is not None and (not isinstance(internal_owner, InternalOwner)
+            or internal_owner.role != ('native' if commerce is not None else 'research')
+            or (internal_owner.role == 'native' and identity is None)):
+        raise ValueError('internal owner binding does not match this service')
     if service is not None and not isinstance(service, RegistrationService):
         raise ValueError('trusted registration service required')
     if budget is not None and not isinstance(budget, RequestBudget):
@@ -77,6 +163,8 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
     purchase_paths = frozenset()
     account_paths = frozenset()
     deletion_paths = frozenset()
+    capture_path = None
+    source_path = None
     # The deployed legacy image deliberately excludes commerce and its Apple
     # subscription dependencies. Only explicit trusted injection may load them.
     if commerce is not None:
@@ -101,10 +189,41 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
         if not isinstance(deletion, AccountDeletion) or identity is None or deletion.bridge is not identity:
             raise ValueError('matching trusted deletion/identity coordinator required')
         deletion_paths=frozenset(DELETION_PATHS)
+    if research_capture is not None:
+        from lite_research_capture import ResearchCaptureReceiver, PATH as CAPTURE, blueprint as capture_blueprint
+        if (not isinstance(research_capture, ResearchCaptureReceiver) or commerce is not None
+                or not isinstance(privacy, FencedPrivacy)
+                or privacy.objects.bucket.name != research_capture.verifier.bucket):
+            raise ValueError('research-only capture destination required')
+        capture_path = CAPTURE
+        app.register_blueprint(capture_blueprint(research_capture))
+    if research_source is not None:
+        from lite_research_source_issuer import ResearchSourceIssuer, PATH as SOURCE, blueprint as source_blueprint
+        if (not isinstance(research_source, ResearchSourceIssuer) or commerce is None
+                or identity is None or research_source.operations is not commerce):
+            raise ValueError('authenticated native service provenance required')
+        source_path = SOURCE
+        app.register_blueprint(source_blueprint(research_source))
+    link_path=None
+    if link_signer is not None:
+        from lite_research_issuer import ACCEPT, OFFER, LinkSigner, issuer_blueprint
+        if not isinstance(link_signer,LinkSigner) or service is None:
+            raise ValueError('reviewed signed research association route required')
+        if link_signer.role=='native':
+            if deletion is None or deletion.scope!=link_signer.scope:raise ValueError('native deletion binding differs')
+            link_path=OFFER
+            app.register_blueprint(issuer_blueprint(link_signer,deletion=deletion))
+        else:
+            if commerce is not None or not isinstance(privacy,FencedPrivacy) or privacy.objects.bucket.name!=link_signer.bucket:
+                raise ValueError('research-only issuer binding differs')
+            link_path=ACCEPT
+            app.register_blueprint(issuer_blueprint(link_signer,privacy=privacy))
     app.extensions['lite_attest_http'] = dict(service=service, budget=budget, privacy=privacy, commerce=commerce)
-    if commerce is not None:app.register_blueprint(commerce_blueprint(commerce))
+    if commerce is not None:app.register_blueprint(commerce_blueprint(commerce, balance_enabled=identity is not None))
     if purchases is not None:app.register_blueprint(purchase_blueprint(purchases))
-    if identity is not None:app.register_blueprint(identity_blueprint(identity))
+    if identity is not None:
+        account_pin = internal_owner.account_sha256 if internal_owner else None
+        app.register_blueprint(identity_blueprint(identity, internal_account_sha256=account_pin))
     if deletion is not None:app.register_blueprint(deletion_blueprint(deletion))
     if identity is not None and identity.events is not None:app.register_blueprint(apple_events_blueprint(identity.events))
     bp = Blueprint('lite_attest_http', __name__)
@@ -135,13 +254,18 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
                 raise AdmissionRejected('noncanonical request target or encoding')
             control = request.path in (CHALLENGE_PATH, REGISTER_PATH)
             service_only = (request.path in service_paths and configuration['commerce'] is not None
-                            and request.endpoint in {'lite_service_http.prepare','lite_service_http.run','lite_service_http.status','lite_service_http.recover','lite_service_http.resubmit'})
+                            and request.endpoint in {'lite_service_http.prepare','lite_service_http.run','lite_service_http.status','lite_service_http.recover','lite_service_http.resubmit','lite_service_http.balance','lite_service_http.wounds'})
             purchase_only=(request.path in purchase_paths and request.endpoint in {'lite_native_purchase.context','lite_native_purchase.confirm'})
             account_only=(request.path in account_paths and request.endpoint in {'lite_account_identity.challenge','lite_account_identity.confirm','lite_account_identity.status','lite_account_identity.logout','lite_account_identity.renew'})
             deletion_only=(request.path in deletion_paths and request.endpoint in {'lite_account_deletion.request','lite_account_deletion.status','lite_account_deletion.reauth_challenge','lite_account_deletion.reauth_confirm'})
-            account_only=account_only or deletion_only
-            service_only=service_only or purchase_only or account_only
-            if not ((request.method == 'POST' and (control or request.path in POST_PATHS or service_only)) or
+            link_only=link_path is not None and request.path==link_path and request.endpoint=='lite_research_issuer.issue'
+            capture_only=capture_path is not None and request.path==capture_path and request.endpoint=='lite_research_capture.capture'
+            capture_lookup=(capture_path is not None and request.path==capture_path+'/status'
+                            and request.endpoint=='lite_research_capture.status')
+            source_only=source_path is not None and request.path==source_path and request.endpoint=='lite_research_source.issue'
+            account_only=account_only or deletion_only or link_only
+            service_only=service_only or purchase_only or account_only or source_only
+            if not ((request.method == 'POST' and (control or request.path in POST_PATHS or service_only or capture_only or capture_lookup)) or
                     (request.method == 'DELETE' and re.fullmatch(PREFIX+r'data/[A-Za-z0-9_-]{1,128}(?:/[0-9a-f]{32})?', request.path))):
                 return jsonify(error='lite_route_not_supported'), 404
             # A bounded 4 KiB challenge body selects the privacy lane. Media
@@ -149,31 +273,48 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
             if request.path == CHALLENGE_PATH:
                 try:
                     data = _json(_body(4096))
+                    withdrawal = set(data) == {'key_id', 'purpose'} and data.get('purpose') == 'withdraw'
+                    if withdrawal:
+                        _b64(data['key_id'], 32, 32)
                 except (AdmissionRejected, RequestEntityTooLarge, BadRequest):
                     budget.reserve()
                     raise
-                withdrawal = set(data) == {'key_id', 'purpose'} and data.get('purpose') == 'withdraw'
-                budget.reserve(scope='withdraw' if withdrawal else 'general')
+                if not withdrawal:
+                    budget.reserve()
                 g.lite_attest_control = data
                 return None
-            budget.reserve(scope='withdraw' if request.method == 'DELETE' or deletion_only else 'general')
             limit = (20000 if (purchase_only or account_only) and request.path.endswith('/confirm') else
-                0 if request.method == 'DELETE' else 4096 if request.path == REJOIN_PATH or (service_only and not request.path.endswith('/run'))
+                0 if request.method == 'DELETE' else 32768 if capture_lookup else 4096 if request.path == REJOIN_PATH or (service_only and not request.path.endswith('/run'))
                 else 96*1024 if request.path == REGISTER_PATH else MAX_BODY)
-            raw = _body(limit)
+            privacy_lane = request.method == 'DELETE' or deletion_only or link_only
+            if privacy_lane:
+                # Only bounded privacy bodies reach this branch. Reject malformed
+                # envelopes against the general budget, before reading any key state.
+                try:
+                    raw = _body(limit)
+                    signed = _signed_headers()
+                except (AdmissionRejected, RequestEntityTooLarge, BadRequest):
+                    budget.reserve()
+                    raise
+            else:
+                budget.reserve()
+                raw = _body(limit)
             if control:
                 g.lite_attest_control = _json(raw)
                 return None
-            key_id = _b64(request.headers.get('X-Lite-Key-ID'), 32, 32)
-            assertion = _b64(request.headers.get('X-Lite-Assertion'), 4096)
-            admitted = service.admission.admit(key_id, request.headers.get('X-Lite-Challenge-ID'), assertion,
-                request_id=request.headers.get('X-Lite-Request-ID'), method=request.method, path=request.path,
-                content_type=request.headers.get('Content-Type', ''), body=raw)
+            key_id, challenge_id, assertion, operation = signed if privacy_lane else _signed_headers()
+            binding = dict(request_id=operation, method=request.method, path=request.path,
+                           content_type=request.headers.get('Content-Type', ''), body=raw)
+            if privacy_lane:
+                with _privacy_capacity(budget) as claim:
+                    admitted = service.admission.admit(key_id, challenge_id, assertion, before_commit=claim, **binding)
+            else:
+                admitted = service.admission.admit(key_id, challenge_id, assertion, **binding)
             if request.method == 'DELETE':
                 # client_data also binds the DELETE path to this installation.
                 parts = request.path.removeprefix(PREFIX+'data/').split('/')
                 owner, requested_epoch = parts[0], parts[1] if len(parts) == 2 else 'legacy'
-            elif request.path == PREFIX+'segment' or (service_only and request.path.endswith('/run')):
+            elif request.path == PREFIX+'segment' or capture_only or (service_only and request.path.endswith('/run')):
                 if request.mimetype != 'multipart/form-data':
                     raise AdmissionRejected('multipart required')
                 owners = request.form.getlist('anon_id')
@@ -190,10 +331,29 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
             if owner != admitted.installation:
                 return jsonify(error='lite_owner_mismatch'), 403
             g.lite_admission = admitted
+            # TestFlight membership alone does not identify a service installation.
+            # Leave existing privacy rights and receipt reads on their own signed routes.
+            old_right = (request.method == 'DELETE' or deletion_only or capture_lookup or request.endpoint in {
+                'lite_service_http.status', 'lite_account_identity.status', 'lite_account_identity.logout',
+                'lite_account_identity.renew'})
+            restrict = internal_owner is not None and not old_right
+            if restrict:
+                permitted=internal_owner.permits_installation(admitted.installation)
+                if request.endpoint in {'lite_account_identity.challenge','lite_account_identity.confirm'}:
+                    previous=identity.existing_account_pin(owner)
+                    if previous is not None:
+                        # A returning participant may reauthenticate only their
+                        # original account. New business writes are still gated.
+                        g.lite_previous_account_sha256=previous
+                        permitted=True
+                if not permitted:
+                    return jsonify(error='lite_internal_owner_required', keep_local=True), 403
             if service_only:
-                if identity is not None and not account_only:
-                    try: identity.require_session(owner)
+                if identity is not None and (not account_only or (restrict and link_only)):
+                    try: session = identity.require_session(owner)
                     except ValueError: return jsonify(error='lite_sign_in_required',keep_local=True),401
+                    if restrict and not identity.matches_account(session['account'], internal_owner.account_sha256):
+                        return jsonify(error='lite_internal_owner_required', keep_local=True), 403
                 # Explicitly registered, authenticated service work has no research
                 # writer ticket and cannot reach research media through this route.
                 # The service account/usage coordinator separately authorizes work.
@@ -220,22 +380,20 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
                     request.environ['woundlite.write_fence'] = 'gcs-generation-v1'
                 else:
                     request.environ['woundlite.writers_drained'] = True
-            else:
+            elif not capture_lookup:
                 request.environ['woundlite.writer_ticket'] = privacy.begin_write(owner)
         except (RequestEntityTooLarge, BadRequest) as exc:
             return jsonify(error='lite_request_too_large' if isinstance(exc, RequestEntityTooLarge) else 'lite_bad_request'), exc.code
         except BudgetExceeded as exc:
-            response = jsonify(error='lite_service_budget', retry_after=exc.retry_after)
-            response.headers['Retry-After'] = str(exc.retry_after)
-            return response, 429
+            return _budget_limit_response(exc)
         except OwnerWithdrawn:
             return jsonify(error='withdrawn'), 410
         except ReconsentRejected:
             return jsonify(error='lite_consent_epoch_conflict'), 409
         except WriterLimit:
             return jsonify(error='lite_writers_busy'), 429
-        except ChallengeLimit:
-            return jsonify(error='lite_challenge_limit'), 429
+        except ChallengeLimit as exc:
+            return _challenge_limit_response(exc)
         except (AdmissionRejected, AssertionRejected, ValueError):
             return jsonify(error='lite_attestation_required'), 401
         except StateUnavailable:
@@ -256,16 +414,23 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
                 if set(data) != {'key_id', 'purpose'} or data['purpose'] not in ('register', 'assert', 'withdraw'):
                     raise AdmissionRejected('invalid challenge request')
                 key = _b64(data['key_id'], 32, 32)
-                challenge = (service.issue_challenge(key) if data['purpose'] == 'register'
-                             else service.admission.issue_challenge(key, purpose=data['purpose']))
+                if data['purpose'] == 'withdraw':
+                    with _privacy_capacity(current_app.extensions['lite_attest_http']['budget']) as claim:
+                        challenge = service.admission.issue_challenge(key, purpose='withdraw', before_commit=claim)
+                elif data['purpose'] == 'register':
+                    challenge = service.issue_challenge(key)
+                else:
+                    challenge = service.admission.issue_challenge(key)
                 return jsonify(challenge_id=challenge.identifier, challenge=base64.b64encode(challenge.nonce).decode('ascii'),
                                expires_at=challenge.expires_at, audience=service.admission.audience)
             if set(data) != {'key_id', 'challenge_id', 'attestation'}:
                 raise AdmissionRejected('invalid registration request')
             result = service.register(_b64(data['key_id'], 32, 32), data['challenge_id'], _b64(data['attestation'], 65536))
             return jsonify(installation=result.installation, key_id=base64.b64encode(result.key_id).decode('ascii'))
-        except ChallengeLimit:
-            return jsonify(error='lite_challenge_limit'), 429
+        except BudgetExceeded as exc:
+            return _budget_limit_response(exc)
+        except ChallengeLimit as exc:
+            return _challenge_limit_response(exc)
         except (AdmissionRejected, AssertionRejected, ValueError):
             return jsonify(error='lite_attestation_rejected'), 401
         except StateUnavailable:

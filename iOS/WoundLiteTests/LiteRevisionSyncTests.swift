@@ -322,7 +322,7 @@ final class LiteRevisionSyncTests: XCTestCase {
         for bound in [true, false] {
             var r = store.records.last!; r.id = UUID().uuidString
             if !bound { r.cloudSync = nil }
-            let saved = try XCTUnwrap(store.saveMeasurement(r, selectedWoundID: "",
+            let saved = try XCTUnwrap(store.saveMeasurement(r, selectedWoundID: store.localTrackingID ?? "",
                 enteredLocation: LiteWoundLocation(side: "right", site: "knee_back"),
                 queueResearchSync: !bound))
             XCTAssertNil(saved.cloudSync?.pending)
@@ -371,7 +371,12 @@ final class LiteRevisionSyncTests: XCTestCase {
             return view.subviews.lazy.compactMap { tabBar($0) }.first
         }
         let bar = try XCTUnwrap(tabBar(host.view))
-        XCTAssertEqual(bar.items?.compactMap(\.title), ["量測", "紀錄", "設定"])
+        // Check the actual rendered titles against independent expectations.
+        // CI uses English; local runs also exercise Traditional Chinese. Do not
+        // derive the expected titles from the production translation helper.
+        let expectedTitles = Locale.current.language.languageCode?.identifier == "en"
+            ? ["Measure", "Records", "Settings"] : ["量測", "紀錄", "設定"]
+        XCTAssertEqual(bar.items?.compactMap(\.title), expectedTitles)
         XCTAssertFalse(bar.isHidden); XCTAssertNil(host.presentedViewController)
         let image = UIGraphicsImageRenderer(bounds: host.view.bounds).image { _ in
             host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)

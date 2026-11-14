@@ -18,6 +18,7 @@ from lite_usage_ledger import digest
 
 LANES=('service_current','apple_revocation','grant_key','research_current','service_history','research_history')
 HISTORY=('service_history','research_history')
+PUBLIC_LANES = {'service_current':'service_results', 'apple_revocation':'apple_revocation', 'grant_key':'grant_key'}
 PENDING=('orphan_or_unlinked_data','soft_delete_and_backups','identity_subscription_retention','live_provider_device_acceptance')
 
 
@@ -52,7 +53,7 @@ class AccountDispositionWorker:
         # Validate existing public observations before dispatch, never repair
         # missing evidence by fabricating a new progress intent.
         self.p._read(p)
-        return dict(v=1,progress=p,research=self.r.w.c._plan(person),
+        return dict(v=1,progress=p,research=self.r.w.c.inventory_plan(person),
                     research_config=self.r.w.config,service_policy=self.s.policy,research_policy=self.r.policy)
 
     @staticmethod
@@ -67,7 +68,7 @@ class AccountDispositionWorker:
             self.p._validate_service(p['progress'],r)
             done=r['service_result_payloads']=='current_sealed'
         elif lane=='grant_key':
-            self.p._validate_key(p['progress'],r);done=r['kms_state']=='DESTROYED'
+            self.p._validate_key(p['progress'],r);done=self.p.key_observed(r)
         elif lane=='apple_revocation':
             d=p['progress']['deletion']
             if (r.get('operation')!=d['operation'] or r.get('installation')!=d['requester']
@@ -187,7 +188,7 @@ class AccountDispositionWorker:
         """Private checkpoint view; no Apple/KMS/media listing or mutation."""
         p=self._plan(person);row=self._read(p);j=self._initial(p) if row is None else row[1];_,c=self._control(p)
         return dict(v=1,plan_sha256=digest(p),revision=j['step'],paused=c['paused'],control_revision=c['revision'],
-            states=dict(j['states']),observations=dict(j['receipts']),pending_lanes=list(PENDING),
+            states=dict(j['states']),observations=dict(j['receipts']),pending_lanes=list(PENDING)+(['shared_key_retirement'] if self.p.shared else []),
             account_deleted=False,physical_backups_erased=False,observed_scope_only=True)
 
     def request_rescan(self,person,*,lane):
@@ -221,11 +222,23 @@ class AccountDispositionWorker:
                 elif current['round']!=target:raise StateUnavailable('history rescan round differs')
             r=h.advance_account(person,versions=limit,apply=True,rescan=rescan)
         self._outcome(p,lane,r)
-        if lane in ('service_current','grant_key'):
-            # Retain existing v2 public progress without widening its contract.
-            self.p.immutable(self.p.audit,key('disposition-progress-intent',digest(p['progress'])),p['progress'])
-            self.p._record(p['progress'],r if lane=='service_current' else None,r if lane=='grant_key' else None,[])
         return r
+
+    def _publish_progress(self,p):
+        def observe(old):
+            row=self._read(p)
+            if row is None: raise StateUnavailable('missing original worker checkpoint')
+            j=row[1]
+            blocked=set(old['blocked'] if old else [])
+            for lane, name in PUBLIC_LANES.items():
+                state=j['states'][lane]
+                if state=='blocked': blocked.add(name)
+                elif state!='not_started': blocked.discard(name)
+            return j['receipts']['service_current'], j['receipts']['grant_key'], sorted(blocked)
+
+        public=p['progress']
+        self.p.immutable(self.p.audit,key('disposition-progress-intent',digest(public)),public)
+        self.p._record_observation(public,observe)
 
     def run(self,person,*,apply=False,max_steps=12,max_seconds=30,limit=5,cancelled=lambda:False):
         """Bound dispatches; blocked lanes are tried at most once per invocation.
@@ -245,6 +258,10 @@ class AccountDispositionWorker:
             if cancelled():reason='cancelled';break
             if self.clock()>=deadline:reason='deadline';break
             p=self._plan(person);row=self._read(p);_,control=self._control(p)
+            # Retry only the receipt publication if the previous invocation
+            # stopped between saving the private checkpoint and updating the app.
+            if dispatched==0 and row and any(row[1]['states'][n]!='not_started' for n in PUBLIC_LANES):
+                self._publish_progress(p)
             if control['paused']:reason='paused';break
             j=self._initial(p) if row is None else row[1]
             choices=[(j['next']+n)%len(LANES) for n in range(len(LANES))]
@@ -274,4 +291,6 @@ class AccountDispositionWorker:
             attempts[lane]+=1
             value=dict(j,step=j['step']+1,next=(index+1)%len(LANES),states=states,receipts=receipts,round_targets=targets)
             self._save(p,row,value)
+            if lane in PUBLIC_LANES:
+                self._publish_progress(p)
         return dict(self.status(person),dispatches=dispatched,stop_reason=reason,deadline_is_cooperative=True)
