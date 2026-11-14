@@ -9,7 +9,7 @@ COPY Backend/LiteReview/__init__.py Backend/LiteReview/contracts.py Backend/Lite
 COPY Backend/LiteReview/templates /app/Backend/LiteReview/templates
 COPY Backend/LiteReview/static /app/Backend/LiteReview/static
 COPY build-context-manifest.json /app/build-context-manifest.json
-RUN python -B /app/Backend/LiteReview/build_provenance.py && chmod -R a-w /app
+RUN python -B /app/Backend/LiteReview/build_provenance.py && chmod -R a=rX /app
 USER 65532:65532
 EXPOSE 8080
 CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "1", "--timeout", "120", "--access-logfile", "/dev/null", "Backend.LiteReview.runtime:portal()"]
