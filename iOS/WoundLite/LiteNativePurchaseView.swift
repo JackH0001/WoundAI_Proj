@@ -80,6 +80,7 @@ struct LiteNativePurchaseView: View {
                     }
                 }
             }
+            LiteNativeSponsorSection(session: session)
             Section(copy("訂閱管理與條款")) {
                 LiteAppleSubscriptionLink()
                 LitePrivacyLink()
