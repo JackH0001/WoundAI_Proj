@@ -353,6 +353,8 @@ jobs:
         run: |
           python -m unittest -v test_lite_operational_materials > evidence/operational-materials-tests.log 2>&1
           python tools/lite_operational_materials_probe.py --output evidence/operational-materials-probe.json
+      - name: Stage runtime-only custody and reconcile uncertain first versions (synthetic only)
+        run: python -m unittest -v test_lite_runtime_custody > evidence/runtime-custody-tests.log 2>&1
       - name: Separate role custody and operator-only bootstrap (synthetic terminals only)
         run: |
           python -m unittest -v test_lite_role_custody > evidence/role-custody-tests.log 2>&1
