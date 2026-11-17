@@ -223,15 +223,23 @@ class Importer:
         sensitive = {'secretmanager.versions.access', 'secretmanager.versions.add', 'secretmanager.versions.enable',
                      'secretmanager.versions.disable', 'secretmanager.versions.destroy', 'secretmanager.secrets.setIamPolicy',
                      'resourcemanager.projects.setIamPolicy', 'iam.roles.update'}
+        definitions = {}
         for role, path in paths.items():
             definition = self.call('GET', path)
             need(type(definition) is dict and definition.get('name') == role
                  and type(definition.get('includedPermissions')) is list, 'inherited role definition unavailable')
+            definitions[role] = definition
             if sensitive.intersection(definition['includedPermissions']):
                 for b in bindings:
                     if b['role'] == role:
                         need(not b.get('condition') and {m.lower() for m in b.get('members', [])} == {owner},
                              'inherited secret or policy access is not owner-only')
+        need(digest(definitions) == self.plan['iam_review_sha256'], 'reviewed role definitions changed')
+        # Definitions and bindings are separate provider reads. Catch observed
+        # binding drift before proceeding; this is not a cross-resource lock.
+        observed = self.call('POST', '/v1/projects/' + self.plan['project'] + ':getIamPolicy',
+                             {'options': {'requestedPolicyVersion': 3}})
+        need(digest(observed) == self.plan['project_policy_sha256'], 'project policy changed during role inspection')
 
     def metadata(self, role):
         target = self.plan['targets'][role]; leaf = '/v1/' + target['name']

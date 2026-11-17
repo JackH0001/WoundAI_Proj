@@ -89,6 +89,7 @@ def fixture():
                                  metadata_sha256='2' * 64, policy_sha256='3' * 64) for r in stage.ROLES})
     cloud = Cloud(plan)
     plan['project_policy_sha256'] = stage.digest(cloud.project_policy)
+    plan['iam_review_sha256'] = stage.digest(cloud.definitions)
     for r in stage.ROLES:
         plan['targets'][r]['metadata_sha256'] = stage.digest(cloud.meta[r])
         plan['targets'][r]['policy_sha256'] = stage.digest(cloud.policy)
@@ -222,6 +223,63 @@ class RuntimeCustodyTests(unittest.TestCase):
         self.cloud.project_policy['etag'] = 'changed'
         with self.assertRaises(stage.Stop): self.importer().stage(self.material)
         self.assertEqual(self.mutations(':addVersion'), [])
+
+    def test_role_definition_pin_is_enforced_before_first_upload(self):
+        self.plan['iam_review_sha256'] = '0' * 64
+        with self.assertRaises(stage.Stop): self.importer().stage(self.material)
+        self.assertEqual(self.mutations(':addVersion'), [])
+
+    def test_owner_role_change_cannot_reuse_old_review_even_if_still_owner_only(self):
+        self.cloud.definitions['roles/owner']['includedPermissions'].append('secretmanager.secrets.delete')
+        with self.assertRaises(stage.Stop): self.importer().stage(self.material)
+        self.assertEqual(self.mutations(':addVersion'), [])
+
+    def test_nonsensitive_role_changes_are_also_part_of_fixed_review(self):
+        role='roles/browser'
+        self.cloud.definitions[role]=dict(name=role,includedPermissions=['resourcemanager.projects.get'])
+        self.cloud.project_policy['bindings'].append(dict(role=role,members=['user:reader@example.invalid']))
+        self.plan['project_policy_sha256']=stage.digest(self.cloud.project_policy)
+        self.plan['iam_review_sha256']=stage.digest(self.cloud.definitions)
+        self.cloud.definitions[role]['includedPermissions'].append('resourcemanager.projects.list')
+        with self.assertRaises(stage.Stop):self.importer().stage(self.material)
+        self.assertEqual(self.mutations(':addVersion'),[])
+
+    def test_binding_changes_during_role_reads_are_rechecked_before_upload(self):
+        def drift(method,path):
+            if path=='/v1/roles/owner':self.cloud.project_policy['etag']='changed-while-reading'
+        self.cloud.before=drift
+        with self.assertRaises(stage.Stop):self.importer().stage(self.material)
+        self.assertEqual(self.mutations(':addVersion'),[])
+
+    def test_role_drift_after_first_disabled_version_stops_remaining_imports(self):
+        def drift(method,path):
+            if path.endswith('/versions/1:disable'):
+                self.cloud.definitions['roles/owner']['etag']='role-now-changed'
+        self.cloud.before=drift
+        with self.assertRaises(stage.Stop):self.importer().stage(self.material)
+        self.assertEqual(len(self.mutations(':addVersion')),1)
+        self.assertEqual(self.cloud.versions['identity'][0]['state'],'DISABLED')
+        self.assertEqual(self.cloud.versions['native_issuer'],[])
+        self.assertEqual(self.journal.rows[-1]['result']['unresolved'],['identity'])
+
+    def test_recovery_under_role_drift_requires_review_before_provider_mutation(self):
+        self.cloud.fault='disable-unavailable'
+        with self.assertRaises(TimeoutError):self.importer().stage(self.material)
+        self.cloud.fault=None
+        self.cloud.definitions['roles/owner']['etag']='changed'
+        count=len(self.mutations(':disable'))
+        result=self.importer(create=False,mode='reconcile').reconcile()
+        self.assertEqual(result['unresolved'],['identity'])
+        self.assertEqual(len(self.mutations(':disable')),count)
+        self.assertEqual(len(self.mutations(':addVersion')),1)
+
+    def test_reviewed_definitions_are_keyed_by_role_not_binding_order(self):
+        role='roles/browser'
+        self.cloud.definitions[role]=dict(name=role,includedPermissions=['resourcemanager.projects.get'])
+        self.cloud.project_policy['bindings'].insert(0,dict(role=role,members=['user:reader@example.invalid']))
+        self.plan['project_policy_sha256']=stage.digest(self.cloud.project_policy)
+        self.plan['iam_review_sha256']=stage.digest(dict(reversed(list(self.cloud.definitions.items()))))
+        self.assertTrue(self.importer().stage(self.material)['all_three_imported'])
 
     def test_new_ancestor_prevents_upload_even_with_same_project_policy(self):
         self.cloud.project['parent'] = dict(type='organization', id='123456')
