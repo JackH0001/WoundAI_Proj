@@ -1,7 +1,7 @@
 import Foundation
 import AuthenticationServices
 
-enum LiteAccountFailure: Error, Equatable { case invalid, unavailable, cancelled, conflict, grantRecoveryRequired }
+enum LiteAccountFailure: Error, Equatable { case invalid, unavailable, cancelled, conflict, grantRecoveryRequired, ownerReviewRequired }
 
 struct LiteAccountChallenge: Codable, Equatable {
     let v: Int, installation: String, operation: String, nonce: String, state: String
@@ -93,6 +93,13 @@ struct LiteSignedAccountTransport:LiteAuthenticatedTransport {
         let(data,response)=try await transport.send(r,installation:owner)
         guard try await installation()==owner,data.count<=20000,
               response.url==r.url else {throw LiteAccountFailure.unavailable}
+        if kind=="confirm",response.statusCode==202 {
+            struct Review:Decodable {let error:String,keep_local:Bool,operation:String,explicit_sign_in_required:Bool,retry_saved_code:Bool}
+            if let r=try? JSONDecoder().decode(Review.self,from:data),r.error=="lite_owner_review_pending",
+               r.keep_local,r.operation==body["operation"] as? String,r.explicit_sign_in_required,!r.retry_saved_code {
+                throw LiteAccountFailure.ownerReviewRequired
+            }
+        }
         if ["confirm","renew"].contains(kind),response.statusCode==409 {
             struct Recovery:Decodable {let error:String,keep_local:Bool,explicit_sign_in_required:Bool,retry_saved_code:Bool}
             if let r=try? JSONDecoder().decode(Recovery.self,from:data),r.error=="lite_apple_grant_recovery_required",
@@ -197,12 +204,12 @@ struct LiteAccountCheckpoint:Codable,Equatable {
     var deletionOperation:String?=nil
     func validate()throws {
         try challenge.validate()
-        guard version==1,URL(string:origin)?.scheme=="https",["apple","confirm","active","logout","ended","reauthenticate","renew","deleting"].contains(phase) else {throw LiteAccountFailure.invalid}
+        guard version==1,URL(string:origin)?.scheme=="https",["apple","confirm","active","logout","ended","reauthenticate","owner_review","renew","deleting"].contains(phase) else {throw LiteAccountFailure.invalid}
         if phase=="deleting" {
             guard let op=deletionOperation,LiteServiceBytes.hex(op,32),session != nil,credential==nil else{throw LiteAccountFailure.invalid}
         } else if deletionOperation != nil {throw LiteAccountFailure.invalid}
         if let credential{try credential.validate(challenge,requireAuthorizationCode:phase=="confirm")}
-        if phase=="reauthenticate" && (credential != nil || session != nil) {throw LiteAccountFailure.invalid}
+        if ["reauthenticate","owner_review"].contains(phase) && (credential != nil || session != nil) {throw LiteAccountFailure.invalid}
         if let session{try session.validate(challenge)}
         if phase=="confirm" && credential==nil{throw LiteAccountFailure.invalid}
         if ["active","renew"].contains(phase) && (credential==nil || session==nil){throw LiteAccountFailure.invalid}
@@ -341,6 +348,14 @@ struct LiteAccountCheckpoint:Codable,Equatable {
         let started=generation
         let session:LiteAccountSession
         do {session=try await service.confirm(record.challenge,credential:credential)}
+        catch LiteAccountFailure.ownerReviewRequired {
+            guard generation==started,try await !hasDeletionIntent(owner) else{throw LiteAccountFailure.conflict}
+            var next=record;next.phase="owner_review";next.credential=nil;next.session=nil
+            _=try await save(owner,old,next)
+            guard generation==started else{throw LiteAccountFailure.conflict}
+            message="本人帳號核對已送出，服務尚未開通。收到核對完成通知後再按登入；原紀錄保留，本次不會購買或使用辨識額度。"
+            return
+        }
         catch LiteAccountFailure.grantRecoveryRequired {
             guard generation==started else{throw LiteAccountFailure.conflict}
             var next=record;next.phase="reauthenticate";next.credential=nil;next.session=nil
@@ -389,6 +404,7 @@ struct LiteAccountCheckpoint:Codable,Equatable {
             else if r.phase=="logout"{try await finishLogout(owner,old,r)}
             else if r.phase=="renew"{try await renew(owner,old,r)}
             else if r.phase=="reauthenticate"{message="請按重新登入以取得新的 Apple 授權；不會重送舊授權碼。"}
+            else if r.phase=="owner_review"{message="本人帳號仍待核對。收到核對完成通知後再按登入；不會重送舊授權碼。"}
             else{message="目前沒有待確認的登入操作。"}
         } catch {message="帳號核對尚未完成，請稍後重試；本機紀錄仍保留。"}
     }

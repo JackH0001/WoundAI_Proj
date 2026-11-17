@@ -34,9 +34,18 @@ class InternalOwner:
     role: str
     installation_sha256: str
     account_sha256: str | None = None
+    review_until: int | None = None
+
+    @property
+    def review_only(self):
+        return self.review_until is not None
 
     def __post_init__(self):
-        pins = (self.installation_sha256, self.account_sha256) if self.role == 'native' else (self.installation_sha256,)
+        if self.review_only and (self.role != 'native' or self.account_sha256 is not None
+                or type(self.review_until) is not int or self.review_until <= 0):
+            raise ValueError('bounded native owner review required')
+        pins = ((self.installation_sha256, self.account_sha256)
+                if self.role == 'native' and not self.review_only else (self.installation_sha256,))
         if (self.role not in ('native', 'research') or (self.role == 'research' and self.account_sha256 is not None)
                 or any(type(pin) is not str or not re.fullmatch(r'[0-9a-f]{64}', pin) for pin in pins)):
             raise ValueError('incomplete internal owner binding')
@@ -46,9 +55,14 @@ class InternalOwner:
         mode = env.get('LITE_INTERNAL_OWNER_MODE')
         pin = env.get('LITE_INTERNAL_INSTALLATION_SHA256')
         account = env.get('LITE_INTERNAL_ACCOUNT_SHA256')
-        if mode is None and pin is None and account is None:
+        deadline = env.get('LITE_INTERNAL_REVIEW_UNTIL')
+        if mode is None and pin is None and account is None and deadline is None:
             return None
-        if mode != 'owner-only':
+        if mode == 'owner-review':
+            if type(deadline) is not str or not re.fullmatch(r'[1-9][0-9]{0,12}', deadline):
+                raise ValueError('explicit review deadline required')
+            return cls(role, pin, account, int(deadline))
+        if mode != 'owner-only' or deadline is not None:
             raise ValueError('explicit internal owner mode required')
         return cls(role, pin, account)
 
@@ -153,6 +167,9 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
             or internal_owner.role != ('native' if commerce is not None else 'research')
             or (internal_owner.role == 'native' and identity is None)):
         raise ValueError('internal owner binding does not match this service')
+    if internal_owner is not None and internal_owner.review_only:
+        if not identity.now() < internal_owner.review_until <= identity.now() + 3600:
+            raise ValueError('owner review window must end within one hour')
     if service is not None and not isinstance(service, RegistrationService):
         raise ValueError('trusted registration service required')
     if budget is not None and not isinstance(budget, RequestBudget):
@@ -223,7 +240,8 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
     if purchases is not None:app.register_blueprint(purchase_blueprint(purchases))
     if identity is not None:
         account_pin = internal_owner.account_sha256 if internal_owner else None
-        app.register_blueprint(identity_blueprint(identity, internal_account_sha256=account_pin))
+        app.register_blueprint(identity_blueprint(identity, internal_account_sha256=account_pin,
+            owner_review_until=internal_owner.review_until if internal_owner else None))
     if deletion is not None:app.register_blueprint(deletion_blueprint(deletion))
     if identity is not None and identity.events is not None:app.register_blueprint(apple_events_blueprint(identity.events))
     bp = Blueprint('lite_attest_http', __name__)
@@ -338,6 +356,10 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
                 'lite_account_identity.renew'})
             restrict = internal_owner is not None and not old_right
             if restrict:
+                if internal_owner.review_only and (request.endpoint not in {
+                        'lite_account_identity.challenge','lite_account_identity.confirm'}
+                        or identity.now() >= internal_owner.review_until):
+                    return jsonify(error='lite_owner_review_closed', keep_local=True), 403
                 permitted=internal_owner.permits_installation(admitted.installation)
                 if request.endpoint in {'lite_account_identity.challenge','lite_account_identity.confirm'}:
                     previous=identity.existing_account_pin(owner)

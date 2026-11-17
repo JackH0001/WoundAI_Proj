@@ -168,3 +168,5 @@
 "雲端已受理，帳號服務已關閉。" = "The cloud accepted the request and account services are closed.";
 "額度每日在 UTC 0 時重算，台灣時間為上午 8 時。處理中的辨識會暫時保留名額。查看已保存的結果不扣次數。" = "The daily allowance resets at 00:00 UTC (08:00 in Taiwan). Analyses in progress temporarily reserve a slot. Viewing saved results does not use the allowance.";
 "；Apple 憑證金鑰：" = "; Apple credential key:";
+"本人帳號核對已送出，服務尚未開通。收到核對完成通知後再按登入；原紀錄保留，本次不會購買或使用辨識額度。" = "Your account verification has been submitted. Service access is not active yet. Sign in again after verification is confirmed. Your records are retained; this step makes no purchase and uses no analysis allowance.";
+"本人帳號仍待核對。收到核對完成通知後再按登入；不會重送舊授權碼。" = "Your account is still awaiting verification. Sign in again after verification is confirmed. The old authorization code will not be resent.";

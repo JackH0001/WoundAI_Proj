@@ -18,7 +18,7 @@ private actor IdentityJournal:LiteServiceJournal {
     let origin=URL(string:"https://synthetic.invalid")!
     var owner="synthetic-device",challenges=0,confirms=0,logouts=0,fail=false,logoutFail=false,wrongAck=false,expired=false,ended=false
     var afterConfirm:(()async->Void)?,afterChallenge:(()async->Void)?
-    var requireCode=false,recovery=false,received=[LiteAppleIdentity]()
+    var requireCode=false,recovery=false,ownerReview=false,received=[LiteAppleIdentity]()
     var enableRenewal=false,clock=identityNow,renewCalls=0,rotations=0,renewFail=false,renewRecovery=false,renewWrongAccount=false
     var renewed:LiteAccountSession?,renewReceipts=[String:LiteAccountSession](),renewOperations=[String]()
     var beforeRenew:(()async throws->Void)?,afterRenew:(()async->Void)?
@@ -31,6 +31,7 @@ private actor IdentityJournal:LiteServiceJournal {
     func confirm(_ c:LiteAccountChallenge,credential:LiteAppleIdentity)async throws->LiteAccountSession {
         confirms+=1;received.append(credential);if fail{throw LiteAccountFailure.unavailable};await afterConfirm?()
         if recovery{throw LiteAccountFailure.grantRecoveryRequired}
+        if ownerReview{throw LiteAccountFailure.ownerReviewRequired}
         var r=LiteAccountSession(v:1,state:"signed_in",installation:wrongAck ? "other":c.installation,operation:c.operation,account_sha256:String(repeating:"c",count:64),app_account_token:"10000000-0000-4000-8000-000000000001",expires_at:identityNow+900)
         if enableRenewal{r.renewal_generation=0;r.renewed_at=identityNow;r.family_expires_at=identityNow+30*86400;renewed=r};return r
     }
@@ -77,6 +78,45 @@ private actor IdentityJournal:LiteServiceJournal {
     private func setup()->(IdentityService,IdentityProvider,IdentityJournal,LiteAccountIdentityStore){
         let s=IdentityService(),p=IdentityProvider(),j=IdentityJournal()
         return(s,p,j,LiteAccountIdentityStore(service:s,provider:p,journal:j,now:{Date(timeIntervalSince1970:Double(identityNow))}))
+    }
+    func testOwnerReviewClearsCredentialsAndRetryAfterRestartSendsNothing()async throws {
+        let(s,p,j,m)=setup();s.ownerReview=true;s.requireCode=true
+        await m.signIn()
+        let record=try await j.records().first!
+        XCTAssertEqual(record.phase,"owner_review");XCTAssertNil(record.credential);XCTAssertNil(record.session)
+        XCTAssertTrue(m.message.contains("服務尚未開通"))
+        let restarted=LiteAccountIdentityStore(service:s,provider:p,journal:j,now:{Date(timeIntervalSince1970:Double(identityNow))})
+        await restarted.retry();let allowed=await restarted.canUseService()
+        XCTAssertFalse(allowed);XCTAssertEqual(s.confirms,1);XCTAssertEqual(p.calls,1);XCTAssertEqual(s.renewCalls,0)
+        XCTAssertTrue(restarted.message.contains("仍待核對"))
+    }
+    func testOwnerReviewNeedsNewExplicitAppleSignInAfterOperatorActivation()async throws {
+        let(s,p,j,m)=setup();s.ownerReview=true;await m.signIn()
+        let first=try await j.records().first!
+        s.ownerReview=false;await m.retry();XCTAssertEqual(p.calls,1)
+        await m.signIn();let next=try await j.records().first!
+        XCTAssertEqual(next.phase,"active");XCTAssertNotEqual(next.challenge.operation,first.challenge.operation)
+        XCTAssertEqual(p.calls,2);XCTAssertEqual(s.confirms,2)
+    }
+    func testOwnerReviewCannotOverwriteRacingSignOut()async throws {
+        let(s,_,j,m)=setup();s.ownerReview=true
+        s.afterConfirm={await m.signOut()}
+        await m.signIn();let record=try await j.records().first!
+        XCTAssertEqual(record.phase,"ended");XCTAssertNil(record.credential);XCTAssertNil(record.session)
+        let allowed=await m.canUseService();XCTAssertFalse(allowed)
+    }
+    func testOwnerReviewSaveFailureRetainsOriginalRequestUntilConfirmed()async throws {
+        let(s,p,j,m)=setup();s.ownerReview=true;s.requireCode=true
+        await j.fail(3);await m.signIn();let before=try await j.records().first!
+        XCTAssertEqual(before.phase,"confirm");XCTAssertNotNil(before.credential)
+        await m.retry();let after=try await j.records().first!
+        XCTAssertEqual(after.phase,"owner_review");XCTAssertEqual(after.challenge,before.challenge)
+        XCTAssertNil(after.credential);XCTAssertEqual(p.calls,1);XCTAssertEqual(s.confirms,2)
+    }
+    func testOwnerReviewCheckpointCannotContainSessionOrCredential()async throws {
+        let(s,p,j,m)=setup();s.ownerReview=true;await m.signIn()
+        var r=try await j.records().first!;r.credential=try await p.signIn(r.challenge)
+        XCTAssertThrowsError(try r.validate())
     }
     private func deletionIntent(_ s:IdentityService,_ j:IdentityJournal)async throws->LiteAccountDeletionCheckpoint {
         let c=LiteDeletionContext(origin:s.origin.absoluteString,installation:s.owner,account:String(repeating:"c",count:64))
@@ -375,6 +415,30 @@ private actor IdentityWire:LiteAuthenticatedTransport {
     }
 }
 @MainActor final class LiteAccountHTTPTests:XCTestCase {
+    func testOwnerReviewAcknowledgmentIsBoundToThisConfirmation()async throws {
+        let s=IdentityService(),p=IdentityProvider(),wire=IdentityWire()
+        let c=try await s.challenge(operation:String(repeating:"1",count:32))
+        let credential=try await p.signIn(c),http=try LiteAccountHTTPService(origin:s.origin,transport:wire)
+        let payload:[String:Any]=["error":"lite_owner_review_pending","keep_local":true,"operation":c.operation,
+                                "explicit_sign_in_required":true,"retry_saved_code":false]
+        await wire.plan(try JSONSerialization.data(withJSONObject:payload),code:202)
+        do{_=try await http.confirm(c,credential:credential);XCTFail()}
+        catch{XCTAssertEqual(error as? LiteAccountFailure,.ownerReviewRequired)}
+        let requests=await wire.requests();XCTAssertEqual(requests.count,1)
+    }
+    func testOwnerReviewWrongOperationOrMalformedAckNeverDropsCredentials()async throws {
+        let s=IdentityService(),p=IdentityProvider(),wire=IdentityWire()
+        let c=try await s.challenge(operation:String(repeating:"1",count:32))
+        let credential=try await p.signIn(c),http=try LiteAccountHTTPService(origin:s.origin,transport:wire)
+        let valid:[String:Any]=["error":"lite_owner_review_pending","keep_local":true,"operation":c.operation,
+                              "explicit_sign_in_required":true,"retry_saved_code":false]
+        for delta:[String:Any] in [["operation":String(repeating:"2",count:32)],
+                                  ["keep_local":false],["retry_saved_code":true],["explicit_sign_in_required":false]] {
+            await wire.plan(try JSONSerialization.data(withJSONObject:valid.merging(delta){_,new in new}),code:202)
+            do{_=try await http.confirm(c,credential:credential);XCTFail()}
+            catch{XCTAssertEqual(error as? LiteAccountFailure,.unavailable)}
+        }
+    }
     func testRenewalSendsBoundGenerationAndNoAppleCredential()async throws {
         let s=IdentityService();s.enableRenewal=true
         let c=try await s.challenge(operation:String(repeating:"1",count:32)),p=IdentityProvider()
