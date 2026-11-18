@@ -59,7 +59,10 @@ final class LiteMeasureVM: ObservableObject {
     private var userEdited = false
     private var gen = 0
 
-    var captureButtonTitle: String { image == nil ? "拍攝傷口" : "重新拍攝" }
+    var captureButtonTitle: String {
+        if image != nil { return "重新拍攝" }
+        return LiteNativeBuild.includesService ? "拍攝測試目標" : "拍攝傷口"
+    }
 
     /// Clear only after the durable index contains this capture. Pending sync belongs
     /// to the store, not this transient screen, and survives navigation/relaunch.
@@ -707,8 +710,9 @@ struct LiteMeasureView: View {
                     .disabled(vm.busy)
                     .accessibilityIdentifier("lite.capture")
 
-                    Text(copy.text("正對傷口、距離 25–40 公分，等中央對焦框變綠再拍。"))
+                    Text(copy.captureHint(inCamera: false))
                         .font(.footnote).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("lite.capture.instructions")
 
                     if let nativeSession {
                         NavigationLink(copy.text("個人服務登入")) { LiteNativeSessionView(session: nativeSession) }
@@ -805,7 +809,7 @@ struct LiteMeasureView: View {
                 CameraCaptureView(
                     // 「只拍傷口」不只是構圖建議，是去識別化的一環：協定層去得掉 EXIF 與
                     // 檔名身分，去不掉畫面裡的臉、證件與環境——那只能靠拍攝當下不要入鏡。
-                    hintText: copy.text("請正對傷口、距離 25–40 公分，框變綠再拍。畫面只拍傷口部位，避免臉部或可辨識個人的物品入鏡。"),
+                    hintText: copy.captureHint(inCamera: true),
                     displayText: LiteCaptureControlsCopy(locale: locale).camera,
                     onCapture: { img, dep in
                         showCamera = false
@@ -847,7 +851,7 @@ struct LiteMeasureView: View {
                 .disabled(vm.busy)
         } else if vm.draft != nil {
             Button(copy.text("捨棄這次拍攝"), role: .destructive) { discardCaptureID = vm.draft?.id }.disabled(vm.busy)
-            Text(copy.text("個人雲端辨識會傳送這張照片並核對免費／訂閱額度；研究上傳另需同意。也可直接自行圈選。"))
+            Text(copy.text("請只送出紙上標靶或人造模型的照片。個人雲端辨識會傳送這張照片並核對您的額度。您也可以在手機上自行圈選。研究上傳須另行同意。"))
                 .font(.footnote).foregroundStyle(.secondary)
             if vm.serviceUnreadable {
                 Text(copy.text("辨識回執無法核對，暫停雲端處理；仍可保存本機圈選。"))

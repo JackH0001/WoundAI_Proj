@@ -14,6 +14,10 @@ struct LiteConsentView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     Text(copy.text(LiteNativeBuild.includesService ? "是否同意上傳研究資料？" : "選擇您的量測方式")).font(.title2).bold()
                         .accessibilityIdentifier("lite.research.consent.title")
+                    if LiteNativeBuild.includesService {
+                        Text(copy.text("本次測試只使用紙上標靶或人造模型。請勿拍攝或上傳真人傷口。"))
+                            .accessibilityIdentifier("lite.research.betaTargets")
+                    }
                     if renewingUnsentWithdrawal {
                         Text(copy.text("您正在重新同意研究上傳。僅在確認撤回尚未送出、此服務沒有已登記身分或綁定紀錄後，才會取消這次未送出的撤回。原撤回與本次選擇會保留；舊服務紀錄不會移轉或重傳。"))
                             .font(.subheadline)

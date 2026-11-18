@@ -38,8 +38,13 @@ final class NativeEntryUITests: XCTestCase {
         XCTAssertTrue(title.waitForExistence(timeout: 5))
         #if LITE_QA_ORDINARY
         XCTAssertEqual(title.label, english ? "Choose how to measure" : "選擇您的量測方式")
+        XCTAssertFalse(app.staticTexts["lite.research.betaTargets"].exists)
         #else
         XCTAssertEqual(title.label, english ? "Do you agree to research uploads?" : "是否同意上傳研究資料？")
+        let targets = app.staticTexts["lite.research.betaTargets"]
+        XCTAssertTrue(targets.isHittable)
+        XCTAssertEqual(targets.label, english
+            ? "Use only paper targets or artificial models in this beta. Do not photograph or upload wounds on people." : "本次測試只使用紙上標靶或人造模型。請勿拍攝或上傳真人傷口。")
         #endif
         attach(app, language + "-research-disclosure")
         let depth = app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", english ? "entire depth map and camera parameters" : "整張深度圖和相機參數")).firstMatch
@@ -276,7 +281,14 @@ final class NativeEntryUITests: XCTestCase {
         let measure = app.tabBars.buttons[en ? "Measure" : "量測"]
         XCTAssertTrue(measure.waitForExistence(timeout: 8)); measure.tap()
         XCTAssertTrue(app.buttons["lite.capture"].waitForExistence(timeout: 5))
+        #if LITE_QA_ORDINARY
         XCTAssertEqual(app.buttons["lite.capture"].label, en ? "Photograph wound" : "拍攝傷口")
+        #else
+        XCTAssertEqual(app.buttons["lite.capture"].label, en ? "Photograph test target" : "拍攝測試目標")
+        let hint = app.staticTexts["lite.capture.instructions"]
+        XCTAssertTrue(hint.isHittable)
+        XCTAssertTrue(hint.label.contains(en ? "paper target or an artificial model" : "紙上標靶或人造模型"))
+        #endif
         attach(app, language + "-capture-start")
         let settings = app.tabBars.buttons[en ? "Settings" : "設定"]
         XCTAssertTrue(settings.exists); settings.tap()

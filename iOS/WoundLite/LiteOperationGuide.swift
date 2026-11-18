@@ -13,7 +13,7 @@ struct LiteHelpTopic: Identifiable {
 
     static func topics(personal: Bool, locale: Locale = .current) -> [Self] {
         var topics: [Self] = [
-            .init(id: "camera", title: "第一次如何拍攝？", path: "量測 → 拍攝傷口",
+            .init(id: "camera", title: "第一次如何拍攝？", path: personal ? "量測 → 拍攝測試目標" : "量測 → 拍攝傷口",
                   steps: "使用有 LiDAR 的後相機，把一處目標放在中央，約 25–40 公分、盡量正對。等對焦框變綠再拍。這次外測請使用紙上圖形或模擬模型。", terms: ["拍照", "拍攝", "相機", "對焦", "距離", "相機黑", "取景", "鏡頭", "模糊", "糊糊", "camera", "photo", "photos"]),
             .init(id: "area", title: "為什麼這筆沒有面積？", path: "設定 → 精確度與限制",
                   steps: "確認相機有 LiDAR，畫面清楚，圈選貼合目標。若畫面提示深度或品質不足，依當筆提示調整角度或距離。報告會保留沒有可靠面積的那次紀錄。", terms: ["面積", "深度", "品質", "lidar", "數值", "area"]),

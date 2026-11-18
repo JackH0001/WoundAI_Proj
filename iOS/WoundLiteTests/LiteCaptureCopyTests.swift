@@ -21,11 +21,20 @@ import SwiftUI
             return try XCTUnwrap(PropertyListSerialization.propertyList(from: Data(contentsOf: url), format: nil) as? [String:String])
         }
         let a = try table("en"), b = try table("zh-Hant")
-        XCTAssertEqual(a.count, 126); XCTAssertEqual(Set(a.keys), Set(b.keys))
+        XCTAssertEqual(a.count, 128); XCTAssertEqual(Set(a.keys), Set(b.keys))
         for (key, value) in a {
             XCTAssertEqual(b[key],key); XCTAssertFalse(value.isEmpty)
             XCTAssertEqual(key.components(separatedBy: "%@").count,value.components(separatedBy: "%@").count)
             XCTAssertFalse(value.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) },key)
+        }
+    }
+    func testCaptureGuidanceMatchesBuildForBothLanguages() {
+        for insideCamera in [false, true] {
+            let english = en.captureHint(inCamera: insideCamera)
+            let chinese = zh.captureHint(inCamera: insideCamera)
+            XCTAssertEqual(english.contains("only a paper target or an artificial model"), LiteNativeBuild.includesService)
+            XCTAssertEqual(chinese.contains("只拍攝紙上標靶或人造模型"), LiteNativeBuild.includesService)
+            XCTAssertTrue(english.contains("25–40 cm")); XCTAssertTrue(chinese.contains("25–40 公分"))
         }
     }
     func testConfirmationPreservesActualNameLocationAndSelection() throws {
@@ -48,7 +57,7 @@ import SwiftUI
         try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true)
         let store = LiteStore(fileURL: folder.appendingPathComponent("records.json"))
         let vm = LiteMeasureVM(captureParticipation: { nil })
-        XCTAssertEqual(en.text(vm.captureButtonTitle),"Photograph wound")
+        XCTAssertEqual(en.text(vm.captureButtonTitle), LiteNativeBuild.includesService ? "Photograph test target" : "Photograph wound")
         _ = await vm.ingest(photo(),depth:nil)
         let bytes = try XCTUnwrap(vm.captureJPEG), note = try XCTUnwrap(vm.note)
         for copy in [en,zh,en] {

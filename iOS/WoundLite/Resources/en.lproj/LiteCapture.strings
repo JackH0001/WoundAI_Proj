@@ -1,3 +1,6 @@
+"拍攝測試目標" = "Photograph test target";
+"本次測試只拍攝紙上標靶或人造模型。請正對目標，距離 25–40 公分，等對焦框變綠再拍。" = "For this beta, photograph only a paper target or an artificial model. Face the target straight on from 25–40 cm away and wait for the focus frame to turn green.";
+"請只送出紙上標靶或人造模型的照片。個人雲端辨識會傳送這張照片並核對您的額度。您也可以在手機上自行圈選。研究上傳須另行同意。" = "Send only photos of paper targets or artificial models. Personal cloud analysis sends this photo and checks your allowance. You can also trace the outline on your device. Research upload requires separate consent.";
 /* Capture presentation only. No persisted values or decisions are translated. */
 "拍攝傷口" = "Photograph wound";
 "重新拍攝" = "Retake photo";
@@ -72,7 +75,6 @@
 "確認並存入" = "Confirm and save";
 "請正對傷口、距離 25–40 公分，框變綠再拍。畫面只拍傷口部位，避免臉部或可辨識個人的物品入鏡。" = "Face the wound directly from 25–40 cm away and wait for the frame to turn green. Include only the wound area; keep faces and identifying items out of the photo.";
 "重試保存這次拍攝" = "Retry saving this capture";
-"個人雲端辨識會傳送這張照片並核對免費／訂閱額度；研究上傳另需同意。也可直接自行圈選。" = "Personal cloud analysis sends this photo and checks your free or subscription allowance. Research upload requires separate consent. You can also draw an outline yourself.";
 "辨識回執無法核對，暫停雲端處理；仍可保存本機圈選。" = "The analysis receipt could not be verified. Cloud processing is paused; you can still save a local outline.";
 "套用已保存的辨識圈選" = "Apply saved analysis outline";
 "預留已逾時：重新送出" = "Reservation expired: submit again";

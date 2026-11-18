@@ -13,6 +13,14 @@ struct LiteCaptureCopy {
         }
         return history.text(source)
     }
+    func captureHint(inCamera: Bool) -> String {
+        if LiteNativeBuild.includesService {
+            return text("本次測試只拍攝紙上標靶或人造模型。請正對目標，距離 25–40 公分，等對焦框變綠再拍。")
+        }
+        return text(inCamera
+            ? "請正對傷口、距離 25–40 公分，框變綠再拍。畫面只拍傷口部位，避免臉部或可辨識個人的物品入鏡。"
+            : "正對傷口、距離 25–40 公分，等中央對焦框變綠再拍。")
+    }
     func format(_ source: String, _ arguments: String...) -> String {
         String(format: text(source), locale: locale, arguments: arguments)
     }
