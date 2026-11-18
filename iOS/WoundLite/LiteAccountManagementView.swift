@@ -1,4 +1,6 @@
 import SwiftUI
+import UniformTypeIdentifiers
+import CoreTransferable
 
 /// Requires the same protected journal in identity/deletion composition.
 /// Not constructed by default startup until disposition and live gates pass.
@@ -26,6 +28,10 @@ struct LiteAccountManagementView:View {
                     Button(copy("登出服務帳號")) {Task{await identity.signOut()}}
                     Text(copy(identity.message)).font(.footnote)
                 }.disabled(identity.busy || deletion.busy)
+                if LiteNativeBuild.showsOwnerReview {
+                    LiteOwnerReviewExport(identity: identity)
+                        .disabled(identity.busy || deletion.busy)
+                }
                 Section(copy("刪除帳號")) {
                     Text(copy("刪除服務帳號時，也會撤回與這個帳號連結的研究參與。我們會停止雲端服務，撤銷 Apple 登入授權，並核對可對應的研究影像、深度及標註。"))
                     Text(copy("目前驗收版會分別回報各項處理進度，完整帳號資料清理仍在驗證中；提出要求不代表資料已刪除。"))
@@ -80,6 +86,74 @@ struct LiteAccountManagementView:View {
             Button(copy("確認刪帳並撤回研究"),role:.destructive){Task{await deletion.requestConfirmed()}}
             Button(copy("取消"),role:.cancel){}
         }message:{Text(copy("確認後，這部手機會先暫停研究上傳，再提出刪帳與研究撤回。影像、深度、標註及封存副本依可確認的範圍清理。手機紀錄保留；如有 Apple 訂閱，請另行取消。"))}
+    }
+}
+
+extension LiteOwnerReviewReference: Transferable {
+    static var transferRepresentation: some TransferRepresentation {
+        DataRepresentation(exportedContentType: .json) { try JSONEncoder().encode($0) }
+    }
+
+    var exportFilename: String {
+        operation == nil ? "WoundAILite-owner-installation" : "WoundAILite-owner-request"
+    }
+}
+
+private struct LiteOwnerReviewExport: View {
+    @ObservedObject var identity: LiteAccountIdentityStore
+    @Environment(\.locale) private var locale
+    @State private var document: LiteOwnerReviewReference?
+    @State private var exporting = false
+    @State private var preparing = false
+    @State private var notice = ""
+    @State private var preparation: Task<Void, Never>?
+
+    private func copy(_ source: String) -> String { LiteServiceCopy.text(source, locale: locale) }
+
+    var body: some View {
+        Section(copy("本人內測核對")) {
+            Text(copy("登入前可匯出安裝摘要。收到待核對提示後再匯出一次，交給自己的 Mac；這份檔案包含這次安裝及登入的識別碼。"))
+                .font(.footnote)
+            Button(copy("匯出本人核對資料")) {
+                preparing = true
+                notice = ""
+                preparation = Task { @MainActor in
+                    defer { preparing = false }
+                    do {
+                        let reference = try await identity.ownerReviewReference()
+                        try Task.checkCancellation()
+                        document = reference
+                        exporting = true
+                    } catch {
+                        if !Task.isCancelled { notice = "目前無法匯出。請先核對裝置登記及登入進度。" }
+                    }
+                }
+            }
+            .disabled(preparing || exporting)
+            .accessibilityIdentifier("liteOwnerReviewExport")
+            if !notice.isEmpty { Text(copy(notice)).font(.footnote) }
+        }
+        .fileExporter(isPresented: $exporting, item: document, contentTypes: [.json],
+                      defaultFilename: document?.exportFilename) { result in
+            document = nil
+            switch result {
+            case .success: notice = "本人核對資料已匯出。請將檔案保存在您的私有位置。"
+            case .failure(let error):
+                notice = (error as NSError).code == NSUserCancelledError ? "" : "匯出未完成，請重新選擇儲存位置。"
+            }
+        } onCancellation: {
+            document = nil
+            notice = ""
+        }
+        .onChange(of: identity.generation) { _, _ in clear() }
+        .onDisappear { clear() }
+    }
+
+    private func clear() {
+        preparation?.cancel()
+        exporting = false
+        document = nil
+        notice = ""
     }
 }
 

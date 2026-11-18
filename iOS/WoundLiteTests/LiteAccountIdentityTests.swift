@@ -1,5 +1,7 @@
 import XCTest
 import SwiftUI
+import CoreTransferable
+import UniformTypeIdentifiers
 @testable import WoundLite
 
 private let identityNow=1_800_000_000
@@ -15,14 +17,18 @@ private actor IdentityJournal:LiteServiceJournal {
     func corrupt(){for k in rows.keys{rows[k]=Data("{}".utf8)}}
 }
 @MainActor private final class IdentityService:LiteAccountIdentityService {
-    let origin=URL(string:"https://synthetic.invalid")!
+    var origin=URL(string:"https://synthetic.invalid")!
     var owner="synthetic-device",challenges=0,confirms=0,logouts=0,fail=false,logoutFail=false,wrongAck=false,expired=false,ended=false
     var afterConfirm:(()async->Void)?,afterChallenge:(()async->Void)?
     var requireCode=false,recovery=false,ownerReview=false,received=[LiteAppleIdentity]()
     var enableRenewal=false,clock=identityNow,renewCalls=0,rotations=0,renewFail=false,renewRecovery=false,renewWrongAccount=false
     var renewed:LiteAccountSession?,renewReceipts=[String:LiteAccountSession](),renewOperations=[String]()
     var beforeRenew:(()async throws->Void)?,afterRenew:(()async->Void)?
-    func installation()async throws->String{owner}
+    var onInstallation: (() async -> Void)?
+    func installation() async throws -> String {
+        await onInstallation?()
+        return owner
+    }
     func challenge(operation:String)async throws->LiteAccountChallenge {
         challenges+=1;await afterChallenge?()
         var c=LiteAccountChallenge(v:1,installation:owner,operation:operation,nonce:String(repeating:"a",count:64),state:String(repeating:"b",count:64),created_at:identityNow-(expired ? 300:0),expires_at:identityNow+(expired ? 0:300),audience:"com.woundai.lite")
@@ -79,6 +85,103 @@ private actor IdentityJournal:LiteServiceJournal {
         let s=IdentityService(),p=IdentityProvider(),j=IdentityJournal()
         return(s,p,j,LiteAccountIdentityStore(service:s,provider:p,journal:j,now:{Date(timeIntervalSince1970:Double(identityNow))}))
     }
+    func testOwnerReferenceExportsOnlyPinThenPendingOperationAndMatchesAfterRestart() async throws {
+        let (s,p,j,m) = setup()
+        s.owner = String(repeating: "a", count: 32)
+        s.origin = URL(string: "https://woundai-lite-native-sandbox-12345678910.asia-east1.run.app")!
+        s.ownerReview = true
+        s.requireCode = true
+        func exported(_ label: String, _ record: LiteOwnerReviewReference) async throws -> [String: String] {
+            let provider = NSItemProvider()
+            provider.register(record)
+            let data: Data = try await withCheckedThrowingContinuation { continuation in
+                _ = provider.loadDataRepresentation(forTypeIdentifier: UTType.json.identifier) { data, error in
+                    if let data { continuation.resume(returning: data) }
+                    else { continuation.resume(throwing: error ?? LiteAccountFailure.invalid) }
+                }
+            }
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = label
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: String])
+        }
+        let first = try await m.ownerReviewReference()
+        XCTAssertEqual(first.exportFilename, "WoundAILite-owner-installation")
+        let fields = try await exported("synthetic-owner-installation", first)
+        XCTAssertEqual(fields, ["schema": "lite-owner-reference/1", "origin": s.origin.absoluteString,
+                                "installation_sha256": LiteServiceBytes.hash(Data(s.owner.utf8))])
+        XCTAssertEqual(s.challenges, 0)
+        XCTAssertEqual(p.calls, 0)
+        await m.signIn()
+        let second = try await m.ownerReviewReference()
+        let saved = try await accountRow(s,j)
+        XCTAssertEqual(second.exportFilename, "WoundAILite-owner-request")
+        var expected = fields
+        expected["installation"] = s.owner
+        expected["operation"] = saved.challenge.operation
+        let pendingFields = try await exported("synthetic-owner-request", second)
+        XCTAssertEqual(pendingFields, expected)
+        let restart = LiteAccountIdentityStore(service:s,provider:p,journal:j,now:m.now)
+        let reread = try await restart.ownerReviewReference()
+        XCTAssertEqual(reread, second)
+        XCTAssertEqual(s.challenges, 1)
+        XCTAssertEqual(p.calls, 1)
+        XCTAssertEqual(s.confirms, 1)
+        XCTAssertEqual(s.renewCalls, 0)
+    }
+    func testOwnerReferenceRefusesActiveSignedOutAndPendingDeletion() async throws {
+        let (s,_,j,m) = setup()
+        s.owner = String(repeating: "a", count: 32)
+        await m.signIn()
+        do { _ = try await m.ownerReviewReference(); XCTFail("active") } catch {}
+        await m.signOut()
+        do { _ = try await m.ownerReviewReference(); XCTFail("signed out") } catch {}
+        s.ownerReview = true
+        await m.signIn()
+        _ = try await deletionIntent(s,j)
+        do { _ = try await m.ownerReviewReference(); XCTFail("deletion") } catch {}
+    }
+    func testOwnerReferenceRejectsOriginalConfirmationAndUnreadableState() async throws {
+        let (s,_,j,m) = setup()
+        s.owner = String(repeating: "a", count: 32)
+        s.fail = true
+        await m.signIn()
+        do { _ = try await m.ownerReviewReference(); XCTFail("unconfirmed") } catch {}
+        await j.corrupt()
+        do { _ = try await m.ownerReviewReference(); XCTFail("corrupt journal") } catch {}
+        XCTAssertEqual(s.confirms, 1)
+    }
+    func testOwnerReferenceStopsWhenInstallationChangesDuringReadback() async throws {
+        let (s,_,_,m) = setup()
+        s.owner = String(repeating: "a", count: 32)
+        s.ownerReview = true
+        await m.signIn()
+        var calls = 0
+        s.onInstallation = {
+            calls += 1
+            if calls == 2 { s.owner = String(repeating: "b", count: 32) }
+        }
+        do { _ = try await m.ownerReviewReference(); XCTFail("installation changed") } catch {}
+        XCTAssertEqual(s.confirms, 1)
+    }
+    func testOwnerReferenceCannotCompleteAcrossLocalSignOut() async throws {
+        let (s,_,_,m) = setup()
+        s.owner = String(repeating: "a", count: 32)
+        s.ownerReview = true
+        await m.signIn()
+        var calls = 0
+        s.onInstallation = {
+            calls += 1
+            if calls == 2 {
+                s.onInstallation = nil
+                await m.signOut()
+            }
+        }
+        do { _ = try await m.ownerReviewReference(); XCTFail("signed out during readback") } catch {}
+        XCTAssertEqual(s.logouts, 1)
+    }
+
     func testOwnerReviewClearsCredentialsAndRetryAfterRestartSendsNothing()async throws {
         let(s,p,j,m)=setup();s.ownerReview=true;s.requireCode=true
         await m.signIn()

@@ -47,6 +47,26 @@ def review_binding(raw, request, expected, now, *, planning=False):
             for name, (bucket, prefix, key) in objects.items()}
 
 
+def compose_request(native, template, expected, reference, now):
+    """Fill only the installation and operation from the App's pending-review export."""
+    exact(template, 'schema plan operator project reader')
+    if template['schema'] != 'lite-owner-readback-template/1' or digest(template) != _hex(expected):
+        raise ValueError('reviewed operator template required')
+    plan = exact(template['plan'], 'schema native_sha256 source image project_number installation_sha256 starts until')
+    exact(reference, 'schema origin installation_sha256 installation operation')
+    number = text(plan['project_number'], r'[1-9][0-9]{5,19}')
+    if (reference['schema'] != 'lite-owner-reference/1'
+            or reference['origin'] != f'https://woundai-lite-native-sandbox-{number}.asia-east1.run.app'
+            or _hex(reference['installation_sha256']) != plan['installation_sha256']):
+        raise ValueError('reference does not match the reviewed service and installation')
+    request = dict(template, schema='lite-owner-readback-command/1',
+                   installation=_hex(reference['installation'], 32),
+                   plan=dict(plan, operation=_hex(reference['operation'], 32)))
+    # Also verifies the raw installation against the independently pinned hash.
+    review_binding(native, request, digest(request), now, planning=True)
+    return request
+
+
 def utc(seconds):
     return datetime.datetime.fromtimestamp(seconds, datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
@@ -123,13 +143,18 @@ class ExactTransport(BudgetedSession):
         return super().request(method, url, **kwargs)
 
 
-def execute(raw, request, expected, *, mode, output, clock=lambda: int(time.time()),
+def execute(raw, request, expected, *, mode, output, reference=None, clock=lambda: int(time.time()),
             monotonic=time.monotonic, operator_transport=GoogleTransport, session_factory=google_session):
-    names = review_binding(raw, request, expected, clock(), planning=mode == 'scope')
     output = available_destination(output)
-    if mode == 'scope':
+    if mode != 'compose' and reference is not None:
+        raise ValueError('a reference is only used during offline preparation')
+    if mode == 'compose':
+        result = compose_request(raw, request, expected, reference, clock())
+    elif mode == 'scope':
+        names = review_binding(raw, request, expected, clock(), planning=True)
         result = scope(request, names)
     elif mode == 'inspect':
+        names = review_binding(raw, request, expected, clock())
         if (os.environ.get('STORAGE_EMULATOR_HOST') or os.environ.get('GOOGLE_CLOUD_API_ENDPOINT_OVERRIDES_STORAGE')
                 or os.environ.get('DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA') != 'true'):
             raise ValueError('fixed Google endpoint and disabled background metadata required')
@@ -160,21 +185,31 @@ def execute(raw, request, expected, *, mode, output, clock=lambda: int(time.time
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('scope', 'inspect'))
+    parser.add_argument('mode', choices=('compose', 'scope', 'inspect'))
     parser.add_argument('--request', required=True, type=Path)
     parser.add_argument('--native-config', required=True, type=Path)
     parser.add_argument('--expected-request', required=True)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--reference', type=Path, help='private iPhone export, required only for compose')
     args = parser.parse_args()
+    if (args.mode == 'compose') != (args.reference is not None):
+        parser.error('--reference is required only for compose')
     try:
         request = loads_json_object_strict(read_private(args.request).decode())
         with args.native_config.open('rb') as config:
             native = config.read(256 * 1024 + 1)
-        execute(native, request, args.expected_request, mode=args.mode, output=args.output)
+        reference = None
+        if args.reference:
+            data = read_private(args.reference)
+            if len(data) > 2048:
+                raise ValueError('unexpected reference size')
+            reference = loads_json_object_strict(data.decode())
+        execute(native, request, args.expected_request, mode=args.mode, output=args.output, reference=reference)
     except Exception:
         print('Readback stopped. Confirm the private inputs, window, permissions and output.', file=sys.stderr)
         return 1
-    print('Private scope saved.' if args.mode == 'scope' else 'Private readback receipt saved.')
+    print({'compose': 'Private request saved.', 'scope': 'Private scope saved.',
+           'inspect': 'Private readback receipt saved.'}[args.mode])
     return 0
 
 

@@ -236,6 +236,72 @@ class CommandTests(unittest.TestCase):
             with self.subTest(fields=list(changes)), self.assertRaises(ValueError):self.run_command()
         self.issuer.assert_not_called()
 
+    def export_inputs(self):
+        plan = self.request['plan'].copy()
+        operation = plan.pop('operation')
+        template = dict(self.request, schema='lite-owner-readback-template/1', plan=plan)
+        installation = template.pop('installation')
+        reference = dict(schema='lite-owner-reference/1', installation=installation, operation=operation,
+                         installation_sha256=plan['installation_sha256'],
+                         origin=f'https://woundai-lite-native-sandbox-{plan["project_number"]}.asia-east1.run.app')
+        return template, reference
+
+    def compose(self, template, reference, expected=None):
+        execute(self.fixture.raw(), template, expected or digest(template), mode='compose', output=self.output,
+                reference=reference, clock=lambda: self.fixture.now, operator_transport=self.issuer)
+
+    def test_export_composes_an_exact_request_usable_for_scoped_readback(self):
+        template, reference = self.export_inputs()
+        original = copy.deepcopy(template)
+        self.compose(template, reference)
+        self.issuer.assert_not_called()
+        self.assertEqual(self.wire.calls, [])
+        self.assertEqual(template, original)
+        self.assertEqual(self.output.stat().st_mode & 0o777, 0o600)
+        self.request = json.loads(read_private(self.output))
+        self.assertEqual(self.request['plan'], self.fixture.plan)
+        self.run_command(output=self.directory/'final.json')
+        receipt = json.loads(read_private(self.directory/'final.json'))
+        self.assertEqual(receipt['storage_gets'], 18)
+        self.assertEqual(receipt['receipt']['account_sha256'], self.fixture.proposal['account_sha256'])
+
+    def test_installation_pin_only_export_is_insufficient(self):
+        template, reference = self.export_inputs()
+        del reference['operation'], reference['installation']
+        with self.assertRaises(ValueError):
+            self.compose(template, reference)
+        self.issuer.assert_not_called()
+        self.assertFalse(self.output.exists())
+
+    def test_export_cannot_change_service_installation_time_or_copy_credentials(self):
+        template, reference = self.export_inputs()
+        for change in ({'origin':'https://research.example.invalid'}, {'operation':'bad'},
+                       {'installation':'0'*32}, {'installation_sha256':'0'*64}, {'until':9999999},
+                       {'schema':'other'}, {'authorizationCode':'placeholder'}):
+            with self.subTest(fields=list(change)), self.assertRaises(ValueError):
+                self.compose(template, dict(reference, **change))
+        self.assertFalse(self.output.exists())
+        self.issuer.assert_not_called()
+
+    def test_different_template_and_extra_operator_fields_are_refused(self):
+        template, reference = self.export_inputs()
+        for change in ({'reader':'different-reader@synthetic-lite.iam.gserviceaccount.com'},
+                       {'plan':dict(template['plan'], until=self.fixture.now+590)}):
+            with self.subTest(fields=list(change)), self.assertRaises(ValueError):
+                self.compose(dict(template, **change), reference, digest(template))
+        with self.assertRaises(ValueError):
+            self.compose(dict(template, installation=reference['installation']), reference)
+        self.assertFalse(self.output.exists())
+        self.issuer.assert_not_called()
+
+    def test_pending_reference_only_consumed_during_offline_composition(self):
+        _, reference = self.export_inputs()
+        for mode in ('scope', 'inspect'):
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                self.run_command(mode, reference=reference)
+        self.issuer.assert_not_called()
+        self.assertFalse(self.output.exists())
+
     def test_command_entrypoint_scope_and_safe_console(self):
         config=self.directory/'native.json'
         config.write_bytes(self.fixture.raw())

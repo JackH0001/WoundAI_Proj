@@ -2,9 +2,33 @@
 
 用途是讓操作員確認本人第一次 Apple 登入已留下與當次安裝及操作相符的證據。成功時產生短效本機收據，供後續切換重新核對。設定、帳號、訂閱與額度由各自的流程管理。
 
-## 準備輸入
+## 在本人候選 App 取得兩份核對檔
 
-在操作員自己的私有目錄保存兩個檔案。第一個是候選服務實際使用的 native 設定檔，保留原始位元內容。第二個是權限覆核時已經固定的 JSON 請求，欄位如下。
+本人專用的個人服務候選組態需明確設 `WOUNDLITE_OWNER_REVIEW=YES`。一般版及未設此選項的外測候選預設隱藏「本人內測核對」。目前 TestFlight 46 未包含這個入口。
+
+1. 先確認這部手機已有候選**個人服務**的裝置登記，再到帳號頁按「匯出本人核對資料」，儲存在「我的 iPhone」。`WoundAILite-owner-installation.json` 包含格式、服務網址及安裝識別碼的 SHA-256。操作員在受控的私有管道收取這份檔案，以本人獨立核對的安裝摘要固定計畫。匯出只讀取現有登記。若是全新安裝，需先完成獨立核准的裝置登記引導，研究服務的登記不能代用。
+2. 經本人同意發起登入，等 App 顯示「本人帳號核對已送出」後，按同一個匯出按鈕。`WoundAILite-owner-request.json` 另含個人服務安裝識別碼及這次登入操作識別碼。這些識別碼用於找回同一份待核對要求。單純匯出或取消檔案選擇都不會重送登入、扣額度或改變研究同意。
+3. 將第二份檔案經本人控制的私有管道交給自己的 Mac，避免放入共享雲端硬碟、聊天或 Git。兩份檔案均不含 Apple 登入憑證、照片或研究紀錄。遇到登出、刪帳、安裝變更或本機紀錄不一致時，先核對原狀態。
+
+## 在 Mac 離線組成請求
+
+權限覆核時，先保存候選真正使用的 native 設定原始位元，以及一份獨立固定摘要的 JSON 範本。範本頂層為 `schema`（`lite-owner-readback-template/1`）、`plan`、`project`、`reader`、`operator`。計畫含 `schema`（`lite-owner-readback/1`）、`native_sha256`、`source`、`image`、`project_number`、第一份檔案核對的 `installation_sha256`、`starts`、`until`。來源、映像、雲端專案及讀取身分均取自受審計畫。日期為 UTC epoch 整數秒，窗口最長一小時。
+
+在 Mac 的 0700 私有目錄準備上述範本與第二份匯出檔，輸入檔設為 0600。環境變數填入絕對路徑，輸出使用新的檔名。
+
+```sh
+export PYTHONPATH=tools:engineering/phase2:Backend/Flask:.
+python tools/lite_owner_review_command.py compose \
+  --request "$REVIEW_TEMPLATE" --expected-request "$TEMPLATE_DIGEST" \
+  --native-config "$NATIVE_CONFIG" --reference "$PRIVATE_PENDING_EXPORT" \
+  --output "$REVIEW_REQUEST"
+```
+
+`compose` 以專案的正規 JSON 摘要核對範本，再核對第二份檔案的服務、安裝識別碼、原先固定的摘要及操作編號，成功才寫入 0600 的完整請求。登入前的摘要檔單獨無法組成完整請求。操作員應覆核輸出範圍，固定完整請求摘要，供下一步傳給 `scope` 和 `inspect`。本工具寫出的正規 JSON 可直接用 `shasum -a 256 "$REVIEW_REQUEST"` 計算摘要。正式雲端執行仍需對應授權。
+
+## 完整請求欄位
+
+組成後的操作請求包含下列欄位。
 
 | 欄位 | 來源 |
 | --- | --- |

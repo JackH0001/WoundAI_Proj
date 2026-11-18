@@ -220,6 +220,15 @@ struct LiteAccountCheckpoint:Codable,Equatable {
     }
 }
 
+/// Exported only on an explicit request in the owner-review build. Never encode the checkpoint.
+struct LiteOwnerReviewReference: Encodable, Equatable {
+    let schema = "lite-owner-reference/1"
+    let origin: String
+    let installation_sha256: String
+    let installation: String?
+    let operation: String?
+}
+
 /// Candidate only: injection and a protected journal required; not a production tab.
 @MainActor final class LiteAccountIdentityStore:ObservableObject,LiteDeletionIdentity {
     @Published private(set) var message="服務帳號登入與研究同意分開處理。"
@@ -235,6 +244,26 @@ struct LiteAccountCheckpoint:Codable,Equatable {
     private func hasDeletionIntent(_ owner:String)async throws->Bool {
         try await journal.load(LiteAccountDeletionCheckpoint.key(origin:service.origin.absoluteString,owner:owner)) != nil
     }
+    /// Snapshot from the local service registration and protected journal. The operator checks live state separately.
+    func ownerReviewReference() async throws -> LiteOwnerReviewReference {
+        let start = generation
+        guard !busy else { throw LiteAccountFailure.conflict }
+        let owner = try await service.installation()
+        guard LiteServiceBytes.hex(owner, 32) else { throw LiteAccountFailure.invalid }
+        let (bytes, record) = try await read(owner)
+        guard try await !hasDeletionIntent(owner),
+              try await service.installation() == owner, try await journal.load(key(owner)) == bytes,
+              try await !hasDeletionIntent(owner), generation == start, !busy, !Task.isCancelled else { throw LiteAccountFailure.conflict }
+        let hash = LiteServiceBytes.hash(Data(owner.utf8))
+        if record == nil {
+            return LiteOwnerReviewReference(origin: service.origin.absoluteString, installation_sha256: hash,
+                                           installation: nil, operation: nil)
+        }
+        guard let record, record.phase == "owner_review" else { throw LiteAccountFailure.unavailable }
+        return LiteOwnerReviewReference(origin: record.origin, installation_sha256: hash,
+                                       installation: owner, operation: record.challenge.operation)
+    }
+
     func hasTrackingAccount(owner: String) async throws -> Bool {
         let initial = generation
         guard !busy, try await !hasDeletionIntent(owner) else { throw LiteAccountFailure.conflict }
