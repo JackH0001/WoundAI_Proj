@@ -20,13 +20,15 @@ struct LitePrivacyLink: View {
 }
 
 private struct LitePrivacyView: View {
+    private var english: Bool { locale.language.languageCode?.identifier == "en" }
     @Environment(\.locale) private var locale
     private func copy(_ source: String) -> String { LiteServiceCopy.text(source, locale: locale) }
     var body: some View {
         Group {
             if let url = Bundle.main.url(forResource: "woundlite", withExtension: "html"),
                let html = try? String(contentsOf: url, encoding: .utf8) {
-                LitePrivacyDocument(html: html)
+                LitePrivacyDocument(html: html, english: english)
+                    .id(english)
             } else {
                 Text(copy("此版本缺少隱私權政策，請聯絡資料處理支援。"))
             }
@@ -38,6 +40,7 @@ private struct LitePrivacyView: View {
 
 private struct LitePrivacyDocument: UIViewRepresentable {
     let html: String
+    let english: Bool
     @Environment(\.openURL) private var openURL
     func makeCoordinator() -> Coordinator { Coordinator(openURL: openURL) }
     func makeUIView(context: Context) -> WKWebView {
@@ -47,7 +50,12 @@ private struct LitePrivacyDocument: UIViewRepresentable {
         let view = WKWebView(frame: .zero, configuration: config)
         view.navigationDelegate = context.coordinator
         // The website footer goes to the policy index. The app has its own Back button.
-        view.loadHTMLString(html.replacingOccurrences(of: "<footer>", with: "<footer hidden>"), baseURL: nil)
+        var page = html.replacingOccurrences(of: "<footer>", with: "<footer hidden>")
+        if english {
+            page = page.replacingOccurrences(of: "id=\"read-zh\" checked", with: "id=\"read-zh\"")
+                .replacingOccurrences(of: "id=\"read-en\">", with: "id=\"read-en\" checked>")
+        }
+        view.loadHTMLString(page, baseURL: nil)
         return view
     }
     func updateUIView(_ view: WKWebView, context: Context) {}

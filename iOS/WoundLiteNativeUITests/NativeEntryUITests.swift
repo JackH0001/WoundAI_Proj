@@ -209,11 +209,20 @@ final class NativeEntryUITests: XCTestCase {
     }
 
     @MainActor func testPrivacyPolicyOpensFromSettingsWithoutRegistrationAndReturns() throws {
+        try verifyPrivacyPolicy(language: "zh-Hant")
+    }
+
+    @MainActor func testPrivacyPolicyStartsInEnglishAndSwitchesOffline() throws {
+        try verifyPrivacyPolicy(language: "en")
+    }
+
+    @MainActor private func verifyPrivacyPolicy(language: String) throws {
         continueAfterFailure = false
-        let app = application()
+        let english = language == "en"
+        let app = application(language: language)
         app.launch()
-        let gate = app.buttons["設定與資料撤回"]
-        let settings = gate.waitForExistence(timeout: 3) ? gate : app.buttons["設定"].firstMatch
+        let gate = app.buttons[english ? "Settings and data withdrawal" : "設定與資料撤回"]
+        let settings = gate.waitForExistence(timeout: 3) ? gate : app.buttons[english ? "Settings" : "設定"].firstMatch
         XCTAssertTrue(settings.waitForExistence(timeout: 8))
         settings.tap()
         let terms = app.descendants(matching: .any)["lite.legal.terms"].firstMatch
@@ -221,13 +230,29 @@ final class NativeEntryUITests: XCTestCase {
         let privacy = app.buttons["lite.legal.privacy"]
         XCTAssertTrue(privacy.isHittable)
         privacy.tap()
-        XCTAssertTrue(app.navigationBars["隱私權政策"].waitForExistence(timeout: 5))
-        let heading = app.webViews.descendants(matching: .any)
-            .matching(NSPredicate(format: "label CONTAINS %@", "WoundAILite 民眾版隱私權政策草稿")).firstMatch
-        XCTAssertTrue(heading.waitForExistence(timeout: 10))
-        attach(app, "offline-privacy-policy")
+        XCTAssertTrue(app.navigationBars[english ? "Privacy policy" : "隱私權政策"].waitForExistence(timeout: 5))
+        let page = app.webViews.descendants(matching: .any)
+        let en = page.matching(NSPredicate(format: "label == %@", "WoundAILite Privacy Policy — Draft")).firstMatch
+        let zh = page.matching(NSPredicate(format: "label == %@", "WoundAILite 民眾版隱私權政策草稿")).firstMatch
+        let initial = english ? en : zh
+        let alternate = english ? zh : en
+        XCTAssertTrue(initial.waitForExistence(timeout: 10))
+        XCTAssertFalse(alternate.exists)
+        attach(app, language + "-privacy-initial")
+        for (label, shown, hidden) in [(english ? "繁體中文" : "English", alternate, initial),
+                                       (english ? "English" : "繁體中文", initial, alternate)] {
+            let selector = page.matching(NSPredicate(format: "label == %@", label)).firstMatch
+            XCTAssertTrue(selector.isHittable, label)
+            selector.tap()
+            XCTAssertTrue(shown.waitForExistence(timeout: 5))
+            XCTAssertFalse(hidden.exists)
+        }
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(privacy.waitForExistence(timeout: 5))
+        let consent = app.switches["lite.research.toggle"].firstMatch
+        for _ in 0..<10 where !consent.isHittable { app.swipeUp() }
+        XCTAssertTrue(consent.isHittable)
+        XCTAssertEqual(consent.value as? String, "0")
     }
     #if LITE_QA_PHOTO_FIXTURE
     @MainActor func testLocalWoundPhotosOpenInTimeOrderAndReturnToTimeline() throws {
