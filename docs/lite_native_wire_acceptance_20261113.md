@@ -108,3 +108,26 @@ fixture tests. It connects renewal, signed billing grace, provider outage,
 confirmed expiry and repeated restoration to native balance/result readback.
 See `lite_subscription_lifecycle_wire_20261113.md`; real Apple Sandbox remains
 a separate acceptance gate.
+
+## Independent external tester accounts (2026-11-18)
+
+The ninth native scenario signs two different synthetic Apple users into two
+separately registered installations. It uses the shared wrapping-key startup
+configuration and ordinary service routes. The existing two-device test still
+signs the same user in on both installations and checks shared wound slots.
+
+One account purchases Plus before the other first signs in. An intact StoreKit
+transaction from the subscriber is presented during the free account’s restore.
+The app must report an account mismatch before confirming or finishing that
+transaction. After rebuilding the backend from its stores and reopening each
+client journal, two restores by the original subscriber must succeed from the
+same purchase. Each wound roster and every saved result must still match its
+original account. The backend evidence for `two-independent-accounts` records
+distinct subjects and purchase tokens as booleans, the subscription links as
+`[true, false]`, and the actual debits as `[1, 2]` in subscriber/free order.
+The app checks daily limits of 10 and 2 and wound slot limits of 5 and 1.
+
+The commands under **Reproduce** now cover nine native scenarios and fifteen
+fixture tests. Apple identity, purchase, KMS, and inference providers are
+simulated. Real Apple sign-in, App Attest and Sandbox restoration with a fresh
+external tester are separate release checks.

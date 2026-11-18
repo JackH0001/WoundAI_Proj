@@ -88,6 +88,22 @@ class NativeWireFixtureTests(unittest.TestCase):
         self.assertEqual(self.post('/fixture/second-installation').status_code, 500)
         self.assertEqual(len(self.fixture.clients), 2)
 
+    def test_independent_installation_receives_its_own_synthetic_apple_identity(self):
+        first = self.post('/fixture/reset-shared')
+        self.assertEqual(first.status_code, 200)
+        invalid = self.post('/fixture/second-installation', b'{"account":"unrecognized"}')
+        self.assertEqual(invalid.status_code, 500)
+        self.assertEqual(len(self.fixture.clients), 1)
+        second = self.post('/fixture/second-installation', b'{"account":"independent"}')
+        self.assertEqual(second.status_code, 200)
+        for seed, user in ((first, 'apple-human-1'), (second, 'apple-human-2')):
+            client = self.fixture.clients[seed.json['owner']]
+            challenge = client.post('account/challenge', operation='1' * 32)
+            self.assertEqual(challenge.status_code, 200)
+            reply = self.post('/fixture/identity', json.dumps({'challenge': challenge.json}).encode())
+            self.assertEqual(reply.status_code, 200)
+            self.assertEqual(reply.json['user'], user)
+
     def test_second_signing_key_cannot_name_first_installation_in_body(self):
         self.post('/fixture/reset'); self.fixture.h.login()
         seed = self.post('/fixture/second-installation').json

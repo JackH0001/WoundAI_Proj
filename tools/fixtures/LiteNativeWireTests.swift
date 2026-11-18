@@ -34,6 +34,12 @@ private struct WireSnapshot: Decodable {
     struct Route: Decodable { let path: String, status: Int; let revision: Int? }
     struct SubscriptionQuery: Decodable { let phase, original_sha256, transaction_sha256: String; let status: Int; let renewal_present: Bool }
     let subscription_queries: [SubscriptionQuery]
+    struct Accounts: Decodable {
+        let distinct_accounts, distinct_purchase_tokens: Bool
+        let subscription_linked: [Bool]
+        let debits: [Int]
+    }
+    let accounts: Accounts?
     let routes: [Route]
 }
 private struct DeletionReadback: Decodable, Equatable {
@@ -160,15 +166,19 @@ private struct PrivacyReadback: Decodable, Equatable {
 
 @MainActor private final class WireApple: LiteAppleIdentityProvider {
     let config: WireConfig
+    let expectedUser: String
     var signIns = 0
-    init(_ config: WireConfig) { self.config = config }
+    init(_ config: WireConfig, expectedUser: String = "apple-human-1") {
+        self.config = config
+        self.expectedUser = expectedUser
+    }
     func signIn(_ challenge: LiteAccountChallenge) async throws -> LiteAppleIdentity {
         signIns += 1
         struct Body: Encodable { let challenge: LiteAccountChallenge }
         return try JSONDecoder().decode(LiteAppleIdentity.self,
             from: await NativeWire.control(config, "identity", JSONEncoder().encode(Body(challenge: challenge))))
     }
-    func authorized(user: String) async throws -> Bool { user == "apple-human-1" }
+    func authorized(user: String) async throws -> Bool { user == expectedUser }
 }
 
 @MainActor private final class WireStoreKit: LitePurchaseProvider {
@@ -692,6 +702,95 @@ private struct PrivacyReadback: Decodable, Equatable {
                        beforeWrongAccount.routes.filter { $0.path.hasSuffix("purchase/confirm") }.count)
         XCTAssertEqual(final.routes.filter { $0.path.hasSuffix("account/status") }.count, 25)
         XCTAssertTrue(final.research_unchanged); XCTAssertTrue(final.image_unchanged)
+    }
+
+    func testTwoPeopleKeepSeparateSubscriptionsQuotasAndWoundsAfterRestart() async throws {
+        let cfg = try config()
+        let first = try JSONDecoder().decode(WireSeed.self, from: await NativeWire.control(cfg, "reset-shared"))
+        let otherPerson = try JSONEncoder().encode(["account": "independent"])
+        let second = try JSONDecoder().decode(WireSeed.self,
+            from: await NativeWire.control(cfg, "second-installation", otherPerson))
+        XCTAssertNotEqual(first.owner, second.owner)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let image = try XCTUnwrap(Data(base64Encoded: first.jpeg))
+        let paidWire = NativeWire(cfg, owner: first.owner), freeWire = NativeWire(cfg, owner: second.owner)
+        let paidApple = WireApple(cfg), freeApple = WireApple(cfg, expectedUser: "apple-human-2")
+        let paidKit = WireStoreKit(cfg), freeKit = WireStoreKit(cfg)
+        func paidSession() throws -> LiteNativeSession {
+            try session(paidWire, paidApple, paidKit, directory.appendingPathComponent("paid"), first.now)
+        }
+        func freeSession() throws -> LiteNativeSession {
+            try session(freeWire, freeApple, freeKit, directory.appendingPathComponent("free"), second.now)
+        }
+        let paid = try paidSession()
+        await paid.identity.signIn()
+        await paid.purchases.loadOffer()
+        await paid.purchases.purchase(accepting: paidKit.quote)
+        let purchased = try XCTUnwrap(paidKit.current)
+        let free = try freeSession()
+        await free.identity.signIn()
+        let paidAccount = try await paid.identity.savedResearchContext()
+        let freeAccount = try await free.identity.savedResearchContext()
+        XCTAssertNotEqual(paidAccount.account, freeAccount.account)
+
+        let paidWound = UUID().uuidString, freeWound = UUID().uuidString
+        _ = try await paid.woundPermit(id: paidWound, owner: nil)
+        _ = try await free.woundPermit(id: freeWound, owner: nil)
+        let paidResult = try await paid.recognizeSaved(recordID: UUID().uuidString, jpeg: image)
+        let freeResult = try await free.recognizeSaved(recordID: UUID().uuidString, jpeg: image)
+        let extraFreeResult = try await free.recognizeSaved(recordID: UUID().uuidString, jpeg: image)
+        for result in [paidResult, freeResult, extraFreeResult] {
+            XCTAssertEqual(result.note, "confirmed", result.message)
+        }
+        let before = try JSONDecoder().decode(WireSnapshot.self, from: await NativeWire.control(cfg, "snapshot"))
+        // StoreKit presents an intact purchase from the first person on the second device.
+        freeKit.current = purchased
+        await free.purchases.restore()
+        XCTAssertTrue(free.purchases.message.contains("服務帳號不符"), free.purchases.message)
+        XCTAssertEqual(freeKit.restores, 1)
+        XCTAssertEqual(freeKit.finishes, 0)
+        let after = try JSONDecoder().decode(WireSnapshot.self, from: await NativeWire.control(cfg, "snapshot"))
+        XCTAssertEqual(after.routes.filter { $0.path.hasSuffix("purchase/confirm") }.count,
+                       before.routes.filter { $0.path.hasSuffix("purchase/confirm") }.count)
+
+        _ = try await NativeWire.control(cfg, "restart")
+        let reopenedPaid = try paidSession(), reopenedFree = try freeSession()
+        await reopenedPaid.purchases.restore()
+        await reopenedPaid.purchases.restore()
+        XCTAssertTrue(reopenedPaid.purchases.message.contains("關聯已確認"), reopenedPaid.purchases.message)
+        XCTAssertEqual(paidKit.restores, 2)
+        XCTAssertEqual(paidKit.finishes, 1)
+        XCTAssertEqual(paidKit.buys, 1)
+        XCTAssertEqual(freeKit.buys, 0)
+        for (app, wound, account, limit, used, slots) in [
+            (reopenedPaid, paidWound, paidAccount.account, 10, 1, 5),
+            (reopenedFree, freeWound, freeAccount.account, 2, 2, 1)
+        ] {
+            let balance = try await app.personalBalance()
+            XCTAssertEqual(balance.limit, limit)
+            XCTAssertEqual(balance.used, used)
+            let roster = try await app.woundList()
+            XCTAssertEqual(roster?.account_sha256, account)
+            XCTAssertEqual(roster?.limit, slots)
+            XCTAssertEqual(roster?.active, [try LiteWoundRoster.wireID(wound)])
+        }
+        for (app, original) in [(reopenedPaid, paidResult), (reopenedFree, freeResult),
+                                (reopenedFree, extraFreeResult)] {
+            let saved = try await app.service.stored(original.captureID)
+            XCTAssertEqual(saved, original)
+        }
+        XCTAssertEqual(paidApple.signIns, 1)
+        XCTAssertEqual(freeApple.signIns, 1)
+        let final = try await finish(cfg, "two-independent-accounts")
+        let accounts = try XCTUnwrap(final.accounts)
+        XCTAssertTrue(accounts.distinct_accounts)
+        XCTAssertTrue(accounts.distinct_purchase_tokens)
+        XCTAssertEqual(accounts.subscription_linked, [true, false])
+        XCTAssertEqual(accounts.debits, [1, 2])
+        XCTAssertEqual(final.registered_installations, 2)
+        XCTAssertEqual(final.model_calls, 3)
+        XCTAssertTrue(final.research_unchanged)
+        XCTAssertTrue(final.image_unchanged)
     }
 
     func testRealHTTPLostRunReplySurvivesBothRestartsAndSessionRenewal() async throws {

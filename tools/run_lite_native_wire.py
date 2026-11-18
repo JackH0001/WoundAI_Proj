@@ -81,10 +81,12 @@ def main():
             security='synthetic App Attest signatures; loopback QA forwarding'), indent=2) + '\n')
         if result.returncode: raise SystemExit(result.returncode)
         summary = json.loads((out / 'summary.json').read_text())
-        if summary.get('passedTests') != 8 or summary.get('failedTests') != 0 or summary.get('skippedTests') != 0:
-            raise RuntimeError('expected exactly eight tests without skips')
-        if len(fixture.completed) != 8: raise RuntimeError('missing backend evidence')
-        print(json.dumps(dict(passed=True, ios_tests=8, backend_scenarios=8, output=str(out))))
+        expected = 9
+        if summary.get('passedTests') != expected or summary.get('failedTests') != 0 or summary.get('skippedTests') != 0:
+            raise RuntimeError(f'expected exactly {expected} tests without skips')
+        if len(fixture.completed) != expected or len({s['name'] for s in fixture.completed}) != expected:
+            raise RuntimeError('missing distinct backend evidence')
+        print(json.dumps(dict(passed=True, ios_tests=expected, backend_scenarios=len(fixture.completed), output=str(out))))
     finally:
         fixture.close()
         # Ephemeral fixture bearer, never an operational or Apple key. Erase it

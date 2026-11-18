@@ -24,6 +24,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from test_lite_native_backend import NativeBackendTests, rows, free_grant
 from test_lite_signed_client import b64
 from test_lite_research_ingest_flow import ResearchIngestFlowTests
+from test_lite_shared_runtime import SharedNativeHTTPTests
 from lite_raw_depth_store import unpack
 from lite_reconsent import Reconsent, epoch
 
@@ -144,6 +145,17 @@ class WireFixture:
                     subscription_queries=list(self.subscription_queries),
                     routes=list(self.events))
 
+    def independent_account_readback(self):
+        accounts = self.h.h.release.n.accounts
+        first = accounts.resolve(self.h.owner)
+        second = accounts.resolve(self.independent_installation)
+        return dict(
+            distinct_accounts=first['subject'] != second['subject'],
+            distinct_purchase_tokens=first['token'] != second['token'],
+            subscription_linked=[a['original_transaction'] is not None for a in (first, second)],
+            debits=[self.clients[owner].quota()['used'] for owner in (self.h.owner, self.independent_installation)],
+        )
+
     def subscription_response(self, original):
         """Synthetic Apple transport only; normal JWS verification is unchanged."""
         a = self.h.h.release.n.a
@@ -224,12 +236,15 @@ class WireFixture:
         return dict(owner=peer.owner, now=h.h.clock(), jpeg=base64.b64encode(h.f.jpeg).decode())
 
     def control(self, kind, body):
-        if kind in ('reset', 'reset-research'):
+        if kind in ('reset', 'reset-research', 'reset-shared'):
             self.cleanup_state()
             if kind == 'reset-research':
                 self.flow = ResearchIngestFlowTests(); self.flow.setUp()
                 self.h = self.flow.n
                 self.h.app = self.h.client.application
+            elif kind == 'reset-shared':
+                self.h = SharedNativeHTTPTests()
+                self.h.setUp()
             else:
                 self.h = NativeBackendTests(); self.h.setUp()
             self.privacy = rows(self.h.h.privacy.store)
@@ -243,6 +258,7 @@ class WireFixture:
             self.subscription_renewal = None
             self.h.h.release.n.a.client.get_all_subscription_statuses = self.subscription_response
             self.clients = {self.h.owner:self.h}
+            self.independent_installation = None
             self.revoke_before_service = False
             return dict(owner=self.h.owner, now=self.h.h.clock(),
                         research_owner=self.flow.r.h.owner if self.flow else None,
@@ -251,9 +267,18 @@ class WireFixture:
         h = self.h
         if kind == 'research-readback': return self.research_readback(body.get('epoch', 'legacy'))
         if kind == 'research-privacy': return self.privacy_readback(body.get('epochs'))
-        if kind == 'second-installation': return self.add_installation()
+        if kind == 'second-installation':
+            if body not in ({}, {'account': 'independent'}):
+                raise ValueError('unknown synthetic account selection')
+            seed = self.add_installation()
+            if body:
+                self.independent_installation = seed['owner']
+            return seed
         if kind == 'identity':
-            c = body['challenge']; sub = 'apple-human-1'
+            c = body['challenge']
+            if c['installation'] not in self.clients:
+                raise ValueError('registered synthetic installation required')
+            sub = 'apple-human-2' if c['installation'] == self.independent_installation else 'apple-human-1'
             person = h.backend.identity.events.identity(sub)
             version = h.backend.identity.grants.cipher.provider.version(h.backend.identity.lifecycle.scope, person)
             if version not in h.h.kms.states: h.h.kms.provision(version)
@@ -298,7 +323,11 @@ class WireFixture:
             h.backend.deletion.advance(person, limit=1)
             return self.deletion_readback(evidence['operation'])
         if kind == 'finish':
-            result = self.snapshot(); result['name'] = body['name']; self.completed.append(result)
+            result = self.snapshot()
+            result['name'] = body['name']
+            if self.independent_installation is not None:
+                result['accounts'] = self.independent_account_readback()
+            self.completed.append(result)
             return result
         raise ValueError('unknown control')
 
