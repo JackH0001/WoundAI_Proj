@@ -8,6 +8,7 @@ import copy
 import hashlib
 import time
 
+from google.api_core.exceptions import NotFound
 from audit_chain_contract import loads_json_object_strict
 from lite_account_identity import IdentityRejected, owner_review_keys
 from lite_attest_state import GCSStateStore, StateUnavailable
@@ -90,14 +91,26 @@ def read_owner_review_snapshot(*, config, installation, operation, until, store,
 
 
 class ExactReader:
-    def __init__(self, bucket, prefix, allowed):
+    def __init__(self, bucket, prefix, allowed, *, presence_only=False):
+        self.presence_only = presence_only
         self.store = GCSStateStore(bucket, prefix=prefix)
         self.allowed = frozenset(allowed)
 
     def load(self, key):
         if key not in self.allowed:
             raise StateUnavailable('object outside reviewed readback')
-        return self.store.load(key)
+        if not self.presence_only:
+            return self.store.load(key)
+        blob = self.store.bucket.blob(self.store._name(key))
+        try:
+            blob.reload(timeout=10, retry=None)
+        except NotFound:
+            return None
+        except Exception:
+            raise StateUnavailable('registration presence unconfirmed') from None
+        if type(blob.generation) is not int or blob.generation < 1:
+            raise StateUnavailable('registration generation unconfirmed')
+        return blob.generation, {}
 
 
 def prepare(native_raw, plan, expected_plan, *, installation, operation, now):
@@ -160,14 +173,15 @@ def observe(native_raw, plan, expected_plan, *, installation, operation, client,
             raise StateUnavailable('readback clock moved backwards')
         return value
 
-    def reader(*names):
+    def reader(*names, presence_only=False):
         bucket, prefix, _ = objects[names[0]]
-        return ExactReader(client.bucket(bucket), prefix, [objects[name][2] for name in names])
+        return ExactReader(client.bucket(bucket), prefix, [objects[name][2] for name in names],
+                           presence_only=presence_only)
 
     proposal, evidence = read_owner_review_snapshot(
         config=config, installation=installation, operation=operation, until=plan['until'],
         store=reader('config', 'session'), audit=reader('proposal', 'marker'),
-        accounts=reader('registration'), clock=current_time,
+        accounts=reader('registration', presence_only=True), clock=current_time,
     )
     return dict(schema='lite-owner-readback-receipt/1', plan=expected_plan,
                 account_sha256=proposal['account_sha256'], **evidence)
