@@ -27,6 +27,32 @@ class IdentityRejected(ValueError): pass
 class OwnerReviewRestart(IdentityRejected): pass
 
 
+def _session_key(namespace, installation):
+    return key('human-session', digest([namespace, _subject(installation)]))
+
+
+def _review_key(namespace, installation, operation, kind):
+    _subject(installation)
+    _hex(operation, 32)
+    return key(kind, digest([namespace, installation, operation]))
+
+
+def owner_review_keys(namespace, installation, operation):
+    """Exact storage keys an operator may inspect for this one request."""
+    from lite_service_operations import ServiceAccounts
+
+    _subject(namespace)
+    _subject(installation)
+    _hex(operation, 32)
+    return {
+        'config': key('human-identity-config', namespace),
+        'session': _session_key(namespace, installation),
+        'proposal': _review_key(namespace, installation, operation, 'human-owner-review'),
+        'marker': _review_key(namespace, installation, operation, 'human-owner-review-only'),
+        'registration': ServiceAccounts.key(installation),
+    }
+
+
 def identity_header(signed):
     """Parse only enough untrusted data to select a key; never accepts key URLs."""
     try:
@@ -208,7 +234,7 @@ class AccountIdentityBridge:
     immutable = staticmethod(SubscriptionRuntime.immutable)
 
     def _key(self, installation):
-        return key('human-session', digest([self.namespace, _subject(installation)]))
+        return _session_key(self.namespace, installation)
 
     def _read(self, installation):
         row = self.store.load(self._key(installation))
@@ -293,12 +319,10 @@ class AccountIdentityBridge:
         return digest(registration['subject']) if registration is not None else None
 
     def owner_review_key(self, installation, operation):
-        _subject(installation); _hex(operation,32)
-        return key('human-owner-review', digest([self.namespace,installation,operation]))
+        return _review_key(self.namespace, installation, operation, 'human-owner-review')
 
     def owner_review_only_key(self, installation, operation):
-        _subject(installation); _hex(operation,32)
-        return key('human-owner-review-only',digest([self.namespace,installation,operation]))
+        return _review_key(self.namespace, installation, operation, 'human-owner-review-only')
 
     def _require_normal_operation(self, installation, operation):
         if self.audit.load(self.owner_review_only_key(installation,operation)) is not None:
