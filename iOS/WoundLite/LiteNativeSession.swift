@@ -111,6 +111,8 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     private let access: LiteSandboxAccess
     private let register: @Sendable () async throws -> String
     private let existing: @Sendable () async throws -> String?
+    private var enrollmentKeyID: (@Sendable () async throws -> String)?
+    @Published private(set) var preparedEnrollmentKeyID: String?
     @Published private(set) var registration: Registration = .checking
     @Published private(set) var registering = false
     @Published private(set) var preparingPurchase = false
@@ -186,6 +188,7 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
             journal: LiteServiceFileJournal(directory: directory), register: { try await client.registeredInstallation() },
             existing: { try await client.existingInstallation() },
             captures: LiteCaptureDraftStore(directory: directory.appendingPathComponent("capture-drafts")), access: access, now: { Date() })
+        session.enrollmentKeyID = { try await client.prepareEnrollmentKeyID() }
         // Create the transport lazily. Viewing account settings never registers
         // an installation, re-enables research or sends an association request.
         let configured = AppSettings.backendURL()
@@ -232,9 +235,20 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
         }
     }
 
+    func prepareOwnerEnrollment() async {
+        guard LiteNativeBuild.showsOwnerReview, registration == .required, !registering,
+              let enrollmentKeyID else { return }
+        registering = true
+        defer { registering = false }
+        preparedEnrollmentKeyID = nil
+        do { preparedEnrollmentKeyID = try await enrollmentKeyID() }
+        catch { message = "暫時無法準備裝置登記識別碼。請解鎖後再試。" }
+    }
+
     func registerDevice() async {
         guard registration != .unreadable else { return }
         guard !registering else { return }; registering = true; defer { registering = false }
+        preparedEnrollmentKeyID = nil
         do {
             let owner = try await register()
             guard try await identity.service.installation() == owner else { throw LiteAccountFailure.conflict }
@@ -350,6 +364,15 @@ struct LiteNativeSessionView: View {
                 Text(copy("先核對裝置，再登入同一服務帳號。此入口不會自動開啟研究上傳或清除手機紀錄。"))
                 Text(copy(session.message)).font(.footnote)
                 if session.registration == .required {
+                    if LiteNativeBuild.showsOwnerReview {
+                        Button(copy("準備本人裝置登記識別碼")) { Task { await session.prepareOwnerEnrollment() } }
+                            .disabled(session.registering)
+                        if let digest = session.preparedEnrollmentKeyID {
+                            Text(copy("請將這個登記識別碼私下交給自己的 Mac，待登記時段確認後再核對裝置登記。"))
+                            Text(verbatim: digest).font(.footnote.monospaced()).textSelection(.enabled)
+                            ShareLink(item: digest) { Text(copy("分享裝置登記識別碼")) }
+                        }
+                    }
                     Button(copy("核對裝置登記（不傳照片）")) { Task { await session.registerDevice() } }
                         .disabled(session.registering)
                 } else if session.registration == .unreadable {

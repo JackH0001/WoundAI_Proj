@@ -256,14 +256,34 @@ def application(environment=None):
     """Gunicorn factory: missing deployment pins refuse startup; no auto-defaults."""
     import os
     env=os.environ if environment is None else environment
-    required=('LITE_NATIVE_CONFIG','LITE_NATIVE_CONFIG_SHA256','LITE_NATIVE_SOURCE',
-              'LITE_NATIVE_IMAGE_SHA256','LITE_NATIVE_SECRET_DIR')
+    def mounted(name, maximum):
+        path = Path(env.get(name, ''))
+        if not path.is_absolute() or path.is_symlink() or not path.is_file():
+            raise ValueError('bounded mounted configuration required')
+        with path.open('rb') as handle:
+            data = handle.read(maximum + 1)
+        if not 0 < len(data) <= maximum:
+            raise ValueError('bounded mounted configuration required')
+        return data
+
+    if not env.get('LITE_NATIVE_CONFIG'):
+        raise ValueError('explicit native deployment configuration required')
+    raw = mounted('LITE_NATIVE_CONFIG', 256*1024)
+    if env.get('LITE_INTERNAL_OWNER_MODE') == 'owner-enrollment':
+        from lite_owner_enrollment import build
+        business_settings = ('LITE_NATIVE_SECRET_DIR', 'LITE_INTERNAL_ACCOUNT_SHA256',
+                             'LITE_INTERNAL_INSTALLATION_SHA256', 'LITE_INTERNAL_REVIEW_UNTIL',
+                             'LITE_RESEARCH_LINK_FILE', 'LITE_RESEARCH_LINK_SHA256')
+        if any(key in env for key in business_settings) or env.get('LITE_RESEARCH_CAPTURE_ENABLED', '0') != '0':
+            raise ValueError('enrollment requires a separate revision')
+        return build(raw, mounted('LITE_OWNER_ENROLLMENT_PLAN', 4096),
+                     plan_sha=env['LITE_OWNER_ENROLLMENT_PLAN_SHA256'], config_sha=env['LITE_NATIVE_CONFIG_SHA256'],
+                     source=env['LITE_NATIVE_SOURCE'], image=env['LITE_NATIVE_IMAGE_SHA256'])
+    if any(key in env for key in ('LITE_OWNER_ENROLLMENT_PLAN','LITE_OWNER_ENROLLMENT_PLAN_SHA256')):
+        raise ValueError('explicit owner enrollment mode required')
+    required=('LITE_NATIVE_CONFIG_SHA256','LITE_NATIVE_SOURCE','LITE_NATIVE_IMAGE_SHA256','LITE_NATIVE_SECRET_DIR')
     if any(type(env.get(k)) is not str or not env[k] for k in required):
         raise ValueError('explicit native deployment configuration required')
-    path=Path(env['LITE_NATIVE_CONFIG'])
-    if not path.is_absolute() or path.is_symlink() or not path.is_file() or path.stat().st_size>256*1024:
-        raise ValueError('bounded mounted configuration required')
-    raw=path.read_bytes()
     try:
         from lite_attest_http import InternalOwner
         from lite_research_issuer import settings as issuer_settings
