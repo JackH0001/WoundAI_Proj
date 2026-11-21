@@ -127,7 +127,15 @@ distinct subjects and purchase tokens as booleans, the subscription links as
 `[true, false]`, and the actual debits as `[1, 2]` in subscriber/free order.
 The app checks daily limits of 10 and 2 and wound slot limits of 5 and 1.
 
-The commands under **Reproduce** now cover nine native scenarios and fifteen
-fixture tests. Apple identity, purchase, KMS, and inference providers are
+The commands under **Reproduce** cover the native scenarios and fixture tests described here. Apple identity, purchase, KMS, and inference providers are
 simulated. Real Apple sign-in, App Attest and Sandbox restoration with a fresh
 external tester are separate release checks.
+
+
+## Restoring on a fresh installation (Sandbox case S4)
+
+The tenth native scenario uses two independently registered installations, separate file journals and the same synthetic Apple user. The first installation uses one free recognition, buys Plus and registers a wound. The second installation signs in through the subscription page, then restores the original StoreKit event. It receives no copy of the first installation’s photo or saved result.
+
+The fixture drops the first successful confirmation reply to the second installation. After restarting the backend and reopening the second journal, restore resends the same confirmation and finishes the transaction locally. A further restore can use the saved acknowledgment. The expected server trace has three successful confirmations (original purchase, lost restore reply, retry). The second and third requests match after JSON key ordering is normalized. All three observations must show one durable receipt with the same hash, including the stored revision. The second installation makes zero purchases.
+
+A subsequent recognition on the second installation brings both balances to 2 used and 8 remaining. Both see the same active wound with a limit of 5, and the first installation still reads its original result. Run all ten scenarios and the fifteen fixture tests with the commands above. Apple identity, StoreKit transactions, the model and cloud providers are synthetic. For the real S4 acceptance, record both builds and the actual backend revision and repeat on a second installation using the original Sandbox purchase and service account.

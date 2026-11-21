@@ -31,7 +31,10 @@ private struct WireSnapshot: Decodable {
     let model_calls, used, attempts: Int
     let registered_installations: Int
     let research_unchanged, image_unchanged: Bool
-    struct Route: Decodable { let path: String, status: Int; let revision: Int? }
+    struct Route: Decodable {
+        let path: String, status: Int, installation_sha256: String
+        let revision: Int?, receipt_count: Int?, confirm_sha256: String?, receipt_store_sha256: String?
+    }
     struct SubscriptionQuery: Decodable { let phase, original_sha256, transaction_sha256: String; let status: Int; let renewal_present: Bool }
     let subscription_queries: [SubscriptionQuery]
     struct Accounts: Decodable {
@@ -59,6 +62,7 @@ private actor WirePairBarrier {
 private actor NativeWire: LiteAuthenticatedTransport {
     let config: WireConfig, owner: String
     let research: Bool
+    private var dropPurchaseConfirmation = false
     var dropRun = false
     var dropCapture = false
     var dropRevision = false
@@ -69,6 +73,7 @@ private actor NativeWire: LiteAuthenticatedTransport {
         self.config = config; self.owner = owner; self.research = research
     }
     func installation() -> String { owner }
+    func losePurchaseConfirmation() { dropPurchaseConfirmation = true }
     func loseRunResponse() { dropRun = true }
     func loseCaptureResponse() { dropCapture = true }
     func loseRevisionResponse() { dropRevision = true }
@@ -99,6 +104,10 @@ private actor NativeWire: LiteAuthenticatedTransport {
            body["action"] as? String == "status", let barrier = woundStatusBarrier {
             woundStatusBarrier = nil
             await barrier.arrive()
+        }
+        if dropPurchaseConfirmation && original.url?.path == "/api/v1/lite/purchase/confirm" && http.statusCode == 200 {
+            dropPurchaseConfirmation = false
+            throw URLError(.networkConnectionLost)
         }
         if dropRun && original.url?.lastPathComponent == "run" {
             dropRun = false; throw URLError(.networkConnectionLost)
@@ -702,6 +711,95 @@ private struct PrivacyReadback: Decodable, Equatable {
                        beforeWrongAccount.routes.filter { $0.path.hasSuffix("purchase/confirm") }.count)
         XCTAssertEqual(final.routes.filter { $0.path.hasSuffix("account/status") }.count, 25)
         XCTAssertTrue(final.research_unchanged); XCTAssertTrue(final.image_unchanged)
+    }
+
+    func testFreshInstallationRestoresOriginalPurchaseAfterLostConfirmation() async throws {
+        let cfg = try config()
+        let first = try JSONDecoder().decode(WireSeed.self, from: await NativeWire.control(cfg, "reset-shared"))
+        let image = try XCTUnwrap(Data(base64Encoded: first.jpeg))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let firstWire = NativeWire(cfg, owner: first.owner)
+        let firstApple = WireApple(cfg), firstKit = WireStoreKit(cfg)
+        let original = try session(firstWire, firstApple, firstKit, directory.appendingPathComponent("first"), first.now)
+
+        func snapshot() async throws -> WireSnapshot {
+            try JSONDecoder().decode(WireSnapshot.self, from: await NativeWire.control(cfg, "snapshot"))
+        }
+        await original.prepareForPurchase()
+        let capture = try await original.recognizeSaved(recordID: UUID().uuidString, jpeg: image)
+        XCTAssertEqual(capture.note, "confirmed", capture.message)
+        await original.purchases.loadOffer()
+        await original.purchases.purchase(accepting: firstKit.quote)
+        let transaction = try XCTUnwrap(firstKit.current)
+        let before = try await snapshot()
+        let firstConfirm = try XCTUnwrap(before.routes.last { $0.path.hasSuffix("purchase/confirm") })
+        XCTAssertEqual(firstConfirm.receipt_count, 1)
+        let originalReceipt = try XCTUnwrap(firstConfirm.receipt_store_sha256)
+        let woundID = UUID().uuidString
+        _ = try await original.woundPermit(id: woundID, owner: nil)
+
+        let second = try JSONDecoder().decode(WireSeed.self, from: await NativeWire.control(cfg, "second-installation"))
+        XCTAssertNotEqual(second.owner, first.owner)
+        let wire = NativeWire(cfg, owner: second.owner), apple = WireApple(cfg), kit = WireStoreKit(cfg)
+        kit.current = transaction
+        func secondSession() throws -> LiteNativeSession {
+            try session(wire, apple, kit, directory.appendingPathComponent("second"), second.now)
+        }
+        let fresh = try secondSession()
+        let localCopy = try await fresh.service.storedIfPresent(capture.captureID)
+        XCTAssertNil(localCopy)
+        await fresh.prepareForPurchase()
+        let account = await fresh.identity.localPurchaseAccess()
+        XCTAssertEqual(account?.token, transaction.token)
+        await wire.losePurchaseConfirmation()
+        await fresh.purchases.restore()
+        XCTAssertEqual(kit.finishes, 0)
+        let interrupted = try await snapshot()
+        let lostConfirm = try XCTUnwrap(interrupted.routes.last { $0.path.hasSuffix("purchase/confirm") })
+        XCTAssertNotEqual(lostConfirm.installation_sha256, firstConfirm.installation_sha256)
+        XCTAssertEqual(lostConfirm.receipt_store_sha256, originalReceipt)
+        let confirmedRequest = try XCTUnwrap(lostConfirm.confirm_sha256)
+        XCTAssertEqual(interrupted.routes.filter { $0.path.hasSuffix("purchase/confirm") && $0.status == 200 }.count, 2)
+
+        _ = try await NativeWire.control(cfg, "restart")
+        let reopened = try secondSession()
+        await reopened.purchases.restore()
+        XCTAssertTrue(reopened.purchases.message.contains("關聯已確認"), reopened.purchases.message)
+        await reopened.purchases.restore()
+        XCTAssertEqual(kit.restores, 3)
+        XCTAssertEqual(kit.buys, 0)
+        XCTAssertEqual(kit.finishes, 1)
+        XCTAssertEqual(firstKit.buys, 1)
+        XCTAssertEqual(firstKit.finishes, 1)
+        XCTAssertEqual(firstApple.signIns, 1)
+        XCTAssertEqual(apple.signIns, 1)
+
+        let secondCapture = try await reopened.recognizeSaved(recordID: UUID().uuidString, jpeg: image)
+        XCTAssertEqual(secondCapture.note, "confirmed", secondCapture.message)
+        for app in [original, reopened] {
+            let balance = try await app.personalBalance()
+            XCTAssertEqual(balance.limit, 10)
+            XCTAssertEqual(balance.used, 2)
+            XCTAssertEqual(balance.remaining, 8)
+            let roster = try await app.woundList()
+            XCTAssertEqual(roster?.limit, 5)
+            XCTAssertEqual(roster?.active, [try LiteWoundRoster.wireID(woundID)])
+        }
+        let preserved = try await original.service.stored(capture.captureID)
+        XCTAssertEqual(preserved, capture)
+        let final = try await finish(cfg, "fresh-install-restore-lost-confirmation")
+        XCTAssertEqual(final.registered_installations, 2)
+        let confirmations = final.routes.filter { $0.path.hasSuffix("purchase/confirm") }
+        XCTAssertEqual(confirmations.map(\.status), [200, 200, 200])
+        XCTAssertEqual(confirmations.compactMap(\.receipt_count), [1, 1, 1])
+        XCTAssertEqual(confirmations.compactMap(\.receipt_store_sha256), Array(repeating: originalReceipt, count: 3))
+        XCTAssertEqual(confirmations.last?.confirm_sha256, confirmedRequest)
+        XCTAssertEqual(confirmations.last?.installation_sha256, lostConfirm.installation_sha256)
+        XCTAssertEqual(final.model_calls, 2)
+        XCTAssertEqual(final.used, 2)
+        XCTAssertEqual(final.attempts, 2)
+        XCTAssertTrue(final.research_unchanged)
+        XCTAssertTrue(final.image_unchanged)
     }
 
     func testTwoPeopleKeepSeparateSubscriptionsQuotasAndWoundsAfterRestart() async throws {

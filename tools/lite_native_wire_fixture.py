@@ -33,13 +33,13 @@ class QuietHandler(WSGIRequestHandler):
     def log_request(self, *args): pass
 
 
-def stored_rows_hash(store):
+def rows_hash(records):
     # Preserve exact SQLite key/data bytes and revision in comparison evidence;
     # neither decoded grant contents nor private material enters the report.
     def binary(value):
         if isinstance(value, bytes): return {'bytes_hex': value.hex()}
         raise TypeError('unsupported stored evidence type')
-    return hashlib.sha256(json.dumps(rows(store), sort_keys=True,
+    return hashlib.sha256(json.dumps(records, sort_keys=True,
         separators=(',', ':'), default=binary).encode()).hexdigest()
 
 
@@ -206,8 +206,8 @@ class WireFixture:
             grant_total=plan['total'], scan=job[1]['scan'], revoked=job[1]['revoked'],
             apple_revoke_calls=h.h.grant.calls.count(REVOKE_URL),
             research_requested=deletion.research_confirmation(person, h.owner, operation),
-            service_store_sha256=stored_rows_hash(h.h.stores['operations']),
-            audit_sha256=stored_rows_hash(h.h.stores['deletion_audit']))
+            service_store_sha256=rows_hash(rows(h.h.stores['operations'])),
+            audit_sha256=rows_hash(rows(h.h.stores['deletion_audit'])))
         self.deletion_checks.append(result)
         return result
 
@@ -377,6 +377,12 @@ class WireFixture:
             if path == '/api/v1/lite/annotation/revision':
                 value = json.loads(raw)
                 event['revision'] = value.get('revision')
+            if path == '/api/v1/lite/purchase/confirm' and event['status'] == 200:
+                # Swift dictionaries may serialize in a different key order on replay.
+                semantic_body = json.dumps(json.loads(raw), sort_keys=True, separators=(',', ':')).encode()
+                receipts = rows(self.h.h.stores['purchases_audit'])
+                event.update(confirm_sha256=hashlib.sha256(semantic_body).hexdigest(),
+                             receipt_count=len(receipts), receipt_store_sha256=rows_hash(receipts))
             self.events.append(event)
             return start_response(status, response_headers, exc_info)
         return client.app(env, capture)
