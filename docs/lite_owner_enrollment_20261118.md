@@ -34,3 +34,30 @@
 正式授權方案應逐一列出上述物件的完整名稱、有限期的物件讀取／建立／覆寫權與讀取桶設定權，另行查核繼承權限。GCS 取代同名物件需要允許覆寫的權限，服務採用 generation 條件。時段內已送出的 GCS 操作可能在期限後才傳回，期限邊界也應由實際 IAM 條件及雲端讀回驗收。專用身分無需研究桶、訂閱、KMS 或 Apple 私鑰權限。每分鐘及每日上限不涵蓋外圍基礎設施收取的網路費用。
 
 成功後先關閉登記流量、收回專用權限，保留登記與稽核，再以手機匯出的安裝摘要規劃限時 owner-review。失敗時封閉登記入口、保留既有登記進度與原始資料。查明結果後才依原金鑰與原證明續接。本機合成測試涵蓋了回覆遺失、重啟、到期、新安裝轉入本人核對。雲端授權、真實 Apple 裝置登記、實際計費及 TestFlight 交付仍需獨立驗收。
+
+## 在 Mac 準備登記計畫與權限清冊
+
+`tools/lite_owner_enrollment_command.py` 可以將本人手機的分享文字轉為後端可直接讀取的設定。這項作業可在登記時段開始前進行。需要已核對簽章的本人專用 IPA、原始 native 設定、本人分享的純文字識別碼及經覆核的小型 JSON 範本。工具可在離線環境執行。識別碼請保存在私人目錄，避免寄到一般信箱或貼入對話。
+
+範本的 `schema` 為 `lite-owner-enrollment-template/1`。各欄位來自下列證據。
+
+| 欄位 | 來源及格式 |
+| --- | --- |
+| `native_sha256`、`source`、`image` | 設定原始位元的 SHA-256、後端 40 位提交、私有映像 64 位 SHA-256（移除 `sha256:` 前綴） |
+| `ipa_sha256`、`app_id` | 已核對簽章的本人 IPA 雜湊與完整 application-identifier，例如團隊代碼加上 `.com.woundai.lite` |
+| `key_id_sha256` | 在手機與 Mac 私下核對一致的 64 位十六進位裝置識別碼後，將其解碼為 32 個原始位元組，再取 SHA-256 |
+| `service_account`、`starts`、`until` | 登記專用服務身分、同一 UTC 日的起迄整數秒，最長 900 秒 |
+
+將範本原始檔的 SHA-256 留在獨立覆核紀錄。工具會讀取既有 IPA 的內容並比對該檔雜湊、本人開關、內測限定、裝置平台、服務網址與組建。簽署與團隊的信任來源是先前對該固定 IPA 的發行驗證。範本、識別碼及新輸出放在本人所有的 0700 目錄，輸入文字檔權限為 0600。分享文字可含一個 LF 或 CRLF 結尾。
+
+以下在 repo 根目錄使用 zsh。變數代表您已核對的檔案絕對路徑，`PLAN` 與 `SCOPE` 各使用新的輸出名稱。
+
+```zsh
+export PYTHONPATH=tools:engineering/phase2:Backend/Flask:.
+inputs=(--native-config "$NATIVE_CONFIG" --template "$TEMPLATE" --template-sha256 "$TEMPLATE_DIGEST"
+        --ipa "$OWNER_IPA" --reference "$PRIVATE_DEVICE_TEXT")
+python tools/lite_owner_enrollment_command.py prepare "${inputs[@]}" --output "$PLAN"
+python tools/lite_owner_enrollment_command.py scope "${inputs[@]}" --plan "$PLAN" --output "$SCOPE"
+```
+
+保留 `prepare` 的原始輸出供掛載，使用該檔 SHA-256 填入 `LITE_OWNER_ENROLLMENT_PLAN_SHA256`。`scope` 會重建設定，逐位元比對已存的計畫，再寫出桶名、metageneration、兩個物件全名、兩條 HTTP 路由、角色所需權限及起迄時間。物件的 DELETE 權限用於 GCS 的條件覆寫。到期後可用既有計畫重新產生清冊，核對須收回的物件與期限；清冊會標示 expired，並保留原截止時間。後續操作須將物件權限精確限於這兩個名稱及期限，並分別查核有效 IAM。確認送件回覆遺失時應保留原安裝與登記紀錄。外部測試版使用一般登記流程。
