@@ -47,6 +47,14 @@ TestFlight46已由本人回報舊紀錄／PDF初步正常。本人46研究服務
 完整訓練血緣或商用許可；已向 owner 詢問授權回覆進度，尚不能寫成取得許可，也不擅自寄信。
 這不阻止使用合成資料繼續技術驗收。
 
+## 外測隱私頁的交付核對
+
+從待送測提交取出 `site/privacy/woundlite.html`。使用匯出收據上的 IPA SHA-256 及組建號，在發布核定頁面後執行下列唯讀核對。工具會直接下載公開頁，分別計算並比對來源、IPA 內附頁及公開頁的 SHA-256。請保存輸出的三個雜湊。結束碼 0 表示三份相符，1 表示內容不同，2 表示下載、發行檔識別或讀取失敗。App Store Connect 的隱私問卷另依實際資料用途逐項核對。
+
+```sh
+python3 tools/verify_lite_release_privacy.py --ipa "$LITE_IPA" --ipa-sha256 "$LITE_IPA_SHA256" --build "$LITE_BUILD" --source site/privacy/woundlite.html
+```
+
 ## 11/10 已核對狀態
 
 - 初始盤點以 `3d76b38` 為基準；後續已授權同步至 `8bd06ce`，GitHub PR #37 保持 draft、未合併。後續多語修正已獲授權推送至 `0c75c4f`，CI 證據另行核對。11/11 歷史頁3fdc0f2已授權推送，8個run／12個job全部成功；量測頁4ddd498、相機／圈選7ce9b2e也已授權推送，各8個run／12個job全成功。操作指南與雙程序額度驗收已依授權推送至64cc0bf，8個run／12個job全成功；CI原始產物醫療262／Lite633／機構166，各0失敗、1既有略過，55個指定回歸通過。後續本機刪帳競爭工具尚未推送，不混用父提交CI證據。

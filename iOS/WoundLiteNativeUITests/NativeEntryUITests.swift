@@ -237,8 +237,8 @@ final class NativeEntryUITests: XCTestCase {
         privacy.tap()
         XCTAssertTrue(app.navigationBars[english ? "Privacy policy" : "隱私權政策"].waitForExistence(timeout: 5))
         let page = app.webViews.descendants(matching: .any)
-        let en = page.matching(NSPredicate(format: "label == %@", "WoundAILite Privacy Policy — Draft")).firstMatch
-        let zh = page.matching(NSPredicate(format: "label == %@", "WoundAILite 民眾版隱私權政策草稿")).firstMatch
+        let en = page.matching(NSPredicate(format: "label == %@", "WoundAILite TestFlight Privacy Notice")).firstMatch
+        let zh = page.matching(NSPredicate(format: "label == %@", "WoundAILite TestFlight 隱私說明")).firstMatch
         let initial = english ? en : zh
         let alternate = english ? zh : en
         XCTAssertTrue(initial.waitForExistence(timeout: 10))
