@@ -267,7 +267,8 @@ final class LiteRevisionSyncTests: XCTestCase {
     func testCaptureClearsOnlyAfterSavedRecordAndDoesNotDeletePendingWork() async throws {
         let (store, dir) = try setup(); defer { try? FileManager.default.removeItem(at: dir) }
         let vm = LiteMeasureVM()
-        XCTAssertEqual(vm.captureButtonTitle, "拍攝傷口")
+        let firstCapture = LiteNativeBuild.includesService ? "拍攝測試目標" : "拍攝傷口"
+        XCTAssertEqual(vm.captureButtonTitle, firstCapture)
         let picture = UIGraphicsImageRenderer(size: CGSize(width: 16, height: 16)).image { c in
             UIColor.red.setFill(); c.fill(CGRect(x: 0, y: 0, width: 16, height: 16))
         }
@@ -287,7 +288,7 @@ final class LiteRevisionSyncTests: XCTestCase {
         XCTAssertNil(vm.image); XCTAssertNil(vm.captureJPEG); XCTAssertNil(vm.depth)
         XCTAssertNil(vm.estimate); XCTAssertTrue(vm.polys.isEmpty)
         XCTAssertNil(vm.note); XCTAssertNil(vm.savedId); XCTAssertNil(vm.cloudBinding)
-        XCTAssertEqual(vm.captureButtonTitle, "拍攝傷口")
+        XCTAssertEqual(vm.captureButtonTitle, firstCapture)
         XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("records.json")), before)
         XCTAssertEqual(LiteStore(fileURL: dir.appendingPathComponent("records.json")).records[0].cloudSync?.pending, r.cloudSync?.pending)
         XCTAssertNil(vm.finishSavedCapture(in: store), "Repeated completion cannot navigate/save twice")
@@ -322,7 +323,7 @@ final class LiteRevisionSyncTests: XCTestCase {
         for bound in [true, false] {
             var r = store.records.last!; r.id = UUID().uuidString
             if !bound { r.cloudSync = nil }
-            let saved = try XCTUnwrap(store.saveMeasurement(r, selectedWoundID: "",
+            let saved = try XCTUnwrap(store.saveMeasurement(r, selectedWoundID: store.localTrackingID ?? "",
                 enteredLocation: LiteWoundLocation(side: "right", site: "knee_back"),
                 queueResearchSync: !bound))
             XCTAssertNil(saved.cloudSync?.pending)
@@ -371,7 +372,12 @@ final class LiteRevisionSyncTests: XCTestCase {
             return view.subviews.lazy.compactMap { tabBar($0) }.first
         }
         let bar = try XCTUnwrap(tabBar(host.view))
-        XCTAssertEqual(bar.items?.compactMap(\.title), ["量測", "紀錄", "設定"])
+        // Check the actual rendered titles against independent expectations.
+        // CI uses English; local runs also exercise Traditional Chinese. Do not
+        // derive the expected titles from the production translation helper.
+        let expectedTitles = Locale.current.language.languageCode?.identifier == "en"
+            ? ["Measure", "Records", "Settings"] : ["量測", "紀錄", "設定"]
+        XCTAssertEqual(bar.items?.compactMap(\.title), expectedTitles)
         XCTAssertFalse(bar.isHidden); XCTAssertNil(host.presentedViewController)
         let image = UIGraphicsImageRenderer(bounds: host.view.bounds).image { _ in
             host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)

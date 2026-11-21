@@ -226,15 +226,71 @@ final class LiteAttestClientTests: XCTestCase {
         XCTAssertEqual(purposes,["register","withdraw","withdraw","withdraw","withdraw","assert"])
         let calls=await http.snapshot();XCTAssertEqual(calls.1.count,5)
     }
+    func testPreparedKeyIDSurvivesRestartAndUsesNoRegistrationRequest() async throws {
+        let device = AttestDeviceDouble(), vault = AttestMemory(), http = AttestHTTPDouble()
+        let first = try client(device, vault, http)
+        let pin = try await first.prepareEnrollmentKeyID()
+        let relaunched = try client(device, vault, http)
+        let restored = try await relaunched.prepareEnrollmentKeyID()
+        XCTAssertEqual(restored, pin)
+        let data = try XCTUnwrap(Data(base64Encoded: device.key))
+        XCTAssertEqual(pin, data.map { String(format: "%02x", $0) }.joined())
+        let before = await http.snapshot()
+        XCTAssertEqual(before.2, 0)
+        XCTAssertTrue(before.0.isEmpty)
+        let owner = try await relaunched.registeredInstallation()
+        let saved = try await first.existingInstallation()
+        XCTAssertEqual(saved, owner)
+        let counts = await device.counts()
+        XCTAssertEqual(counts.0, 1)
+        XCTAssertEqual(counts.1, 1)
+        do { _ = try await first.prepareEnrollmentKeyID(); XCTFail("already registered") }
+        catch LiteAttestFailure.invalidState {}
+    }
+
+    func testPendingRegistrationRetainsOriginalKeyIDAndProofAfterLostAcknowledgement() async throws {
+        let device = AttestDeviceDouble(), vault = AttestMemory(), http = AttestHTTPDouble()
+        let c = try client(device, vault, http)
+        let pin = try await c.prepareEnrollmentKeyID()
+        await http.options(failRegistration: true)
+        do { _ = try await c.registeredInstallation(); XCTFail() } catch is URLError {}
+        let before = await vault.load()
+        let reread = try await c.prepareEnrollmentKeyID()
+        let after = await vault.load()
+        XCTAssertEqual(reread, pin)
+        XCTAssertEqual(before, after)
+        let sent = await http.snapshot()
+        XCTAssertEqual(sent.0.count, 1)
+        _ = try await c.registeredInstallation()
+        let retried = await http.snapshot()
+        XCTAssertEqual(retried.0, [sent.0[0], sent.0[0]])
+    }
+
+    func testPreparationStorageFailureDoesNotStartRegistration() async throws {
+        let device = AttestDeviceDouble(), vault = AttestMemory(), http = AttestHTTPDouble()
+        await vault.fail(at: 1)
+        do { _ = try await client(device, vault, http).prepareEnrollmentKeyID(); XCTFail() }
+        catch LiteAttestFailure.unavailable {}
+        let sent = await http.snapshot()
+        XCTAssertEqual(sent.2, 0)
+        XCTAssertTrue(sent.0.isEmpty)
+        let record = await vault.load()
+        XCTAssertNil(record)
+    }
+
     func testRegistrationPersistsKeyAndDropsAcknowledgedProof() async throws {
         let device = AttestDeviceDouble(), vault = AttestMemory(), http = AttestHTTPDouble()
         let c = try client(device, vault, http), owner = try await c.registeredInstallation()
         let stored = try JSONDecoder().decode(LiteAttestClient.Identity.self, from: await vault.load()!)
         XCTAssertEqual(stored.installation, owner); XCTAssertEqual(stored.phase, "registered")
         XCTAssertNil(stored.attestation); XCTAssertNil(stored.challengeID)
+        let before = await http.snapshot()
         let second = try client(device, vault, http)
         let restored = try await second.registeredInstallation(); XCTAssertEqual(restored, owner)
         let counts = await device.counts(); XCTAssertEqual(counts.0, 1); XCTAssertEqual(counts.1, 1)
+        let after = await http.snapshot()
+        XCTAssertEqual(after.0, before.0); XCTAssertEqual(after.1.count, before.1.count)
+        XCTAssertEqual(after.2, before.2, "Saved registration is not a live cloud health check")
     }
     func testLostRegistrationResponseRetriesExactProofAfterRestart() async throws {
         let device = AttestDeviceDouble(), vault = AttestMemory(), http = AttestHTTPDouble()

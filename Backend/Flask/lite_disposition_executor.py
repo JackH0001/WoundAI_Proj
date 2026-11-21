@@ -198,7 +198,7 @@ class DispositionExecutor:
     def _safe_worker(self,person):
         raw=self.w.status(person)
         return dict(v=1,revision=raw['revision'],paused=raw['paused'],control_revision=raw['control_revision'],
-            states={n:raw['states'][n] for n in LANES},pending_lanes=list(PENDING),
+            states={n:raw['states'][n] for n in LANES},pending_lanes=list(PENDING)+(['shared_key_retirement'] if self.w.p.shared else []),
             account_deleted=False,physical_backups_erased=False,observed_scope_only=True)
 
     def inspect(self,person):

@@ -3,6 +3,7 @@
 Temporary SQLite security state/budget and LocalStore media; no external service.
 """
 import ast
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 import io
 import json
@@ -15,7 +16,7 @@ from unittest.mock import patch
 from flask import Flask
 from werkzeug.test import EnvironBuilder
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'Backend/Flask'))
-from lite_attest_http import install_lite_attest, CHALLENGE_PATH, REGISTER_PATH
+from lite_attest_http import InternalOwner, install_lite_attest, CHALLENGE_PATH, REGISTER_PATH
 from lite_attest_budget import RequestBudget, BudgetExceeded
 from lite_privacy_state import PrivacyState
 from lite_attest_state import SQLiteStateStore, StateUnavailable
@@ -48,6 +49,36 @@ class HTTPTests(SignedHTTPClient, unittest.TestCase):
         self.assertEqual(response.status_code,401,response.json)
         self.assertEqual(response.json['error'],'lite_attestation_required')
 
+    def test_internal_research_gate_denies_new_work_before_writes_but_preserves_withdrawal(self):
+        self.register()
+        for allowed in (True, False):
+            pin=hashlib.sha256((self.owner if allowed else 'other').encode()).hexdigest()
+            app=Flask('restricted-research')
+            app.register_blueprint(media_fixture.lite.lite_bp)
+            install_lite_attest(app,service=self.e.service,budget=self.budget,privacy=self.privacy,
+                                internal_owner=InternalOwner('research',pin))
+            self.client=app.test_client()
+            raw,ctype=self.segment_bytes()
+            with patch.object(self.privacy,'begin_write',wraps=self.privacy.begin_write) as writer:
+                response=self.post_signed('/api/v1/lite/segment',raw,ctype)
+            self.assertEqual(response.status_code,200 if allowed else 403,response.json)
+            self.assertEqual(writer.call_count,1 if allowed else 0)
+        path='/api/v1/lite/data/'+self.owner
+        response=self.client.delete(path,headers=self.headers(path,b'','',method='DELETE',purpose='withdraw'))
+        self.assertEqual(response.status_code,200,response.json)
+        self.assertTrue(self.privacy.is_withdrawn(self.owner))
+
+    def test_partial_or_mismatched_internal_settings_refuse_startup(self):
+        self.assertIsNone(InternalOwner.configured({},'research'))
+        fields={'LITE_INTERNAL_OWNER_MODE':'owner-only','LITE_INTERNAL_INSTALLATION_SHA256':'a'*64}
+        self.assertEqual(InternalOwner.configured(fields,'research').role,'research')
+        for role,env in [('native',fields),('research',{**fields,'LITE_INTERNAL_ACCOUNT_SHA256':'b'*64}),
+                         ('research',{'LITE_INTERNAL_OWNER_MODE':'owner-only'}),
+                         ('research',{'LITE_INTERNAL_INSTALLATION_SHA256':'a'*64}),
+                         ('research',{**fields,'LITE_INTERNAL_OWNER_MODE':'off'})]:
+            with self.subTest(role=role,env=env),self.assertRaises(ValueError):
+                InternalOwner.configured(env,role)
+
     def test_signed_empty_delete_with_gunicorn_stream_succeeds(self):
         self.register()
         path='/api/v1/lite/data/'+self.owner
@@ -65,6 +96,37 @@ class HTTPTests(SignedHTTPClient, unittest.TestCase):
         self.assertEqual(response.json['retry_after'],73)
         self.assertTrue(response.json['retryable'])
         self.assertNotIn('stored',response.json)
+
+    def test_challenge_backpressure_uses_first_expiry_of_its_own_lane(self):
+        from lite_attest_state import MAX_CHALLENGES, MAX_WITHDRAWAL_CHALLENGES, CHALLENGE_TTL
+        self.register()
+        start = self.e.now
+        def ask(lane):
+            return self.client.post(CHALLENGE_PATH, json={'key_id': self.key, 'purpose': lane})
+        # An older privacy challenge must not shorten the wait for another lane.
+        for _ in range(MAX_WITHDRAWAL_CHALLENGES):
+            self.assertEqual(ask('withdraw').status_code, 200)
+        self.e.now = start + 10
+        self.assertEqual(ask('assert').status_code, 200)
+        self.e.now = start + 20
+        for _ in range(MAX_CHALLENGES - 1):
+            self.assertEqual(ask('assert').status_code, 200)
+        registered = self.e.store.load(self.e.key_id)
+        for lane, expected in [('withdraw', CHALLENGE_TTL - 20), ('assert', CHALLENGE_TTL - 10)]:
+            with self.subTest(lane=lane):
+                result = ask(lane)
+                self.assertEqual(result.status_code, 429)
+                self.assertEqual(result.headers['Retry-After'], str(expected))
+                self.assertEqual(result.json['retry_after'], expected)
+                self.assertTrue(result.json['retryable'])
+                self.assertEqual(result.json['error'], 'lite_challenge_limit')
+        self.assertEqual(self.e.store.load(self.e.key_id), registered)
+        self.e.now = start + CHALLENGE_TTL
+        self.assertEqual(ask('withdraw').status_code, 200)
+        self.e.now += 9
+        self.assertEqual(ask('assert').headers['Retry-After'], '1')
+        self.e.now += 1
+        self.assertEqual(ask('assert').status_code, 200)
 
     def test_nonempty_delete_remains_rejected(self):
         response=self.client.delete('/api/v1/lite/data/'+'0'*32,data=b'x',

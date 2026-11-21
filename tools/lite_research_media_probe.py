@@ -8,6 +8,7 @@ import argparse
 import copy
 import json
 import unittest
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from lite_account_research_closure import AccountResearchClosure
@@ -31,6 +32,14 @@ class ProbeBucket(objects.Bucket):
         return SimpleNamespace(pages=iter([values]),next_page_token=str(end) if end<len(names) else None)
 
 
+def pairing_args(worker, f, research, owner):
+    # The reference parent predates cross-origin receipts; replay its original API.
+    if 'associations' not in inspect.signature(worker).parameters:
+        return {}
+    from research_pair_fixture import pairs
+    return {'associations':pairs(f,research,[(owner,owner)])}
+
+
 def run():
     try:from lite_research_media_disposition import ResearchMediaDisposition
     except ModuleNotFoundError as error:
@@ -49,7 +58,7 @@ def run():
         original=copy.deepcopy(bucket.history);other_before=copy.deepcopy(bucket.live[other.name])
         f.close();identity=f.preserved();providers=copy.deepcopy((f.f.g.calls,f.f.kms.calls))
         closure=AccountResearchClosure(deletion=f.d,research=research,
-            store=f.store('probe-closure'),audit_store=f.store('probe-closure-audit'))
+            store=f.store('probe-closure'),audit_store=f.store('probe-closure-audit'),**pairing_args(AccountResearchClosure,f,research,owner))
         while not closure.advance(f.person)['scan_finished']:pass
         admitted_live=sum(v[2]['state']=='live' for k,v in bucket.live.items() if '/'+owner+'/' in k)
         host.assertEqual(admitted_live,73)

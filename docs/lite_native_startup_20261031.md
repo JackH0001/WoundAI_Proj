@@ -151,3 +151,18 @@ only the explicitly pinned model artifacts into the local build context.
 No patient images, research data, real tokens or keys are required for this local
 validation. No deployment, IAM mutation, real data deletion or store update was
 performed by these tests.
+
+## Attached Cloud Run identity
+
+The native service and the separate key preparation worker check the attached service
+account email, project ID, project number, and asia-east1 region through the fixed
+Cloud Run metadata endpoint before constructing Storage or KMS clients. Bundle,
+signature, local mounts and model checks retain their existing order before
+provider access. A mismatched or unreadable field stops startup; the process does
+not try an alternate account. A configured credential object can echo the account
+passed to its constructor even on the wrong machine, so it cannot establish the
+deployment identity. The checks are GET-only and do not acquire an access token.
+
+Use the actual logged service identity and platform fields in a separately authorized
+deployment smoke test. The loopback tests use fabricated metadata; passing them does
+not attest a live revision. See [Cloud Run container runtime contract](https://docs.cloud.google.com/run/docs/container-contract#metadata-server).

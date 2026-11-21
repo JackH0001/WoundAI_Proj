@@ -24,7 +24,8 @@ FLASK_FILES = (
     'lite_attest_registration.py', 'lite_attest_request.py', 'lite_attest_state.py',
     'lite_bucket_policy.py', 'lite_ledger_purge.py', 'lite_privacy_state.py',
     'lite_fenced_objects.py', 'lite_fenced_manifest.py', 'lite_fenced_store.py',
-    'lite_reconsent.py',
+    'lite_reconsent.py', 'lite_research_association.py', 'lite_research_issuer.py',
+    'lite_research_source.py', 'lite_research_capture.py', 'lite_research_image_privacy.py', 'lite_result_contract.py',
     'lite_raw_depth_contract.py', 'lite_raw_depth_store.py', 'lite_service_profile.py',
     'privacy/haarcascade_frontalface_default.xml', 'privacy/README.md',
     'certificates/Apple_App_Attestation_Root_CA.pem', 'certificates/AppleRootCA-G3.pem',
@@ -73,7 +74,8 @@ def optional_commerce_imports(name, tree):
     gates = {'commerce': {'lite_service_operations', 'lite_service_http'},
              'purchases': {'lite_native_purchase'},
              'identity': {'lite_account_identity', 'lite_apple_account_events'},
-             'deletion': {'lite_account_deletion'}}
+             'deletion': {'lite_account_deletion'},
+             'research_source': {'lite_research_source_issuer'}}
     for function in tree.body:
         if not isinstance(function, ast.FunctionDef) or function.name != 'install_lite_attest':
             continue

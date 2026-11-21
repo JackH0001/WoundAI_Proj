@@ -18,6 +18,7 @@ from lite_subscription_executor import key
 from lite_subscription_runtime import SubscriptionRuntime
 from lite_usage_ledger import digest, _hex
 import hashlib
+from lite_research_association import ResearchAssociations, ResearchLinkPending
 
 
 POLICY = dict(v=1, purpose='account-disposition-planning', max_grants=5,
@@ -39,11 +40,14 @@ class AccountDataInventory:
     """
     immutable = staticmethod(SubscriptionRuntime.immutable)
 
-    def __init__(self, *, deletion, audit_store, research=None):
+    def __init__(self, *, deletion, audit_store, research=None, associations=None):
         if not isinstance(deletion, AccountDeletion):
             raise ValueError('actual account deletion authority required')
         if research is not None and not isinstance(research, Reconsent):
             raise ValueError('actual independent research authority required')
+        if associations is not None and not isinstance(associations,ResearchAssociations):
+            raise ValueError('verified research association required')
+        self.associations=associations
         b = deletion.bridge
         links = b.registry.subscription_links
         if not isinstance(links, (StableSubscriptionLinks, ServiceSubscriptionLinks)):
@@ -127,11 +131,18 @@ class AccountDataInventory:
             stable_present=r is not None, legacy_policies_inspected=len(legacy),
             disposition='retention_review_required', billing_cancelled=False)
 
-    def _research(self, installation, refs):
+    def _research(self, installation, refs, *, person, operation, registration):
         if self.research is None:
             return dict(state='authority_not_configured', complete=False, epochs=0)
         if re.fullmatch(r'[0-9a-f]{32}', installation) is None:
             return dict(state='installation_not_research_owner_format', complete=False, epochs=0)
+        if self.associations is None or registration is None:
+            return dict(state='research_association_pending',complete=False,epochs=0)
+        try:
+            installation,association_proof=self.associations.resolve(self.deletion.scope,self.research.privacy.objects.bucket.name,
+                person,installation,operation,registration)
+        except ResearchLinkPending:
+            return dict(state='research_association_pending',complete=False,epochs=0)
         r = self.research
         raw = r.store.load(r.key(installation))
         version, current, event = r.load(installation)
@@ -176,9 +187,9 @@ class AccountDataInventory:
             current = previous
         return dict(state='linked_epoch_references_observed', complete=False,
             epochs=count, current_epoch_sha256=digest(first),
-            media_inventory_complete=False, research_withdrawn_by_inventory=False)
+            media_inventory_complete=False, research_withdrawn_by_inventory=False,association_sha256=association_proof)
 
-    def _grant(self, person, node, account, refs):
+    def _grant(self, person, node, account, refs, closure_operation):
         installation, op = node['installation'], node['operation']
         reg_row = self.b.registry.store.load(self.b.registry.key(installation))
         self._observe(refs, 'registration', self.b.registry.key(installation), reg_row)
@@ -217,7 +228,7 @@ class AccountDataInventory:
         self._observe(refs, 'identity_audit', key('human-verified', digest([self.b.namespace, installation, op])))
         return dict(grant_id=node['grant_id'], position=node['position'],
             installation_sha256=digest(installation), registration_present=reg_row is not None,
-            grant_present=grant_row is not None, research=self._research(installation, refs))
+            grant_present=grant_row is not None, research=self._research(installation,refs,person=person,operation=closure_operation,registration=None if reg_row is None else reg['proof']))
 
     def inspect(self, person, *, cursor=None, limit=5):
         """A bounded internal page; a caller cursor never proves whole-account coverage."""
@@ -227,7 +238,7 @@ class AccountDataInventory:
         page = self.b.lifecycle.page(person, cursor=cursor, limit=limit)
         refs = []; account = self._account(person, refs)
         subscription = self._subscription(account, refs)
-        grants = [self._grant(person, n, account, refs) for n in page['items']]
+        grants = [self._grant(person, n, account, refs, plan['operation']) for n in page['items']]
         unique = {}
         for ref in refs:
             k = (ref['store'], ref['key'])

@@ -23,6 +23,11 @@ def enum_value(value):
     return getattr(value, 'value', value)
 
 
+def matches_apple_account_token(signed_value, registered_token):
+    """The validated registry UUID is lowercase. Apple may vary ASCII hex case."""
+    return type(signed_value) is str and signed_value.isascii() and signed_value.lower() == registered_token
+
+
 @dataclass(frozen=True)
 class ApplePolicy:
     bundle: str
@@ -127,7 +132,7 @@ class AppleSubscriptionAuthority:
         if (getattr(renewal,'originalTransactionId',None)!=binding.original_transaction
                 or getattr(renewal,'productId',None)!=self.policy.product
                 or enum_value(getattr(renewal,'environment',None))!=self.policy.environment
-                or ('appAccountToken' in raw and raw['appAccountToken']!=binding.app_account_token)):
+                or ('appAccountToken' in raw and not matches_apple_account_token(raw['appAccountToken'], binding.app_account_token))):
             raise SubscriptionRejected('renewal product/owner/environment mismatch')
         # The token is optional in renewal info; the transaction token is always
         # required and verified above. A future autoRenewProductId is not the
@@ -197,7 +202,7 @@ class AppleSubscriptionAuthority:
                 enum_value(getattr(transaction,'environment',None))==p.environment,
                 getattr(transaction,'productId',None)==p.product,
                 getattr(transaction,'originalTransactionId',None)==binding.original_transaction,
-                getattr(transaction,'appAccountToken',None)==binding.app_account_token,
+                matches_apple_account_token(raw['appAccountToken'], binding.app_account_token),
                 enum_value(getattr(transaction,'type',None))=='Auto-Renewable Subscription',
                 enum_value(getattr(transaction,'inAppOwnershipType',None))=='PURCHASED',
                 getattr(transaction,'isUpgraded',False) in (None,False))

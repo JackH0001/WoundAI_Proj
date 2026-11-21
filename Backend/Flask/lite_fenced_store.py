@@ -4,6 +4,7 @@ Clinical/demo legacy storage is separate. Security budgets remain in their own
 store; this adapter accepts only Lite media and the two research ledgers.
 """
 import json
+import hashlib
 import re
 import secrets
 from lite_attest_state import StateUnavailable
@@ -138,6 +139,34 @@ class FencedMedia:
             raise ValueError('invalid annotation receipt scope')
         data = (json.dumps(record, ensure_ascii=False, allow_nan=False) + '\n').encode('utf-8')
         return self._create_once(ObjectRef(self.owner, 'label', receipt_id), data, receipt_id=receipt_id)
+
+    def capture_index(self, identifier):
+        if type(identifier) is not str or re.fullmatch(r'[0-9a-f]{16}', identifier) is None:
+            raise ValueError('invalid capture identifier')
+        data = self._read(ObjectRef(self.owner, 'index', identifier))
+        return None if data is None else json.loads(data)
+
+    def _capture_intent_ref(self, identifier):
+        if type(identifier) is not str or re.fullmatch(r'[0-9a-f]{16}', identifier) is None:
+            raise ValueError('invalid capture identifier')
+        # Separate metadata object, under the same owner/epoch deletion fence.
+        slot = hashlib.sha256(('research-capture-intent/1:'+identifier).encode()).hexdigest()
+        return ObjectRef(self.owner, 'metadata', slot)
+
+    def capture_intent(self, identifier):
+        data = self._read(self._capture_intent_ref(identifier))
+        return None if data is None else json.loads(data)
+
+    def claim_capture_once(self, identifier, record):
+        data = json.dumps(record, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+        return self._create_once(self._capture_intent_ref(identifier), data)
+
+    def publish_capture_once(self, identifier, record):
+        if (record.get('anon_id') != self.owner or record.get('image_id') != identifier
+                or type(identifier) is not str or re.fullmatch(r'[0-9a-f]{16}', identifier) is None):
+            raise ValueError('invalid capture index scope')
+        data = json.dumps(record, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+        return self._create_once(ObjectRef(self.owner, 'index', identifier), data)
 
     def read_lines_fresh(self, key):
         kind = LEDGERS.get(key)

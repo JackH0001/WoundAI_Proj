@@ -1,0 +1,136 @@
+{
+  "schema": "woundailite-build-provenance/1",
+  "reconstructed_at": "2026-11-07",
+  "limitations": "Source configurations and signed-file receipts, not a new Apple portal readback. Generated Xcode project hash was not captured for every historic build. No retrospective tags fabricated.",
+  "builds": [
+    {
+      "build": 40,
+      "version": "1.0",
+      "source": "9ba47559408645384e0d18607d8fb8117a630604",
+      "source_config_sha256": {
+        "iOS/project.yml": "7e461f72b2e56c2a119fc2500e05e734e5c121b09b951579a6c4a0e8869262a7",
+        "iOS/project.lite-sandbox.yml": "1d7408f420056b0bc5ccedc25042c30606d0684b4b5314972abf59c0ffc139d5",
+        "site/privacy/woundlite.html": "a8e645e0f9f51ae3abecd34f476f56a11f73c42ec4e149943edd8f8e951b626a"
+      },
+      "ipa_sha256": "5e853bb5f0d04e8359e080e3484455b2b0fa4961926ff65e87858cdd9b736b42",
+      "scheme": "WoundLite",
+      "configuration": "Release",
+      "candidate_project": "iOS/project.lite-sandbox.yml",
+      "effective_overrides": {
+        "CURRENT_PROJECT_VERSION": "40",
+        "WOUNDLITE_RESEARCH_CAPTURE": "YES",
+        "WOUNDLITE_SAVED_RECORD_TEST": "NO",
+        "native_environment": "sandbox"
+      },
+      "delivery": "local export only; not delivered",
+      "backend_at_delivery": "candidate native backend not deployed; do not infer backend version from App build",
+      "backend_readback_20261107": {
+        "research": "woundai-lite-candidate-00009-kid",
+        "medical": "woundai-backend-mmhps20261007-opt-4b39849"
+      },
+      "evidence": [
+        {
+          "path": "woundailite-timeline-trend-20261102/source.json",
+          "sha256": "8bf6a16759a13428a5207710e8ffe4c1b61f890a8987d7dbb369ff7213e92aa3"
+        },
+        {
+          "path": "woundailite-timeline-trend-20261102/local-export.json",
+          "sha256": "15492397eb1eeea6535fcfa06560f97c91f05c91b8f35a2922dbdffd3457f10a"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "build": 43,
+      "version": "1.0",
+      "source": "dfb5ca45ad069aab770025b47fe8add511795933",
+      "source_config_sha256": {
+        "iOS/project.yml": "f8d03ef3d0d576419bd8e22710811c39608557c6bfede21ce76f93d4d6dc2aa4",
+        "iOS/project.lite-sandbox.yml": "bc3cb56a0a6a267d488ddc7f325a590a8b26ec16f499cf0b4a0b05550865e5e1",
+        "site/privacy/woundlite.html": "54f031764d65c858592afd0a7e0773d2bd85d051015600ebe19ccea5d896d4fb"
+      },
+      "ipa_sha256": "37dbabe523fac7dc8bb717c2ec88bf86b3409fd53432fddafd32f6bbb10c01ce",
+      "scheme": "WoundLite",
+      "configuration": "Release",
+      "candidate_project": "iOS/project.lite-sandbox.yml",
+      "effective_overrides": {
+        "CURRENT_PROJECT_VERSION": "43",
+        "WOUNDLITE_RESEARCH_CAPTURE": "YES",
+        "WOUNDLITE_SAVED_RECORD_TEST": "NO",
+        "native_environment": "sandbox"
+      },
+      "delivery": "owner-only TestFlight receipt preserved",
+      "backend_at_delivery": "candidate native backend not deployed; do not infer backend version from App build",
+      "backend_readback_20261107": {
+        "research": "woundai-lite-candidate-00009-kid",
+        "medical": "woundai-backend-mmhps20261007-opt-4b39849"
+      },
+      "evidence": [
+        {
+          "path": "woundailite-beta43-20261103/source.json",
+          "sha256": "767cc9588bc2212fa857ea597029e4e55edd80e0d7815e97e3647d4917baf758"
+        },
+        {
+          "path": "woundailite-beta43-20261103/local-export.json",
+          "sha256": "dddcb94cb3416f21de6fdd4c21bb9264cc013e7da9d993a49bb41af7b8d1f147"
+        },
+        {
+          "path": "woundailite-beta43-20261103/owner-delivery/delivery.json",
+          "sha256": "d3d0e22269e080c926fee3ba1bb9bd2fe26452e12ad7c925bf669a6a67d051b6"
+        },
+        {
+          "path": "woundailite-beta43-20261103/testflight43-delivery/receipt.json",
+          "sha256": "47bd303222a4df64dbbead0e54718f9bc4af36496105eb9774cadc4551719f5e"
+        },
+        {
+          "path": "woundailite-beta43-20261103/jack-studio/source.json",
+          "sha256": "61bcb0b9a9963acbaec8bdef85fa3c85d793ac99bb27c15d823e9ff96b6a09cd"
+        }
+      ],
+      "notes": [
+        "43 preliminary exports 7b15390 and 1b7f7da were superseded; final source is dfb5ca4"
+      ]
+    },
+    {
+      "build": 44,
+      "version": "1.0",
+      "source": "53b4742b8d046558947628baa806fac274d7d177",
+      "source_config_sha256": {
+        "iOS/project.yml": "f8d03ef3d0d576419bd8e22710811c39608557c6bfede21ce76f93d4d6dc2aa4",
+        "iOS/project.lite-sandbox.yml": "bc3cb56a0a6a267d488ddc7f325a590a8b26ec16f499cf0b4a0b05550865e5e1",
+        "site/privacy/woundlite.html": "54f031764d65c858592afd0a7e0773d2bd85d051015600ebe19ccea5d896d4fb"
+      },
+      "ipa_sha256": "98e10674bc6658919af656a11273fa3e2e874de7a29ccf387431a9024dad7bc6",
+      "scheme": "WoundLite",
+      "configuration": "Release",
+      "candidate_project": "iOS/project.lite-sandbox.yml",
+      "effective_overrides": {
+        "CURRENT_PROJECT_VERSION": "44",
+        "WOUNDLITE_RESEARCH_CAPTURE": "YES",
+        "WOUNDLITE_SAVED_RECORD_TEST": "NO",
+        "native_environment": "sandbox"
+      },
+      "delivery": "owner-only TestFlight receipt preserved",
+      "backend_at_delivery": "candidate native backend not deployed; do not infer backend version from App build",
+      "backend_readback_20261107": {
+        "research": "woundai-lite-candidate-00009-kid",
+        "medical": "woundai-backend-mmhps20261007-opt-4b39849"
+      },
+      "evidence": [
+        {
+          "path": "woundailite-candidate53-20261104/app44/delivery-complete.json",
+          "sha256": "091d480314f72f29b35e4ff2a789ec789d5568d651d0a3d943222bb016d0aa63"
+        },
+        {
+          "path": "woundailite-candidate53-20261104/owner44-readiness/signed-app.json",
+          "sha256": "d1949eb701cc56a5ed1b3019edfccf7cf1720d9044d6353a0a38f360187171b1"
+        },
+        {
+          "path": "woundailite-candidate53-20261104/owner44-readiness/source-hashes.json",
+          "sha256": "339ca57aed20f996203cba0740ea4fdac1e837a2960134de405254448f6ba57e"
+        }
+      ],
+      "notes": []
+    }
+  ]
+}

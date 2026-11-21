@@ -57,8 +57,20 @@ class ServiceHTTPTests(SignedServiceClient, unittest.TestCase):
         self.assertNotIn(self.f.jpeg,payload);self.assertNotIn(b'raw_depth',payload)
         self.assertEqual(self.quota()['used'],1)
 
+    def test_confirmed_mask_version_survives_receipt_replay(self):
+        contract = 'student-onnx-logits-sigmoid-before-resize/v1'
+        model = self.inference.model
+        with patch.object(self.inference, 'model', side_effect=lambda rgb: (
+                model(rgb), {'route': 'student', 'student_output_contract': contract})):
+            first = self.complete().json
+        self.assertEqual(first['result']['student_output_contract'], contract)
+        self.assertEqual(self.json_request('status').json, first)
+        self.assertEqual(self.model_calls, 1)
+        self.assertEqual(self.quota()['used'], 1)
+
     def test_completed_readback_needs_no_image_or_entitlement_query(self):
         first=self.complete()
+        self.assertNotIn('student_output_contract', first.json['result'])
         with patch.object(self.accounts,'grant',side_effect=AssertionError('do not reauthorize a receipt')):
             repeat=self.json_request('status');self.assertEqual(repeat.json,first.json)
             prepared=self.json_request('prepare');self.assertEqual(prepared.json,first.json)
@@ -136,6 +148,69 @@ class ServiceHTTPTests(SignedServiceClient, unittest.TestCase):
         self.assertEqual(blocked.status_code,410)
         self.assertTrue(self.privacy._load(self.owner)[1]['withdrawn'])
         self.assertEqual(self.privacy._load(self.owner)[1]['writers'],[])
+
+    def test_busy_worker_preserves_the_same_ticket_while_control_requests_finish(self):
+        for n in (1, 2):
+            self.assertEqual(self.json_request('prepare', n).json['state'], 'ready')
+        entered, release = threading.Event(), threading.Event()
+        infer = self.inference.infer
+        def hold(rgb):
+            entered.set()
+            self.assertTrue(release.wait(10))
+            return infer(rgb)
+        with ThreadPoolExecutor(max_workers=1) as pool, patch.object(self.inference, 'infer', hold):
+            task = pool.submit(self.ops.run, self.owner, f'{1:032x}', self.f.jpeg)
+            try:
+                self.assertTrue(entered.wait(10))
+                self.assertEqual(self.run_request(1).status_code, 202)
+                busy = self.run_request(2)
+                self.assertEqual((busy.status_code, busy.json['error'], busy.json['retry_action']),
+                                 (429, 'lite_model_busy', 'status'))
+                self.assertEqual(busy.headers['Retry-After'], '5')
+                self.assertTrue(busy.json['keep_local'])
+                status = self.json_request('status', 2)
+                self.assertEqual((status.json['state'], status.json['receipt']['outcome']), ('ready', 'reserved'))
+                self.assertEqual((self.quota()['attempts'], self.quota()['used']), (2, 0))
+                path = '/api/v1/lite/data/' + self.owner
+                self.assertEqual(self.client.delete(path, headers=self.headers(path, b'', '',
+                    method='DELETE', purpose='withdraw')).status_code, 200)
+            finally:
+                release.set()
+            self.assertEqual(task.result()['receipt']['outcome'], 'succeeded')
+        result = self.run_request(2)
+        self.assertEqual(result.json['receipt']['outcome'], 'succeeded')
+        self.assertEqual(self.run_request(2).json, result.json)
+        self.assertEqual((self.quota()['attempts'], self.quota()['used'], self.model_calls), (2, 2, 2))
+
+    def test_model_failure_releases_worker_without_rerunning_uncertain_work(self):
+        for n in (1, 2):
+            self.assertEqual(self.json_request('prepare', n).json['state'], 'ready')
+        with patch.object(self.inference, 'infer', side_effect=StateUnavailable('interrupted')):
+            self.assertEqual(self.run_request(1).status_code, 503)
+        self.assertEqual(self.run_request(1).status_code, 202)
+        self.assertEqual(self.run_request(2).json['receipt']['outcome'], 'succeeded')
+        self.assertEqual((self.quota()['used'], self.model_calls), (1, 1))
+
+    def test_settlement_between_operation_and_receipt_reads_returns_original_result(self):
+        self.json_request('prepare')
+        operation=f'{1:032x}'
+        earlier=self.ops._require(self.subject,operation)
+        result=self.run_request().json
+        latest=self.ops._require(self.subject,operation)
+        with patch.object(self.ops,'_require',side_effect=[earlier,latest]) as read:
+            self.assertEqual(self.json_request('status').json,result)
+            self.assertEqual(read.call_count,2)
+        self.assertEqual((self.model_calls,self.quota()['used']),(1,1))
+
+    def test_terminal_receipt_alone_cannot_recreate_an_unavailable_result(self):
+        self.json_request('prepare')
+        earlier=self.ops._require(self.subject,f'{1:032x}')
+        self.run_request()
+        with patch.object(self.ops,'_require',return_value=earlier):
+            response=self.json_request('status')
+            self.assertEqual(response.status_code,503)
+            self.assertEqual(response.json['error'],'lite_operation_unconfirmed')
+        self.assertEqual((self.model_calls,self.quota()['used']),(1,1))
 
     def test_unprovisioned_authenticated_device_cannot_choose_account(self):
         self.ops.accounts=ServiceAccounts(SQLiteStateStore(self.root/'empty-accounts.sqlite'))

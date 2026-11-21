@@ -5,7 +5,7 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
-from lite_account_deletion import AccountDeletion, DeletionBusy, PREFIX
+from lite_account_deletion import AccountDeletion, DeletionBusy, LINKED_WITHDRAWAL, PREFIX
 from lite_account_identity import IdentityRejected
 from lite_attest_state import SQLiteStateStore, StateUnavailable
 from lite_apple_oauth import GrantUncertain, REVOKE_URL, TOKEN_URL
@@ -220,6 +220,25 @@ class DeletionHTTPTests(unittest.TestCase):
         self.d.advance(self.person)
         self.assertEqual(self.post('status').json['apple_revocation'],'confirmed')
         self.assertFalse(self.post('status').json['account_deleted'])
+    def test_signed_scope_upgrade_reuses_original_request_and_separate_audit(self):
+        legacy = self.post()
+        self.assertEqual(legacy.status_code, 202)
+        self.assertEqual(legacy.json['research_withdrawal'], 'awaiting_confirmation')
+        self.assertNotEqual(self.post(operation='a'*32, confirmation=LINKED_WITHDRAWAL).status_code, 202)
+        self.assertEqual(self.post(anon_id='other', confirmation=LINKED_WITHDRAWAL).status_code, 403)
+        self.assertEqual(self.post('status').json, legacy.json)
+        first = self.post(confirmation=LINKED_WITHDRAWAL)
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(first.json['research_withdrawal'], 'requested')
+        self.assertEqual(first.json['operation'], legacy.json['operation'])
+        saved = rows(self.d.audit)
+        self.assertEqual(self.post(confirmation=LINKED_WITHDRAWAL).json, first.json)
+        self.assertEqual(self.post().json, first.json)
+        self.assertEqual(self.post('status').json, first.json)
+        self.assertEqual(rows(self.d.audit), saved)
+        self.assertFalse(first.json['account_deleted'])
+        self.assertFalse(first.json['subscription_cancelled'])
+
     def test_explicit_confirmation_and_owner_required(self):
         self.assertEqual(self.post(confirmation='').status_code,409)
         self.assertEqual(self.post(anon_id='other').status_code,403)

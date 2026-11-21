@@ -159,6 +159,7 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
     private let now: () -> Date
     private var processing=Set<String>()
     private var listener: Task<Void,Never>?
+    private var listeningToken: String?
     init(service: any LitePurchaseService,provider: any LitePurchaseProvider,journal: any LiteServiceJournal,now:@escaping ()->Date=Date.init) {
         self.service=service;self.provider=provider;self.journal=journal;self.now=now
     }
@@ -210,11 +211,13 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
         }
         guard try await service.installation() == owner else { throw LitePurchaseFailure.accountMismatch }
         if record.acknowledgment == nil {
+            try Task.checkCancellation()
             let r=try await service.confirm(record.context,event:record.event!);try r.validate(record.context,event)
             record.acknowledgment=r;old=try await save(key,old,record)
         }
         guard try await service.installation() == owner else { throw LitePurchaseFailure.accountMismatch }
         if !record.finished {
+            try Task.checkCancellation()
             try await provider.finish(event)
             record.finished=true;_=try await save(key,old,record)
         }
@@ -229,6 +232,12 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
         // Validate the whole StoreKit batch before mutating its first transaction.
         for event in events { try event.validate(context) }
         for event in events { try await process(event, using: context) }
+    }
+    func observePurchases(accountToken: String?) async {
+        guard !Task.isCancelled else { return }
+        guard let accountToken else { stopObserving(); return }
+        startObserving(accountToken: accountToken)
+        await reconcile(reportEmpty: false, accountToken: accountToken)
     }
     func loadOffer() async {
         guard !busy, !loadingOffer else { return }
@@ -253,9 +262,19 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
             message = "目前無法核對 Apple 的商品與價格，尚未開始購買。"
             return
         }
+        let known: [LitePurchaseEvent]
+        do { known = try await provider.knownPurchases() }
+        catch {
+            message = "無法核對 Apple 的既有訂閱，尚未發起新的購買。請稍後再試。"
+            return
+        }
+        let c: LitePurchaseContext
+        do { c = try await context() }
+        catch {
+            message = "服務帳號尚未核對，尚未向 Apple 發起購買。請確認連線並登入原服務帳號後再試。"
+            return
+        }
         do {
-            let known = try await provider.knownPurchases()
-            let c=try await context()
             if !known.isEmpty {
                 try await reconcileKnown(known, using: c)
                 return
@@ -272,30 +291,62 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
     }
     func restore() async {
         guard !busy else{return};busy=true;defer{busy=false}
-        do {
-            let c=try await context();let events=try await provider.restore()
-            if events.isEmpty { message="沒有找到可恢復的訂閱；未建立新帳號或重設額度。" }
-            try await reconcileKnown(events, using: c)
-        } catch { failed(error) }
+        let c: LitePurchaseContext
+        do { c = try await context() }
+        catch {
+            message = "服務帳號尚未核對，尚未向 Apple 查詢既有訂閱。請確認連線並登入原服務帳號後再試。"
+            return
+        }
+        let events: [LitePurchaseEvent]
+        do { events = try await provider.restore() }
+        catch {
+            message = "未能確認 Apple 的既有訂閱。請稍後再按「恢復購買」。"
+            return
+        }
+        guard !events.isEmpty else {
+            message = "沒有找到可恢復的訂閱；未建立新帳號或重設額度。"
+            return
+        }
+        do { try await reconcileKnown(events, using: c) } catch { failed(error) }
     }
-    func reconcile() async {
+    func reconcile(reportEmpty: Bool = true, accountToken: String? = nil) async {
         guard !busy else{return};busy=true;defer{busy=false}
-        do { for e in try await provider.unfinished() { try await process(e) } }
-        catch { failed(error) }
+        do {
+            let events = try await provider.unfinished()
+            if events.isEmpty && reportEmpty { message = "Apple 目前沒有待完成的交易。要查找既有訂閱，請按「恢復購買」。" }
+            for event in events {
+                try Task.checkCancellation()
+                if let accountToken {
+                    guard listeningToken == accountToken else { return }
+                    guard event.token == accountToken else { continue }
+                }
+                try await process(event)
+            }
+        }
+        catch { if !Task.isCancelled { failed(error) } }
     }
-    func startObserving() {
-        guard listener == nil else{return}
+    func startObserving(accountToken: String) {
+        guard listeningToken != accountToken else { return }
+        stopObserving()
+        listeningToken = accountToken
+        let updates = provider.updates()
         listener=Task { [weak self] in
-            guard let provider=self?.provider else{return}
-            for await update in provider.updates() {
+            for await update in updates {
                 guard !Task.isCancelled else{return}
                 do {
                     switch update {
-                    case .event(let e):try await self?.process(e)
+                    case .event(let e):
+                        guard e.token == accountToken else { continue }
+                        try await self?.process(e)
                     case .invalid:throw LitePurchaseFailure.invalid
                     }
-                } catch { self?.failed(error) }
+                } catch { if !Task.isCancelled { self?.failed(error) } }
             }
         }
+    }
+    func stopObserving() {
+        listener?.cancel()
+        listener = nil
+        listeningToken = nil
     }
 }

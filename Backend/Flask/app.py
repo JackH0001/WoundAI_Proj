@@ -1242,7 +1242,7 @@ def _apply_ssot_preproc(resized_rgb, model_key):
         x = x / 255.0
     return np.ascontiguousarray(x)
 
-def segment_wound_ai(image):
+def segment_wound_ai(image, *, provenance=None):
     """使用AI模型進行傷口分割 - 支援 ONNX Runtime 與 TensorFlow Keras。"""
     try:
         # ---- ONNX Runtime 推論 ----
@@ -1286,6 +1286,8 @@ def segment_wound_ai(image):
             )
             wound_mask = np.clip(wound_mask, 0.0, 1.0)
             confidence = float(np.mean(np.maximum(wound_mask, 1.0 - wound_mask)))
+            if provenance is not None and mkey == "student":
+                provenance["student_output_contract"] = STUDENT_OUTPUT_CONTRACT
             return wound_mask, confidence
 
         # ---- TensorFlow Keras 推論 ----
@@ -1454,7 +1456,8 @@ def segment_for_lite(image_rgb):
     在醫療版與民眾版會得到不同答案，而那種差異最難歸因。
     """
     import numpy as _np
-    out = segment_wound_ai(image_rgb)
+    provenance = {}
+    out = segment_wound_ai(image_rgb, provenance=provenance)
     wound_prob = out[0] if isinstance(out, tuple) else out
     if wound_prob is None:
         mask = _np.zeros(image_rgb.shape[:2], bool)
@@ -1464,7 +1467,7 @@ def segment_for_lite(image_rgb):
     mask, info = escalate_mask(image_rgb, mask, w, h, policy="on_weak")
     info.setdefault("route", "student")
     info.setdefault("escalated", False)
-    info['student_output_contract'] = STUDENT_OUTPUT_CONTRACT if _active_model_key() == 'student' else None
+    info.update(provenance)
     return mask, info
 
 
@@ -1481,7 +1484,7 @@ def segment_for_lite(image_rgb):
 # 也讓它在沒有 ONNX 模型的環境下 import 得起來（契約測試因此不必載入模型）。
 if LITE_API_ENABLED:
     try:
-        from lite_attest_http import install_lite_attest
+        from lite_attest_http import InternalOwner, install_lite_attest
         from lite_attest_config import build_lite_security
         try:
             _lite_security, _lite_budget, _lite_privacy = build_lite_security(os.environ)
@@ -1491,7 +1494,16 @@ if LITE_API_ENABLED:
             # Fail closed without printing configuration, credentials or paths.
             _lite_security, _lite_budget, _lite_privacy = None, None, None
             BLUEPRINT_FAILURES.append(("lite_attest", "security configuration unavailable"))
-        install_lite_attest(app, service=_lite_security, budget=_lite_budget, privacy=_lite_privacy)
+        _link_signer = None
+        if LITE_SERVICE and ('LITE_RESEARCH_LINK_FILE' in os.environ or 'LITE_RESEARCH_LINK_SHA256' in os.environ):
+            from lite_research_issuer import settings as _issuer_settings
+            _link_signer = _issuer_settings(os.environ, 'research')
+        from lite_research_capture import configured_receiver as _capture_receiver
+        _research_capture = _capture_receiver(os.environ, signer=_link_signer,
+            privacy=_lite_privacy, request_budget=_lite_budget)
+        install_lite_attest(app, service=_lite_security, budget=_lite_budget, privacy=_lite_privacy,
+            link_signer=_link_signer, research_capture=_research_capture,
+            internal_owner=InternalOwner.configured(os.environ,'research') if LITE_SERVICE else None)
         from api_lite import lite_bp as _lite_bp, init_lite as _init_lite
         _init_lite(segment_for_lite)
         app.register_blueprint(_lite_bp)
@@ -1926,6 +1938,7 @@ def classify_wound():
         # (模型權重/訓練集/golden 釘值一律不變 → 對臨床效能零風險)
         phantom = str(request.form.get('seg', 'auto')).lower() == 'color'
         seg_model = _active_model_key(); route = "student"; escalated = False; au_ratio = None; iou_sa = None
+        provenance = {}
         phantom_pass = None; phantom_hint = False
         if phantom:
             _sr = _load_seg_red()
@@ -1936,7 +1949,7 @@ def classify_wound():
             seg_model = f"color_hsv(phantom,{phantom_pass})"; route = "phantom_color(非AI)"
         else:
             # Stage2 分割(端上主力 student)
-            wound_prob, conf = segment_wound_ai(img)
+            wound_prob, conf = segment_wound_ai(img, provenance=provenance)
             # 門檻只有一個來源（`student_threshold()`）。先前這裡與 segment_for_lite
             # 各寫一份同樣的運算式——兩份拷貝一旦分岔，同一張照片在醫療版與
             # 民眾版會得到不同遮罩，而兩邊看起來都「有套用 SSOT 門檻」。
@@ -2110,7 +2123,7 @@ def classify_wound():
             # App 在臨床模式看到 true 要警示:那多半不是這次回診拍的照片。
             'image_reused': bool(image_reused),
             'stage2_segment': {'model': seg_model, 'wound_ratio': round(float(mask.mean()), 4), 'confidence': round(conf, 4),
-                               'student_output_contract': (STUDENT_OUTPUT_CONTRACT if _active_model_key() == 'student' and not route.startswith('phantom_color') else None),
+                               'student_output_contract': provenance.get('student_output_contract'),
                                'route': route, 'escalated': escalated, 'au_area_ratio': au_ratio, 'iou_student_au': iou_sa,
                                'wound_polygon': wound_poly,
                                # 所有輪廓（由大到小）。只讀 wound_polygon 的話，

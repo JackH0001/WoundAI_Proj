@@ -4,6 +4,16 @@ import StoreKit
 import StoreKitTest
 @testable import WoundLite
 
+/// A previous simulated purchase may have left Ask to Buy or another override
+/// active if its test process timed out before cleanup.
+@MainActor func freshCommerceTestSession(url: URL) throws -> SKTestSession {
+    let session = try SKTestSession(contentsOf: url)
+    session.resetToDefaultState()
+    session.disableDialogs = true
+    session.clearTransactions()
+    return session
+}
+
 final class LiteCommerceStoreTests: XCTestCase {
     @MainActor private func waitFor(_ plan: LiteLabPlan, store: LiteCommerceStore) async throws {
         for _ in 0..<40 {
@@ -16,10 +26,8 @@ final class LiteCommerceStoreTests: XCTestCase {
     @MainActor func testRealStoreKitPurchaseRestoreAndRefund() async throws {
         executionTimeAllowance = 60
         let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "WoundLiteCommerce", withExtension: "storekit"))
-        let session = try SKTestSession(contentsOf: url)
+        let session = try freshCommerceTestSession(url: url)
         print("STOREKIT session initialized: purchase")
-        session.disableDialogs = true
-        session.clearTransactions()
         defer { session.clearTransactions() }
         let store = LiteCommerceStore()
         await store.load()
@@ -28,7 +36,12 @@ final class LiteCommerceStoreTests: XCTestCase {
         XCTAssertEqual(product.price, Decimal(string: "1.99"))
         XCTAssertEqual(product.subscription?.subscriptionPeriod.unit, .month)
         XCTAssertEqual(product.subscription?.subscriptionPeriod.value, 1)
-        XCTAssertEqual(store.plan, .free)
+        // StoreKit may deliver the prior entitlement briefly after clearing the test history.
+        XCTAssertTrue(session.allTransactions().isEmpty)
+        if store.plan != .free && session.allTransactions().isEmpty {
+            try await AppStore.sync()
+        }
+        try await waitFor(.free, store: store)
         await store.purchase()
         XCTAssertEqual(store.plan, .plus, store.message)
         let restored = LiteCommerceStore()
@@ -44,10 +57,8 @@ final class LiteCommerceStoreTests: XCTestCase {
     @MainActor func testExpiredSubscriptionDoesNotKeepPaidQuota() async throws {
         executionTimeAllowance = 60
         let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "WoundLiteCommerce", withExtension: "storekit"))
-        let session = try SKTestSession(contentsOf: url)
+        let session = try freshCommerceTestSession(url: url)
         print("STOREKIT session initialized: expiration")
-        session.disableDialogs = true
-        session.clearTransactions()
         defer { session.clearTransactions() }
         _ = try await session.buyProduct(identifier: LiteCommerceStore.productID)
         print("STOREKIT test purchase completed")
@@ -63,9 +74,7 @@ final class LiteCommerceStoreTests: XCTestCase {
     @MainActor func testPendingPurchaseDoesNotGrantUntilApproved() async throws {
         executionTimeAllowance = 60
         let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "WoundLiteCommerce", withExtension: "storekit"))
-        let session = try SKTestSession(contentsOf: url)
-        session.disableDialogs = true
-        session.clearTransactions()
+        let session = try freshCommerceTestSession(url: url)
         session.askToBuyEnabled = true
         defer { session.askToBuyEnabled = false; session.clearTransactions() }
         let store = LiteCommerceStore()

@@ -7,12 +7,21 @@ import os
 import posixpath
 import re
 from flask import jsonify, request
+from lite_attest_request import RESEARCH_ACCEPT_PATH
 
 POST_ROUTES = frozenset({
     '/api/v1/lite/attest/challenge', '/api/v1/lite/attest/register',
     '/api/v1/lite/segment', '/api/v1/lite/annotation', '/api/v1/lite/annotation/revision',
     '/api/v1/lite/research/rejoin',
 })
+
+# These routes exist only when the research service has its matching receiver
+# or proof signer. Leave unregistered routes and catch-all handlers outside.
+RESEARCH_POST_ENDPOINTS = {
+    '/api/v1/lite/research/capture': 'lite_research_capture.capture',
+    '/api/v1/lite/research/capture/status': 'lite_research_capture.status',
+    RESEARCH_ACCEPT_PATH: 'lite_research_issuer.issue',
+}
 
 
 def service_profile(environment):
@@ -65,8 +74,9 @@ def install_lite_perimeter(app):
         raw = request.environ.get('RAW_URI', request.environ.get('REQUEST_URI', path))
         canonical = (not request.query_string and not request.script_root and raw == path
                      and '%' not in path and '\\' not in path)
+        research_post = request.endpoint is not None and request.endpoint == RESEARCH_POST_ENDPOINTS.get(path)
         allowed = ((path == '/api/health' and method in ('GET', 'HEAD')) or
-                   (path in POST_ROUTES and method == 'POST') or
+                   (method == 'POST' and (path in POST_ROUTES or research_post)) or
                    (method == 'DELETE' and re.fullmatch(
                        r'/api/v1/lite/data/[0-9a-f]{32}(?:/[0-9a-f]{32})?', path)))
         if not canonical or not allowed:

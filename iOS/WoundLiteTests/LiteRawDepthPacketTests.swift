@@ -32,6 +32,36 @@ final class LiteRawDepthPacketTests: XCTestCase {
         _ = await vm.ingest(other, depth: nil)
         XCTAssertNotEqual(vm.captureJPEG, captured)
     }
+    @MainActor
+    func testCaptureRejectsDifferentOrPartialPriorRGBDimensionsInsteadOfRebinding() async throws {
+        let photo = try XCTUnwrap(UIImage(data: jpeg()))
+        for (w, h) in [(128, 128), (0, 64), (64, 0)] {
+            var d = depth()
+            d.rgbWidth = w
+            d.rgbHeight = h
+            let vm = LiteMeasureVM()
+            _ = await vm.ingest(photo, depth: d)
+            XCTAssertNil(vm.depth, "Conflicting capture dimensions \(w)×\(h)")
+            XCTAssertNil(vm.estimate)
+            XCTAssertNil(vm.cloudBinding)
+            XCTAssertNotNil(vm.image)
+        }
+    }
+
+    @MainActor
+    func testCaptureRejectsDepthOrientedForAnotherPhotoOfSameDimensions() async throws {
+        let photo = try XCTUnwrap(UIImage(data: jpeg()))
+        for exif in [2, 3, 6] {
+            var d = depth()
+            d.sourceExifOrientation = exif
+            let vm = LiteMeasureVM()
+            _ = await vm.ingest(photo, depth: d)
+            XCTAssertNil(vm.depth, "Depth used EXIF \(exif) but this camera photo is upright")
+            XCTAssertNil(vm.estimate)
+            XCTAssertNil(vm.cloudBinding)
+        }
+    }
+
     func testExactFloatBitsAndHonestProvenance() throws {
         var d = depth();d.map[0] = Float(bitPattern: 0x7fc01234)
         let j = jpeg();let p = try LiteRawDepthPacket.make(depth:d,jpeg:j)
@@ -41,6 +71,29 @@ final class LiteRawDepthPacketTests: XCTestCase {
         XCTAssertEqual(m["schema"] as? String,"lite.rgbd/1")
         XCTAssertEqual(m["pose"] as? String,"unavailable")
         XCTAssertEqual(m["registration"] as? String,"not_verified")
+    }
+
+    @MainActor
+    func testFreshCameraMapCanBindOnceWithAllMatchingPhotoOrientations() async throws {
+        let pixels = try XCTUnwrap(UIImage(data: jpeg())?.cgImage)
+        let orientations: [UIImage.Orientation] = [.up, .upMirrored, .down, .downMirrored,
+                                                    .left, .leftMirrored, .right, .rightMirrored]
+        for orientation in orientations {
+            let raw = UIImage(cgImage: pixels, scale: 1, orientation: orientation)
+            var d = depth()
+            d.rgbWidth = 0
+            d.rgbHeight = 0
+            d.sourceExifOrientation = Int(try XCTUnwrap(DepthCapture.exifOrientation(orientation)).rawValue)
+            let vm = LiteMeasureVM()
+            _ = await vm.ingest(raw, depth: d)
+            let paired = try XCTUnwrap(vm.depth)
+            XCTAssertEqual(paired.rgbWidth, 64)
+            XCTAssertEqual(paired.rgbHeight, 64)
+            XCTAssertEqual(paired.sourceExifOrientation, d.sourceExifOrientation)
+            XCTAssertEqual(paired.map.map(\.bitPattern), d.map.map(\.bitPattern))
+            let packet = try LiteRawDepthPacket.make(depth: paired, jpeg: XCTUnwrap(vm.captureJPEG))
+            XCTAssertEqual(packet.rawDepth.count, d.map.count * 4)
+        }
     }
     func testCaptureV2IsStableAcrossSerializationAndBindsTimeToPacket() throws {
         var d = depth()
@@ -66,6 +119,28 @@ final class LiteRawDepthPacketTests: XCTestCase {
         XCTAssertThrowsError(try LiteRawDepthPacket.make(depth:d,jpeg:jpeg()))
         d = depth();d.rgbWidth = 48
         XCTAssertThrowsError(try LiteRawDepthPacket.make(depth:d,jpeg:jpeg()))
+    }
+
+    @MainActor
+    func testPortraitCameraNormalizationBindsTheResizedPixelsAndKeepsDepthSamples() async throws {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let landscape = UIGraphicsImageRenderer(size: CGSize(width: 2400, height: 1200), format: format).image { ctx in
+            UIColor.blue.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 1200, height: 1200))
+        }
+        let raw = UIImage(cgImage: try XCTUnwrap(landscape.cgImage), scale: 1, orientation: .right)
+        let samples = (0..<128).map { Float(0.30) + Float($0) / 100_000 }
+        let d = DepthCapture(map: samples, width: 8, height: 16, fx: 20, fy: 20, cx: 4, cy: 8,
+                             refWidth: 8, refHeight: 16, accuracy: "absolute", filtered: false, sourceExifOrientation: 6)
+        let vm = LiteMeasureVM()
+        _ = await vm.ingest(raw, depth: d)
+        let paired = try XCTUnwrap(vm.depth)
+        XCTAssertEqual([paired.rgbWidth, paired.rgbHeight], [1024, 2048])
+        let packet = try LiteRawDepthPacket.make(depth: paired, jpeg: XCTUnwrap(vm.captureJPEG))
+        XCTAssertEqual(packet.rawDepth, samples.withUnsafeBytes { Data($0) })
+        let size = try LiteServiceBytes.imageSize(packet.jpeg)
+        XCTAssertEqual([size.0, size.1], [1024, 2048])
     }
     func testBadDimensionsAndTruncatedDepthRejected() {
         var d = depth();d.map.removeLast()

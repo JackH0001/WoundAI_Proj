@@ -16,11 +16,14 @@ import time
 from unittest.mock import Mock, patch
 
 
-def main(application_root):
+def main(application_root, require_provenance=False):
     root=application_root.resolve(strict=True)
     if not (root/'Backend/LiteReview/runtime.py').is_file():
         raise ValueError('isolated application root missing')
     sys.path.insert(0,str(root))
+    if require_provenance:
+        from Backend.LiteReview.build_provenance import verify
+        print(json.dumps({'package': verify(root)}))
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.hazmat.primitives import serialization
     import jwt
@@ -72,4 +75,6 @@ def main(application_root):
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--application-root',type=Path,default=Path('/app'))
-    main(parser.parse_args().application_root)
+    parser.add_argument('--require-provenance',action='store_true')
+    args=parser.parse_args()
+    main(args.application_root,args.require_provenance)

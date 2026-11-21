@@ -84,6 +84,15 @@ struct LiteRevisionPresentation: Equatable {
     static func make(record: LiteRecord, syncing: Bool, consent: Bool,
                      withdrawalBlocked: Bool, retiredResearch: Bool = false, now: Date = Date()) -> Self {
         guard let sync = record.cloudSync else {
+            if let job = record.researchCapture {
+                if withdrawalBlocked || !consent || retiredResearch {
+                    return Self(phase: .localOnly, title: "研究保存已暫停", detail: "本機照片、深度與修改已保留。")
+                }
+                let waiting = job.retryAt.map { $0 > now } ?? false
+                return Self(phase: waiting ? .waiting : .pending, title: "已存入手機，研究保存待確認",
+                            detail: job.notice ?? "將核對這筆拍攝的保存收據，確認後再同步圈選。",
+                            retryTitle: waiting ? nil : "核對這筆研究保存")
+            }
             return Self(phase: .unavailable, title: "僅存於此手機",
                         detail: "此筆未取得雲端影像保存確認，無法直接同步修改。原紀錄保留。")
         }
@@ -130,12 +139,17 @@ struct LiteRevisionPresentation: Equatable {
 
 extension LiteRecord {
     func revisionJSON() throws -> String? {
-        guard (manuallyConfirmed == true || (manuallyConfirmed == false && source == "cloud")), let cloudSync,
+        guard let binding = cloudSync?.binding else { return nil }
+        return try revisionJSON(width: binding.imageW, height: binding.imageH)
+    }
+
+    func revisionJSON(width: Int, height: Int) throws -> String? {
+        guard (manuallyConfirmed == true || (manuallyConfirmed == false && source == "cloud")),
               let raw = polysJson?.data(using: .utf8),
               let polygons = try? JSONDecoder().decode([[[Int]]].self, from: raw),
               !polygons.isEmpty else { return nil }
         let p = LiteRevisionPayload(polygons: polygons,
-                                    image_w: cloudSync.binding.imageW, image_h: cloudSync.binding.imageH,
+                                    image_w: width, image_h: height,
                                     surface_cm2: surfaceCm2, projected_cm2: projectedCm2,
                                     volume_ml: volumeMl, max_depth_mm: maxDepthMm,
                                     wound_id: woundID, wound_side: woundLocation?.side,

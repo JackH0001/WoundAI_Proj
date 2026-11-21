@@ -32,7 +32,12 @@ class PackageTests(unittest.TestCase):
     def test_independent_package_no_model_secret_or_web_routes(self):
         for n in ('models/weight.onnx','upload.jpg','.env','app.py','lite_native_startup.py','secret.p8'):
             p=self.root/'Backend/Flask'/n;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('not for worker')
-        m=self.build();self.assertEqual(len(m['files']),38);self.assertFalse(m['release_approved'])
+        m=self.build()
+        self.assertEqual(len(m['files']),41)
+        self.assertIn('lite_result_contract.py',m['files'])
+        self.assertIn('lite_rotating_grant_keys.py',m['files'])
+        self.assertIn('lite_run_identity.py',m['files'])
+        self.assertFalse(m['release_approved'])
         r=self.verify();self.assertEqual(r.returncode,0,r.stderr)
         self.assertFalse(json.loads(r.stdout)['application_started']);self.assertFalse(json.loads(r.stdout)['cloud_access'])
     def test_new_nested_dependency_blocks_staging(self):

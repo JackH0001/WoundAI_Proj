@@ -5,12 +5,18 @@ import Charts
  本地紀錄＋同一傷口的面積變化；量測變化不能單獨判定癒合。
  */
 struct LiteHistoryView: View {
+    private var copy: LiteHistoryCopy { LiteHistoryCopy(locale: locale) }
+    @Environment(\.locale) private var locale
+    private var reportCopy: LiteReportCopy { LiteReportCopy(locale: locale) }
     @ObservedObject var store: LiteStore
     @Binding var recordToOpen: String?
     let nativeSession: LiteNativeSession?
     @State private var selected: LiteRecord?
     @State private var woundFilter = ""
     @State private var choseInitialWound = false
+    @State private var compareWound: LiteWoundGroup?
+    @State private var reportWound: LiteWoundGroup?
+    @State private var manageTracking = false
     private let ungrouped = "__ungrouped__"
 
     init(store: LiteStore, recordToOpen: Binding<String?> = .constant(nil), nativeSession: LiteNativeSession? = nil) {
@@ -44,52 +50,63 @@ struct LiteHistoryView: View {
                     VStack(spacing: 10) {
                         Image(systemName: "chart.line.uptrend.xyaxis")
                             .font(.system(size: 40)).foregroundStyle(.secondary)
-                        Text(store.needsReload ? "紀錄暫時無法讀取" : "還沒有量測紀錄").font(.headline)
-                        if let error = store.storageError { Text(error).font(.footnote).foregroundStyle(.orange) }
+                        Text(copy.text(store.needsReload ? "紀錄暫時無法讀取" : "還沒有量測紀錄")).font(.headline)
+                        if let error = store.storageError { Text(copy.message(error)).font(.footnote).foregroundStyle(.orange) }
                         if store.needsReload {
-                            Button("重新讀取紀錄") { store.reload() }
+                            Button(copy.text("重新讀取紀錄")) { store.reload() }
                         }
-                        Text(store.needsReload ? "原資料未被覆寫。" : "到「量測」拍下第一筆，同一傷口的面積紀錄會分開追蹤。")
+                        Text(copy.text(store.needsReload ? "原資料未被覆寫。" : "到「量測」拍下第一筆，同一傷口的面積紀錄會分開追蹤。"))
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 } else {
                     List {
-                        if let error = store.storageError { Text(error).foregroundStyle(.orange) }
-                        if store.needsReload { Button("重新讀取紀錄") { store.reload() } }
+                        if let error = store.storageError { Text(copy.message(error)).foregroundStyle(.orange) }
+                        if store.needsReload { Button(copy.text("重新讀取紀錄")) { store.reload() } }
                         Section {
-                            Picker("傷口", selection: $woundFilter) {
-                                Text("全部紀錄").tag("")
-                                Text("未分組").tag(ungrouped)
+                            Picker(copy.text("傷口"), selection: $woundFilter) {
+                                Text(copy.text("全部紀錄")).tag("")
+                                Text(copy.text("未分組")).tag(ungrouped)
                                 ForEach(store.wounds) { wound in
-                                    Text(wound.displayName).tag(wound.id)
+                                    Text(copy.group(wound) + (wound.ended ? copy.text("（已結束）") : "")).tag(wound.id)
                                 }
                             }
                         } header: {
-                            Text("選擇傷口")
+                            Text(copy.text("傷口時間軸"))
                         }
-                        Section("LiDAR 表面積估算趨勢（cm²）") {
+                        if let wound = store.wounds.first(where: { $0.id == woundFilter }) {
+                            Button { compareWound = wound } label: {
+                                Label(copy.text("比較最近兩次照片"), systemImage: "rectangle.split.2x1")
+                            }.accessibilityIdentifier("lite.timeline.compare")
+                            Button { reportWound = wound } label: {
+                                Label(reportCopy.text("匯出此傷口時間軸 PDF"),systemImage:"square.and.arrow.up")
+                            }.accessibilityIdentifier("lite.timeline.export")
+                        }
+                        Section(copy.text("LiDAR 表面積估算趨勢（cm²）")) {
                             if !woundFilter.isEmpty, woundFilter != ungrouped {
                                 LiteTrendChart(woundID: woundFilter, records: store.records)
-                                Text("只比較同一處傷口。拍攝角度、距離與圈選差異都會影響數值；變化不等於癒合判定。")
+                                Text(copy.text("只比較同一處傷口。拍攝角度、距離與圈選差異都會影響數值；變化不等於癒合判定。"))
                                     .font(.caption).foregroundStyle(.secondary)
                             } else {
-                                Text("請在上方選擇一處傷口查看圖表；全部紀錄與未分組資料不合併計算趨勢。")
+                                Text(copy.text("請在上方選擇一處傷口查看圖表；全部紀錄與未分組資料不合併計算趨勢。"))
                                     .font(.footnote).foregroundStyle(.secondary)
                             }
                         }
-                        Section("量測紀錄（點選查看・左滑刪除）") {
+                        Section(copy.text("量測紀錄（點選查看・左滑刪除）")) {
                             ForEach(visibleRecords) { r in
                                 Button { selected = r } label: { row(r).contentShape(Rectangle()) }
                                     .buttonStyle(.plain)
+                                    .accessibilityIdentifier("lite.record." + r.id)
                                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                        Button("刪除", role: .destructive) { pendingDelete = r }
+                                        Button(copy.text("刪除"), role: .destructive) { pendingDelete = r }
                                     }
                             }
                         }
                     }
                 }
             }
-            .navigationTitle("紀錄")
+            .navigationTitle(copy.text("紀錄"))
+            .toolbar { Button(copy.text("管理追蹤")) { manageTracking = true } }
+            .sheet(isPresented: $manageTracking) { LiteTrackingManager(store: store, session: nativeSession) }
             .onAppear {
                 openSavedRecord()
                 if !choseInitialWound, !store.records.isEmpty {
@@ -105,19 +122,28 @@ struct LiteHistoryView: View {
             .sheet(item: $selected) { r in
                 LiteRecordDetailView(recordId: r.id, store: store, nativeSession:nativeSession)
             }
+            .fullScreenCover(item: $compareWound) { group in
+                LitePhotoComparisonView(group: group, store: store)
+            }
+            .sheet(item:$reportWound) { group in
+                LiteTimelineExportView(group:group,store:store)
+            }
             .confirmationDialog(
-                "確定刪除這筆紀錄？",
+                copy.text("確定刪除這筆紀錄？"),
                 isPresented: Binding(get: { pendingDelete != nil },
                                      set: { if !$0 { pendingDelete = nil } }),
                 titleVisibility: .visible
             ) {
-                Button("刪除（無法復原）", role: .destructive) {
-                    if let r = pendingDelete { store.delete(r) }
+                Button(copy.text("刪除（無法復原）"), role: .destructive) {
+                    if let r = pendingDelete {
+                        if let nativeSession { Task { _ = await nativeSession.deleteLocalRecord(r, in: store) } }
+                        else { store.delete(r) }
+                    }
                     pendingDelete = nil
                 }
-                Button("取消", role: .cancel) { pendingDelete = nil }
+                Button(copy.text("取消"), role: .cancel) { pendingDelete = nil }
             } message: {
-                Text("刪除此裝置的紀錄及對應影像、深度資料。已上傳的研究資料不會因此撤回。")
+                Text(copy.text("刪除此裝置的紀錄及對應影像、深度資料。已上傳的研究資料不會因此撤回。"))
             }
         }
     }
@@ -128,13 +154,13 @@ struct LiteHistoryView: View {
             VStack(alignment: .leading, spacing: 2) {
                 if let series = r.areaSeries {
                     Text(String(format: "LiDAR %.2f cm²", r.surfaceCm2)).font(.headline)
-                    Text(series.rawValue).font(.caption2).foregroundStyle(.secondary)
+                    Text(copy.text(series.rawValue)).font(.caption2).foregroundStyle(.secondary)
                 } else {
-                    Text("未提供面積").font(.headline)
-                    Text("點選查看原因").font(.caption2).foregroundStyle(.secondary)
+                    Text(copy.text("未提供面積")).font(.headline)
+                    Text(copy.text("點選查看原因")).font(.caption2).foregroundStyle(.secondary)
                 }
-                Text([r.woundName ?? "未分組", r.woundLocation?.label ?? "待補位置"].joined(separator: "・")).font(.caption).foregroundStyle(.secondary)
-                Text(Self.pretty(r.dateISO) + (r.source == "cloud" ? "・雲端辨識" : "・手動圈選"))
+                Text([r.woundName ?? copy.text("未分組"), r.woundLocation.map { copy.location($0) } ?? copy.text("待補位置")].joined(separator: copy.english ? ", " : "・")).font(.caption).foregroundStyle(.secondary)
+                Text(copy.date(r.dateISO) + " · " + copy.text(r.source == "cloud" ? "雲端辨識" : r.source == "local" ? "地端模型" : "手動圈選"))
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
@@ -154,12 +180,6 @@ struct LiteHistoryView: View {
         LiteGrouping.changePercent(r, in: store.records)
     }
 
-    private static func pretty(_ iso: String) -> String {
-        guard let d = ISO8601DateFormatter().date(from: iso) else { return iso }
-        let f = DateFormatter()
-        f.dateFormat = "M/d HH:mm"
-        return f.string(from: d)
-    }
 }
 
 /**
@@ -249,6 +269,9 @@ struct LiteContourChangeSummary: Equatable {
 }
 
 struct LiteRecordDetailView: View {
+    private var copy: LiteHistoryCopy { LiteHistoryCopy(locale: locale) }
+    @Environment(\.locale) private var locale
+    private var reportCopy: LiteReportCopy { LiteReportCopy(locale: locale) }
     @ObservedObject private var withdrawal = LiteWithdrawalModel.shared
     let recordId: String
     @ObservedObject var store: LiteStore
@@ -283,49 +306,49 @@ struct LiteRecordDetailView: View {
                                         imageH: img.cgImage?.height ?? 1)
                         }
                         detailCard(r)
-                        if let nativeSession {
-                            NavigationLink("此筆服務辨識驗收（內部）") {
+                        if LiteNativeBuild.showsSavedRecordTest, let nativeSession {
+                            NavigationLink(copy.text("此筆服務辨識驗收（內部）")) {
                                 LiteSavedServiceView(recordID:r.id,records:store,session:nativeSession)
                             }
                         }
                         Button {
                             pdfError = nil; pdfBusy = true
                             // Freeze the saved record; export never edits or syncs it.
-                            let snapshot = r, photo = image
+                            let snapshot = r, photo = image, reportLocale = locale
                             Task { @MainActor in
                                 await Task.yield()
                                 defer { pdfBusy = false }
                                 do {
-                                    let copy = try LitePDFShare(data: LitePDFReport.render(record: snapshot, image: photo))
+                                    let copy = try LitePDFShare(data: LitePDFReport.render(record: snapshot, image: photo, locale: reportLocale))
                                     pdfCopy = copy; pdfShare = copy
                                 } catch { pdfError = "PDF 暫時無法產生；原照片、紀錄與同步狀態未變更。" }
                             }
                         } label: {
-                            Label(pdfBusy ? "正在產生 PDF…" : "分享此筆 PDF 紀錄", systemImage: "square.and.arrow.up")
+                            Label(pdfBusy ? reportCopy.text("正在產生 PDF…") : reportCopy.text("分享此筆 PDF 紀錄"), systemImage: "square.and.arrow.up")
                         }
                         .buttonStyle(.bordered)
                         .disabled(busy || pdfBusy || !imageLoadFinished)
                         .accessibilityIdentifier("lite.report.share")
-                        Text("只在本機製作，不重新辨識或扣額度。PDF 含照片與位置，分享前請確認接收對象。")
+                        Text(reportCopy.text("只在本機製作，不重新辨識或扣額度。PDF 含照片與位置，分享前請確認接收對象。"))
                             .font(.caption).foregroundStyle(.secondary)
-                        if let pdfError { Text(pdfError).font(.footnote).foregroundStyle(.orange) }
-                        DisclosureGroup("影像與深度保存詳情") {
+                        if let pdfError { Text(reportCopy.text(pdfError)).font(.footnote).foregroundStyle(.orange) }
+                        DisclosureGroup(copy.text("影像與深度保存詳情")) {
                             if let binding = r.cloudSync?.binding,
                                let status = LiteWithdrawalJournal.standard.status(for: binding) {
-                                Text(status).font(.footnote).foregroundStyle(.secondary)
+                                Text(LiteResearchCopy(locale: locale).text(status)).font(.footnote).foregroundStyle(.secondary)
                             } else if let binding = r.cloudSync?.binding,
                                       let status = LiteStorageReceipt.message(imageStored: true, receipt: binding.storageReceipt) {
-                                Text(status).font(.footnote).foregroundStyle(.secondary)
+                                Text(LiteResearchCopy(locale: locale).text(status)).font(.footnote).foregroundStyle(.secondary)
                             }
                         }
                         if r.depthName == nil {
-                            Text("此筆沒有可供重新量測的影像或深度資料，原紀錄保留。")
+                            Text(copy.text("此筆沒有可供重新量測的影像或深度資料，原紀錄保留。"))
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
                     .padding()
                 } else {
-                    Text("紀錄不存在").padding()
+                    Text(copy.text("紀錄不存在")).padding()
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -335,25 +358,32 @@ struct LiteRecordDetailView: View {
                             syncing: store.syncingRecordIDs.contains(recordId),
                             consent: LitePrefs.researchConsent == true,
                             withdrawalBlocked: withdrawal.blocksUploads,
-                            retiredResearch: r.cloudSync.map { !withdrawal.blocksUploads && !LiteWithdrawalJournal.standard.permits($0.binding) } ?? false),
+                            retiredResearch: r.cloudSync.map { !withdrawal.blocksUploads && !LiteWithdrawalJournal.standard.permits($0.binding) }
+                                ?? r.researchCapture.map { nativeSession?.researchDelivery?.permits($0.pin.scope) != true } ?? false),
                         calculating: busy, change: changeSummary,
                         note: note, noteIsInformational: noteIsInformational,
                         canEdit: r.depthName != nil && image != nil,
-                        syncAllowed: r.cloudSync.map { LiteWithdrawalJournal.standard.permits($0.binding) } == true && LitePrefs.researchConsent == true,
+                        syncAllowed: LitePrefs.researchConsent == true && (r.cloudSync.map { LiteWithdrawalJournal.standard.permits($0.binding) }
+                            ?? r.researchCapture.map { nativeSession?.researchDelivery?.permits($0.pin.scope) == true } ?? false),
                         onEdit: {
                             note = nil; noteIsInformational = false; changeSummary = nil
                             editFlow.begin(record: r, fallback: polys)
                         },
                         onRetry: {
                             note = nil
-                            Task { await store.syncRevision(recordID: recordId) }
+                            Task {
+                                if r.cloudSync == nil, r.researchCapture != nil {
+                                    await nativeSession?.researchDelivery?.resume(recordId, store: store, explicit: true)
+                                }
+                                await store.syncRevision(recordID: recordId)
+                            }
                         })
                         .disabled(pdfBusy)
                 }
             }
-            .navigationTitle("量測紀錄")
+            .navigationTitle(copy.text("量測紀錄"))
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("關閉") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) { Button(copy.text("關閉")) { dismiss() } }
             }
         }
         .task { await load() }
@@ -367,22 +397,20 @@ struct LiteRecordDetailView: View {
                 Form {
                     Text(wound.name)
                     LiteLocationFields(side: $assignmentSide, site: $assignmentSite)
-                    Text("此位置會用於同一傷口的紀錄。不同傷口即使位置相同，仍應分開建檔。")
+                    Text(copy.text("此位置會用於同一傷口的紀錄。不同傷口即使位置相同，仍應分開建檔。"))
                         .font(.caption).foregroundStyle(.secondary)
-                    if let error = store.storageError { Text(error).foregroundStyle(.orange) }
-                    Button("儲存位置與分組") {
+                    if let error = store.storageError { Text(copy.message(error)).foregroundStyle(.orange) }
+                    if let assignmentNotice { Text(copy.message(assignmentNotice)).foregroundStyle(.orange) }
+                    Button(copy.text("儲存位置與分組")) {
                         guard let r = record else { return }
                         var completed = wound
                         completed.location = LiteWoundLocation(side: assignmentSide, site: assignmentSite)
-                        if store.assign(r, to: completed) {
-                            assigningWound = nil
-                            Task { await store.syncRevision(recordID: recordId) }
-                        }
+                        saveAssignment(r, to: completed)
                     }
                     .disabled(!LiteWoundLocation(side: assignmentSide, site: assignmentSite).isComplete)
                 }
-                .navigationTitle("傷口位置")
-                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { assigningWound = nil } } }
+                .navigationTitle(copy.text("傷口位置"))
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button(copy.text("取消")) { assigningWound = nil } } }
             }
         }
         .fullScreenCover(item: Binding(get: { editFlow.session }, set: { value in
@@ -392,6 +420,7 @@ struct LiteRecordDetailView: View {
                 WoundEditView(image: img, initialPolygons: session.polygons, originalArea: nil,
                               tissueFrac: [:], exudate: nil, mmPerPx: nil, resume: nil,
                               wbGains: nil, boundaryOnly: true,
+                              displayText: LiteCaptureControlsCopy(locale: locale).text,
                               onCancel: { _ = editFlow.finish(session.id) },
                               onDone: { _, all, iou, _, _, _ in
                                   guard let baseline = editFlow.finish(session.id) else { return }
@@ -404,9 +433,7 @@ struct LiteRecordDetailView: View {
 
     private func assign(_ record: LiteRecord, to wound: LiteWoundGroup) {
         if wound.location?.isComplete == true {
-            if store.assign(record, to: wound) {
-                Task { await store.syncRevision(recordID: recordId) }
-            }
+            saveAssignment(record, to: wound)
         } else {
             assignmentSide = ""
             assignmentSite = ""
@@ -414,47 +441,77 @@ struct LiteRecordDetailView: View {
         }
     }
 
+    @State private var assignmentNotice: String?
+
+    private func saveAssignment(_ original: LiteRecord, to wound: LiteWoundGroup) {
+        guard !busy else { return }
+        let accountGeneration = nativeSession?.identity.generation
+        busy = true
+        Task { @MainActor in
+            defer { busy = false }
+            do {
+                let owner = store.wounds.first(where: { $0.id == wound.id })?.account
+                guard original.woundAccount == nil || original.woundAccount == owner || owner == nil else {
+                    throw LiteWoundTrackingError.otherAccount
+                }
+                let permit = try await nativeSession?.woundPermit(id: wound.id, owner: owner ?? original.woundAccount,
+                                                                  resume: owner == nil && !wound.ended)
+                guard nativeSession?.identity.generation == accountGeneration,
+                      let latest = record, latest.woundID == original.woundID,
+                      latest.woundAccount == original.woundAccount else { throw LiteWoundTrackingError.changed }
+                guard store.assign(latest, to: wound, permit: permit) else { return }
+                assignmentNotice = nil
+                assigningWound = nil
+                await store.syncRevision(recordID: recordId)
+            } catch { assignmentNotice = ((error as? LiteWoundTrackingError) ?? .unavailable).localizedDescription }
+        }
+    }
+
     private func detailCard(_ r: LiteRecord) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            if let error = store.storageError { Text(error).font(.footnote).foregroundStyle(.orange) }
+            if let error = store.storageError { Text(copy.message(error)).font(.footnote).foregroundStyle(.orange) }
+            if let assignmentNotice { Text(copy.message(assignmentNotice)).font(.footnote).foregroundStyle(.orange) }
             Menu {
-                ForEach(store.wounds) { wound in
-                    Button(wound.displayName) { assign(r, to: wound) }
+                ForEach(store.wounds.filter { !$0.ended }) { wound in
+                    Button(copy.group(wound)) { assign(r, to: wound) }
                 }
-                Button("新增一處傷口") { assign(r, to: store.newWound()) }
+                Button(copy.text("新增一處傷口")) { assign(r, to: store.newWound()) }
             } label: {
-                Label(r.woundName ?? "未分組・指定傷口", systemImage: "folder")
+                Label(r.woundName ?? copy.text("未分組・指定傷口"), systemImage: "folder")
             }
             .disabled(busy)
-            Text(r.woundLocation?.label ?? "位置尚未填寫，可由上方分組選單補齊。")
+            Text(r.woundLocation.map { copy.location($0) } ?? copy.text("位置尚未填寫，可由上方分組選單補齊。"))
                 .font(.footnote).foregroundStyle(.secondary)
             let assessment = r.savedArea
+            if let notice = r.contourUncertaintyNotice {
+                Text(copy.message(notice)).font(.footnote).foregroundStyle(.orange)
+            }
             if let series = assessment.series {
-                Text(String(format: "LiDAR 表面積估算：%.2f cm²", r.surfaceCm2)).font(.title3).bold()
-                Text(series.rawValue).font(.caption).foregroundStyle(.secondary)
-                Text(String(format: "相機方向投影估算 %.2f cm²", r.projectedCm2)).font(.footnote)
+                Text(copy.format("LiDAR 表面積估算：%@ cm²", copy.decimal(r.surfaceCm2))).font(.title3).bold()
+                Text(copy.text(series.rawValue)).font(.caption).foregroundStyle(.secondary)
+                Text(copy.format("相機方向投影估算 %@ cm²", copy.decimal(r.projectedCm2))).font(.footnote)
             } else if case .unavailable(let reason) = assessment {
-                Text("未提供面積").font(.title3).bold()
-                Text(reason).font(.footnote)
+                Text(copy.text("未提供面積")).font(.title3).bold()
+                Text(copy.message(reason)).font(.footnote)
             }
             LiteVolumeReferenceView(volume: r.volumeMl, depth: r.maxDepthMm)
             if let context = r.measurementContext {
-                ForEach(context.warnings, id: \.self) { Text("⚠ " + $0).font(.caption).foregroundStyle(.orange) }
+                ForEach(context.warnings, id: \.self) { Text("⚠ " + copy.message($0)).font(.caption).foregroundStyle(.orange) }
                 if case .current = assessment {
-                    Text("已核對保存的面積來源與拍攝品質，數值僅供參考。")
+                    Text(copy.text("已核對保存的面積來源與拍攝品質，數值僅供參考。"))
                         .font(.caption).foregroundStyle(.secondary)
                 }
             } else {
-                Text("舊版紀錄保留原數值；當時的完整品質資訊未記錄，不與本版量測連成同一條趨勢。")
+                Text(copy.text("舊版紀錄保留原數值；當時的完整品質資訊未記錄，不與本版量測連成同一條趨勢。"))
                     .font(.caption).foregroundStyle(.secondary)
             }
-            NavigationLink("精確度與限制") { LiteMeasurementInfoView() }
+            NavigationLink(copy.text("精確度與限制")) { LiteMeasurementInfoView() }
             if let t = r.tiltDeg {
-                Text(String(format: "拍攝傾角約 %.0f°", t)).font(.footnote)
+                Text(copy.format("拍攝傾角約 %@°", String(format: "%.0f", t))).font(.footnote)
             }
-            Text("拍攝時間 \(Self.pretty(r.dateISO))・輪廓 "
-                 + (r.source == "cloud" ? "雲端辨識" : r.source == "local" ? "地端模型" : "手動圈選")
-                 + (r.quality == "ok" ? "" : "・⚠ 拍攝品質備註"))
+            Text(copy.format("拍攝時間 %@・輪廓 %@", copy.date(r.dateISO),
+                 copy.text(r.source == "cloud" ? "雲端辨識" : r.source == "local" ? "地端模型" : "手動圈選"))
+                 + (r.quality == "ok" ? "" : copy.text("・⚠ 拍攝品質備註")))
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(12)
@@ -555,17 +612,13 @@ struct LiteRecordDetailView: View {
         }
     }
 
-    private static func pretty(_ iso: String) -> String {
-        guard let d = ISO8601DateFormatter().date(from: iso) else { return iso }
-        let f = DateFormatter()
-        f.dateFormat = "M/d HH:mm"
-        return f.string(from: d)
-    }
 }
 
 /// Fixed beside the actions: local persistence and cloud acknowledgement are separate facts.
 /// Acknowledged records have no upload button. Only unfinished work offers retry.
 struct LiteRevisionActionCard: View {
+    @Environment(\.locale) private var locale
+    private var copy: LiteHistoryCopy { LiteHistoryCopy(locale: locale) }
     let status: LiteRevisionPresentation
     var calculating = false
     var change: LiteContourChangeSummary? = nil
@@ -588,14 +641,14 @@ struct LiteRevisionActionCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if calculating {
-                HStack { ProgressView(); Text("正在依新圈選計算面積…").font(.headline) }
-                Text("完成計算並保存後，會自動同步已同意上傳的修改。")
+                HStack { ProgressView(); Text(copy.text("正在依新圈選計算面積…")).font(.headline) }
+                Text(copy.text("完成計算並保存後，會自動同步已同意上傳的修改。"))
                     .font(.caption).foregroundStyle(.secondary)
             } else {
-                Label("本機紀錄已保存", systemImage: "checkmark.circle.fill")
+                Label(copy.text("本機紀錄已保存"), systemImage: "checkmark.circle.fill")
                     .font(.subheadline).bold()
                 if let change {
-                    Text(change.text).font(.subheadline).bold()
+                    Text(copy.change(change)).font(.subheadline).bold()
                         .accessibilityIdentifier("lite.revision.areaChange")
                 }
                 HStack(alignment: .top, spacing: 8) {
@@ -604,19 +657,19 @@ struct LiteRevisionActionCard: View {
                         Image(systemName: status.phase == .synced ? "checkmark.icloud.fill" : "icloud")
                             .foregroundStyle(statusColor)
                     }
-                    Text(status.title).font(.headline).foregroundStyle(statusColor)
+                    Text(copy.message(status.title)).font(.headline).foregroundStyle(statusColor)
                         .accessibilityIdentifier("lite.revision.status")
                 }
-                Text(status.detail).font(.caption).foregroundStyle(.secondary)
+                Text(copy.revisionDetail(status)).font(.caption).foregroundStyle(.secondary)
             }
             if let note {
-                Text(note).font(.caption)
+                Text(copy.message(note)).font(.caption)
                     .foregroundStyle(noteIsInformational ? Color.secondary : Color.orange)
                     .accessibilityIdentifier("lite.revision.notice")
             }
             if !active, let retry = status.retryTitle {
                 Button(action: onRetry) {
-                    Label(retry, systemImage: "arrow.clockwise.icloud")
+                    Label(copy.message(retry), systemImage: "arrow.clockwise.icloud")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -624,14 +677,14 @@ struct LiteRevisionActionCard: View {
             }
             if canEdit {
                 Button(action: onEdit) {
-                    Label("修正圈選並更新紀錄", systemImage: "pencil.tip.crop.circle")
+                    Label(copy.text("修正圈選並更新紀錄"), systemImage: "pencil.tip.crop.circle")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
                 .disabled(active)
                 .accessibilityIdentifier("lite.revision.edit")
                 if !active {
-                    Text(syncAllowed ? "完成圈選後自動保存並同步修改。" : "完成圈選後保存於此手機。")
+                    Text(copy.text(syncAllowed ? "完成圈選後自動保存並同步修改。" : "完成圈選後保存於此手機。"))
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -646,6 +699,8 @@ struct LiteRevisionActionCard: View {
 
 /// 單一已指定傷口的表面積折線；水平軸為紀錄順序，不代表等距日期。
 struct LiteTrendChart: View {
+    @Environment(\.locale) private var locale
+    private var copy: LiteHistoryCopy { LiteHistoryCopy(locale: locale) }
     let woundID: String
     let records: [LiteRecord]
     @State private var selectedSeries: LiteAreaSeries?
@@ -656,24 +711,26 @@ struct LiteTrendChart: View {
         let points = LiteWoundTrend.points(woundID: woundID, records: records, series: series)
         VStack(alignment: .leading, spacing: 12) {
             if available.count > 1 {
-                Picker("比較的面積紀錄", selection: Binding(get: { series }, set: { selectedSeries = $0 })) {
-                    ForEach(available) { Text($0.rawValue).tag(Optional($0)) }
+                Picker(copy.text("比較的面積紀錄"), selection: Binding(get: { series }, set: { selectedSeries = $0 })) {
+                    ForEach(available) { Text(copy.text($0.rawValue)).tag(Optional($0)) }
                 }
-                Text("本版與舊版紀錄分開比較，原有數值保留。").font(.caption).foregroundStyle(.secondary)
+                Text(copy.text("本版與舊版紀錄分開比較，原有數值保留。")).font(.caption).foregroundStyle(.secondary)
             }
             if let latest = points.last {
-                Text("最近一次：\(latest.area, specifier: "%.2f") cm²")
+                Text(copy.format("最近一次：%@ cm²", copy.decimal(latest.area)))
                     .font(.headline)
                 Chart(points) { point in
-                    LineMark(x: .value("拍攝時間", point.date),
-                             y: .value("表面積", point.area))
-                        .foregroundStyle(Color.blue)
-                        .interpolationMethod(.linear)
-                    PointMark(x: .value("拍攝時間", point.date),
-                              y: .value("表面積", point.area))
+                    if let group = point.lineGroup {
+                        LineMark(x: .value(copy.text("拍攝時間"), point.date), y: .value(copy.text("表面積"), point.area),
+                                 series: .value(copy.text("可比較的連續紀錄"), group))
+                            .foregroundStyle(Color.blue)
+                            .interpolationMethod(.linear)
+                    }
+                    PointMark(x: .value(copy.text("拍攝時間"), point.date),
+                              y: .value(copy.text("表面積"), point.area))
                         .foregroundStyle(Color.blue)
                         .accessibilityLabel(point.date.formatted(date: .abbreviated, time: .shortened))
-                        .accessibilityValue(String(format: "%.2f 平方公分", point.area))
+                        .accessibilityValue(copy.format("%@ 平方公分", copy.decimal(point.area)))
                 }
                 .chartYScale(domain: 0...max(1, (points.map(\.area).max() ?? 0) * 1.15))
                 .chartXAxis {
@@ -683,18 +740,100 @@ struct LiteTrendChart: View {
                         AxisValueLabel(format: .dateTime.month().day().hour().minute())
                     }
                 }
-                .chartXAxisLabel("拍攝時間")
+                .chartXAxisLabel(copy.text("拍攝時間"))
                 .chartYAxisLabel("cm²")
                 .frame(height: 190)
+                if points.contains(where: { $0.lineGroup == nil }) || Set(points.compactMap(\.lineGroup)).count > 1 {
+                    Text(copy.text("圈選方式或版本不同時會分段顯示。版本未確認的紀錄只顯示單點。"))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if points.count == 1 {
-                    Text("目前只有一筆紀錄；新增同一傷口的紀錄後即可比較變化。")
+                    Text(copy.text("目前只有一筆紀錄；新增同一傷口的紀錄後即可比較變化。"))
                         .font(.caption).foregroundStyle(.secondary)
                 }
             } else {
-                Text("這處傷口尚無可繪製的有效量測紀錄。")
+                Text(copy.text("這處傷口尚無可繪製的有效量測紀錄。"))
                     .font(.footnote).foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 8)
+    }
+}
+
+private struct LitePhotoComparisonView: View {
+    @Environment(\.locale) private var locale
+    private var copy: LiteHistoryCopy { LiteHistoryCopy(locale: locale) }
+    let group: LiteWoundGroup
+    @ObservedObject var store: LiteStore
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            GeometryReader { geometry in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text(copy.group(group)).font(.headline)
+                        switch LitePhotoComparison(group: group, records: store.records) {
+                        case .unavailable(let reason):
+                            Text(copy.message(reason))
+                        case .pair(let previous, let current, let missingDates):
+                            let layout = geometry.size.width >= 650
+                                ? AnyLayout(HStackLayout(alignment: .top, spacing: 16))
+                                : AnyLayout(VStackLayout(alignment: .leading, spacing: 16))
+                            layout {
+                                LiteComparisonPhoto(label: "前次", record: previous, images: store.images)
+                                    .id(previous.id + previous.imageName)
+                                LiteComparisonPhoto(label: "最近一次", record: current, images: store.images)
+                                    .id(current.id + current.imageName)
+                            }
+                            if missingDates > 0 {
+                                Text(copy.format("另有 %@ 筆缺少可核對的時間。", String(missingDates))).font(.footnote)
+                            }
+                            Text(copy.text("請參照拍攝日期及外觀。兩張照片各自縮放，距離、角度與光線會影響看起來的大小和顏色。"))
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading).padding()
+                }
+            }
+            .navigationTitle(copy.text("前後照片")).navigationBarTitleDisplayMode(.inline)
+            .toolbar { Button(copy.text("完成")) { dismiss() } }
+        }
+    }
+}
+
+private struct LiteComparisonPhoto: View {
+    @Environment(\.locale) private var locale
+    private var copy: LiteHistoryCopy { LiteHistoryCopy(locale: locale) }
+    let label: String
+    let record: LiteRecord
+    let images: LocalImageStore
+    @State private var image: UIImage?
+    @State private var finished = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(copy.text(label)).font(.headline)
+            if let date = LiteRecord.captureDate(record.dateISO) {
+                Text(date.formatted(date: .abbreviated, time: .standard)).font(.subheadline)
+            }
+            ZStack {
+                RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08))
+                if let image {
+                    Image(uiImage: image).resizable().scaledToFit().accessibilityLabel(copy.text(label + "照片"))
+                } else if finished {
+                    Text(copy.text("此筆照片暫時無法讀取")).foregroundStyle(.secondary)
+                } else {
+                    ProgressView()
+                }
+            }
+            .frame(maxWidth: .infinity).frame(height: 240)
+        }
+        .task(id: record.imageName) {
+            let preview = await ImageLoadQueue.shared.thumbnail(store: images, name: record.imageName, maxPixel: 1280)
+            guard !Task.isCancelled else { return }
+            image = preview.image
+            finished = true
+        }
     }
 }

@@ -58,11 +58,13 @@ final class LiteStorageReceiptTests: XCTestCase {
         let config=URLSessionConfiguration.ephemeral;config.protocolClasses=[StorageReceiptProtocol.self]
         let session=URLSession(configuration:config);defer {session.invalidateAndCancel()}
         let client=BackendClient(baseUrl:"https://example.invalid",liteTransport:LiteReceiptTestTransport(session:session))
-        StorageReceiptProtocol.response=["wound_polygons":[],"image_w":64,"image_h":48,"stored":true,"image_id":"image","storage_receipt":valid]
+        StorageReceiptProtocol.response=["wound_polygons":[],"image_w":64,"image_h":48,"stored":true,"image_id":"image","storage_receipt":valid, "student_output_contract": LiteContourOrigin.studentV1]
         let result=try await client.liteSegment(jpeg:Data([1]),anonId:"a",consentVersion:"test")
         XCTAssertEqual(result.storageReceipt,LiteStorageReceipt.parse(valid))
+        XCTAssertEqual(result.studentOutputContract, LiteContourOrigin.studentV1)
+        StorageReceiptProtocol.response.removeValue(forKey:"student_output_contract")
         StorageReceiptProtocol.response.removeValue(forKey:"storage_receipt")
         let old=try await client.liteSegment(jpeg:Data([1]),anonId:"a",consentVersion:"test")
-        XCTAssertTrue(old.stored);XCTAssertNil(old.storageReceipt)
+        XCTAssertTrue(old.stored);XCTAssertNil(old.storageReceipt);XCTAssertNil(old.studentOutputContract)
     }
 }

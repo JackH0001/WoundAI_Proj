@@ -26,7 +26,7 @@ class GrantFixture:
                 if self.revoke_error: raise OSError('private-refresh-token')
                 return 200,b''
             return 200,json.dumps(dict(access_token='private-access-token',refresh_token='private-refresh-token',
-                id_token=self.token,expires_in=3600,token_type='Bearer')).encode()
+                id_token=self.token,expires_in=3600,token_type='bearer')).encode()
         self.provider=AppleOAuthProvider(client_id=self.f.verifier.audience,client_secret=lambda:'synthetic-client-secret',post=post)
         self.cipher=GrantCipher(keys={'one':b'v'*32},current='one')
         self.store=SQLiteStateStore(self.f.h.f.root/'grant-vault.sqlite')

@@ -28,7 +28,9 @@ class InventoryTests(unittest.TestCase):
         self.owner='a'*32;self.f.f.login(self.owner)
         self.bucket=objects.Bucket()
         self.r=Reconsent(FencedPrivacy(self.f.store('research'),self.bucket),clock=self.f.f.f.now)
-        self.i=AccountDataInventory(deletion=self.f.d,audit_store=self.audit,research=self.r)
+        from research_pair_fixture import pairs
+        self.i=AccountDataInventory(deletion=self.f.d,audit_store=self.audit,research=self.r,
+            associations=pairs(self.f,self.r,[(self.owner,self.owner)]))
     def rejoin(self, previous, new):
         self.r.privacy.scoped(previous).manifest.withdraw(self.owner)
         return self.r.resume(self.owner,dict(anon_id=self.owner,research_consent=True,

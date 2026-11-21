@@ -109,9 +109,11 @@ class UsageLedger:
         _subject(subject); _integer(day)
         return hashlib.sha256(('woundlite/usage/1\0'+self.namespace+'\0'+subject+'\0'+str(day)).encode()).digest()
 
-    def _load(self, subject, day):
+    def _load(self, subject, day, *, allow_missing=False):
         row = self.store.load(self.key(subject, day))
         if row is None:
+            if allow_missing:
+                return None
             raise StateUnavailable('day not initialized: verified legacy baseline required')
         revision, value = row; _revision(revision)
         try:
@@ -129,10 +131,12 @@ class UsageLedger:
             if _integer(b['attempts']) < _integer(b['successes']):
                 raise ValueError('baseline counters')
             _hex(b['manifest'])
+            if value['v']==1 and self.cutover is not None and self.cutover.first_install:
+                raise ValueError('legacy row contradicts signed first-install inventory')
             if value['v'] == 2:
                 if self.cutover is None: raise ValueError('v2 requires pinned cutover')
                 policy = self.cutover.read(self.namespace, self.now())
-                if (value['policy'] != self._policy_fields(policy) or day <= policy['day']
+                if (value['policy'] != self._policy_fields(policy) or not self._zero_day(day,policy)
                         or b != self._zero_baseline(subject, day, policy)):
                     raise ValueError('day policy/baseline mismatch')
                 fences = value['fences']
@@ -195,15 +199,20 @@ class UsageLedger:
         return dict(sha256=digest(policy), reservation_seconds=policy['reservation_seconds'])
 
     @staticmethod
+    def _zero_day(day, policy):
+        return day>policy['day'] or (day==policy['day'] and 'fresh_inventory_sha256' in policy)
+
+    @staticmethod
     def _zero_baseline(subject, day, policy):
-        return dict(successes=0, attempts=0, manifest=digest(['verified-post-cutover-day/1',
+        basis='verified-first-install-day/1' if day==policy['day'] else 'verified-post-cutover-day/1'
+        return dict(successes=0, attempts=0, manifest=digest([basis,
                     digest(policy), subject, day]))
 
     def _ensure_current_day(self, subject, day):
         """Called only after trusted service-account/grant resolution, never by HTTP input."""
         if self.cutover is None or self.store.load(self.key(subject, day)) is not None: return
         now = self.now(); policy = self.cutover.read(self.namespace, now, admission=True)
-        if day != now//86400 or day <= policy['day']:
+        if day != now//86400 or not self._zero_day(day,policy):
             raise StateUnavailable('verified cutover-day baseline required')
         value = dict(v=2, subject_hash=digest(subject), day=day,
             baseline=self._zero_baseline(subject, day, policy), entries={}, updated=now,
@@ -211,19 +220,24 @@ class UsageLedger:
         self.store.compare_exchange(self.key(subject, day), 0, value)
         self._load(subject, day)  # uncertain write/readback never authorizes work
 
+    def _apply_expiry(self, state, subject, day, now):
+        changed = False
+        for op, entry in state['entries'].items():
+            deadline = entry['history'][0][0] + state['policy']['reservation_seconds']
+            if entry['history'][-1][1] == 'reserved' and now >= deadline:
+                proof = digest(['unstarted-lease-expiry/1', self.namespace, subject, day,
+                                op, entry['digest'], deadline, state['policy']['sha256']])
+                entry['history'].append([now, 'cancelled', proof])
+                changed = True
+        return changed
+
     def _active(self, subject, day):
         """Expire only unclaimed v2 reservations, on the same row as claim CAS."""
         for _ in range(CAS_ATTEMPTS):
             rev, state = self._load(subject, day)
             if state['v'] == 1: return rev, state
-            now = self.now(); changed = False
-            for op, e in state['entries'].items():
-                deadline = e['history'][0][0] + state['policy']['reservation_seconds']
-                if e['history'][-1][1] == 'reserved' and now >= deadline:
-                    proof = digest(['unstarted-lease-expiry/1', self.namespace, subject, day,
-                                    op, e['digest'], deadline, state['policy']['sha256']])
-                    e['history'].append([now, 'cancelled', proof]); changed = True
-            if not changed: return rev, state
+            now = self.now()
+            if not self._apply_expiry(state, subject, day, now): return rev, state
             state['updated'] = now
             if self.store.compare_exchange(self.key(subject, day), rev, state):
                 continue  # return actual persisted revision; do not fabricate one
@@ -269,6 +283,8 @@ class UsageLedger:
         The caller must pause legacy writers and verify their baseline, even if
         zero. Existing rows are never replaced, and old days cannot be created.
         """
+        if self.cutover is not None and self.cutover.first_install:
+            raise UsageConflict('cannot seed legacy rows for a first installation')
         now = self.now(); _integer(day)
         if day != now // 86400 or _integer(baseline_attempts) < _integer(baseline_successes):
             raise UsageConflict('invalid current-day migration baseline')
@@ -286,6 +302,32 @@ class UsageLedger:
         success = value['baseline']['successes'] + sum(e['history'][-1][1] == 'succeeded' for e in entries)
         pending = sum(e['history'][-1][1] in ('reserved', 'running') for e in entries)
         return success, pending, value['baseline']['attempts'] + len(value['entries']) + len(value.get('fences', {}))
+
+    def current_balance(self, subject, grant):
+        """Preview the active day without creating a baseline, releasing a hold or reserving work."""
+        now = self.now()
+        day = now // 86400
+        grant.validate(subject, now)
+        policy = self.cutover.read(self.namespace, now, admission=True) if self.cutover is not None else None
+        row = self._load(subject, day, allow_missing=True)
+        if row is None:
+            if policy is None or day <= policy['day']:
+                raise StateUnavailable('current baseline has not been confirmed')
+            used, pending, attempts = 0, 0, 0
+        else:
+            _, value = row
+            if value['v'] == 2:
+                # _load returns a private copy; admission persists expiration only
+                # when an actual operation needs it. A running claim never ages out.
+                self._apply_expiry(value, subject, day, now)
+            used, pending, attempts = self._counts(value)
+        current = self.now()
+        grant.validate(subject, current)
+        if current // 86400 != day:
+            raise StateUnavailable('UTC day changed during balance read')
+        return dict(v=1, account_sha256=digest(subject), as_of=now, resets_at=(day+1)*86400, used=used,
+                    pending=pending, limit=grant.limit, remaining=max(0, grant.limit-used-pending),
+                    attempt_limit_reached=attempts>=self.ATTEMPT_LIMIT)
 
     def snapshot(self, subject, day, grant):
         grant.validate(subject, self.now())

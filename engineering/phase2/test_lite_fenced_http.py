@@ -153,8 +153,10 @@ class FencedHTTPTests(unittest.TestCase):
         def broken(**kwargs):
             yield object_fixture.SimpleNamespace(name=next(iter(self.bucket.live)))
             raise OSError('listing interrupted')
-        with patch.object(self.bucket,'list_blobs',side_effect=broken):
+        with self.assertLogs('api_lite', level='ERROR') as logged, \
+                patch.object(self.bucket,'list_blobs',side_effect=broken):
             self.assertEqual(self.delete().status_code,503)
+        self.assertIn('listing interrupted', '\n'.join(logged.output))
         self.assertEqual(self.delete().status_code,200);self.assert_sealed()
 
     def test_withdraw_during_inference_finishes_without_waiting_for_stopped_model(self):

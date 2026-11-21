@@ -12,6 +12,8 @@ on:
       - 'tools/build_lite_review_catalogue.py'
       - 'tools/probe_lite_review_container.py'
       - 'tools/test_probe_lite_review_container.py'
+      - 'tools/stage_lite_review_candidate.py'
+      - 'tools/test_stage_lite_review_candidate.py'
       - 'engineering/phase2/test_lite_review_portal.py'
       - '.github/workflows/lite-review.yml'
   workflow_dispatch:
@@ -29,8 +31,12 @@ jobs:
         run: python3 -B tools/test_plan_lite_review_human.py
       - name: Rehearse bounded B1 partial failures without cloud credentials
         run: python3 -B tools/test_lite_review_executor.py
+      - name: Verify and stage only committed review sources
+        run: |
+          python3 -B tools/test_stage_lite_review_candidate.py
+          python3 -B tools/stage_lite_review_candidate.py --repo . --output "$RUNNER_TEMP/lite-review-context"
       - name: Build isolated review image
-        run: docker build -f Backend/LiteReview/Dockerfile -t lite-review:test .
+        run: docker build -t lite-review:test "$RUNNER_TEMP/lite-review-context"
       - name: Verify external probe with deployment sandbox restrictions
         run: >-
           docker run --rm --network=none --read-only
@@ -39,4 +45,4 @@ jobs:
           --workdir /tmp
           -v "$PWD/tools/probe_lite_review_container.py:/verification/probe.py:ro"
           --entrypoint python lite-review:test -I -B /verification/probe.py
-          --application-root /app
+          --application-root /app --require-provenance

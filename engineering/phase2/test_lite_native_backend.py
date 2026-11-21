@@ -16,6 +16,8 @@ from PIL import Image
 from lite_native_backend import compose_native_backend, STORE_NAMES, location, overlaps
 from lite_attest_state import SQLiteStateStore, GCSStateStore, StateUnavailable
 from lite_attest_budget import RequestBudget
+from lite_attest_http import InternalOwner
+from lite_usage_ledger import digest
 from lite_privacy_state import PrivacyState
 from lite_grant_key_custody import GoogleGrantKeyProvider
 from lite_service_operations import RasterInference
@@ -109,6 +111,57 @@ class NativeBackendTests(SignedServiceClient, unittest.TestCase):
     def quota(self):
         h=self.h; subject=h.release.n.accounts.resolve(self.owner)['subject']
         return h.release.ledger.snapshot(subject,h.clock()//86400,free_grant(subject,h.clock()))
+
+    def restrict_to(self,installation,subject):
+        person=self.backend.identity.events.identity(subject)
+        binding=InternalOwner('native',hashlib.sha256(installation.encode()).hexdigest(),digest('apple-'+person))
+        self.client=self.backend.create_app(internal_owner=binding).test_client()
+
+    def test_internal_owner_can_sign_in_run_and_use_one_quota(self):
+        self.restrict_to(self.owner,'apple-human-1')
+        self.login()
+        self.complete(1)
+        self.assertEqual((self.h.model_calls,self.quota()['used']),(1,1))
+
+    def test_other_installation_has_no_new_account_challenge(self):
+        self.restrict_to('other-device','apple-human-1')
+        before=self.h.snapshot()
+        response=self.post('account/challenge',operation='a'*32)
+        self.assertEqual(response.status_code,403,response.json)
+        self.assertEqual(self.h.snapshot(),before)
+
+    def test_other_apple_identity_rejected_before_grant_or_account_write(self):
+        self.restrict_to(self.owner,'apple-human-1')
+        op='a'*32
+        challenge=self.post('account/challenge',operation=op).json
+        before=self.h.snapshot()
+        signed=self.h.identity.token(challenge,sub='second-person')
+        response=self.post('account/confirm',operation=op,state=challenge['state'],identity_token=signed,
+                           authorization_code='never-exchange')
+        self.assertEqual(response.status_code,401,response.json)
+        self.assertEqual(self.h.snapshot(),before)
+        self.assertNotIn(TOKEN_URL,self.h.grant.calls)
+
+    def test_existing_participant_can_read_result_reauthenticate_and_request_deletion(self):
+        self.login()
+        self.complete(1)
+        self.restrict_to('other-device','second-person')
+        self.assertEqual(self.post('account/logout',operation=self.login_operation).status_code,200)
+        self.login()
+        self.assertEqual(self.json_request('status',1).status_code,200)
+        self.assertEqual(self.json_request('prepare',2).status_code,403)
+        self.assertEqual((self.h.model_calls,self.quota()['used']),(1,1))
+        before=rows(self.h.release.ledger.store)
+        self.assertEqual(self.post('account/deletion/request',operation='d'*32,confirmation='delete_account').status_code,202)
+        self.assertEqual(rows(self.h.release.ledger.store),before)
+
+    def test_old_session_on_the_allowed_installation_cannot_start_other_account_work(self):
+        self.login()
+        self.complete(1)
+        self.restrict_to(self.owner,'other-person')
+        self.assertEqual(self.json_request('prepare',2).status_code,403)
+        self.assertEqual(self.json_request('status',1).status_code,200)
+        self.assertEqual((self.h.model_calls,self.quota()['used']),(1,1))
 
     def test_end_to_end_two_free_then_block_without_research_or_original_mutation(self):
         before=rows(self.h.privacy.store); image=self.f.jpeg

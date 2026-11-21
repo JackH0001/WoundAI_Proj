@@ -48,7 +48,7 @@ class ProgressFixture:
     def complete(self):
         self.ops.prepare('device-one',self.op,self.image_hash)
         return self.ops.run('device-one',self.op,self.capture)
-    def close(self):return self.d.begin('device-one','d'*32)
+    def close(self):return self.d.begin('device-one','d'*32,withdraw_research=True)
     def status(self):return self.d.status('device-one','d'*32)
     def advance(self,**kwargs):return self.progress.advance(self.person,**kwargs)
     def preserved(self):return [rows(s) for s in (self.ledger.store,self.f.b.registry.store,self.f.b.store)]
