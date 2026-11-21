@@ -79,8 +79,8 @@ struct LiteNativePurchaseView: View {
                         .accessibilityIdentifier("lite.offer.price")
                     Text(copy("每月自動續訂，可在 Apple 訂閱設定取消。購買會綁定目前的服務帳號。"))
                         .font(.footnote)
-                    if canManagePurchases {
-                        Button(LiteServiceCopy.format("以 %@／月訂閱", locale: locale, offer.displayPrice)) { Task { await store.purchase(accepting: offer) } }
+                    if let account = session.purchaseObservationAccount, !identity.busy {
+                        Button(LiteServiceCopy.format("以 %@／月訂閱", locale: locale, offer.displayPrice)) { Task { await store.purchase(accepting: offer, for: account) } }
                             .buttonStyle(.borderedProminent)
                             .disabled(session.preparingPurchase)
                             .accessibilityIdentifier("lite.offer.buy")
@@ -118,9 +118,9 @@ struct LiteNativePurchaseView: View {
                 LitePrivacyLink()
                 LiteTermsLink()
             }
-            if canManagePurchases {
+            if let account = session.purchaseObservationAccount, !identity.busy {
                 Section(copy("既有訂閱")) {
-                    Button(copy("恢復購買")) { Task { await store.restore() } }
+                    Button(copy("恢復購買")) { Task { await store.restore(for: account) } }
                     Button(copy("核對未完成購買")) { Task { await store.reconcile() } }
                 }.disabled(store.busy)
                 Section(copy("核對狀態")) {

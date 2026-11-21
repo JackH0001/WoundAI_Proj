@@ -47,9 +47,12 @@ private actor SessionJournal: LiteServiceJournal {
     var unfinishedReads = 0
     var stream: AsyncStream<LitePurchaseUpdate>.Continuation?
     var onFinish: (() -> Void)?
+    var beforePayment: (() async -> Void)?
     func monthlyOffer() async throws -> LiteMonthlyOffer { nativeTestOffer }
     func knownPurchases() async throws -> [LitePurchaseEvent] { pending ? [event] : [] }
-    func purchase(offer: LiteMonthlyOffer, token: UUID) async throws -> LitePurchaseOutcome {
+    func purchase(offer: LiteMonthlyOffer, token: UUID, checkAccount: @MainActor () throws -> Void) async throws -> LitePurchaseOutcome {
+        await beforePayment?()
+        try checkAccount()
         XCTAssertEqual(token.uuidString.lowercased(), sessionToken)
         XCTAssertEqual(offer, nativeTestOffer); buys += 1; pending = true
         return .completed(event)
@@ -698,6 +701,24 @@ private actor SessionWire: LiteAuthenticatedTransport {
         XCTAssertEqual(kit.buys, 0); let after = await journal.snapshot(); XCTAssertEqual(before, after)
         let counts = await wire.counts(); XCTAssertNil(counts["purchase/context"])
     }
+    func testLogoutAfterPurchaseContextClosesPaymentBeforeStoreKitBegins() async throws {
+        let wire = try SessionWire(), kit = SessionStoreKit()
+        let session = try runtime(wire, SessionJournal(), storeKit: kit)
+        await session.identity.signIn()
+        let account = LiteNativeSession.PurchaseAccount(generation: session.identity.generation, token: sessionToken)
+        await session.purchases.loadOffer()
+        kit.beforePayment = { await session.identity.signOut() }
+        await session.purchases.purchase(accepting: nativeTestOffer, for: account)
+        kit.beforePayment = nil
+        let counts = await wire.counts()
+        XCTAssertGreaterThan(session.identity.generation, account.generation)
+        XCTAssertEqual(counts["purchase/context"], 1)
+        XCTAssertEqual(counts["account/logout"], 1)
+        XCTAssertNil(counts["purchase/confirm"])
+        XCTAssertEqual(kit.buys, 0)
+        XCTAssertEqual(kit.finishes, 0)
+    }
+
     func testLogoutDuringContextResponseCannotOpenStoreKit() async throws {
         let wire = try SessionWire(), kit = SessionStoreKit(), r = try runtime(wire, SessionJournal(), storeKit: kit)
         await r.identity.signIn(); await wire.onContext { await r.identity.signOut() }

@@ -199,7 +199,8 @@ private struct PrivacyReadback: Decodable, Equatable {
     init(_ config: WireConfig) { self.config = config }
     func monthlyOffer() async throws -> LiteMonthlyOffer { quote }
     func knownPurchases() async throws -> [LitePurchaseEvent] { current.map { [$0] } ?? [] }
-    func purchase(offer: LiteMonthlyOffer, token: UUID) async throws -> LitePurchaseOutcome {
+    func purchase(offer: LiteMonthlyOffer, token: UUID, checkAccount: @MainActor () throws -> Void) async throws -> LitePurchaseOutcome {
+        try checkAccount()
         buys += 1
         let data = try await NativeWire.control(config, "purchase",
             JSONEncoder().encode(["token":token.uuidString.lowercased()]))

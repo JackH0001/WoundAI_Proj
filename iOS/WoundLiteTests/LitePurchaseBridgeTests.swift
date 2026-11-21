@@ -34,6 +34,7 @@ private actor PurchaseJournal:LiteServiceJournal {
     let origin=URL(string:"https://synthetic.invalid")!
     var owner="synthetic-device",token=purchaseToken,environment="Sandbox",calls=0,contexts=0,fail=false,wrongAck=false,expired=false
     var afterConfirm:(()->Void)?
+    var generation = 0
     var account = String(repeating:"a",count:64)
     func installation() async throws ->String{owner}
     var lookups = [String]()
@@ -59,18 +60,28 @@ private actor PurchaseJournal:LiteServiceJournal {
     var continuation:AsyncStream<LitePurchaseUpdate>.Continuation?
     var catalog: LiteMonthlyOffer? = nativeTestOffer
     var lookups = 0, unfinishedReads = 0
-    func knownPurchases() async throws -> [LitePurchaseEvent] { pending + restored }
+    var beforeKnown: (() -> Void)?
+    var afterPayment: (() -> Void)?
+    var duringRestore: (() -> Void)?
+    func knownPurchases() async throws -> [LitePurchaseEvent] {
+        beforeKnown?()
+        return pending + restored
+    }
     func monthlyOffer() async throws -> LiteMonthlyOffer {
         lookups += 1
         guard let catalog else { throw LitePurchaseFailure.unavailable }
         return catalog
     }
-    func purchase(offer: LiteMonthlyOffer, token: UUID) async throws -> LitePurchaseOutcome {
+    func purchase(offer: LiteMonthlyOffer, token: UUID, checkAccount: @MainActor () throws -> Void) async throws -> LitePurchaseOutcome {
         XCTAssertEqual(offer, catalog)
-        try await beforePurchase?();purchases+=1;requestedToken=token
-        if case .completed(let e)=outcome{pending=[e]};return outcome
+        try await beforePurchase?()
+        try checkAccount()
+        purchases+=1;requestedToken=token
+        if case .completed(let e)=outcome{pending=[e]}
+        afterPayment?()
+        return outcome
     }
-    func restore() async throws ->[LitePurchaseEvent]{restoreCalls+=1;return restored}
+    func restore() async throws ->[LitePurchaseEvent]{restoreCalls+=1;duringRestore?();return restored}
     func unfinished() async throws ->[LitePurchaseEvent]{unfinishedReads += 1; return pending}
     func updates()->AsyncStream<LitePurchaseUpdate>{AsyncStream{continuation=$0}}
     func finish(_ e:LitePurchaseEvent)async throws {
@@ -83,7 +94,7 @@ private actor PurchaseJournal:LiteServiceJournal {
 @MainActor final class LitePurchaseBridgeTests:XCTestCase {
     private func setup()->(PurchaseService,PurchaseProvider,PurchaseJournal,LiteNativePurchaseStore){
         let s=PurchaseService(),p=PurchaseProvider(),j=PurchaseJournal()
-        return(s,p,j,LiteNativePurchaseStore(service:s,provider:p,journal:j,now:{Date(timeIntervalSince1970:Double(purchaseNow))}))
+        return(s,p,j,LiteNativePurchaseStore(service:s,provider:p,journal:j,accountGeneration:{s.generation},now:{Date(timeIntervalSince1970:Double(purchaseNow))}))
     }
 
     func testSecondTapWithUnfinishedTransactionReconcilesWithoutBuyingAgain() async {
@@ -122,6 +133,95 @@ private actor PurchaseJournal:LiteServiceJournal {
         XCTAssertEqual(service.contexts, 0)
         let rows = await journal.values()
         XCTAssertTrue(rows.isEmpty)
+    }
+
+    func testAccountSwitchDuringEntitlementLookupCannotStartPaymentForNewAccount() async {
+        let (service, provider, _, store) = setup()
+        let secondToken = "20000000-0000-4000-8000-000000000001"
+        provider.beforeKnown = {
+            service.generation += 1
+            service.token = secondToken
+            provider.outcome = .completed(event(secondToken))
+        }
+        await store.purchaseDisplayedTestOffer()
+        XCTAssertEqual(provider.purchases, 0)
+        XCTAssertNil(provider.requestedToken)
+        XCTAssertEqual(service.calls, 0)
+        XCTAssertEqual(provider.finishes, 0)
+    }
+
+    func testSignOutDuringFinalStorefrontCheckCannotOpenPayment() async {
+        let (service, provider, _, store) = setup()
+        provider.beforePurchase = { service.generation += 1 }
+        await store.purchaseDisplayedTestOffer()
+        XCTAssertEqual(provider.purchases, 0)
+        XCTAssertEqual(service.calls, 0)
+        XCTAssertEqual(provider.finishes, 0)
+    }
+
+    func testNewAccountMustAcceptItsOwnOfferAfterASwitch() async {
+        let (service, provider, _, store) = setup()
+        await store.loadOffer()
+        let previous = LiteNativeSession.PurchaseAccount(generation: 0, token: purchaseToken)
+        service.generation = 1
+        service.token = "20000000-0000-4000-8000-000000000001"
+        provider.outcome = .completed(event(service.token))
+        await store.purchase(accepting: nativeTestOffer, for: previous)
+        XCTAssertEqual(provider.purchases, 0)
+        XCTAssertEqual(service.contexts, 0)
+        let current = LiteNativeSession.PurchaseAccount(generation: 1, token: service.token)
+        await store.purchase(accepting: nativeTestOffer, for: current)
+        XCTAssertEqual(provider.purchases, 1)
+        XCTAssertEqual(provider.requestedToken?.uuidString.lowercased(), service.token)
+        XCTAssertEqual(service.calls, 1)
+        XCTAssertEqual(provider.finishes, 1)
+    }
+
+    func testDisplayedAccountTokenMustMatchBeforePurchaseOrRestore() async {
+        let (service, provider, journal, store) = setup()
+        let displayed = LiteNativeSession.PurchaseAccount(generation: service.generation,
+            token: "20000000-0000-4000-8000-000000000001")
+        await store.loadOffer()
+        await store.purchase(accepting: nativeTestOffer, for: displayed)
+        await store.restore(for: displayed)
+        XCTAssertEqual(provider.purchases, 0)
+        XCTAssertEqual(provider.restoreCalls, 0)
+        XCTAssertEqual(service.calls, 0)
+        let saved = await journal.values()
+        XCTAssertTrue(saved.isEmpty)
+    }
+
+    func testChangeAfterPaymentLeavesTransactionForOriginalAccountToFinishOnce() async {
+        let (service, provider, _, store) = setup()
+        provider.afterPayment = { service.generation += 1 }
+        await store.purchaseDisplayedTestOffer()
+        XCTAssertEqual(provider.pending, [event()])
+        XCTAssertEqual(service.calls, 0)
+        XCTAssertEqual(provider.finishes, 0)
+        await store.observePurchases(accountToken: "20000000-0000-4000-8000-000000000001")
+        XCTAssertEqual(service.calls, 0)
+        await store.observePurchases(accountToken: purchaseToken)
+        await store.observePurchases(accountToken: purchaseToken)
+        XCTAssertEqual(provider.purchases, 1)
+        XCTAssertEqual(service.calls, 1)
+        XCTAssertEqual(provider.finishes, 1)
+        XCTAssertTrue(provider.pending.isEmpty)
+        store.stopObserving()
+    }
+
+    func testAccountChangeDuringRestoreLeavesOriginalTransactionAvailable() async {
+        let (service, provider, _, store) = setup()
+        provider.restored = [event()]
+        provider.duringRestore = { service.generation += 1 }
+        await store.restore()
+        XCTAssertTrue(store.message.contains("帳號已變更"))
+        XCTAssertEqual(service.calls, 0)
+        XCTAssertEqual(provider.finishes, 0)
+        provider.duringRestore = nil
+        await store.restore()
+        XCTAssertEqual(provider.purchases, 0)
+        XCTAssertEqual(service.calls, 1)
+        XCTAssertEqual(provider.finishes, 1)
     }
     func testUnregisteredPreviewReadsOnlyCatalogEvenWithAnUnfinishedPurchase() async {
         let (service, provider, journal, store) = setup()
@@ -312,7 +412,7 @@ private actor PurchaseJournal:LiteServiceJournal {
     }
     func testLostServerReplyRetainsSameContextOnRestart()async {
         let(s,p,j,m)=setup();s.fail=true;await m.purchaseDisplayedTestOffer();XCTAssertEqual(p.finishes,0)
-        s.fail=false;let restarted=LiteNativePurchaseStore(service:s,provider:p,journal:j)
+        s.fail=false;let restarted=LiteNativePurchaseStore(service:s,provider:p,journal:j,accountGeneration:{s.generation})
         await restarted.reconcile();XCTAssertEqual(s.contexts,1);XCTAssertEqual(p.purchases,1);XCTAssertEqual(p.finishes,1)
     }
     func testAckJournalFailureRetriesServerButNeverPurchasesAgain()async {
@@ -399,6 +499,24 @@ private actor PurchaseJournal:LiteServiceJournal {
 import StoreKit
 import StoreKitTest
 @MainActor final class LiteNativeStoreKitTests:XCTestCase {
+    func testStoreKitCreatesNoTransactionWhenAccountCheckRejectsPayment() async throws {
+        let config = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "WoundLiteCommerce", withExtension: "storekit"))
+        let localStore = try freshCommerceTestSession(url: config)
+        defer { localStore.clearTransactions() }
+        let provider = LiteStoreKitPurchaseProvider(xcodeTest: true)
+        let offer = try await provider.monthlyOffer()
+        let token = try XCTUnwrap(UUID(uuidString: purchaseToken))
+        var checked = 0
+        do {
+            _ = try await provider.purchase(offer: offer, token: token) {
+                checked += 1
+                throw LitePurchaseFailure.accountChanged
+            }
+            XCTFail("A stale account started an Apple purchase")
+        } catch LitePurchaseFailure.accountChanged {}
+        XCTAssertEqual(checked, 1)
+        XCTAssertTrue(localStore.allTransactions().isEmpty)
+    }
     func testOfferPreviewDisplaysTheStoreKitPriceWithoutATransaction() async throws {
         let config = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "WoundLiteCommerce", withExtension: "storekit"))
         let session = try freshCommerceTestSession(url: config)
@@ -406,7 +524,7 @@ import StoreKitTest
         let products = try await Product.products(for: [purchaseProduct])
         let product = try XCTUnwrap(products.first)
         let service = PurchaseService(), journal = PurchaseJournal()
-        let store = LiteNativePurchaseStore(service: service, provider: LiteStoreKitPurchaseProvider(xcodeTest: true), journal: journal)
+        let store = LiteNativePurchaseStore(service: service, provider: LiteStoreKitPurchaseProvider(xcodeTest: true), journal: journal, accountGeneration: { service.generation })
         await store.observePurchases(accountToken: nil)
         await store.loadOffer()
         XCTAssertEqual(store.offer?.displayPrice, product.displayPrice)
@@ -436,7 +554,7 @@ import StoreKitTest
         XCTAssertEqual(product.subscription?.subscriptionPeriod.unit, .year)
         let service = PurchaseService()
         let provider = LiteStoreKitPurchaseProvider(xcodeTest: true)
-        let model = LiteNativePurchaseStore(service: service, provider: provider, journal: PurchaseJournal())
+        let model = LiteNativePurchaseStore(service: service, provider: provider, journal: PurchaseJournal(), accountGeneration: { service.generation })
         let count = session.allTransactions().count
         await model.loadOffer()
         XCTAssertNil(model.offer)
@@ -450,7 +568,7 @@ import StoreKitTest
         defer{session.clearTransactions()}
         let s=PurchaseService();s.environment="Xcode";s.fail=true
         let p=LiteStoreKitPurchaseProvider(xcodeTest:true),j=PurchaseJournal()
-        let m=LiteNativePurchaseStore(service:s,provider:p,journal:j,now:{Date(timeIntervalSince1970:Double(purchaseNow))})
+        let m=LiteNativePurchaseStore(service:s,provider:p,journal:j,accountGeneration:{s.generation},now:{Date(timeIntervalSince1970:Double(purchaseNow))})
         await m.observePurchases(accountToken: purchaseToken)
         defer { m.stopObserving() }
         await m.loadOffer()
@@ -485,7 +603,7 @@ import StoreKitTest
         service.environment = "Xcode"
         func start() -> LiteNativePurchaseStore {
             LiteNativePurchaseStore(service: service, provider: LiteStoreKitPurchaseProvider(xcodeTest: true),
-                journal: journal, now: { Date(timeIntervalSince1970: Double(purchaseNow)) })
+                journal: journal, accountGeneration: { service.generation }, now: { Date(timeIntervalSince1970: Double(purchaseNow)) })
         }
         let original = start()
         await original.observePurchases(accountToken: purchaseToken)

@@ -192,7 +192,7 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
         access.identity = identity
         purchases = LiteNativePurchaseStore(service: try LitePurchaseHTTPService(origin: origin, environment: "Sandbox",
             transport: scoped("purchase", ["context", "confirm"], ordinary: true)),
-            provider: purchaseProvider, journal: storage("purchases"), now: now)
+            provider: purchaseProvider, journal: storage("purchases"), accountGeneration: { [identity] in identity.generation }, now: now)
         service = try LiteServiceClient(origin: origin,
             transport: scoped("service", ["prepare", "run", "status", "recover", "resubmit"], ordinary: true),
             journal: storage("recognition"), now: now)
