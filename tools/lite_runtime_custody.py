@@ -31,6 +31,15 @@ class Stop(ValueError):
     """Fixed messages only; never include provider bodies or private inputs."""
 
 
+class OwnerInputExpired(Stop):
+    """The interactive approval expired before this process claimed a journal."""
+
+
+def check_owner_input_deadline(approval):
+    if int(time.time()) >= approval['expires_at']:
+        raise OwnerInputExpired('authorization expired before import')
+
+
 def need(ok, message):
     if not ok:
         raise Stop(message)
@@ -359,9 +368,18 @@ def main(argv=None):
     material = None
     if mode == 'import':
         need(sys.stdin.isatty(), 'interactive owner terminal required')
-        need(input('Type STAGE_THREE_RUNTIME_KEYS; services stay disabled: ') == 'STAGE_THREE_RUNTIME_KEYS', 'cancelled')
-        material = custody.restore(backup, custody.password_prompt('Recovery passphrase (hidden): '),
-                                   expected_manifest_sha256=raw['manifest_sha256'])
+        expires = time.strftime('%Y-%m-%d %H:%M:%S %z', time.localtime(approval['expires_at']))
+        print(f'本人匯入授權截止時間 / Import approval expires at {expires}', file=sys.stderr)
+        confirmed = input('Type STAGE_THREE_RUNTIME_KEYS; services stay disabled: ')
+        check_owner_input_deadline(approval)
+        need(confirmed == 'STAGE_THREE_RUNTIME_KEYS', 'cancelled')
+        password = custody.password_prompt('Recovery passphrase (hidden): ')
+        try:
+            check_owner_input_deadline(approval)
+            material = custody.restore(backup, password, expected_manifest_sha256=raw['manifest_sha256'])
+        finally:
+            del password
+        check_owner_input_deadline(approval)
     journal = Journal(args.journal, raw, create=mode == 'import')
     try:
         # Connect only after local pins, approval, password and durable claim.
@@ -375,6 +393,10 @@ def main(argv=None):
 if __name__ == '__main__':
     try:
         main()
+    except OwnerInputExpired:
+        print('本人匯入時段已結束。本次操作尚未建立日誌或連線。請關閉視窗。\n'
+              'Import approval expired before staging. Close this window.', file=sys.stderr)
+        sys.exit(2)
     except (Exception, KeyboardInterrupt):
         print('Stopped. Preserve backup and journal; do not repeat import. Review reconciliation.', file=sys.stderr)
         sys.exit(2)

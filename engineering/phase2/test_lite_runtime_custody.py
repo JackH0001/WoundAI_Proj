@@ -395,6 +395,78 @@ class RuntimeCustodyTests(unittest.TestCase):
         self.assertEqual(json.loads(out.getvalue())['cloud_calls'], 0)
         self.assertFalse(json.loads(out.getvalue())['decrypted'])
 
+    def run_interactive_import(self, expire_during=None):
+        password = secrets.token_urlsafe(32)
+        backup = custody.seal(self.material, password)
+        receipt = custody.canonical(custody.recovery_receipt(backup))
+        self.plan.update(backup_sha256=custody.sha(backup), receipt_sha256=custody.sha(receipt))
+        approval = self.approval()
+        args = ['owner-import', '--plan-sha256', stage.digest(self.plan), '--journal', str(self.path)]
+        files = {'approval': custody.canonical(approval), 'plan': custody.canonical(self.plan),
+                 'backup': backup, 'receipt': receipt}
+        for name, data in files.items():
+            path = self.root / name
+            path.write_bytes(data)
+            path.chmod(0o600)
+            args.extend(['--' + name, str(path)])
+
+        steps = []
+        now = [self.now]
+        def answer(step, value):
+            steps.append(step)
+            if step == expire_during:
+                now[0] = approval['expires_at']
+            return value
+        restore = custody.restore
+        def unlock(*values, **options):
+            return answer('restore', restore(*values, **options))
+        with patch.object(stage.sys.stdin, 'isatty', return_value=True), \
+             patch.object(stage.time, 'time', side_effect=lambda: now[0]), \
+             patch('builtins.input', side_effect=lambda _: answer('confirmation', 'STAGE_THREE_RUNTIME_KEYS')), \
+             patch.object(custody, 'password_prompt', side_effect=lambda _: answer('password', password)), \
+             patch.object(custody, 'restore', side_effect=unlock), \
+             patch.object(stage, 'GoogleTransport', side_effect=lambda _: answer('provider', self.cloud)), \
+             patch('sys.stderr', new_callable=io.StringIO) as status, \
+             patch('sys.stdout', new_callable=io.StringIO) as out:
+            if expire_during:
+                with self.assertRaisesRegex(stage.Stop, 'expired'):
+                    stage.main(args)
+            else:
+                stage.main(args)
+        self.assertNotIn(password, status.getvalue() + out.getvalue())
+        return steps, out.getvalue()
+
+    def test_expiry_during_confirmation_skips_password_and_claim(self):
+        steps, _ = self.run_interactive_import('confirmation')
+        self.assertEqual(steps, ['confirmation'])
+        self.assertFalse(self.path.exists())
+        self.assertEqual(self.cloud.calls, [])
+
+    def test_expiry_during_password_skips_restore_and_claim(self):
+        steps, _ = self.run_interactive_import('password')
+        self.assertEqual(steps, ['confirmation', 'password'])
+        self.assertFalse(self.path.exists())
+        self.assertEqual(self.cloud.calls, [])
+
+    def test_expiry_during_restore_preserves_existing_journal(self):
+        original = custody.canonical({'event': 'claimed', 'plan': 'a' * 64}) + b'\n'
+        self.path.write_bytes(original)
+        self.path.chmod(0o600)
+        steps, _ = self.run_interactive_import('restore')
+        self.assertEqual(steps, ['confirmation', 'password', 'restore'])
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertEqual(self.cloud.calls, [])
+
+    def test_timely_owner_confirmation_completes_with_three_disabled_versions(self):
+        steps, out = self.run_interactive_import()
+        self.assertEqual(steps, ['confirmation', 'password', 'restore', 'provider'])
+        result = json.loads(out)
+        self.assertTrue(result['all_three_imported'])
+        self.assertEqual(result['verified_payloads'], 3)
+        self.assertEqual(len(self.mutations(':addVersion')), 3)
+        self.assertEqual(len(self.mutations(':disable')), 3)
+        self.assertTrue(all(v[0]['state'] == 'DISABLED' for v in self.cloud.versions.values()))
+
     def test_corrupt_encrypted_backup_or_receipt_rejected_without_password(self):
         backup = custody.seal(self.material, secrets.token_urlsafe(32))
         receipt = custody.canonical(custody.recovery_receipt(backup))
