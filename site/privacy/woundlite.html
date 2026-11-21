@@ -26,10 +26,10 @@
 <section lang="zh-Hant">
 <div class="warn"><strong>測試僅使用紙上標靶或人造模型。</strong>拍攝及回報問題時，請避開人物、姓名及病歷資料。參加 TestFlight 測試與同意研究上傳是兩個獨立選擇。</div>
 <h1>WoundAILite 民眾版隱私權政策草稿</h1>
-<p class="sub">2026-11-18 修訂。裝置上的研究上傳說明為 2026-11-03.1。若您只同意過舊版說明，新版 App 會暫停研究上傳，等您閱讀並確認後才開啟。您可繼續使用本機功能。</p>
+<p class="sub">2026-11-21 修訂。裝置上的研究上傳說明為 2026-11-03.1。若您只同意過舊版說明，新版 App 會暫停研究上傳，等您閱讀並確認後才開啟。您可繼續使用本機功能。</p>
 <h2>1. 離線使用與雲端選擇</h2>
 <p>WoundAILite 提供個人傷口照片紀錄、圈選與 LiDAR 輔助表面積估算。估算供紀錄參考，不提供診斷或治療建議；此說明不是醫療器材法規分類結論。</p>
-<p>本機拍攝、圈選、保存及分享單筆或同一處傷口的時間軸 PDF，無須登入服務帳號。一般版的雲端研究功能需另行同意。在已開放個人雲端辨識的版本，您可登入服務帳號，在量測頁選擇當次拍攝或已保存的拍攝草稿，並確認送出。這項操作只上傳選取的 JPEG，深度留在手機。使用個人服務或恢復購買都不會開啟研究上傳。</p>
+<p>本機拍攝、圈選、保存及分享單筆或同一處傷口的時間軸 PDF，無須登入服務帳號。一般版的雲端研究功能需另行同意。在已開放個人雲端辨識的版本，您可登入服務帳號，在量測頁選擇當次拍攝或已保存的拍攝草稿，並確認送出。個人辨識送出所選的 JPEG 及工作識別資訊，這次請求的影像資料只有 JPEG。若您另行同意研究上傳，研究送件可包含同一張照片、圈選及裝置取得的深度圖（見第 3 節）。使用個人服務或恢復購買都不會開啟研究上傳。</p>
 <h2>2. 手機上的資料</h2>
 <p>操作指南在手機上搜尋本版說明。若您選擇裝置端 AI，它只根據輸入的操作問題建議閱讀主題。WoundAILite 不保存搜尋紀錄，也不將提問傳到客服伺服器。指南不會讀取照片或變更帳戶、研究同意與訂閱。</p>
 <p>您可自行開啟每日紀錄提醒。時間保存在本機，由裝置排程；通知使用一般文字，不含照片、傷口名稱或量測值。</p>
@@ -48,7 +48,8 @@
 <p>影像、深度、傷口位置與歷次量測可能揭露健康資訊。安裝假名代碼會串聯同一安裝的資料；沒有姓名或帳號不等於完全匿名，也不能保證無法重新辨識。同意研究上傳後，研究照片、深度及輪廓可連結至同一安裝。雲端另保存請求與修訂紀錄，供核對送件及限制使用次數。</p>
 <h2>5. 身分驗證、供應商與連線資料</h2>
 <p>候選使用 Apple App Attest 驗證請求來源及原安裝身分。這會與 Apple 的裝置驗證服務通訊；不是註冊 Apple ID 帳號給 WoundLite，也不把驗證結果當成量測準確率證明。尚須完成真實 Apple／後台端到端驗收。</p>
-<p>候選雲端由 Google Cloud 處理與儲存資料。應用程式限流記錄安裝代碼及加鹽 IP 雜湊；雜湊不能保證不可反推，也不代表雲端平台、代理或存取日誌沒有原始 IP。正式服務地區、日誌欄位、存取權限、保存期限、研究接收者與跨境安排須在開放前確認。本稿不承諾未核對的「完全不與第三方處理」或「不保存任何連線資料」。</p>
+<p>候選服務使用 Google Cloud 處理資料。為限制請求次數，服務會記錄安裝代碼與加鹽的 IP 雜湊值。雲端基礎設施的存取日誌可能包含原始 IP 位址。</p>
+<p>本次核對的四個儲存桶位於台灣（asia-east1），用於研究媒體、安全狀態、個人服務狀態及發行稽核。Google Cloud 將專案的兩個內建日誌桶標示為全球（global）。寫入預設日誌桶的項目保留 30 天，寫入必要稽核日誌桶的項目保留 400 天。照片、深度、標註及備份的處理範圍見第 6、7 節。</p>
 <p>內部驗收尚未啟用廣告或跨 App 追蹤。研究資料不作廣告用途。</p>
 <h3>選用個人服務與訂閱</h3>
 <p>登入後核對、變更追蹤名額時，服務以帳戶及不透明的傷口識別碼維護名單，與同帳戶的其他裝置共用。這個請求只需要名額資料，不含照片、傷口位置或觀察內容。單筆及所選傷口時間軸的 PDF 在手機產生，分享範圍由您決定。</p>
@@ -58,8 +59,8 @@
 <p>設定中關閉研究上傳會停止後續新傳送，不會自動召回已送出的請求，也不刪除雲端資料。另設「撤回研究並要求清除雲端媒體」按鈕，依本安裝仍保有的可驗證身分，向目前服務提出撤回。</p>
 <p>新版候選後台先阻止新的研究寫入，再清空此安裝目前可見的照片、深度、metadata、研究索引及標註／量測修訂內容，並核對結果。為阻止延遲上傳重新寫回，保留最少的安裝／物件識別、撤回狀態與空物件標記；安全驗證與防濫用狀態不因此全部刪除。不宣稱所有物件名稱消失。</p>
 <p>撤回尚待確認時，可在設定核對進度。本機紀錄保留。已受理的撤回保留稽核，再次參與研究須另行閱讀並同意。先前撤回的資料不會因此恢復。未追蹤的匯出、備份、已訓練模型或其他服務，由負責方依核定計畫說明處理範圍與時程。</p>
-<h2>7. 保存、研究期間與參與資格：發布前待確認</h2>
-<p>正式研究的期間、資料與安全標記／日誌保存期限、用途終止後處理、刪除例外與回覆時限尚未由負責方確認。本稿不承諾永久保存，也不虛構已核准的保留期限。現階段測試限定合成或模擬資料，不能據此開始真實人體收案。</p>
+<h2>7. 測試資料的保存與參與範圍</h2>
+<p>本次測試請只上傳紙上標靶或人造模型的影像。雲端照片、深度及標註由撤回或刪帳流程依清冊處理。所有歷史副本與備份完成處理的最長天數仍待確認。您可在設定查看已確認的進度，或透過第 8 節的信箱查詢未完成項目。</p>
 <p>須補齊研究程序、風險與利益、研究負責者／資料管理者、適用地區、成人／未成年人參與條件，以及倫理審查核准或適用性判定。家長拍攝不會自動代替研究所需的監護人同意流程。</p>
 <h2>8. TestFlight 回饋與聯絡</h2>
 <p>Apple 透過 TestFlight 向開發者提供測試版本、裝置與當機等資訊。您主動送出的意見與截圖可由開發者在 App Store Connect 查看。透過電郵受邀時，開發者可在回饋明細看到該地址。請只用合成資料回報問題。若以電子郵件聯絡，Jack Studio 會收到您的寄件地址與信件內容，用於處理您的詢問。</p>
@@ -70,9 +71,9 @@
 <section lang="en">
 <div class="warn"><strong>Use only paper targets or artificial models for this beta.</strong> Keep people, names and patient records out of photos and feedback. Joining TestFlight and agreeing to research uploads are separate choices.</div>
 <h1>WoundAILite Privacy Policy — Draft</h1>
-<p class="sub">Revised November 18, 2026. On-device research upload notice 2026-11-03.1. If you previously accepted only an older notice, this version pauses research uploads until you review and accept the new notice. Local features remain available.</p>
+<p class="sub">Revised November 21, 2026. On-device research upload notice 2026-11-03.1. If you previously accepted only an older notice, this version pauses research uploads until you review and accept the new notice. Local features remain available.</p>
 <h2>1. Offline use and cloud choice</h2>
-<p>WoundAILite supports on-device photos, outlines, reference area estimates and sharing of single-record or selected-wound timeline PDFs without a service account. Area estimates are for personal records and sharing with a clinician. The app does not diagnose conditions or recommend treatments. The ordinary build offers cloud research features with separate consent. In builds where the personal service is available, you can sign in and explicitly send a selected JPEG from a new capture or a saved capture draft for personal recognition. Its depth remains on the phone for this action. Using personal recognition or restoring a purchase does not enable research upload.</p>
+<p>WoundAILite supports on-device photos, outlines, reference area estimates and sharing of single-record or selected-wound timeline PDFs without a service account. Area estimates are for personal records and sharing with a clinician. The app does not diagnose conditions or recommend treatments. The ordinary build offers cloud research features with separate consent. In builds where the personal service is available, you can sign in and explicitly send a selected JPEG from a new capture or a saved capture draft for personal recognition. Personal recognition sends the selected JPEG and job identifiers. The JPEG is the only image data in that request. If you separately consent to research uploads, a research submission can include the same photo, its outline and a depth map if your device captured one (see section 3). Using personal recognition or restoring a purchase does not enable research upload.</p>
 <h2>2. On-device records</h2>
 <p>The in-app guide searches the instructions bundled with this version. If you choose on-device AI, it uses your question only to suggest a help topic. WoundAILite does not save search history or send questions to a support server. The guide does not read photos or change your account, research consent or subscription.</p>
 <p>If you turn on a daily reminder, your device stores the time and schedules a local notification. The notification uses general wording and includes no photo, wound name or measurement.</p>
@@ -84,7 +85,9 @@
 <h2>4. Identification risks</h2>
 <p>Re-encoding does not remove faces, names, documents, tattoos or background details in pixels. Research photos may retain display information such as orientation, dimensions and colour profiles. For this beta, frame the target and keep identifying details out of the picture. The public backend candidate stops inference and research persistence when a face is detected or its face check is unavailable. This limited check cannot guarantee detection of every identifying feature and is not an implemented automatic-blurring service. Photographs, depth, body location and longitudinal measurements may reveal health information. An installation pseudonym links records; no account does not mean complete anonymity. With research consent, photographs, depth maps and outlines can be linked to the same installation. The service also retains request and revision records to reconcile submissions and enforce usage limits.</p>
 <h2>5. Verification and providers</h2>
-<p>The candidate uses Apple App Attest to verify installations and uses Google Cloud for cloud processing. Rate records include an installation pseudonym and a salted IP hash. Infrastructure logs may contain an original IP address. Production regions, access, retention, research recipients and cross-border arrangements require confirmation before opening. The internal test has no advertising or cross-app tracking. Research data is not used for advertising.</p>
+<p>The candidate uses Apple App Attest to verify installations and Google Cloud to process data. To limit requests, the service records an installation pseudonym and a salted IP hash. Infrastructure access logs may contain the original IP address.</p>
+<p>The four storage buckets checked for this beta are in Taiwan (asia-east1). They hold research media, security state, personal service state and release audit records. Google Cloud lists the project's two built-in log buckets as global. Entries written to the default log bucket are retained for 30 days. Entries written to the required audit log bucket are retained for 400 days. Sections 6 and 7 describe the handling of photographs, depth maps, annotations and backups.</p>
+<p>The internal test has no advertising or cross-app tracking. Research data is not used for advertising.</p>
 <h3>Optional personal service and subscription</h3>
 <p>Signed-in devices share an account roster of opaque wound identifiers to check and change tracking slots. Slot requests contain no photographs, body locations or observations. Individual and selected-wound timeline PDFs are generated on the device. You choose whether and with whom to share them.</p>
 <p>The internal candidate uses Sign in with Apple and device verification for the service account. The service uses account and installation identifiers, Apple authorization credentials, transaction identifiers and signed data to verify login, purchases and restores. Recognition jobs, results, usage and receipts support retry reconciliation. Apple handles subscription payments.</p>
@@ -92,8 +95,9 @@
 <h2>6. Stopping uploads and withdrawal</h2>
 <p>Turning off research upload stops subsequent new transmissions, not already-sent requests or existing cloud data. A separate withdrawal button requests removal from the current service using the installation's verifiable identity. The new backend candidate closes research writes, clears the installation's currently live photographs, depth, metadata, research indexes and annotation/measurement revisions, then verifies the result. Minimal owner/object identifiers, revocation state and empty markers remain to stop delayed writes from recreating payloads. Verification and abuse-prevention state is not entirely deleted.</p>
 <p>While withdrawal is pending, check its progress in Settings. Local records are preserved. Accepted withdrawals remain in the audit history. Rejoining research requires fresh consent and does not reinstate withdrawn data. Handling of untracked exports, backups, trained models and other services must be explained under the approved protocol.</p>
-<h2>7. Publication prerequisites</h2>
-<p>The responsible party has not yet confirmed research duration, data/security-marker/log retention, end-of-purpose handling, deletion exceptions or response deadlines. This draft promises neither permanent storage nor an invented approved retention period. Current tests are synthetic or phantom only, not authorization to enroll people. Publication requires research procedures, risks/benefits, responsible investigator/controller, regions, adult/minor eligibility and ethics approval or an applicability determination. A parent taking a photograph does not replace the required guardian-consent procedure.</p>
+<h2>7. Retention and scope of the beta</h2>
+<p>Use only paper targets or artificial models for beta uploads. Withdrawal or account deletion starts a process that checks cloud photographs, depth maps and annotations against the inventory. The maximum time to finish processing all historical copies and backups is still being verified. You can check confirmed progress in Settings or contact the address in section 8 about outstanding items.</p>
+<p>Before recruiting human participants, the study must specify its procedures, risks and benefits, investigator and data controller, regions, eligibility for adults and minors, and ethics approval or an applicability determination. A parent taking a photograph does not replace the required guardian consent.</p>
 <h2>8. TestFlight feedback and contact</h2>
 <p>Apple provides the developer with beta information through TestFlight, such as the build, device and crash details. If you send comments or screenshots, the developer can view them in App Store Connect. For an email invitation, the developer can see that address in the feedback details. Use synthetic material when reporting issues. If you email Jack Studio, we receive your sender address and message to respond to your inquiry.</p>
 <h3>Contact Jack Studio and policy changes</h3>

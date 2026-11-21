@@ -14,4 +14,24 @@ final class LitePrivacyResourceTests: XCTestCase {
             XCTFail("Missing disclosure: " + text)
         }
     }
+
+    func testStorageLocationAndRetentionAreScopedInEachLanguage() throws {
+        let url = try XCTUnwrap(Bundle.main.url(forResource: "woundlite", withExtension: "html"))
+        let html = try String(contentsOf: url, encoding: .utf8)
+
+        for (language, expected) in [
+            ("zh-Hant", ["台灣（asia-east1）", "全球（global）", "預設日誌桶的項目保留 30 天",
+                         "必要稽核日誌桶的項目保留 400 天", "歷史副本與備份完成處理的最長天數仍待確認"]),
+            ("en", ["Taiwan (asia-east1)", "log buckets as global",
+                    "default log bucket are retained for 30 days", "required audit log bucket are retained for 400 days",
+                    "maximum time to finish processing all historical copies and backups is still being verified"])
+        ] {
+            let start = try XCTUnwrap(html.range(of: "<section lang=\"\(language)\">")?.upperBound)
+            let end = try XCTUnwrap(html.range(of: "</section>", range: start..<html.endIndex)?.lowerBound)
+            let section = html[start..<end]
+            for disclosure in expected {
+                XCTAssertTrue(section.contains(disclosure), "Missing disclosure in \(language): \(disclosure)")
+            }
+        }
+    }
 }
