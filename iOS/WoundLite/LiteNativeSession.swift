@@ -96,7 +96,7 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
 }
 
 @MainActor final class LiteNativeSession: ObservableObject {
-    enum Registration { case checking, required, confirmed, unreadable }
+    enum Registration { case checking, required, pending, confirmed, unreadable }
     let origin: URL
     let identity: LiteAccountIdentityStore
     let purchases: LiteNativePurchaseStore
@@ -111,6 +111,7 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     private let access: LiteSandboxAccess
     private let register: @Sendable () async throws -> String
     private let existing: @Sendable () async throws -> String?
+    private var resumableEnrollment: LiteAttestClient?
     private var enrollmentKeyID: (@Sendable () async throws -> String)?
     @Published private(set) var preparedEnrollmentKeyID: String?
     @Published private(set) var registration: Registration = .checking
@@ -214,6 +215,8 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
             journal: LiteServiceFileJournal(directory: directory), register: { try await client.registeredInstallation() },
             existing: { try await client.existingInstallation() },
             captures: LiteCaptureDraftStore(directory: directory.appendingPathComponent("capture-drafts")), access: access, now: { Date() })
+        // The owner-only enrollment window is pinned to a pre-approved key.
+        if !LiteNativeBuild.showsOwnerReview { session.resumableEnrollment = client }
         session.enrollmentKeyID = { try await client.prepareEnrollmentKeyID() }
         // Create the transport lazily. Viewing account settings never registers
         // an installation, re-enables research or sends an association request.
@@ -248,8 +251,12 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
         registering = true; defer { registering = false }
         do {
             guard let owner = try await existing() else {
-                registration = .required
-                message = "請先核對這部裝置的登記，之後即可使用 Apple 登入。"
+                if try await resumableEnrollment?.canResumePendingRegistration() == true {
+                    showPendingRegistration()
+                } else {
+                    registration = .required
+                    message = "請先核對這部裝置的登記，之後即可使用 Apple 登入。"
+                }
                 return
             }
             guard try await identity.service.installation() == owner else { throw LiteAccountFailure.conflict }
@@ -271,18 +278,41 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
         catch { message = "暫時無法準備裝置登記識別碼。請解鎖後再試。" }
     }
 
-    func registerDevice() async {
-        guard registration != .unreadable else { return }
-        guard !registering else { return }; registering = true; defer { registering = false }
+    private func showPendingRegistration() {
+        registration = .pending
+        message = "上次的裝置登記尚待確認。點選「續接裝置登記」，服務會先核對原登記。"
+    }
+
+    func registerDevice(resumePending: Bool = false) async {
+        guard !registering, registration != .unreadable,
+              (registration == .pending) == resumePending else { return }
+        registering = true; defer { registering = false }
         preparedEnrollmentKeyID = nil
         do {
+            if resumePending {
+                guard let resumableEnrollment, !identity.busy, !purchases.busy else { return }
+                let generation = identity.generation
+                _ = try await resumableEnrollment.recoverUnregisteredIdentity {
+                    await MainActor.run {
+                        self.identity.generation == generation && !self.identity.busy && !self.purchases.busy
+                    }
+                }
+                guard generation == identity.generation, !identity.busy, !purchases.busy else {
+                    throw LiteAccountFailure.conflict
+                }
+            }
             let owner = try await register()
             guard try await identity.service.installation() == owner else { throw LiteAccountFailure.conflict }
             registration = .confirmed
             message = "裝置登記已核對；可接續 Apple 服務帳號登入。尚未送出照片或變更研究同意。"
         } catch {
-            registration = .unreadable
-            message = "裝置登記尚未確認。請先重讀原裝置登記，再決定是否續接。"
+            if (try? await resumableEnrollment?.canResumePendingRegistration()) == true {
+                showPendingRegistration()
+                if resumePending { message = "服務尚未確認這次登記。原登記資料已保留，請稍後再續接。" }
+            } else {
+                registration = .unreadable
+                message = "裝置登記尚未確認。請先重讀原裝置登記，再決定是否續接。"
+            }
         }
     }
 
@@ -303,6 +333,10 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
             purchasePreparationMessage = preparationCopy!.source; return
         }
         if registration == .required { await registerDevice() }
+        if registration == .pending {
+            purchasePreparationMessage = "先登入服務帳號，再確認月費並訂閱；登入不會付款或開啟研究上傳。"
+            return
+        }
         guard registration == .confirmed else {
             purchasePreparationMessage = "裝置登記尚未完成，可能是連線或服務尚未就緒。請稍後再試；尚未付款，也未開啟 Apple 購買。"; return
         }
@@ -400,6 +434,9 @@ struct LiteNativeSessionView: View {
                         }
                     }
                     Button(copy("核對裝置登記（不傳照片）")) { Task { await session.registerDevice() } }
+                        .disabled(session.registering)
+                } else if session.registration == .pending {
+                    Button(copy("續接裝置登記")) { Task { await session.registerDevice(resumePending: true) } }
                         .disabled(session.registering)
                 } else if session.registration == .unreadable {
                     Button(copy("重讀原裝置登記")) { Task { await session.checkExistingRegistration() } }

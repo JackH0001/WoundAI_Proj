@@ -237,6 +237,14 @@ actor LiteAttestClient {
         guard let identity = try await stored(), identity.phase == "registered" else { return nil }
         return identity.installation
     }
+    /// A local read for the explicit first-enrollment continuation. A locked or
+    /// invalid item throws, and a confirmed installation can never be replaced.
+    func canResumePendingRegistration() async throws -> Bool {
+        try await acquire(); defer { release() }; try Task.checkCancellation()
+        guard let value = try await stored(), value.phase == "pending" else { return false }
+        return (value.registrationRecoveries?.count ?? 0) < 4
+    }
+
     func registeredInstallation() async throws -> String {
         try await acquire(); defer { release() }; try Task.checkCancellation()
         return try await enroll().installation!
@@ -248,7 +256,8 @@ actor LiteAttestClient {
     /// exact original expired pending challenge. Missing/active/revoked/corrupt
     /// states are rejected. Its echoed lineage and DIFFERENT challenge prove
     /// old proof invalidation, closing a race with a delayed registration.
-    /// The caller must re-read consent, withdrawal and records on every check.
+    /// The caller rechecks its scope on every step (including consent,
+    /// withdrawal and records when the identity is used for research).
     /// No media is sent and no record is rebound by this operation.
     func recoverUnregisteredIdentity(
         allowRecovery: @Sendable () async throws -> Bool

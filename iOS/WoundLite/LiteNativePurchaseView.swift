@@ -92,12 +92,18 @@ struct LiteNativePurchaseView: View {
             }.disabled(store.busy)
             if !canManagePurchases {
                 Section(copy("繼續訂閱或恢復購買")) {
-                    Button(copy("登入並繼續訂閱 Plus")) { Task { await session.prepareForPurchase() } }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(session.preparingPurchase || session.registering || identity.busy || store.busy)
-                        .accessibilityIdentifier("lite.offer.signIn")
+                    if session.registration == .pending {
+                        Button(copy("續接裝置登記")) { Task { await session.registerDevice(resumePending: true) } }
+                            .disabled(session.registering || identity.busy || store.busy)
+                            .accessibilityIdentifier("lite.offer.resumeRegistration")
+                    } else {
+                        Button(copy("登入並繼續訂閱 Plus")) { Task { await session.prepareForPurchase() } }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(session.preparingPurchase || session.registering || identity.busy || store.busy)
+                            .accessibilityIdentifier("lite.offer.signIn")
+                    }
                     if session.preparingPurchase { ProgressView(copy("正在準備，請勿重複操作…")) }
-                    Text(session.presentationPurchasePreparation(locale: locale))
+                    Text(session.registration == .pending ? copy(session.message) : session.presentationPurchasePreparation(locale: locale))
                         .accessibilityIdentifier("lite.offer.preparationStatus")
                     Text(copy("已有訂閱請登入原服務帳號。此步不會付款；研究上傳由您另行決定。"))
                         .font(.footnote).accessibilityIdentifier("lite.offer.preview")
