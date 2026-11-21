@@ -61,3 +61,19 @@ python tools/lite_owner_enrollment_command.py scope "${inputs[@]}" --plan "$PLAN
 ```
 
 保留 `prepare` 的原始輸出供掛載，使用該檔 SHA-256 填入 `LITE_OWNER_ENROLLMENT_PLAN_SHA256`。`scope` 會重建設定，逐位元比對已存的計畫，再寫出桶名、metageneration、兩個物件全名、兩條 HTTP 路由、角色所需權限及起迄時間。物件的 DELETE 權限用於 GCS 的條件覆寫。到期後可用既有計畫重新產生清冊，核對須收回的物件與期限；清冊會標示 expired，並保留原截止時間。後續操作須將物件權限精確限於這兩個名稱及期限，並分別查核有效 IAM。確認送件回覆遺失時應保留原安裝與登記紀錄。外部測試版使用一般登記流程。
+
+### 產生本人登記的桶權限草稿與回復草稿
+
+從上一步保留原始 `SCOPE` 與輸出時的 SHA-256。讀取目標桶的完整 IAM 政策時指定 `optionsRequestedPolicyVersion=3`，將成功回應封裝為 `{"bucket":"<桶名>","requested_policy_version":3,"status":200,"body":{…}}`。另存現行專案角色 `woundaiLiteSecurityObjects` 的回應為 `{"status":200,"body":{…}}`。成功回應為版本 1 時，完整政策可以沒有條件。請為這些檔案使用本人所有的私人目錄與檔案權限。
+
+```zsh
+python tools/lite_owner_enrollment_iam.py grant --scope "$SCOPE" --scope-sha256 "$SCOPE_DIGEST" \
+  --policy "$CURRENT_POLICY" --etag "$CURRENT_ETAG" --role "$CURRENT_ROLE" --output "$GRANT_DRAFT"
+python tools/lite_owner_enrollment_iam.py recover --scope "$SCOPE" --scope-sha256 "$SCOPE_DIGEST" \
+  --policy "$FRESH_POLICY" --etag "$FRESH_ETAG" --original "$GRANT_DRAFT" \
+  --original-sha256 "$GRANT_DRAFT_DIGEST" --output "$RECOVERY_DRAFT"
+```
+
+`grant` 產生供覆核的政策與異動收據。條件對桶中繼資料與兩個指定物件各自核對資源類型與完整名稱，並套用左閉右開的時間窗。角色必須已存在且僅含上述四項權限。請保留原始草稿及輸出的雜湊。計畫結束後，回復仍使用同一份原始清冊。
+
+若日後取得套用授權，應先核對桶已啟用統一存取控制、角色定義與繼承的有效權限，再以草稿的 etag 進行條件寫入。回應遺失或 etag 衝突時，先重新讀取完整政策。使用新讀回與原異動收據進行回復，保留其他人新增的綁定。回復摘要的 `removed` 為 0 時可略過寫入。若同名綁定已改變，工具會停止以供人工核對。演練完成後，實際有效權限與收回結果仍須在獲授權的雲端驗收中驗證。桶權限草稿含裝置物件名稱與成員資訊，應與私人清冊一併保管。

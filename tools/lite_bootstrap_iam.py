@@ -116,9 +116,15 @@ def checked_policy(policy, etag):
     return copy.deepcopy(policy)
 
 
-def add_delta(policy, proposal, *, bucket, expected_proposal, expected_etag):
+def _schema(purpose, kind):
+    if purpose not in ('bootstrap', 'owner-enrollment'):
+        raise ValueError('unsupported policy purpose')
+    return 'lite-'+purpose+'-iam-'+kind+'/1'
+
+
+def add_delta(policy, proposal, *, bucket, expected_proposal, expected_etag, purpose='bootstrap'):
     """Prepare an additive policy body; caller must retain etag and use CAS."""
-    if (digest(proposal) != expected_proposal or proposal.get('schema') != 'lite-bootstrap-iam-proposal/1'
+    if (digest(proposal) != expected_proposal or proposal.get('schema') != _schema(purpose, 'proposal')
             or proposal.get('draft') is not True or proposal.get('applied') is not False
             or bucket not in proposal['bucket_bindings']):
         raise ValueError('pinned reviewed proposal required')
@@ -135,7 +141,7 @@ def add_delta(policy, proposal, *, bucket, expected_proposal, expected_etag):
     added = [copy.deepcopy(b) for b in planned if b not in current]
     out['version'] = 3
     out['bindings'].extend(added)
-    receipt = dict(schema='lite-bootstrap-iam-delta/1', proposal=expected_proposal,
+    receipt = dict(schema=_schema(purpose, 'delta'), proposal=expected_proposal,
         bucket=bucket, principal=proposal['principal'], prior_policy=digest(policy),
         proposed_policy=digest(out), base_etag=expected_etag, added=copy.deepcopy(added),
         retained_for_principal=copy.deepcopy([b for b in policy.get('bindings', [])
@@ -143,14 +149,14 @@ def add_delta(policy, proposal, *, bucket, expected_proposal, expected_etag):
     return out, receipt
 
 
-def remove_delta(policy, receipt, *, bucket, expected_receipt, expected_etag):
+def remove_delta(policy, receipt, *, bucket, expected_receipt, expected_etag, purpose='bootstrap'):
     """Rehearse removal of exact additions from a fresh policy, not old restore.
 
     A response-lost caller may read back first and remove only exact surviving
     additions. Changed entries stop for review; unrelated entries are retained.
     The returned body is not sent and does not prove effective access is gone.
     """
-    if (digest(receipt) != expected_receipt or receipt.get('schema') != 'lite-bootstrap-iam-delta/1'
+    if (digest(receipt) != expected_receipt or receipt.get('schema') != _schema(purpose, 'delta')
             or receipt.get('applied') is not False or type(receipt.get('added')) is not list
             or type(receipt.get('retained_for_principal')) is not list or receipt.get('bucket') != bucket):
         raise ValueError('original pinned delta required')
