@@ -9,18 +9,15 @@ struct LiteAppleSubscriptionLink: View {
     }
 }
 
-/// The candidate injects a trusted service bridge. Reading the disclosures needs no service access.
-struct LiteNativePurchaseView: View {
-    @ObservedObject var store: LiteNativePurchaseStore
+/// Mounted on the home screen, including when the offer has never been opened.
+struct LitePurchaseObservation: View {
     @ObservedObject private var session: LiteNativeSession
     @ObservedObject private var identity: LiteAccountIdentityStore
     @Environment(\.scenePhase) private var scene
-    @State private var authorizedGeneration: Int?
 
     init(session: LiteNativeSession) {
         self.session = session
         self.identity = session.identity
-        self.store = session.purchases
     }
 
     private struct AccountCheck: Equatable {
@@ -28,8 +25,37 @@ struct LiteNativePurchaseView: View {
         let generation: Int
     }
 
+    var body: some View {
+        Color.clear
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .task(id: scene) {
+                if scene == .active { await session.checkExistingRegistration() }
+            }
+            .task(id: AccountCheck(registered: session.registration == .confirmed, busy: identity.busy,
+                                   active: scene != .background, generation: identity.generation)) {
+                await session.trackPurchaseAccess(foreground: scene != .background)
+            }
+            .task(id: session.purchaseObservationAccount) {
+                await session.purchases.observePurchases(accountToken: session.purchaseObservationAccount?.token)
+            }
+            .onDisappear { session.purchases.stopObserving() }
+    }
+}
+
+/// The candidate injects a trusted service bridge. Reading the disclosures needs no service access.
+struct LiteNativePurchaseView: View {
+    @ObservedObject var store: LiteNativePurchaseStore
+    @ObservedObject private var session: LiteNativeSession
+    @ObservedObject private var identity: LiteAccountIdentityStore
+    init(session: LiteNativeSession) {
+        self.session = session
+        self.identity = session.identity
+        self.store = session.purchases
+    }
+
     private var canManagePurchases: Bool {
-        session.registration == .confirmed && !identity.busy && authorizedGeneration == identity.generation
+        session.purchaseObservationAccount != nil && !identity.busy
     }
     @Environment(\.locale) private var locale
     private func copy(_ source: String) -> String { LiteServiceCopy.text(source, locale: locale) }
@@ -99,22 +125,6 @@ struct LiteNativePurchaseView: View {
             }
         }
         .navigationTitle(copy("Plus 方案與價格"))
-        .task(id: AccountCheck(registered: session.registration == .confirmed, busy: identity.busy,
-                               active: scene == .active, generation: identity.generation)) {
-            guard session.registration == .confirmed else { authorizedGeneration = nil; return }
-            guard scene == .active, !identity.busy else { return }
-            let generation = identity.generation
-            let deadline = await identity.purchaseAccessDeadline()
-            guard !Task.isCancelled, generation == identity.generation else { return }
-            guard let deadline else { authorizedGeneration = nil; return }
-            authorizedGeneration = generation
-            do { try await Task.sleep(for: .seconds(max(0, deadline.timeIntervalSince(identity.now())))) }
-            catch { return }
-            if !Task.isCancelled { authorizedGeneration = nil }
-        }
         .task { await store.loadOffer() }
-        .task(id: canManagePurchases) {
-            await store.observePurchases(canManagePurchases: canManagePurchases)
-        }
     }
 }

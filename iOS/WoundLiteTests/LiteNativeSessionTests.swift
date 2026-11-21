@@ -44,6 +44,9 @@ private actor SessionJournal: LiteServiceJournal {
     let event = LitePurchaseEvent(transaction: "123", original: "100", token: sessionToken,
         product: "com.woundai.lite.plus.monthly", environment: "Sandbox", signed: "synthetic-jws")
     var buys = 0, finishes = 0, restores = 0, pending = false
+    var unfinishedReads = 0
+    var stream: AsyncStream<LitePurchaseUpdate>.Continuation?
+    var onFinish: (() -> Void)?
     func monthlyOffer() async throws -> LiteMonthlyOffer { nativeTestOffer }
     func knownPurchases() async throws -> [LitePurchaseEvent] { pending ? [event] : [] }
     func purchase(offer: LiteMonthlyOffer, token: UUID) async throws -> LitePurchaseOutcome {
@@ -52,9 +55,9 @@ private actor SessionJournal: LiteServiceJournal {
         return .completed(event)
     }
     func restore() async throws -> [LitePurchaseEvent] { restores += 1; return [event] }
-    func unfinished() async throws -> [LitePurchaseEvent] { pending ? [event] : [] }
-    func updates() -> AsyncStream<LitePurchaseUpdate> { AsyncStream { $0.finish() } }
-    func finish(_ event: LitePurchaseEvent) async throws { finishes += 1; pending = false }
+    func unfinished() async throws -> [LitePurchaseEvent] { unfinishedReads += 1; return pending ? [event] : [] }
+    func updates() -> AsyncStream<LitePurchaseUpdate> { AsyncStream { stream = $0 } }
+    func finish(_ event: LitePurchaseEvent) async throws { finishes += 1; pending = false; onFinish?() }
 }
 
 private actor SessionWire: LiteAuthenticatedTransport {
@@ -172,6 +175,69 @@ private actor SessionWire: LiteAuthenticatedTransport {
         XCTAssertEqual(before, ["registration": 0]); XCTAssertTrue(rows.isEmpty); XCTAssertEqual(kit.buys, 0)
         XCTAssertNil(LiteRootView(lidarAvailable: false).nativeSession)
         XCTAssertTrue(LiteRootView(lidarAvailable: false, nativeSession: r).nativeSession === r)
+    }
+
+    private func mountHome(_ session: LiteNativeSession) -> UIWindow {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 430, height: 932))
+        let home = LiteRootView(lidarAvailable: false, nativeSession: session)
+            .environment(\.scenePhase, .active)
+        window.rootViewController = UIHostingController(rootView: home)
+        window.makeKeyAndVisible()
+        return window
+    }
+
+    func testColdLaunchRecoversApprovalWithoutOpeningTheOffer() async throws {
+        let wire = try SessionWire(), journal = SessionJournal(), kit = SessionStoreKit()
+        let beforeClosing = try runtime(wire, journal)
+        await beforeClosing.identity.signIn()
+        kit.pending = true
+        let confirmed = expectation(description: "Confirmed the original transaction on the home tab")
+        kit.onFinish = { confirmed.fulfill() }
+        let reopened = try runtime(wire, journal, storeKit: kit)
+        let window = mountHome(reopened)
+        defer { window.isHidden = true; window.rootViewController = nil }
+        await fulfillment(of: [confirmed], timeout: 5)
+        let counts = await wire.counts()
+        XCTAssertEqual(counts["purchase/confirm"], 1)
+        XCTAssertEqual(kit.finishes, 1)
+        XCTAssertEqual(kit.buys, 0)
+        XCTAssertEqual(kit.restores, 0)
+        XCTAssertEqual(counts["registration"], 0)
+    }
+
+    func testHomeWaitsForSignInAndStopsListeningAfterSignOut() async throws {
+        let wire = try SessionWire(), kit = SessionStoreKit()
+        let session = try runtime(wire, SessionJournal(), storeKit: kit)
+        let window = mountHome(session)
+        defer { window.isHidden = true; window.rootViewController = nil }
+        for _ in 0..<100 where session.registration == .checking {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(session.registration, .confirmed)
+        XCTAssertNil(kit.stream)
+        XCTAssertEqual(kit.unfinishedReads, 0)
+        let initial = await wire.counts()
+        XCTAssertEqual(initial, ["registration": 0])
+
+        await session.identity.signIn()
+        for _ in 0..<100 where kit.stream == nil || kit.unfinishedReads == 0 {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let stream = try XCTUnwrap(kit.stream)
+        let confirmed = expectation(description: "Approved while the home tab is visible")
+        kit.onFinish = { confirmed.fulfill() }
+        stream.yield(.event(kit.event))
+        await fulfillment(of: [confirmed], timeout: 5)
+        await session.identity.signOut()
+        for _ in 0..<100 {
+            if case .terminated = stream.yield(.event(kit.event)) { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        guard case .terminated = stream.yield(.event(kit.event)) else { return XCTFail("Listener outlived the signed-in account") }
+        let counts = await wire.counts()
+        XCTAssertEqual(counts["purchase/confirm"], 1)
+        XCTAssertEqual(kit.finishes, 1)
+        XCTAssertEqual(kit.buys + kit.restores, 0)
     }
 
     private func scopedWoundRequest(_ session: LiteNativeSession) async throws -> (Data, HTTPURLResponse) {
@@ -453,9 +519,9 @@ private actor SessionWire: LiteAuthenticatedTransport {
         let runtime = try runtime(wire, journal, apple: apple, storeKit: kit)
         await runtime.checkExistingRegistration()
         XCTAssertEqual(runtime.registration, .confirmed)
-        let absent = await runtime.identity.purchaseAccessDeadline()
+        let absent = await runtime.identity.localPurchaseAccess()
         XCTAssertNil(absent)
-        await runtime.purchases.observePurchases(canManagePurchases: absent != nil)
+        await runtime.purchases.observePurchases(accountToken: absent?.token)
         await runtime.purchases.loadOffer()
         XCTAssertEqual(runtime.purchases.offer, nativeTestOffer)
         let counts = await wire.counts(), emptyJournal = await journal.snapshot()

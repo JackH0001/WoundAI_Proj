@@ -17,8 +17,8 @@ let nativeTestOffer = LiteMonthlyOffer(name: "WoundAILite Plus", displayPrice: "
     }
 }
 private let purchaseNow=1_800_000_000
-private func event(_ token:String=purchaseToken,signed:String="synthetic-jws",environment:String="Sandbox")->LitePurchaseEvent {
-    LitePurchaseEvent(transaction:"123",original:"100",token:token,product:purchaseProduct,environment:environment,signed:signed)
+private func event(_ token:String=purchaseToken,signed:String="synthetic-jws",environment:String="Sandbox",transaction:String="123")->LitePurchaseEvent {
+    LitePurchaseEvent(transaction:transaction,original:"100",token:token,product:purchaseProduct,environment:environment,signed:signed)
 }
 private actor PurchaseJournal:LiteServiceJournal {
     var rows=[String:Data](),writes=0,failAt=0
@@ -74,7 +74,10 @@ private actor PurchaseJournal:LiteServiceJournal {
     func unfinished() async throws ->[LitePurchaseEvent]{unfinishedReads += 1; return pending}
     func updates()->AsyncStream<LitePurchaseUpdate>{AsyncStream{continuation=$0}}
     func finish(_ e:LitePurchaseEvent)async throws {
-        try await beforeFinish?();if failFinish{throw LitePurchaseFailure.unavailable};finishes+=1;pending=[]
+        try await beforeFinish?()
+        if failFinish { throw LitePurchaseFailure.unavailable }
+        finishes += 1
+        pending.removeAll { $0.sameTransaction(as: e) }
     }
 }
 @MainActor final class LitePurchaseBridgeTests:XCTestCase {
@@ -123,7 +126,7 @@ private actor PurchaseJournal:LiteServiceJournal {
     func testUnregisteredPreviewReadsOnlyCatalogEvenWithAnUnfinishedPurchase() async {
         let (service, provider, journal, store) = setup()
         provider.pending = [event()]
-        await store.observePurchases(canManagePurchases: false)
+        await store.observePurchases(accountToken: nil)
         await store.loadOffer()
         await Task.yield()
         XCTAssertEqual(store.offer, nativeTestOffer)
@@ -136,12 +139,55 @@ private actor PurchaseJournal:LiteServiceJournal {
         let saved = await journal.values()
         XCTAssertTrue(saved.isEmpty)
         provider.catalog = nil
-        await store.observePurchases(canManagePurchases: false)
+        await store.observePurchases(accountToken: nil)
         await store.loadOffer()
         XCTAssertNil(store.offer)
         XCTAssertEqual(provider.lookups, 2)
         XCTAssertEqual(provider.unfinishedReads, 0)
         XCTAssertEqual(provider.pending.count, 1)
+    }
+
+    func testAutomaticCatchUpIgnoresAnotherAccountsTransactionBeforeAValidOne() async {
+        let (service, provider, journal, store) = setup()
+        let foreign = event("20000000-0000-4000-8000-000000000001", transaction: "124")
+        provider.pending = [foreign]
+        await store.observePurchases(accountToken: purchaseToken)
+        let rows = await journal.values()
+        XCTAssertTrue(rows.isEmpty)
+        XCTAssertEqual(service.contexts, 0)
+        XCTAssertEqual(provider.finishes, 0)
+        provider.pending = [foreign, event()]
+        await store.observePurchases(accountToken: purchaseToken)
+        XCTAssertEqual(service.contexts, 1)
+        XCTAssertEqual(service.calls, 1)
+        XCTAssertEqual(provider.finishes, 1)
+        XCTAssertEqual(provider.pending, [foreign])
+        XCTAssertEqual(provider.purchases + provider.restoreCalls, 0)
+        store.stopObserving()
+    }
+
+    func testStopAfterServerConfirmationRecoversReceiptWithoutConfirmingTwice() async throws {
+        let (service, provider, journal, store) = setup()
+        let approved = event()
+        service.afterConfirm = { store.stopObserving() }
+        store.startObserving(accountToken: purchaseToken)
+        provider.pending = [approved]
+        provider.continuation?.yield(.event(approved))
+        var acknowledged = false
+        for _ in 0..<100 {
+            let rows = try await journal.values().map { try JSONDecoder().decode(LitePurchaseCheckpoint.self, from: $0) }
+            acknowledged = rows.contains { $0.acknowledgment != nil && !$0.finished }
+            if acknowledged { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(acknowledged)
+        XCTAssertEqual(service.calls, 1)
+        XCTAssertEqual(provider.finishes, 0)
+        service.afterConfirm = nil
+        await store.observePurchases(accountToken: purchaseToken)
+        XCTAssertEqual(service.calls, 1)
+        XCTAssertEqual(provider.finishes, 1)
+        store.stopObserving()
     }
 
     func testPriceAndStorefrontChangesRequireFreshUserActionBeforePurchase() async {
@@ -293,7 +339,7 @@ private actor PurchaseJournal:LiteServiceJournal {
     }
     func testPendingDoesNotConfirmUntilUpdate()async throws {
         let(s,p,_,m)=setup();p.outcome = .pending;await m.purchaseDisplayedTestOffer();XCTAssertEqual(s.calls,0);XCTAssertEqual(p.finishes,0)
-        m.startObserving();await Task.yield();p.continuation?.yield(.event(event()))
+        m.startObserving(accountToken: purchaseToken);await Task.yield();p.continuation?.yield(.event(event()))
         for _ in 0..<20 where p.finishes==0{try await Task.sleep(for:.milliseconds(10))}
         XCTAssertEqual(s.calls,1);XCTAssertEqual(p.finishes,1)
     }
@@ -334,7 +380,7 @@ private actor PurchaseJournal:LiteServiceJournal {
         XCTAssertTrue(m.message.contains("沒有找到"))
     }
     func testDuplicateConcurrentUpdatesFinishOnlyOnce()async throws {
-        let(s,p,_,m)=setup();m.startObserving();await Task.yield()
+        let(s,p,_,m)=setup();m.startObserving(accountToken: purchaseToken);await Task.yield()
         p.continuation?.yield(.event(event()));p.continuation?.yield(.event(event()))
         for _ in 0..<20 where p.finishes==0{try await Task.sleep(for:.milliseconds(10))}
         XCTAssertEqual(s.calls,1);XCTAssertEqual(p.finishes,1)
@@ -361,7 +407,7 @@ import StoreKitTest
         let product = try XCTUnwrap(products.first)
         let service = PurchaseService(), journal = PurchaseJournal()
         let store = LiteNativePurchaseStore(service: service, provider: LiteStoreKitPurchaseProvider(xcodeTest: true), journal: journal)
-        await store.observePurchases(canManagePurchases: false)
+        await store.observePurchases(accountToken: nil)
         await store.loadOffer()
         XCTAssertEqual(store.offer?.displayPrice, product.displayPrice)
         XCTAssertEqual(store.offer?.name, product.displayName)
@@ -405,6 +451,8 @@ import StoreKitTest
         let s=PurchaseService();s.environment="Xcode";s.fail=true
         let p=LiteStoreKitPurchaseProvider(xcodeTest:true),j=PurchaseJournal()
         let m=LiteNativePurchaseStore(service:s,provider:p,journal:j,now:{Date(timeIntervalSince1970:Double(purchaseNow))})
+        await m.observePurchases(accountToken: purchaseToken)
+        defer { m.stopObserving() }
         await m.loadOffer()
         let offer = try XCTUnwrap(m.offer)
         let products = try await Product.products(for: [purchaseProduct])
@@ -426,6 +474,41 @@ import StoreKitTest
         let remaining=try await p.unfinished();XCTAssertTrue(remaining.isEmpty)
         await m.restore();XCTAssertEqual(s.calls,2)
         XCTAssertEqual(session.allTransactions().count, 1)
+    }
+
+    func testStoreKitApprovalWhileClosedReopensWithOneAcknowledgment() async throws {
+        let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "WoundLiteCommerce", withExtension: "storekit"))
+        let sandbox = try freshCommerceTestSession(url: url)
+        sandbox.askToBuyEnabled = true
+        defer { sandbox.askToBuyEnabled = false; sandbox.clearTransactions() }
+        let service = PurchaseService(), journal = PurchaseJournal()
+        service.environment = "Xcode"
+        func start() -> LiteNativePurchaseStore {
+            LiteNativePurchaseStore(service: service, provider: LiteStoreKitPurchaseProvider(xcodeTest: true),
+                journal: journal, now: { Date(timeIntervalSince1970: Double(purchaseNow)) })
+        }
+        let original = start()
+        await original.observePurchases(accountToken: purchaseToken)
+        await original.purchaseDisplayedTestOffer()
+        XCTAssertTrue(original.message.contains("等待核准"), original.message)
+        XCTAssertEqual(service.calls, 0)
+        original.stopObserving()
+        let transaction = try XCTUnwrap(sandbox.allTransactions().first)
+        try sandbox.approveAskToBuyTransaction(identifier: transaction.identifier)
+
+        let reopened = start()
+        defer { reopened.stopObserving() }
+        await reopened.observePurchases(accountToken: purchaseToken)
+        var unfinished = try await reopened.provider.unfinished()
+        for _ in 0..<50 where service.calls == 0 || !unfinished.isEmpty {
+            try await Task.sleep(for: .milliseconds(100))
+            unfinished = try await reopened.provider.unfinished()
+        }
+        XCTAssertTrue(unfinished.isEmpty)
+        XCTAssertEqual(service.calls, 1)
+        XCTAssertEqual(sandbox.allTransactions().count, 1)
+        let checkpoints = try await journal.values().map { try JSONDecoder().decode(LitePurchaseCheckpoint.self, from: $0) }
+        XCTAssertEqual(checkpoints.filter { $0.finished && $0.acknowledgment?.app_account_token == purchaseToken }.count, 1)
     }
 }
 #endif

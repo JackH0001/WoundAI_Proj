@@ -159,6 +159,7 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
     private let now: () -> Date
     private var processing=Set<String>()
     private var listener: Task<Void,Never>?
+    private var listeningToken: String?
     init(service: any LitePurchaseService,provider: any LitePurchaseProvider,journal: any LiteServiceJournal,now:@escaping ()->Date=Date.init) {
         self.service=service;self.provider=provider;self.journal=journal;self.now=now
     }
@@ -210,11 +211,13 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
         }
         guard try await service.installation() == owner else { throw LitePurchaseFailure.accountMismatch }
         if record.acknowledgment == nil {
+            try Task.checkCancellation()
             let r=try await service.confirm(record.context,event:record.event!);try r.validate(record.context,event)
             record.acknowledgment=r;old=try await save(key,old,record)
         }
         guard try await service.installation() == owner else { throw LitePurchaseFailure.accountMismatch }
         if !record.finished {
+            try Task.checkCancellation()
             try await provider.finish(event)
             record.finished=true;_=try await save(key,old,record)
         }
@@ -230,14 +233,11 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
         for event in events { try event.validate(context) }
         for event in events { try await process(event, using: context) }
     }
-    func observePurchases(canManagePurchases: Bool) async {
-        if canManagePurchases {
-            startObserving()
-            await reconcile(reportEmpty: false)
-        } else {
-            listener?.cancel()
-            listener = nil
-        }
+    func observePurchases(accountToken: String?) async {
+        guard !Task.isCancelled else { return }
+        guard let accountToken else { stopObserving(); return }
+        startObserving(accountToken: accountToken)
+        await reconcile(reportEmpty: false, accountToken: accountToken)
     }
     func loadOffer() async {
         guard !busy, !loadingOffer else { return }
@@ -309,28 +309,44 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
         }
         do { try await reconcileKnown(events, using: c) } catch { failed(error) }
     }
-    func reconcile(reportEmpty: Bool = true) async {
+    func reconcile(reportEmpty: Bool = true, accountToken: String? = nil) async {
         guard !busy else{return};busy=true;defer{busy=false}
         do {
             let events = try await provider.unfinished()
             if events.isEmpty && reportEmpty { message = "Apple 目前沒有待完成的交易。要查找既有訂閱，請按「恢復購買」。" }
-            for event in events { try await process(event) }
+            for event in events {
+                try Task.checkCancellation()
+                if let accountToken {
+                    guard listeningToken == accountToken else { return }
+                    guard event.token == accountToken else { continue }
+                }
+                try await process(event)
+            }
         }
-        catch { failed(error) }
+        catch { if !Task.isCancelled { failed(error) } }
     }
-    func startObserving() {
-        guard listener == nil else{return}
+    func startObserving(accountToken: String) {
+        guard listeningToken != accountToken else { return }
+        stopObserving()
+        listeningToken = accountToken
+        let updates = provider.updates()
         listener=Task { [weak self] in
-            guard let provider=self?.provider else{return}
-            for await update in provider.updates() {
+            for await update in updates {
                 guard !Task.isCancelled else{return}
                 do {
                     switch update {
-                    case .event(let e):try await self?.process(e)
+                    case .event(let e):
+                        guard e.token == accountToken else { continue }
+                        try await self?.process(e)
                     case .invalid:throw LitePurchaseFailure.invalid
                     }
-                } catch { self?.failed(error) }
+                } catch { if !Task.isCancelled { self?.failed(error) } }
             }
         }
+    }
+    func stopObserving() {
+        listener?.cancel()
+        listener = nil
+        listeningToken = nil
     }
 }

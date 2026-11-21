@@ -116,6 +116,32 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     @Published private(set) var registration: Registration = .checking
     @Published private(set) var registering = false
     @Published private(set) var preparingPurchase = false
+    struct PurchaseAccount: Equatable {
+        let generation: Int
+        let token: String
+    }
+    @Published private var authorizedPurchaseAccount: PurchaseAccount?
+    var purchaseObservationAccount: PurchaseAccount? {
+        guard registration == .confirmed, authorizedPurchaseAccount?.generation == identity.generation else { return nil }
+        return authorizedPurchaseAccount
+    }
+
+    /// Read only the local registration and session. Each transaction still
+    /// needs live account admission and server acknowledgment before finishing.
+    func trackPurchaseAccess(foreground: Bool) async {
+        guard foreground, registration == .confirmed else { authorizedPurchaseAccount = nil; return }
+        // Ordinary service requests briefly set busy while checking identity.
+        // Keep the listener for this same generation during those checks.
+        guard !identity.busy else { return }
+        let generation = identity.generation
+        let access = await identity.localPurchaseAccess()
+        guard !Task.isCancelled, generation == identity.generation else { return }
+        guard let access else { authorizedPurchaseAccount = nil; return }
+        authorizedPurchaseAccount = PurchaseAccount(generation: generation, token: access.token)
+        do { try await Task.sleep(for: .seconds(max(0, access.deadline.timeIntervalSince(identity.now())))) }
+        catch { return }
+        if !Task.isCancelled, generation == identity.generation { authorizedPurchaseAccount = nil }
+    }
     @Published private(set) var purchasePreparationMessage = "先登入服務帳號，再確認月費並訂閱；登入不會付款或開啟研究上傳。"
     private var preparationCopy: LiteServiceCopy.Message?
     func presentationPurchasePreparation(locale: Locale) -> String {

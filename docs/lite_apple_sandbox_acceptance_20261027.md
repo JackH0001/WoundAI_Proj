@@ -10,7 +10,13 @@
 
 ### 先驗證商品目錄
 
-含方案預覽的候選版可在服務裝置尚未登記時，從「設定 → 服務登入、訂閱與刪帳 → Plus 方案與價格」讀取 Apple 對目前商店提供的商品名稱與每月價格。預覽只查商品目錄；未完成交易會保留至正式購買頁核對。測試者可保持原本的研究同意選擇。
+含方案預覽的候選版可在服務裝置尚未登記時，從「設定 → 服務登入、訂閱與刪帳 → Plus 方案與價格」讀取 Apple 對目前商店提供的商品名稱與每月價格。預覽只查商品目錄。測試者可保持原本的研究同意選擇。
+
+### 延後核准後回到首頁
+
+第 50 版在進入 Plus 頁時才開始核對未完成交易。後續修正版從首頁讀取本機既有的裝置登記與有效服務帳號，監聽 StoreKit 的交易更新，並核對該帳號未完成的交易。登出後停止監聽。另一個服務帳號的交易保留給原帳號處理。[Apple 交易更新說明](https://developer.apple.com/documentation/storekit/transaction/updates)
+
+在 S8 使用允許延後核准的測試環境。送出一筆待核准的訂閱，關閉 App，核准後重開並停在量測首頁。再測一次 App 已停在首頁時收到核准。兩次各核對該筆交易只關聯一次、Apple 原交易已完成、今日已用次數及研究同意如前。另以登出及其他服務帳號重開，確認原交易仍待原帳號處理。記錄測試組建、測試環境及服務端回執。Xcode StoreKit 與 TestFlight Sandbox 的結果分別保存。
 
 真實 TestFlight 驗收時，記錄 App 組建號、Apple 商店地區、顯示名稱、幣別與月費。若商品查詢沒有結果，先核對商品 ID、當地價格、在地化文字和付費協議，再檢查測試機的商店環境。產品可查到、購買成功以及恢復到原服務帳號，是三項分開的驗收。Apple 說明 Sandbox 商品查詢可在商品送審前進行。[Apple TN3186](https://developer.apple.com/documentation/technotes/tn3186-troubleshooting-in-app-purchases-availability-in-the-sandbox) · [Apple Sandbox 測試](https://developer.apple.com/documentation/storekit/testing-in-app-purchases-with-sandbox)
 

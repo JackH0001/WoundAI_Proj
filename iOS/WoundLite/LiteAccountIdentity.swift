@@ -274,7 +274,7 @@ struct LiteOwnerReviewReference: Encodable, Equatable {
         return true
     }
     /// Local presentation only. Signed transport checks the active account again before any request.
-    func purchaseAccessDeadline() async -> Date? {
+    func localPurchaseAccess() async -> (token: String, deadline: Date)? {
         let start = generation
         do {
             let owner = try await service.installation()
@@ -282,8 +282,11 @@ struct LiteOwnerReviewReference: Encodable, Equatable {
                   let session = record.session, try await !hasDeletionIntent(owner),
                   !blocked, !busy, generation == start else { return nil }
             let deadline = Date(timeIntervalSince1970: Double(session.family_expires_at ?? session.expires_at))
-            return deadline > now() ? deadline : nil
+            return deadline > now() ? (session.app_account_token, deadline) : nil
         } catch { return nil }
+    }
+    func purchaseAccessDeadline() async -> Date? {
+        await localPurchaseAccess()?.deadline
     }
 
     func deletionContext() async throws -> LiteDeletionContext {
