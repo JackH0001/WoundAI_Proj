@@ -45,6 +45,7 @@ struct LitePurchaseObservation: View {
 
 /// The candidate injects a trusted service bridge. Reading the disclosures needs no service access.
 struct LiteNativePurchaseView: View {
+    @Environment(\.liteRearLiDARAvailable) private var canCapture
     @ObservedObject var store: LiteNativePurchaseStore
     @ObservedObject private var session: LiteNativeSession
     @ObservedObject private var identity: LiteAccountIdentityStore
@@ -63,7 +64,9 @@ struct LiteNativePurchaseView: View {
         Form {
             Section(copy("個人雲端辨識")) {
                 Text(copy("免費方案每日可成功辨識 2 次。Plus 每日共 10 次，包含當日已使用的次數。")).accessibilityIdentifier("lite.offer.quota")
-                Text(copy("拍攝新的傷口紀錄需使用配備後置 LiDAR 的 iPhone 或 iPad。請先在量測頁確認這部裝置可拍攝，再決定是否訂閱。"))
+                Text(copy(canCapture
+                    ? "拍攝新的傷口紀錄需使用配備後置 LiDAR 的 iPhone 或 iPad。請先在量測頁確認這部裝置可拍攝，再決定是否訂閱。"
+                    : "此裝置沒有可用的後置 LiDAR 相機。訂閱 Plus 後仍無法在這部裝置拍攝新紀錄。您仍可恢復或管理既有訂閱。"))
                     .font(.footnote).accessibilityIdentifier("lite.offer.captureRequirement")
                 Text(copy("免費可同時追蹤 1 處傷口，Plus 每帳戶最多 5 處。每日辨識次數由各處傷口合計。結束追蹤可換另一處，舊時間軸仍可查看及匯出 PDF。"))
                 Text(copy("額度每日在 UTC 0 時重算，台灣時間為上午 8 時。處理中的辨識會暫時保留名額。查看已保存的結果不扣次數。"))

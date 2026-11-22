@@ -70,6 +70,57 @@ final class NativeEntryUITests: XCTestCase {
     }
 
     #if !LITE_QA_ORDINARY && !LITE_QA_MISSING_BINDING
+    #if targetEnvironment(simulator)
+    @MainActor func testEnglishNoLiDARHistoryAndPlusExplainThisDevice() {
+        verifyNoLiDARHistoryAndPlus(language: "en")
+    }
+
+    @MainActor func testChineseNoLiDARHistoryAndPlusExplainThisDevice() {
+        verifyNoLiDARHistoryAndPlus(language: "zh-Hant")
+    }
+
+    @MainActor private func verifyNoLiDARHistoryAndPlus(language: String) {
+        continueAfterFailure = false
+        let english = language == "en"
+        let app = application(language: language)
+        app.launch()
+        let history = app.buttons[english ? "View existing records" : "查看既有紀錄"]
+        XCTAssertTrue(history.waitForExistence(timeout: 8))
+        attach(app, language + "-no-depth-camera")
+        history.tap()
+        XCTAssertTrue(app.staticTexts[english ? "No measurements yet" : "還沒有量測紀錄"].waitForExistence(timeout: 5))
+        let historyHint = english
+            ? "This device has no available rear LiDAR camera. New records can be captured on a device with rear LiDAR. Photos and timelines stay on the device that captured them."
+            : "此裝置沒有可用的後置 LiDAR 相機。請使用配備後置 LiDAR 的裝置拍攝新紀錄。照片與時間軸保存在拍攝裝置上。"
+        let historyExplained = app.staticTexts.matching(NSPredicate(format: "label == %@", historyHint)).firstMatch.isHittable
+        let oldHint = english ? "Take your first photo in Measure. Each wound has its own measurement history."
+                              : "到「量測」拍下第一筆，同一傷口的面積紀錄會分開追蹤。"
+        let stillPromptsForCapture = app.staticTexts[oldHint].exists
+        attach(app, language + "-empty-history")
+        app.terminate()
+        app.launch()
+        let settings = app.buttons[english ? "Settings and data withdrawal" : "設定與資料撤回"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 8))
+        settings.tap()
+        let account = app.buttons[english ? "Sign-in, subscriptions and account deletion" : "服務登入、訂閱與刪帳"]
+        XCTAssertTrue(account.waitForExistence(timeout: 5))
+        account.tap()
+        app.buttons[english ? "Plus plan and price" : "Plus 方案與價格"].tap()
+        let offerHint = app.staticTexts["lite.offer.captureRequirement"]
+        XCTAssertTrue(offerHint.waitForExistence(timeout: 5))
+        let displayed = offerHint.label
+        let beforeSignIn = !app.buttons["lite.offer.buy"].exists
+        attach(app, language + "-plus-on-this-device")
+        continueAfterFailure = true
+        XCTAssertEqual(displayed, english
+            ? "This device has no available rear LiDAR camera. A Plus subscription cannot enable new captures here. You can still restore or manage an existing subscription."
+            : "此裝置沒有可用的後置 LiDAR 相機。訂閱 Plus 後仍無法在這部裝置拍攝新紀錄。您仍可恢復或管理既有訂閱。")
+        XCTAssertTrue(historyExplained)
+        XCTAssertFalse(stillPromptsForCapture)
+        XCTAssertTrue(beforeSignIn)
+    }
+    #endif
+
     @MainActor func testEnglishSubscriptionEntryExplainsQuotaAndDoesNotOpenAPurchase() throws {
         continueAfterFailure = false
         let app = application(language: "en")

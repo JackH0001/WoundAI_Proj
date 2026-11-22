@@ -122,6 +122,17 @@ enum LitePrefs {
 
 enum LiteRootTab: Hashable { case measure, history, settings }
 
+private struct LiteRearLiDARKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var liteRearLiDARAvailable: Bool {
+        get { self[LiteRearLiDARKey.self] }
+        set { self[LiteRearLiDARKey.self] = newValue }
+    }
+}
+
 struct LiteRootView: View {
     @StateObject private var store = LiteStore()
     @Environment(\.scenePhase) private var scenePhase
@@ -185,6 +196,7 @@ struct LiteRootView: View {
                 .tag(LiteRootTab.settings)
                 .tabItem { Label(LiteServiceCopy.text("設定"), systemImage: "gearshape") }
         }
+        .environment(\.liteRearLiDARAvailable, lidarOK)
         .background {
             if let nativeSession { LitePurchaseObservation(session: nativeSession) }
         }

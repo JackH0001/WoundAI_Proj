@@ -170,3 +170,4 @@
 "舊版 LiDAR 表面積" = "Legacy LiDAR surface area";
 "雙指縮放與移動，檢查圈選邊界。" = "Pinch to zoom and move to check the outline.";
 "重設檢視" = "Reset view";
+"此裝置沒有可用的後置 LiDAR 相機。請使用配備後置 LiDAR 的裝置拍攝新紀錄。照片與時間軸保存在拍攝裝置上。" = "This device has no available rear LiDAR camera. New records can be captured on a device with rear LiDAR. Photos and timelines stay on the device that captured them.";

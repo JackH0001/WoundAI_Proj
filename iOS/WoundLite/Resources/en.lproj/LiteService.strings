@@ -184,3 +184,4 @@
 "續接裝置登記" = "Resume device registration";
 "服務尚未確認這次登記。原登記資料已保留，請稍後再續接。" = "The service could not confirm this registration. Your registration details are saved. Try resuming later.";
 "服務帳號已變更。請登入原帳號後核對訂閱狀態。" = "The service account changed. Sign in to the original account to check your subscription.";
+"此裝置沒有可用的後置 LiDAR 相機。訂閱 Plus 後仍無法在這部裝置拍攝新紀錄。您仍可恢復或管理既有訂閱。" = "This device has no available rear LiDAR camera. A Plus subscription cannot enable new captures here. You can still restore or manage an existing subscription.";

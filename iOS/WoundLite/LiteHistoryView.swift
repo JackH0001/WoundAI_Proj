@@ -7,6 +7,7 @@ import Charts
 struct LiteHistoryView: View {
     private var copy: LiteHistoryCopy { LiteHistoryCopy(locale: locale) }
     @Environment(\.locale) private var locale
+    @Environment(\.liteRearLiDARAvailable) private var canCapture
     private var reportCopy: LiteReportCopy { LiteReportCopy(locale: locale) }
     @ObservedObject var store: LiteStore
     @Binding var recordToOpen: String?
@@ -43,6 +44,12 @@ struct LiteHistoryView: View {
     /// 單靠一個滑動手勢就永久毀掉影像＋深度資料，誤觸成本太高。
     @State private var pendingDelete: LiteRecord?
 
+    private var emptyHistoryHint: String {
+        if store.needsReload { return "原資料未被覆寫。" }
+        if canCapture { return "到「量測」拍下第一筆，同一傷口的面積紀錄會分開追蹤。" }
+        return "此裝置沒有可用的後置 LiDAR 相機。請使用配備後置 LiDAR 的裝置拍攝新紀錄。照片與時間軸保存在拍攝裝置上。"
+    }
+
     var body: some View {
         NavigationStack {
             Group {
@@ -55,7 +62,7 @@ struct LiteHistoryView: View {
                         if store.needsReload {
                             Button(copy.text("重新讀取紀錄")) { store.reload() }
                         }
-                        Text(copy.text(store.needsReload ? "原資料未被覆寫。" : "到「量測」拍下第一筆，同一傷口的面積紀錄會分開追蹤。"))
+                        Text(copy.text(emptyHistoryHint))
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 } else {
