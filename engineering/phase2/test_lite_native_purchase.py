@@ -140,6 +140,50 @@ class NativePurchaseTests(unittest.TestCase):
         c=self.h.context();self.h.a.now+=31
         with self.assertRaises(StateUnavailable):self.h.confirm(c)
         self.h.publish();self.h.confirm(c)
+    def test_second_device_restores_renewal_after_lost_receipt_without_moving_balances(self):
+        h = self.h
+        first = h.confirm()
+        h.f.use(3)
+        other = 'another-subscriber'
+        h.accounts.provision('other-device', other, '30000000-0000-4000-8000-000000000003', None, 'a'*64)
+        h.f.ledger.initialize_day(other, h.f.day, baseline_successes=1, baseline_attempts=1, manifest_sha256='f'*64)
+        initial_balances = rows(h.f.ledger.store)
+        original_link = rows(h.links.store)
+        original_receipts = rows(h.bridge.audit)
+        self.assertEqual(len(original_receipts), 1)
+
+        h.a.payload = dict(h.a.payload, transactionId='987654321')
+        renewal = h.a.sign(h.a.payload)
+        wrong = h.context('other-device')
+        with self.assertRaises(SubscriptionRejected):
+            h.bridge.confirm('other-device', wrong['operation'], renewal)
+        self.assertEqual(rows(h.bridge.audit), original_receipts)
+
+        context = h.context('second-device')
+        write = h.bridge.audit.compare_exchange
+        def lose_confirmation(*args):
+            write(*args)
+            raise StateUnavailable('simulated reply lost after durable receipt')
+
+        with patch.object(h.bridge.audit, 'compare_exchange', side_effect=lose_confirmation):
+            with self.assertRaises(StateUnavailable):
+                h.bridge.confirm('second-device', context['operation'], renewal)
+        receipts_after_loss = rows(h.bridge.audit)
+        self.assertEqual(len(receipts_after_loss), 2)
+        restored = h.bridge.confirm('second-device', context['operation'], renewal)
+        self.assertEqual(restored['transaction_id'], '987654321')
+        self.assertNotEqual(restored['transaction_id'], first['transaction_id'])
+        self.assertEqual(restored['original_transaction_id'], first['original_transaction_id'])
+        self.assertEqual(restored['account_sha256'], first['account_sha256'])
+        self.assertEqual(h.confirm(device='second-device'), restored)
+        self.assertEqual(rows(h.bridge.audit), receipts_after_loss)
+        self.assertEqual(rows(h.links.store), original_link)
+        self.assertEqual(rows(h.f.ledger.store), initial_balances)
+        for device, subject, used, limit in [('second-device', h.f.subject, 3, 10), ('other-device', other, 1, 2)]:
+            grant = h.f.grant(device)
+            self.assertEqual(grant.limit, limit)
+            self.assertEqual(h.f.ledger.snapshot(subject, h.f.day, grant)['used'], used)
+
     def test_restore_new_transaction_same_original_keeps_single_binding(self):
         h=self.h;h.confirm();before=rows(h.links.store)
         r=h.confirm(payload=dict(h.a.payload,transactionId='987654321'))

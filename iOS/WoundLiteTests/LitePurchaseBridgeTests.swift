@@ -594,6 +594,75 @@ import StoreKitTest
         XCTAssertEqual(session.allTransactions().count, 1)
     }
 
+    func testRenewalAfterAccountSwitchRestoresOnlyToOriginalAccountOnSecondInstallation() async throws {
+        let config = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "WoundLiteCommerce", withExtension: "storekit"))
+        let session = try freshCommerceTestSession(url: config)
+        defer { session.clearTransactions() }
+
+        func purchaseStore(_ service: PurchaseService, journal: PurchaseJournal) -> LiteNativePurchaseStore {
+            service.environment = "Xcode"
+            return LiteNativePurchaseStore(service: service, provider: LiteStoreKitPurchaseProvider(xcodeTest: true),
+                journal: journal, accountGeneration: { service.generation },
+                now: { Date(timeIntervalSince1970: Double(purchaseNow)) })
+        }
+
+        let originalService = PurchaseService()
+        let originalStore = purchaseStore(originalService, journal: PurchaseJournal())
+        await originalStore.purchaseDisplayedTestOffer()
+        XCTAssertEqual(originalService.calls, 1)
+        let initialEntitlements = try await originalStore.provider.knownPurchases()
+        XCTAssertEqual(initialEntitlements.count, 1)
+        let initial = try XCTUnwrap(initialEntitlements.first)
+
+        try session.forceRenewalOfSubscription(productIdentifier: purchaseProduct)
+        // Wait for StoreKit to publish the renewal while the original account is away.
+        var renewal: LitePurchaseEvent?
+        for _ in 0..<50 {
+            let observed = try await originalStore.provider.unfinished()
+            renewal = observed.first { $0.transaction != initial.transaction && $0.original == initial.original }
+            if renewal != nil { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        let renewed = try XCTUnwrap(renewal)
+        XCTAssertEqual(renewed.token, purchaseToken)
+        XCTAssertEqual(session.allTransactions().count, 2)
+
+        let secondService = PurchaseService()
+        secondService.owner = "synthetic-second-installation"
+        secondService.account = String(repeating: "e", count: 64)
+        secondService.token = "20000000-0000-4000-8000-000000000002"
+        let secondJournal = PurchaseJournal()
+        let secondStore = purchaseStore(secondService, journal: secondJournal)
+        await secondStore.restore()
+        XCTAssertTrue(secondStore.message.contains("不符"), secondStore.message)
+        XCTAssertEqual(secondService.calls, 0)
+        let retained = try await secondStore.provider.unfinished()
+        XCTAssertTrue(retained.contains { $0.sameTransaction(as: renewed) })
+
+        secondService.generation += 1
+        secondService.account = originalService.account
+        secondService.token = originalService.token
+        await secondStore.restore()
+        XCTAssertTrue(secondStore.message.contains("關聯已確認"), secondStore.message)
+        XCTAssertEqual(secondService.calls, 1)
+        let completed = try await secondJournal.values()
+            .map { try JSONDecoder().decode(LitePurchaseCheckpoint.self, from: $0) }
+            .filter { $0.finished }
+        XCTAssertEqual(completed.count, 1)
+        let checkpoint = try XCTUnwrap(completed.first)
+        XCTAssertEqual(checkpoint.context.installation, secondService.owner)
+        XCTAssertEqual(checkpoint.acknowledgment?.account_sha256, originalService.account)
+        XCTAssertEqual(checkpoint.acknowledgment?.transaction_id, renewed.transaction)
+        XCTAssertEqual(checkpoint.acknowledgment?.original_transaction_id, initial.original)
+        let remaining = try await secondStore.provider.unfinished()
+        XCTAssertTrue(remaining.isEmpty)
+
+        await secondStore.restore()
+        XCTAssertEqual(secondService.calls, 1)
+        XCTAssertEqual(originalService.calls, 1)
+        XCTAssertEqual(session.allTransactions().count, 2)
+    }
+
     func testStoreKitApprovalWhileClosedReopensWithOneAcknowledgment() async throws {
         let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "WoundLiteCommerce", withExtension: "storekit"))
         let sandbox = try freshCommerceTestSession(url: url)
