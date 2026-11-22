@@ -154,6 +154,37 @@ performed by these tests.
 
 ## Attached Cloud Run identity
 
+### External beta revision and secret versions
+
+For the external Lite personal service, save the approved settings JSON, the
+operator's independent release plan, and the Cloud Run **v2 Revision** response.
+Run the following offline, keeping the inputs in the operator's workspace.
+
+```sh
+python tools/check_lite_native_revision.py plan.json revision.json settings.json
+```
+
+The plan records the signed app's `team` and `build` (strings), `revision` (full resource name), `image`
+(registry path at SHA-256 digest), `settings_sha256` (original file bytes), and
+`secret_versions`. The latter maps `config`, `identity`, `oauth`, `api` and each
+configured `root-N` to `projects/PROJECT_ID/secrets/NAME/versions/NUMBER`.
+If research linking is planned, add its independently reviewed absolute file
+path and secret version to `additional_secret_files`. Pin these values when
+reviewing the proposed revision, before collecting the provider response.
+The regression fixture includes a complete example of this comparison.
+
+Exit 0 confirms the reviewed mounted inputs, app build, Sandbox product, runtime
+identity and image references for the named revision. Owner enrollment and
+owner-only settings fail this external-beta check. The output covers configuration.
+Collect the serving traffic allocation, effective IAM, in-container mount metadata,
+successful startup and a tester's actual App Attest and Sandbox receipts separately.
+The comparison runs on the operator's machine and takes metadata files as input.
+The signed IPA and retained service image can be used with this tool as issued.
+[Revision resource](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services.revisions)
+and [secret volume fields](https://docs.cloud.google.com/run/docs/reference/rest/v2/Volume).
+
+### Runtime metadata
+
 The native service and the separate key preparation worker check the attached service
 account email, project ID, project number, and asia-east1 region through the fixed
 Cloud Run metadata endpoint before constructing Storage or KMS clients. Bundle,
