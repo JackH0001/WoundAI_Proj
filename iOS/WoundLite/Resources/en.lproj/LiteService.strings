@@ -56,7 +56,7 @@
 "已取消這次身分核對；原刪帳要求與手機紀錄保留。一般服務仍暫停，可稍後再核對。" = "Identity check cancelled. The original deletion request and device records are retained. Regular services remain paused; you can check again later.";
 "已受理，清理待核對" = "Accepted; cleanup pending verification";
 "已排程，等待銷毀確認" = "Scheduled; awaiting confirmed destruction";
-"已有訂閱請登入原服務帳號。此步不會付款；研究上傳由您另行決定。" = "Already subscribed? Sign in to your original service account. This step does not charge you. Research uploads are your separate choice.";
+"已有訂閱？請登入原服務帳號，再點「恢復購買」。" = "Already subscribed? Sign in to your original service account, then choose “Restore purchases”.";
 "已登出服務帳號；未刪除紀錄，也未撤回研究資料。" = "Signed out of the service account. Records were not deleted and research data was not withdrawn.";
 "已確認無法解密" = "Confirmed undecryptable";
 "已讀取這部裝置的登記。" = "This device registration has been read.";
@@ -117,7 +117,6 @@
 "無法核對原刪帳要求；已停止新增要求。請保留紀錄，稍後再核對。" = "The original deletion request could not be verified. New requests have been stopped. Keep your records and check again later.";
 "無法讀取原刪帳要求。請解鎖裝置後重新核對。" = "The original deletion request could not be read. Unlock the device and check again.";
 "無法讀取這部手機原有的研究登記。請先解鎖；若從未參與研究，無須建立登記。" = "This device's original research registration could not be read. Unlock first. If you never joined research, you do not need to create a registration.";
-"登入並繼續訂閱 Plus" = "Sign in and continue to Plus";
 "登入尚未確認，請保留原紀錄並重試；未移轉帳號或增加額度。" = "Sign-in is not confirmed. Keep your records and retry. No account was transferred or allowance added.";
 "登出服務帳號" = "Sign out of service account";
 "目前存取已停止；歷史加密副本仍待處理" = "Current access has stopped; historical encrypted copies still need processing";

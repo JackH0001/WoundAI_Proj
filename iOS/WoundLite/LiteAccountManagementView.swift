@@ -1,6 +1,47 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import CoreTransferable
+import AuthenticationServices
+
+/// The service must obtain its challenge asynchronously before presenting Apple authorization.
+struct LiteAppleSignInButton: View {
+    let identifier: String
+    let action: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        Control(identifier: identifier, style: colorScheme == .dark ? .white : .black, action: action)
+            .id(colorScheme)
+            .frame(maxWidth: .infinity)
+            .frame(height: 48)
+    }
+
+    private struct Control: UIViewRepresentable {
+        let identifier: String
+        let style: ASAuthorizationAppleIDButton.Style
+        let action: () -> Void
+
+        final class Coordinator: NSObject {
+            var action: () -> Void
+            init(action: @escaping () -> Void) { self.action = action }
+            @objc func pressed() { action() }
+        }
+
+        func makeCoordinator() -> Coordinator { Coordinator(action: action) }
+
+        func makeUIView(context: Context) -> ASAuthorizationAppleIDButton {
+            let button = ASAuthorizationAppleIDButton(type: .signIn, style: style)
+            button.addTarget(context.coordinator, action: #selector(Coordinator.pressed), for: .touchUpInside)
+            return button
+        }
+
+        func updateUIView(_ button: ASAuthorizationAppleIDButton, context: Context) {
+            context.coordinator.action = action
+            button.accessibilityIdentifier = identifier
+            button.isEnabled = context.environment.isEnabled
+        }
+    }
+}
 
 /// Requires the same protected journal in identity/deletion composition.
 /// Not constructed by default startup until disposition and live gates pass.
@@ -23,7 +64,9 @@ struct LiteAccountManagementView:View {
         Form {
             if deletion.record==nil && !deletion.needsReview {
                 Section(copy("服務帳號")) {
-                    Button(copy("使用 Apple 登入")) {Task{await identity.signIn()}}
+                    LiteAppleSignInButton(identifier: "lite.account.signIn") {
+                        Task { await identity.signIn() }
+                    }
                     Button(copy("核對未完成登入")) {Task{await identity.retry()}}
                     Button(copy("登出服務帳號")) {Task{await identity.signOut()}}
                     Text(copy(identity.message)).font(.footnote)

@@ -4,6 +4,14 @@
 購買、續訂、寬限期及帳號關聯驗證。這不是部署指令，也不表示可公開上市。
 本輪沒有建立商品、登入測試帳號、購買、修改 Apple 設定或更新 TestFlight。
 
+## 外測的登入與恢復購買入口（2026-11-22）
+
+Apple 已交付的本人內測 54 版，在「設定 → 服務登入、訂閱與刪帳 → Plus 方案與價格」顯示「登入並繼續訂閱 Plus」。後續原始碼在同一位置改用 Apple 系統登入按鈕，供新訂閱與既有訂閱者共用。英文路徑是 Settings → Sign-in, subscriptions and account deletion → Plus plan and price → Sign in with Apple。
+
+1. 全新安裝先查看月費。保持原研究選擇，點選登入，完成裝置登記與 Apple 身分核對。若登記尚待服務確認，請從同頁續接原登記。
+2. 已有訂閱的測試者登入原服務帳號，選「恢復購買」／Restore purchases。核對原交易、當日已用額度及原研究選擇。首次訂閱的測試者另按顯示月費的按鈕，進行 S2。
+3. 填 Apple 審查備註前，先以待送審組建與獨立測試身分在實機走通上述入口。如果後端仍限制本人安裝，先完成外部測試身分的服務驗收。記下組建、服務修訂及交易核對結果。模擬器的操作結果與真實 Sandbox 結果分別記載。[Apple 登入按鈕設計](https://developer.apple.com/design/human-interface-guidelines/sign-in-with-apple)
+
 ## 2026-11-01 候選版入口
 
 內部組態現在可從 App 的設定開啟原生服務流程。初次使用須先明確核對裝置登記，再進入 Apple 登入。一般組態維持原本的量測與紀錄流程。模擬器驗證到登記前，S0–S9 仍須使用正確簽署的實機及獨立候選服務。[建置與驗收邊界](lite_native_candidate_entry_20261101.md)

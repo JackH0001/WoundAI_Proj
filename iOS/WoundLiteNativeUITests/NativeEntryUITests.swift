@@ -137,11 +137,15 @@ final class NativeEntryUITests: XCTestCase {
         XCTAssertTrue(quota.label.contains("2 successful")); XCTAssertTrue(quota.label.contains("total of 10"))
         let button = app.buttons["lite.offer.signIn"]
         for _ in 0..<8 where !button.isHittable { app.swipeUp() }
-        XCTAssertTrue(button.isHittable); XCTAssertEqual(button.label, "Sign in and continue to Plus")
+        XCTAssertTrue(button.isHittable)
+        XCTAssertEqual(button.label.lowercased(), "sign in with apple")
+        XCTAssertGreaterThanOrEqual(button.frame.height, 44)
         XCTAssertFalse(app.buttons["lite.offer.buy"].exists)
         XCTAssertFalse(app.buttons["Restore purchases"].exists)
         XCTAssertTrue(app.staticTexts["lite.offer.preparationStatus"].label.contains("does not charge"))
-        attach(app, "english-subscription-before-registration")
+        XCTAssertEqual(app.buttons.matching(identifier: "lite.offer.signIn").count, 1)
+        XCTAssertTrue(app.staticTexts["lite.offer.preview"].label.contains("Restore purchases"))
+        attach(app, "english-apple-sign-in")
     }
     #endif
     @MainActor func testUnmatchedHelpKeepsOfflineTopicsAndDoesNotRetainTheQuestion() throws {
@@ -518,6 +522,10 @@ final class NativeEntryUITests: XCTestCase {
         for _ in 0..<4 where !continueSubscription.isHittable { app.swipeUp() }
         XCTAssertTrue(continueSubscription.isHittable)
         XCTAssertTrue(continueSubscription.isEnabled)
+        XCTAssertTrue(continueSubscription.label.contains("Apple"))
+        XCTAssertTrue(continueSubscription.label.contains("登入"))
+        XCTAssertGreaterThanOrEqual(continueSubscription.frame.height, 44)
+        XCTAssertTrue(app.staticTexts["lite.offer.preview"].label.contains("恢復購買"))
         attach(app, "subscription-sign-in-before-registration")
         continueSubscription.tap()
         // Simulator App Attest cannot register. The same page must explain

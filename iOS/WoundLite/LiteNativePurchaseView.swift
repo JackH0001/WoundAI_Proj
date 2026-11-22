@@ -100,15 +100,15 @@ struct LiteNativePurchaseView: View {
                             .disabled(session.registering || identity.busy || store.busy)
                             .accessibilityIdentifier("lite.offer.resumeRegistration")
                     } else {
-                        Button(copy("登入並繼續訂閱 Plus")) { Task { await session.prepareForPurchase() } }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(session.preparingPurchase || session.registering || identity.busy || store.busy)
-                            .accessibilityIdentifier("lite.offer.signIn")
+                        LiteAppleSignInButton(identifier: "lite.offer.signIn") {
+                            Task { await session.prepareForPurchase() }
+                        }
+                        .disabled(session.preparingPurchase || session.registering || identity.busy || store.busy)
                     }
                     if session.preparingPurchase { ProgressView(copy("正在準備，請勿重複操作…")) }
                     Text(session.registration == .pending ? copy(session.message) : session.presentationPurchasePreparation(locale: locale))
                         .accessibilityIdentifier("lite.offer.preparationStatus")
-                    Text(copy("已有訂閱請登入原服務帳號。此步不會付款；研究上傳由您另行決定。"))
+                    Text(copy("已有訂閱？請登入原服務帳號，再點「恢復購買」。"))
                         .font(.footnote).accessibilityIdentifier("lite.offer.preview")
                     if session.registration == .confirmed, let account = try? session.accountView() {
                         NavigationLink(copy("核對未完成登入或帳號狀態")) { account }

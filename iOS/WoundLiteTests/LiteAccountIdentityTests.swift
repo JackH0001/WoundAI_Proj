@@ -2,6 +2,7 @@ import XCTest
 import SwiftUI
 import CoreTransferable
 import UniformTypeIdentifiers
+import AuthenticationServices
 @testable import WoundLite
 
 private let identityNow=1_800_000_000
@@ -306,6 +307,45 @@ private actor IdentityJournal:LiteServiceJournal {
         let suspended=try await accountRow(s,j);XCTAssertEqual(suspended.phase,"deleting")
         XCTAssertNil(suspended.renewalOperation);XCTAssertNil(suspended.credential)
     }
+    func testAccountPageAppleButtonStartsOnlyTheExplicitSignIn() async throws {
+        let (service, provider, journal, identity) = setup()
+        let deletion = IdentityDeletionService()
+        let page = try LiteAccountManagementView(identity: identity, service: deletion)
+        let host = UIHostingController(rootView: NavigationStack { page })
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 430, height: 932))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+
+        func findButton(in view: UIView) -> ASAuthorizationAppleIDButton? {
+            if let button = view as? ASAuthorizationAppleIDButton,
+               button.accessibilityIdentifier == "lite.account.signIn" { return button }
+            return view.subviews.lazy.compactMap { findButton(in: $0) }.first
+        }
+        host.view.layoutIfNeeded()
+        for _ in 0..<100 where findButton(in: host.view) == nil {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let button = try XCTUnwrap(findButton(in: host.view))
+        XCTAssertTrue(button.isEnabled)
+        XCTAssertEqual(service.challenges, 0)
+        XCTAssertEqual(provider.calls, 0)
+        provider.beforeSignIn = {
+            let record = try await journal.records().first
+            XCTAssertEqual(record?.phase, "apple")
+        }
+        button.sendActions(for: .touchUpInside)
+        for _ in 0..<100 where service.confirms == 0 || identity.busy {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let record = try await journal.records().first
+        XCTAssertEqual(record?.phase, "active")
+        XCTAssertEqual(service.challenges, 1)
+        XCTAssertEqual(provider.calls, 1)
+        XCTAssertEqual(service.confirms, 1)
+        XCTAssertEqual(deletion.requests, 0)
+    }
+
     func testCandidateManagementViewRendersPendingWithoutSendingOrClaimingComplete()async throws {
         let(s,_,j,m)=setup();await m.signIn();let intent=try await deletionIntent(s,j)
         try await m.suspendForDeletion(intent.context,operation:intent.operation)
