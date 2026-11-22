@@ -88,6 +88,17 @@ def apple_verifier(policy, root_certificates, *, allowed_products=None):
     return SignedDataVerifier(root_certificates, True, Environment(policy.environment), policy.bundle, policy.app_id)
 
 
+def verify_apple_jws(decode, signed):
+    """Keep temporary online certificate checks distinct from rejected transactions."""
+    from appstoreserverlibrary.signed_data_verifier import VerificationException, VerificationStatus
+    try:
+        return decode(signed)
+    except Exception as exc:
+        if isinstance(exc, VerificationException) and exc.status == VerificationStatus.RETRYABLE_VERIFICATION_FAILURE:
+            raise StateUnavailable('Apple certificate status temporarily unavailable') from exc
+        raise SubscriptionRejected('Apple signed data rejected') from exc
+
+
 class AppleSubscriptionAuthority:
     def __init__(self, *, policy, verifier, client, proof_store, clock=time.time, allowed_products=None):
         policy.validate(allowed_products)
@@ -113,8 +124,8 @@ class AppleSubscriptionAuthority:
             raise StateUnavailable('billing grace renewal proof unavailable; refresh')
         if type(signed) is not str or not 1<=len(signed)<=12000:
             raise SubscriptionRejected('bounded signed renewal required')
+        renewal = verify_apple_jws(self.verifier.verify_and_decode_renewal_info, signed)
         try:
-            renewal=self.verifier.verify_and_decode_renewal_info(signed)
             encoded=signed.split('.')[1]
             raw=loads_json_object_strict(base64.b64decode(encoded+'='*(-len(encoded)%4),
                 altchars=b'-_',validate=True).decode('utf-8'))
@@ -177,9 +188,8 @@ class AppleSubscriptionAuthority:
         row=matches[0]; signed=getattr(row,'signedTransactionInfo',None)
         if type(signed) is not str or not 1 <= len(signed) <= 12000:
             raise SubscriptionRejected('bounded signed transaction required')
+        transaction = verify_apple_jws(self.verifier.verify_and_decode_signed_transaction, signed)
         try:
-            # Name is pinned to Apple library 3.1.2; upstream main uses another name.
-            transaction=self.verifier.verify_and_decode_signed_transaction(signed)
             # Official model conversion can coerce booleans/numbers into expected
             # types. Inspect the SAME already signature-verified payload to reject
             # such coercion and duplicate JSON keys; this is not JWS verification.

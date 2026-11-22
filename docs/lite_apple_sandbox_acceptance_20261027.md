@@ -130,6 +130,18 @@ S9 若涉及商品改變，須先確認 Apple 的實際商品轉換及有效交�
 
 ## 保存與停止條件
 
+### S4、S6 的憑證查詢中斷驗收（2026-11-22）
+
+購買或恢復流程收到 `503 lite_purchase_unconfirmed`、`keep_local=true`、
+`retryable=true` 時，保留原交易與操作編號，依回應的 `retry_after` 等待，
+再核對同一筆交易。測試時記下第一次回應、恢復後的回執與重送結果。
+驗收預期為一張購買回執、辨識額度與研究同意維持原值。帳號或簽章確定不符仍應拒絕。
+
+本機以合成憑證重現 App Store Server Library 3.1.2 查詢 OCSP 暫時失敗，
+再用有效的簽章回應驗證恢復。另測試 Apple 訂閱狀態中的交易與寬限期續訂證明遇到
+同一錯誤時保留既有證據。真實 Sandbox 的購買及跨裝置恢復仍須以 S3、S4 獨立驗收。
+[Apple 驗證函式庫固定版本原始碼](https://github.com/apple/app-store-server-library-python/blob/v3.1.2/appstoreserverlibrary/signed_data_verifier.py)
+
 每項記錄組建／來源／映像／UTC時間、匿名帳號雜湊、operation/result雜湊、
 used/pending前後值、模型呼叫數、Apple查詢數、簽章驗證結果及稽核回執。
 完整真實 JWS、original transaction、token、金鑰及登入資訊只留受限證據區，

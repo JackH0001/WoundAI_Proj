@@ -9,7 +9,7 @@ from audit_chain_contract import loads_json_object_strict
 from lite_attest_state import StateUnavailable
 from lite_usage_ledger import UsageConflict,digest,_hex
 from lite_subscription_runtime import SubscriptionRuntime
-from lite_subscription_authority import SubscriptionRejected, matches_apple_account_token
+from lite_subscription_authority import SubscriptionRejected, matches_apple_account_token, verify_apple_jws
 from lite_subscription_executor import key
 
 PREFIX='/api/v1/lite/purchase/'
@@ -61,8 +61,8 @@ class NativePurchaseBridge:
         if type(signed_transaction) is not str or not 1<=len(signed_transaction)<=12000:
             raise SubscriptionRejected('bounded Apple transaction required')
         c=self.context(installation,operation,existing_only=True);p=self.authority.policy
+        verify_apple_jws(self.authority.verifier.verify_and_decode_signed_transaction, signed_transaction)
         try:
-            self.authority.verifier.verify_and_decode_signed_transaction(signed_transaction)
             s=signed_transaction.split('.')[1]
             raw=loads_json_object_strict(base64.b64decode(s+'='*(-len(s)%4),altchars=b'-_',validate=True).decode())
             for k in ('transactionId','originalTransactionId','bundleId','environment','productId','appAccountToken','type','inAppOwnershipType'):

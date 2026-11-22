@@ -212,6 +212,63 @@ class PurchaseHTTPTests(unittest.TestCase):
         self.assertEqual(self.post('confirm',signed_transaction=signed).json,r.json)
         self.assertEqual(before,[rows(h.ledger.store),rows(h.privacy.store)])
         self.assertEqual(h.model_calls,0)
+    def test_ocsp_outage_and_recovery_preserve_same_purchase(self):
+        from datetime import datetime, timedelta, timezone
+        from types import SimpleNamespace
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.x509 import ocsp
+        from lite_subscription_authority import apple_verifier
+        from test_lite_subscription_authority import synthetic_chain
+
+        apple = self.p.a
+        endpoint = 'https://ocsp.example.invalid/status'
+        apple.keys, apple.certs = synthetic_chain(ocsp_url=endpoint)
+        root = apple.certs[0].public_bytes(serialization.Encoding.DER)
+        self.p.bridge.authority.verifier = apple_verifier(apple.a.policy, [root])
+        transaction = apple.sign()
+        h = self.h
+        self.assertEqual(self.post('context').status_code, 200)
+        kept = [self.p.bridge.store, h.ledger.store, h.privacy.store]
+        preserved = [rows(store) for store in kept]
+        untouched = [self.p.bridge.audit, self.p.links.store, self.p.links.audit, apple.store]
+        prior = [rows(store) for store in untouched]
+
+        def healthy_response(url, *, data, **options):
+            self.assertEqual(url, endpoint)
+            request = ocsp.load_der_ocsp_request(data)
+            child = next(i for i in (1, 2) if apple.certs[i].serial_number == request.serial_number)
+            issuer = apple.certs[child - 1]
+            now = datetime.now(timezone.utc)
+            response = (ocsp.OCSPResponseBuilder()
+                        .add_response(apple.certs[child], issuer, request.hash_algorithm,
+                                      ocsp.OCSPCertStatus.GOOD, now - timedelta(minutes=1),
+                                      now + timedelta(minutes=5), None, None)
+                        .responder_id(ocsp.OCSPResponderEncoding.HASH, issuer)
+                        .sign(apple.keys[child - 1], hashes.SHA256()))
+            return SimpleNamespace(status_code=200, content=response.public_bytes(serialization.Encoding.DER))
+
+        with patch('appstoreserverlibrary.signed_data_verifier.requests.post',
+                   return_value=SimpleNamespace(status_code=503)) as responder:
+            pending = self.post('confirm', signed_transaction=transaction)
+        responder.assert_called_once()
+        self.assertEqual(pending.status_code, 503, pending.json)
+        self.assertEqual(pending.json['error'], 'lite_purchase_unconfirmed')
+        self.assertIs(pending.json['keep_local'], True)
+        self.assertIs(pending.json['retryable'], True)
+        self.assertGreater(pending.json['retry_after'], 0)
+        self.assertEqual([rows(store) for store in untouched], prior)
+
+        with patch('appstoreserverlibrary.signed_data_verifier.requests.post', side_effect=healthy_response) as responder:
+            confirmed = self.post('confirm', signed_transaction=transaction)
+            self.assertEqual(confirmed.status_code, 200, confirmed.json)
+            self.assertEqual(responder.call_count, 2)  # Intermediate and leaf.
+            replay = self.post('confirm', signed_transaction=transaction)
+            self.assertEqual((replay.status_code, replay.json), (200, confirmed.json))
+            self.assertEqual(responder.call_count, 2)
+        self.assertEqual(len(rows(self.p.bridge.audit)), 1)
+        self.assertEqual([rows(store) for store in kept], preserved)
+        self.assertEqual(h.model_calls, 0)
+
     def test_unsigned_and_owner_spoofing_rejected(self):
         self.assertEqual(self.h.client.post(PREFIX+'context',json={}).status_code,401)
         raw=json.dumps(dict(anon_id='different',operation='1'*32)).encode()

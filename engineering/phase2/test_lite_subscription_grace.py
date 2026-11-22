@@ -66,6 +66,21 @@ class GraceAuthorityTests(unittest.TestCase):
         self.assertEqual(self.a.verifier.verify_and_decode_renewal_info(p['signed_renewal']).originalTransactionId,apple.BINDING.original_transaction)
         self.assertEqual(self.a.verifier.verify_and_decode_signed_transaction(p['signed_transaction']).appAccountToken,apple.TOKEN)
 
+    def test_status_or_renewal_verification_outage_preserves_evidence(self):
+        from appstoreserverlibrary.signed_data_verifier import VerificationException, VerificationStatus
+        response = self.a.client.get_all_subscription_statuses(apple.BINDING.original_transaction)
+        self.a.client.get_all_subscription_statuses = lambda _: response
+        original = self.grant()
+        evidence = rows(self.a.store)
+        for method in ('verify_and_decode_signed_transaction', 'verify_and_decode_renewal_info'):
+            failure = VerificationException(VerificationStatus.RETRYABLE_VERIFICATION_FAILURE)
+            with self.subTest(method=method), patch.object(self.a.verifier, method, side_effect=failure):
+                with self.assertRaises(StateUnavailable):
+                    self.grant()
+                self.assertEqual(rows(self.a.store), evidence)
+        self.assertEqual(self.grant(), original)
+        self.assertEqual(rows(self.a.store), evidence)
+
     def test_grace_expiry_caps_grant_without_hardcoded_days(self):
         for seconds in (1,4,29,30,600,28*86400):
             self.renewal['gracePeriodExpiresDate']=(self.a.now+seconds)*1000
