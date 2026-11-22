@@ -88,6 +88,10 @@ struct LiteRevisionPresentation: Equatable {
                 if withdrawalBlocked || !consent || retiredResearch {
                     return Self(phase: .localOnly, title: "研究保存已暫停", detail: "本機照片、深度與修改已保留。")
                 }
+                if job.privacyBlocked {
+                    return Self(phase: .localOnly, title: "這筆拍攝已停止研究送件",
+                                detail: job.notice ?? "本機照片、深度與修改已保留。")
+                }
                 let waiting = job.retryAt.map { $0 > now } ?? false
                 return Self(phase: waiting ? .waiting : .pending, title: "已存入手機，研究保存待確認",
                             detail: job.notice ?? "將核對這筆拍攝的保存收據，確認後再同步圈選。",

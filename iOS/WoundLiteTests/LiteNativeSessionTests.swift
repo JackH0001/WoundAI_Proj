@@ -1576,6 +1576,12 @@ private actor CaptureWire: LiteAuthenticatedTransport {
     let job: LitePendingResearchCapture, packet: LiteRawDepthPacket
     let badLookup: Bool, wrongDepth: Bool, expireFirstLookup: Bool
     var mediaPosts = 0, statusPosts = 0, sourcePosts = 0
+    var mediaError: (status: Int, code: String)?
+    var lookupError: (status: Int, code: String)?
+    var acceptedMedia = false
+    func setMediaError(_ status: Int, _ code: String) { mediaError = (status, code) }
+    func setLookupError(_ status: Int, _ code: String) { lookupError = (status, code) }
+    func allowMedia() { mediaError = nil }
     init(_ job: LitePendingResearchCapture, _ packet: LiteRawDepthPacket, badLookup: Bool = false,
          wrongDepth: Bool = false, expireFirstLookup: Bool = false) {
         self.job = job; self.packet = packet; self.badLookup = badLookup; self.wrongDepth = wrongDepth
@@ -1604,11 +1610,15 @@ private actor CaptureWire: LiteAuthenticatedTransport {
             let args = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
             XCTAssertEqual(args["bundle_sha256"] as? String, packet.bundleDigest)
             XCTAssertNil(data.range(of: packet.jpeg))
+            if let lookupError {
+                return (try JSONSerialization.data(withJSONObject: ["error": lookupError.code]),
+                        HTTPURLResponse(url: url, statusCode: lookupError.status, httpVersion: nil, headerFields: nil)!)
+            }
             if expireFirstLookup && statusPosts == 1 {
                 return (Data(#"{"error":"research_source_expired","renew_source_only":true}"#.utf8),
                         HTTPURLResponse(url:url,statusCode:409,httpVersion:nil,headerFields:nil)!)
             }
-            if mediaPosts > 0 {
+            if acceptedMedia {
                 let idJSON = try JSONSerialization.data(withJSONObject: ["lite.research-capture/1",job.pin.owner,job.pin.epoch,job.captureID],options:.withoutEscapingSlashes)
                 let imageID = String(LiteServiceBytes.hash(idJSON).prefix(16))
                 let raw: [String: Any] = ["schema":"lite.rgbd.receipt/1","status":"stored","registration":"not_verified",
@@ -1630,6 +1640,11 @@ private actor CaptureWire: LiteAuthenticatedTransport {
             XCTAssertNotNil(data.range(of: packet.jpeg))
             XCTAssertNotNil(data.range(of: packet.rawDepth))
             mediaPosts += 1
+            if let mediaError {
+                return (try JSONSerialization.data(withJSONObject: ["error": mediaError.code]),
+                        HTTPURLResponse(url: url, statusCode: mediaError.status, httpVersion: nil, headerFields: nil)!)
+            }
+            acceptedMedia = true
             throw URLError(.networkConnectionLost)
         default: throw LiteServiceFailure.invalidState
         }
@@ -1667,6 +1682,103 @@ extension LiteNativeSessionTests {
                           consent: @escaping () -> Bool = { true }) -> LiteResearchCaptureDelivery {
         LiteResearchCaptureDelivery(source: wire, currentAccount: { job.pin.account },
             researchOwner: { _ in job.pin.owner }, permits: { _ in consent() }, researchTransport: { _,_ in wire })
+    }
+
+    func testPrivacyRejectedCaptureCannotBeRetriedAfterRestart() async throws {
+        for reason in ["face_detected", "research_photo_metadata"] {
+            let (path, store, saved, packet) = try await researchFixture()
+            defer { cleanCapture(path, store, saved) }
+            let job = try XCTUnwrap(saved.researchCapture)
+            let wire = CaptureWire(job, packet)
+            await wire.setMediaError(400, reason)
+            await delivery(job, wire: wire).resume(saved.id, store: store)
+            let reopened = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+            let stopped = try XCTUnwrap(reopened.records.first)
+            XCTAssertEqual(stopped.researchCapture?.privacyStopReason, reason)
+            let status = LiteRevisionPresentation.make(record: stopped, syncing: false, consent: true, withdrawalBlocked: false)
+            XCTAssertNil(status.retryTitle)
+            XCTAssertNotEqual(LiteHistoryCopy(locale: Locale(identifier: "en")).revisionDetail(status), status.detail)
+            XCTAssertEqual(LiteHistoryCopy(locale: Locale(identifier: "zh-Hant")).revisionDetail(status), status.detail)
+            await delivery(job, wire: wire).resume(saved.id, store: reopened)
+            await delivery(job, wire: wire).resume(saved.id, store: reopened, explicit: true)
+            let counts = await wire.counts()
+            XCTAssertEqual(counts, [1, 1, 1], reason)
+            XCTAssertEqual(stopped.researchCapture?.firstRevision, job.firstRevision)
+            XCTAssertNotNil(stopped.researchCapture?.encryptedTicket)
+            XCTAssertNil(stopped.cloudSync)
+            XCTAssertEqual(reopened.images.rawBytes(stopped.imageName), packet.jpeg)
+            let depth = try XCTUnwrap(reopened.loadDepth(try XCTUnwrap(stopped.depthName), matchingImage: stopped.imageName))
+            XCTAssertEqual(try LiteRawDepthPacket.make(depth: depth, jpeg: packet.jpeg).bundleDigest, packet.bundleDigest)
+        }
+    }
+
+    func testUnrelatedStatusOrEndpointCannotMarkPhotoAsPrivacyRejected() async throws {
+        for (lookup, code, reason) in [(true, 400, "face_detected"), (false, 503, "research_photo_metadata"),
+                                        (false, 400, "invalid_research_capture"), (true, 403, "research_source_mismatch")] {
+            let (path, store, saved, packet) = try await researchFixture()
+            defer { cleanCapture(path, store, saved) }
+            let job = try XCTUnwrap(saved.researchCapture)
+            let wire = CaptureWire(job, packet)
+            if lookup { await wire.setLookupError(code, reason) } else { await wire.setMediaError(code, reason) }
+            await delivery(job, wire: wire).resume(saved.id, store: store)
+            let record = try XCTUnwrap(store.records.first)
+            let status = LiteRevisionPresentation.make(record: record, syncing: false, consent: true,
+                                                       withdrawalBlocked: false, now: .distantPast)
+            if code == 503 {
+                XCTAssertNotNil(record.researchCapture?.retryAt)
+                XCTAssertEqual(status.phase, .waiting)
+            } else {
+                XCTAssertNotNil(status.retryTitle)
+            }
+            XCTAssertNil(record.researchCapture?.privacyStopReason)
+            if reason == "research_source_mismatch" { XCTAssertTrue(status.detail.contains("不符")) }
+            let counts = await wire.counts()
+            XCTAssertEqual(counts, [1, 1, lookup ? 0 : 1])
+        }
+    }
+
+    func testLegacyPrivacyNoticesBlockManualAndScheduledRetry() async throws {
+        for notice in ["照片可能包含人臉，本次研究送件已停止。",
+                       "已保留手機紀錄。照片附帶研究服務無法接受的資訊，這次研究送件已停止。"] {
+            let (path, store, saved, packet) = try await researchFixture()
+            defer { cleanCapture(path, store, saved) }
+            var legacy = saved
+            legacy.researchCapture?.notice = notice
+            legacy.researchCapture?.retryAt = nil
+            XCTAssertTrue(store.update(legacy))
+            let reopened = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+            let record = try XCTUnwrap(reopened.records.first)
+            let job = try XCTUnwrap(record.researchCapture)
+            let wire = CaptureWire(job, packet)
+            let status = LiteRevisionPresentation.make(record: record, syncing: false, consent: true, withdrawalBlocked: false)
+            XCTAssertNil(status.retryTitle)
+            await delivery(job, wire: wire).resume(record.id, store: reopened)
+            await delivery(job, wire: wire).resume(record.id, store: reopened, explicit: true)
+            let counts = await wire.counts()
+            XCTAssertEqual(counts, [0, 0, 0])
+        }
+    }
+
+    func testOwnerOnlyDenialCanResumeWithOriginalSourceAndRecoverReceipt() async throws {
+        let (path, store, saved, packet) = try await researchFixture()
+        defer { cleanCapture(path, store, saved) }
+        let job = try XCTUnwrap(saved.researchCapture)
+        let wire = CaptureWire(job, packet)
+        await wire.setMediaError(403, "lite_internal_owner_required")
+        let client = delivery(job, wire: wire)
+        await client.resume(saved.id, store: store)
+        let denied = try XCTUnwrap(store.records.first)
+        let status = LiteRevisionPresentation.make(record: denied, syncing: false, consent: true, withdrawalBlocked: false)
+        XCTAssertNotNil(status.retryTitle)
+        XCTAssertTrue(status.detail.contains("測試"))
+        XCTAssertTrue(LiteHistoryCopy(locale: Locale(identifier: "en")).revisionDetail(status).contains("testing"))
+        await wire.allowMedia()
+        await client.resume(saved.id, store: store, explicit: true)
+        let reopened = LiteStore(fileURL: path.appendingPathComponent("index.json"), now: { store.revisionNow.addingTimeInterval(65) })
+        await client.resume(saved.id, store: reopened)
+        let counts = await wire.counts()
+        XCTAssertEqual(counts, [1, 3, 2])
+        XCTAssertEqual(reopened.records.first?.cloudSync?.pending?.payloadJSON, job.firstRevision)
     }
 
     func testResearchLostReplyRestartGetsReceiptWithoutReuploadAndOrdersFirstAndEditedRevisions() async throws {

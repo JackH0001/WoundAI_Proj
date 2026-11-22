@@ -23,20 +23,42 @@ struct LitePendingResearchCapture: Codable, Equatable {
     var signature: String?
     var retryAt: Date? = Date.distantPast
     var notice: String?
+    var privacyStopReason: String?
+
+    var privacyBlocked: Bool {
+        // Earlier releases saved only the displayed reason in the record.
+        privacyStopReason != nil || ResearchPhotoRejection.allCases.contains { $0.notice == notice }
+    }
+}
+
+private enum ResearchPhotoRejection: String, CaseIterable {
+    case metadata = "research_photo_metadata"
+    case face = "face_detected"
+
+    var notice: String {
+        switch self {
+        case .metadata: return "已保留手機紀錄。照片附帶研究服務無法接受的資訊，這次研究送件已停止。"
+        case .face: return "照片可能包含人臉，本次研究送件已停止。"
+        }
+    }
 }
 
 private enum CaptureDeliveryError: Error {
-    case retain, renewTicket, response(Int, String?)
+    case retain, renewTicket, privacy(ResearchPhotoRejection), response(Int, String?)
 
     var notice: String {
         switch self {
         case .response(401, _): return "請核對原服務帳號與裝置登記，再從這筆紀錄重試。"
         case .response(404, _): return "這個服務尚未開放研究保存。照片與圈選已存於手機。"
-        case .response(_, "research_photo_metadata"): return "已保留手機紀錄。照片附帶研究服務無法接受的資訊，這次研究送件已停止。"
-        case .response(_, "face_detected"): return "照片可能包含人臉，本次研究送件已停止。"
-        case .response(_, "research_source_receipt_expired"): return "這筆辨識的來源回執已到期，紀錄保留在手機。"
-        case .response(410, _): return "原研究批次已停止收件，紀錄保留在手機。"
-        case .response(409, _), .response(403, _): return "研究批次或拍攝資料與原送件不符，已保留原紀錄。"
+        case .privacy(let reason): return reason.notice
+        case .response(410, "research_source_receipt_expired"): return "這筆辨識的來源回執已到期，紀錄保留在手機。"
+        case .response(410, "withdrawn"): return "原研究批次已停止收件，紀錄保留在手機。"
+        case .response(403, "lite_owner_review_closed"), .response(403, "lite_internal_owner_required"):
+            return "此安裝目前無法使用這項測試服務。測試開放後可再核對這筆紀錄。"
+        case .response(403, "research_consent_required"): return "研究服務需要有效的同意。請到設定查看研究參與狀態。"
+        case .response(403, "research_source_mismatch"), .response(409, "research_capture_conflict"):
+            return "研究批次或拍攝資料與原送件不符，已保留原紀錄。"
+        case .response(409, "research_source_unavailable"): return "服務目前無法確認這筆拍攝的來源。請稍後再核對。"
         default: return "尚未確認研究保存。請核對原帳號、研究登記與本機紀錄後重試。"
         }
     }
@@ -100,6 +122,10 @@ private enum CaptureDeliveryError: Error {
         guard data.count <= 32768 else { throw CaptureDeliveryError.retain }
         if response.statusCode != 200 {
             let code = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
+            if path == "research/capture", response.statusCode == 400, let code,
+               let reason = ResearchPhotoRejection(rawValue: code) {
+                throw CaptureDeliveryError.privacy(reason)
+            }
             if response.statusCode == 409, ["research/capture/status", "research/capture"].contains(path),
                code == "research_source_expired" {
                 throw CaptureDeliveryError.renewTicket
@@ -140,7 +166,7 @@ private enum CaptureDeliveryError: Error {
 
     func resume(_ id: String, store: LiteStore, explicit: Bool = false) async {
         guard let record = store.records.first(where: { $0.id == id }), var job = record.researchCapture,
-              record.cloudSync == nil, store.captureCanResume(id), permits(job.pin.scope),
+              record.cloudSync == nil, !job.privacyBlocked, store.captureCanResume(id), permits(job.pin.scope),
               job.retryAt.map({ $0 <= store.revisionNow }) ?? explicit, inFlight.insert(id).inserted else { return }
         defer { inFlight.remove(id) }
         do {
@@ -222,7 +248,9 @@ private enum CaptureDeliveryError: Error {
                 next.notice = "連線中斷，原紀錄已保存，下次會先核對雲端收據。"
             } else {
                 next.retryAt = nil
-                next.notice = ((error as? CaptureDeliveryError) ?? .retain).notice
+                let failure = (error as? CaptureDeliveryError) ?? .retain
+                if case .privacy(let reason) = failure { next.privacyStopReason = reason.rawValue }
+                next.notice = failure.notice
             }
             try? replace(job, with: next, id: id, store: store)
         }
