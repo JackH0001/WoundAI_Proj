@@ -2,6 +2,12 @@
 
 An account deletion can request research withdrawal. A consumer service App Attest installation and a research App Attest installation have different origins, counters and identifiers. The user explicitly confirms association of the existing registrations for this deletion. A matching hexadecimal ID, shared device, subscription, or Apple sign-in alone cannot authorize a research operation.
 
+## Pausing a beta with existing participants
+
+Keep both association routes and their respective pinned issuer settings available when restricting new work. An installation that already requested account deletion with research withdrawal can finish the handoff even if its ordinary service session has ended or it is outside the new-work allowlist. The personal service checks the original deletion requester, operation and recorded consent. The research service checks the ticket for its own scope, bucket and signed installation. The app still needs its original keys and an admitted build.
+
+Before moving traffic, test both halves at the app's two service origins. Accept the deletion during a pause and complete the link. Also pause between the offer and acceptance, then replay a previously accepted ticket and compare the receipt and its stored version. New recognition and rejoining research should remain closed to that installation. The association receipt reports `cleanup_confirmed: false`; track media disposition separately. An older image on either service can leave the handoff pending.
+
 ## From confirmation to receipt
 
 1. The candidate account screen requires the accepted original deletion checkpoint and the corresponding research withdrawal request. The app can read its local progress without a network call. On explicit confirmation it saves the two origins, original service account, operation and current existing research installation before sending either request. If there is no readable research registration, the app asks the user to check the original installation and creates no new ID.

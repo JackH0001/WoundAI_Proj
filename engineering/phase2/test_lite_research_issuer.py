@@ -19,7 +19,8 @@ from test_lite_signed_client import SignedHTTPClient
 from lite_account_research_closure import AccountResearchClosure
 from lite_attest_budget import RequestBudget
 from lite_attest_enrollment import RegistrationService
-from lite_attest_http import install_lite_attest
+from lite_attest_http import InternalOwner, install_lite_attest
+from lite_account_deletion import LINKED_WITHDRAWAL
 from lite_attest_state import StateUnavailable
 from lite_disposition_progress_probe import ProgressFixture
 from lite_fenced_store import FencedPrivacy
@@ -71,6 +72,9 @@ class IssuanceTests(unittest.TestCase):
         self.seeds = [Ed25519PrivateKey.generate() for _ in range(2)]
         self.pub = [k.public_key().public_bytes_raw() for k in self.seeds]
         self.now = 1500
+        self.install_services()
+
+    def install_services(self, *, native_owner=None, research_owner=None):
         for idx, (role, phone) in enumerate((("native", self.native), ("research", self.research))):
             signer = LinkSigner(role=role, scope=self.f.d.scope, bucket=self.bucket.name,
                                 native_key=self.pub[0], research_key=self.pub[1],
@@ -82,7 +86,9 @@ class IssuanceTests(unittest.TestCase):
             extras = (dict(commerce=self.f.ops, identity=self.f.f.b, deletion=self.f.d,
                            privacy=PrivacyState(self.f.store("native-privacy"))) if role == "native"
                       else dict(privacy=self.privacy))
-            install_lite_attest(app, service=phone.e.service, budget=budget, link_signer=signer, **extras)
+            internal_owner = native_owner if role == "native" else research_owner
+            install_lite_attest(app, service=phone.e.service, budget=budget, link_signer=signer,
+                                internal_owner=internal_owner, **extras)
             phone.client = app.test_client()
 
     def begin(self):
@@ -101,6 +107,49 @@ class IssuanceTests(unittest.TestCase):
         reply = self.offer()
         self.assertEqual(reply.status_code, 200, reply.json)
         return reply.json
+
+    def test_original_requester_can_finish_link_after_both_services_restrict_new_work(self):
+        self.install_services(native_owner=InternalOwner("native", "1"*64, "2"*64),
+                              research_owner=InternalOwner("research", "3"*64))
+        accepted = self.native.post("/api/v1/lite/account/deletion/request", operation=self.operation,
+                                    confirmation=LINKED_WITHDRAWAL)
+        self.assertEqual(accepted.status_code, 202, accepted.json)
+        self.assertEqual(accepted.json["research_withdrawal"], "requested")
+        ticket = self.ticket()
+        reply = self.research.post(ACCEPT, ticket=ticket)
+        self.assertEqual(reply.status_code, 200, reply.json)
+        self.assertFalse(reply.json["cleanup_confirmed"])
+        self.assertEqual(self.research.post(ACCEPT, ticket=ticket).json, reply.json)
+        for phone, path in ((self.native, "/api/v1/lite/service/prepare"),
+                            (self.research, "/api/v1/lite/research/rejoin")):
+            with self.subTest(path=path):
+                raw = json.dumps({"anon_id": phone.owner, "operation": self.operation}).encode()
+                blocked = phone.post_signed(path, raw)
+                self.assertEqual(blocked.status_code, 403, blocked.json)
+                self.assertEqual(blocked.json["error"], "lite_internal_owner_required")
+
+    def test_research_service_accepts_outstanding_offer_after_pause(self):
+        self.begin()
+        ticket = self.ticket()
+        self.install_services(research_owner=InternalOwner("research", "3"*64))
+        key = object_key("research", [self.f.d.scope, self.bucket.name, self.research.owner])
+        self.assertIsNone(self.privacy.manifest.store.load(key))
+        first = self.research.post(ACCEPT, ticket=ticket)
+        self.assertEqual(first.status_code, 200, first.json)
+        proof = self.privacy.manifest.store.load(key)
+        self.assertIsNotNone(proof)
+        self.now += TTL + 1
+        self.assertEqual(self.research.post(ACCEPT, ticket=ticket).json, first.json)
+        self.assertEqual(self.privacy.manifest.store.load(key), proof)
+
+    def test_restricted_service_requires_original_confirmed_deletion_for_offer(self):
+        self.install_services(native_owner=InternalOwner("native", "1"*64, "2"*64))
+        self.f.d.begin(self.native.owner, self.operation, withdraw_research=False)
+        reply = self.offer()
+        self.assertEqual(reply.status_code, 409, reply.json)
+        self.assertEqual(reply.json["error"], "lite_research_link_conflict")
+        self.assertIsNone(self.f.d.audit.load(
+            object_key("native", [self.f.d.scope, self.f.person, self.native.owner, self.operation])))
 
     def test_authenticated_proof_reaches_worker_for_correct_owner_only(self):
         self.begin()

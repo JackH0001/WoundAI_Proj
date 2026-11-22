@@ -351,7 +351,9 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
             g.lite_admission = admitted
             # TestFlight membership alone does not identify a service installation.
             # Leave existing privacy rights and receipt reads on their own signed routes.
-            old_right = (request.method == 'DELETE' or deletion_only or capture_lookup or request.endpoint in {
+            # The two signed link routes complete an explicitly confirmed deletion.
+            # Its original requester may already have lost their ordinary session.
+            old_right = (request.method == 'DELETE' or deletion_only or link_only or capture_lookup or request.endpoint in {
                 'lite_service_http.status', 'lite_account_identity.status', 'lite_account_identity.logout',
                 'lite_account_identity.renew'})
             restrict = internal_owner is not None and not old_right
@@ -371,7 +373,7 @@ def install_lite_attest(app, *, service=None, budget=None, privacy=None, commerc
                 if not permitted:
                     return jsonify(error='lite_internal_owner_required', keep_local=True), 403
             if service_only:
-                if identity is not None and (not account_only or (restrict and link_only)):
+                if identity is not None and not account_only:
                     try: session = identity.require_session(owner)
                     except ValueError: return jsonify(error='lite_sign_in_required',keep_local=True),401
                     if restrict and not identity.matches_account(session['account'], internal_owner.account_sha256):
