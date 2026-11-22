@@ -188,6 +188,31 @@ The signed IPA and retained service image can be used with this tool as issued.
 [Revision resource](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services.revisions)
 and [secret volume fields](https://docs.cloud.google.com/run/docs/reference/rest/v2/Volume).
 
+### Verify the URL in the TestFlight build
+
+For external beta acceptance, add `serving_origin` to the reviewed plan. Copy
+the `LiteNativeSandboxOrigin` value from the verified, signed IPA for the build.
+Collect a Cloud Run v2 **Service** resource alongside the **Revision** resource.
+Use both snapshots from the same deployment after traffic has settled.
+
+```sh
+python tools/check_lite_native_revision.py plan.json revision.json settings.json --service service.json
+```
+
+Plans with `serving_origin` require the service snapshot. The check verifies that
+the service advertises that exact default app URL with external ingress, that
+the observed generation has reconciled successfully, and that the requested
+and observed traffic both direct 100% of ordinary app requests to the reviewed
+revision. Explicit revision routing and the Cloud Run latest-ready default are
+supported. A tagged URL with zero traffic can still exist during staging.
+A successful result includes the observed generation, origin and percentage.
+Existing mount-only plans can continue to check a revision before traffic moves.
+
+This is a point-in-time comparison of control-plane metadata. Also verify IAM
+and a signed request from a fresh installation at the app URL, followed by
+Apple Sandbox sign-in and purchase restoration before inviting external testers.
+[Cloud Run v2 Service fields and traffic allocation](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services)
+
 ### Runtime metadata
 
 The native service and the separate key preparation worker check the attached service

@@ -238,3 +238,116 @@ class RevisionTests(unittest.TestCase):
             self.assertEqual(failed.returncode, 1)
             self.assertFalse(failed.stdout)
             self.assertNotIn(b"private diagnostic text",failed.stderr)
+
+
+class ServingTests(unittest.TestCase):
+    def setUp(self):
+        self.plan, self.rev, self.raw = example()
+        self.revision = self.rev["name"]
+        self.origin = "https://woundai-lite-native-sandbox-987654321.asia-east1.run.app"
+        self.plan["serving_origin"] = self.origin
+        self.target = {"type": "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION", "revision": "test-01", "percent": 100}
+        self.service = {"name": self.revision.rsplit("/revisions/", 1)[0], "generation": "15",
+                        "observedGeneration": "15", "terminalCondition": {"state": "CONDITION_SUCCEEDED"},
+                        "latestReadyRevision": self.revision, "ingress": "INGRESS_TRAFFIC_ALL",
+                        "uri": "https://synthetic-alias.a.run.app", "urls": [self.origin],
+                        "traffic": [self.target.copy()], "trafficStatuses": [self.target.copy()]}
+
+    def verify(self):
+        return check(self.plan, self.rev, self.raw, service=self.service)["serving"]
+
+    def test_stable_origin_uses_reviewed_revision(self):
+        result = self.verify()
+        self.assertEqual(result["origin"], self.origin)
+        self.assertEqual(result["generation"], "15")
+        self.assertEqual(result["percent"], 100)
+
+    def test_revision_only_cannot_certify_plan_with_serving_origin(self):
+        with self.assertRaisesRegex(Mismatch, "service readback required"):
+            check(self.plan, self.rev, self.raw)
+
+    def test_positive_old_traffic_fails_even_when_new_revision_ready(self):
+        old = dict(self.target, revision="old")
+        for field in ("traffic", "trafficStatuses"):
+            self.service[field] = [old]
+            with self.subTest(field=field), self.assertRaises(Mismatch):
+                self.verify()
+            self.service[field] = [self.target]
+
+    def test_split_or_missing_observation_is_rejected(self):
+        for rows in ([], [dict(self.target, percent=99)],
+                     [dict(self.target, percent=50), dict(self.target, revision="old", percent=50)],
+                     [dict(self.target, percent=True)], [dict(self.target, percent=100.0)],
+                     [dict(self.target, percent=-1), dict(self.target, percent=101)]):
+            self.service["trafficStatuses"] = rows
+            with self.subTest(rows=rows), self.assertRaises(Mismatch):
+                self.verify()
+
+    def test_implicit_and_explicit_latest_require_matching_observed_revision(self):
+        latest = {"type": "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST", "percent": 100}
+        self.service["trafficStatuses"] = [dict(latest, revision="test-01")]
+        for desired in (None, [], [latest]):
+            if desired is None:
+                self.service.pop("traffic", None)
+            else:
+                self.service["traffic"] = desired
+            self.assertEqual(self.verify()["percent"], 100)
+        self.service["latestReadyRevision"] = self.revision + "-other"
+        with self.assertRaises(Mismatch):
+            self.verify()
+        self.service["latestReadyRevision"] = self.revision
+        for target in (latest, dict(latest, revision="old")):
+            self.service["trafficStatuses"] = [target]
+            with self.subTest(target=target), self.assertRaises(Mismatch):
+                self.verify()
+
+    def test_tag_only_old_revision_does_not_receive_default_traffic(self):
+        tag = {"type": self.target["type"], "revision": "old", "tag": "retained"}
+        self.service["traffic"].append(tag)
+        self.service["trafficStatuses"].append(dict(tag, uri="https://retained---synthetic.a.run.app"))
+        self.assertEqual(self.verify()["percent"], 100)
+
+    def test_changing_failed_or_deleted_service_is_rejected(self):
+        for delta in ({"reconciling": True}, {"generation": "16"}, {"generation": None, "observedGeneration": None},
+                      {"terminalCondition": {"state": "CONDITION_FAILED"}}, {"deleteTime": "yesterday"},
+                      {"name": self.service["name"] + "-other"}):
+            with self.subTest(delta=delta):
+                changed = dict(self.service, **delta)
+                with self.assertRaises(Mismatch):
+                    check(self.plan, self.rev, self.raw, service=changed)
+
+    def test_origin_must_be_available_on_the_intended_service(self):
+        for delta in ({"urls": []}, {"urls": self.origin}, {"defaultUriDisabled": True},
+                      {"iapEnabled": True}, {"ingress": "INGRESS_TRAFFIC_INTERNAL_ONLY"}):
+            with self.subTest(delta=delta), self.assertRaises(Mismatch):
+                check(self.plan, self.rev, self.raw, service=dict(self.service, **delta))
+        self.service["uri"] = self.origin
+        del self.service["urls"]
+        self.assertEqual(self.verify()["percent"], 100)
+        self.plan["serving_origin"] = self.origin.replace("native-sandbox", "candidate")
+        self.service["uri"] = self.plan["serving_origin"]
+        with self.assertRaises(Mismatch):
+            self.verify()
+
+    def test_legacy_plan_accepts_mount_check_but_cannot_certify_routing(self):
+        del self.plan["serving_origin"]
+        self.assertNotIn("serving", check(self.plan, self.rev, self.raw))
+        with self.assertRaises(Mismatch):
+            self.verify()
+
+    def test_cli_serving_readback(self):
+        with tempfile.TemporaryDirectory() as d:
+            paths = [Path(d)/name for name in ("plan","revision","settings","service")]
+            for path, content in zip(paths, (json.dumps(self.plan).encode(), json.dumps(self.rev).encode(),
+                                             self.raw, json.dumps(self.service).encode())):
+                path.write_bytes(content)
+            cmd = [sys.executable, "-B", str(Path(__file__).with_name("check_lite_native_revision.py")), *paths[:3],
+                 "--service", paths[-1]]
+            self.assertEqual(json.loads(subprocess.check_output(cmd))["serving"]["origin"], self.origin)
+            paths[-1].write_text('{"error":{"code":404}}')
+            denied = subprocess.run(cmd, capture_output=True)
+            self.assertEqual(denied.returncode, 1)
+            self.assertEqual(denied.stdout, b"")
+            paths[0].write_text(json.dumps({k: v for k, v in self.plan.items() if k != "serving_origin"}))
+            paths[-1].write_text("null")
+            self.assertEqual(subprocess.run(cmd, capture_output=True).returncode, 1)

@@ -51,7 +51,52 @@ def version_ref(secret, version, deployment):
     return f"projects/{deployment['project']}/secrets/{secret}/versions/{version}"
 
 
-def check(plan, revision, settings_raw):
+def serving_route(service, settings, revision, origin):
+    """Check the untagged URL used by the app, including the provider's observed traffic."""
+    deployment = settings["deployment"]
+    service_id = "woundai-lite-native-sandbox"
+    location = "locations/asia-east1/services/" + service_id
+    names = {f"projects/{project}/{location}" for project in (deployment["project"], deployment["project_number"])}
+    need(service.get("name") in names and not service.get("deleteTime"), "serving service differs")
+    generation = service.get("generation")
+    need(isinstance(generation, str) and re.fullmatch(r"[1-9][0-9]*", generation)
+         and service.get("observedGeneration") == generation and service.get("reconciling", False) is False
+         and service.get("terminalCondition", {}).get("state") == "CONDITION_SUCCEEDED",
+         "service reconciliation incomplete")
+    need(service.get("ingress") == "INGRESS_TRAFFIC_ALL" and service.get("defaultUriDisabled", False) is False
+         and service.get("iapEnabled", False) is False, "external app origin unavailable")
+    urls = service.get("urls", [])
+    expected_origin = f"https://{service_id}-{deployment['project_number']}.asia-east1.run.app"
+    need(origin == expected_origin and isinstance(urls, list) and (origin == service.get("uri") or origin in urls),
+         "app origin differs from serving URLs")
+
+    short = revision.rsplit("/", 1)[1]
+    revision_names = {short} | {name + "/revisions/" + short for name in names}
+    latest = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"
+    explicit = "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION"
+    for field in ("traffic", "trafficStatuses"):
+        rows = service.get(field, [])
+        need(isinstance(rows, list), "invalid traffic readback")
+        if not rows and field == "traffic":
+            rows = [{"type": latest, "percent": 100}]
+        total = 0
+        for row in rows:
+            percent = row.get("percent", 0)
+            need(type(percent) is int and 0 <= percent <= 100, "invalid traffic percentage")
+            if percent == 0:
+                continue
+            allocation = row.get("type")
+            need(allocation in (explicit, latest), "unknown traffic allocation")
+            if allocation == latest:
+                need(service.get("latestReadyRevision") in revision_names, "latest ready revision differs")
+            if field == "trafficStatuses" or allocation == explicit or row.get("revision"):
+                need(row.get("revision") in revision_names, "traffic reaches a different revision")
+            total += percent
+        need(total == 100, "reviewed revision must receive all app traffic")
+    return {"origin": origin, "generation": generation, "percent": 100}
+
+
+def check(plan, revision, settings_raw, *, service=None):
     settings = parse(settings_raw)
     deployment = settings["deployment"]
     need(hashlib.sha256(settings_raw).hexdigest() == plan["settings_sha256"], "settings bytes differ")
@@ -148,6 +193,9 @@ def check(plan, revision, settings_raw):
     if research is not None:
         result["research_link"] = {"capture_enabled": research["capture_enabled"],
                                    "secret_version": additional[research["file"]], "sha256": research["sha256"]}
+    if service is not None or "serving_origin" in plan:
+        need(isinstance(service, dict) and "serving_origin" in plan, "serving origin and service readback required")
+        result["serving"] = serving_route(service, settings, name, plan["serving_origin"])
     return result
 
 
@@ -155,9 +203,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("plan", "revision", "settings"):
         parser.add_argument(name, type=Path)
+    parser.add_argument("--service", type=Path, help="Cloud Run v2 Service JSON for the app's untagged origin")
     args = parser.parse_args()
     try:
-        result = check(parse(args.plan.read_bytes()), parse(args.revision.read_bytes()), args.settings.read_bytes())
+        service = None
+        if args.service is not None:
+            service = parse(args.service.read_bytes())
+            need(isinstance(service, dict), "service readback required")
+        result = check(parse(args.plan.read_bytes()), parse(args.revision.read_bytes()), args.settings.read_bytes(),
+                       service=service)
     except Mismatch as exc:
         print(str(exc), file=sys.stderr)
         return 1
