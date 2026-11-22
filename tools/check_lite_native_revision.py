@@ -100,9 +100,24 @@ def check(plan, revision, settings_raw):
     need(set(paths) == set(expected), "approved role set differs")
     key_stores = {expected[k].rsplit("/versions/", 1)[0] for k in ("identity", "oauth", "api")}
     need(len(key_stores) == 3, "identity and Apple credentials require separate secrets")
-    # Additional reviewed native inputs (e.g. the optional research-link issuer)
-    # must have their own independently approved file path and numeric version.
-    for n, (filename, secret_version) in enumerate(sorted(plan.get("additional_secret_files", {}).items()), 1):
+    additional = plan.get("additional_secret_files", {})
+    need(isinstance(additional, dict), "additional secret files must map paths to versions")
+    research = plan.get("research_link")
+    capture = env.get("LITE_RESEARCH_CAPTURE_ENABLED", {"value": "0"}).get("value")
+    if "research_link" not in plan:
+        need(capture == "0" and "LITE_RESEARCH_LINK_FILE" not in env and "LITE_RESEARCH_LINK_SHA256" not in env,
+             "research link settings require a reviewed plan")
+    else:
+        need(isinstance(research, dict) and set(research) == {"file", "sha256", "capture_enabled"},
+             "research link plan fields differ")
+        need(research["file"] in additional and env.get("LITE_RESEARCH_LINK_FILE", {}).get("value") == research["file"],
+             "research link path differs from reviewed mount")
+        need(isinstance(research["sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", research["sha256"])
+             and env.get("LITE_RESEARCH_LINK_SHA256", {}).get("value") == research["sha256"],
+             "research link issuer digest differs")
+        need(type(research["capture_enabled"]) is bool and capture == ("1" if research["capture_enabled"] else "0"),
+             "research capture setting differs")
+    for n, (filename, secret_version) in enumerate(sorted(additional.items()), 1):
         key = f"additional-{n}"
         paths[key] = absolute(filename)
         expected[key] = secret_version
@@ -127,9 +142,13 @@ def check(plan, revision, settings_raw):
         need(len(items) == 1 and items[0]["path"] == path.name, f"{role} filename differs")
         actual = version_ref(secret["secret"], items[0]["version"], deployment)
         need(actual == expected[role], f"{role} secret version differs")
-    return {"scope": "external-personal-service-mounted-inputs", "build": app["version"],
-            "revision": name, "settings_sha256": plan["settings_sha256"], "image": plan["image"],
-            "matched_roles": sorted(paths)}
+    result = {"scope": "external-personal-service-mounted-inputs", "build": app["version"],
+              "revision": name, "settings_sha256": plan["settings_sha256"], "image": plan["image"],
+              "matched_roles": sorted(paths)}
+    if research is not None:
+        result["research_link"] = {"capture_enabled": research["capture_enabled"],
+                                   "secret_version": additional[research["file"]], "sha256": research["sha256"]}
+    return result
 
 
 def main():

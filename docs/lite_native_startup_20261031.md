@@ -168,9 +168,14 @@ The plan records the signed app's `team` and `build` (strings), `revision` (full
 (registry path at SHA-256 digest), `settings_sha256` (original file bytes), and
 `secret_versions`. The latter maps `config`, `identity`, `oauth`, `api` and each
 configured `root-N` to `projects/PROJECT_ID/secrets/NAME/versions/NUMBER`.
-If research linking is planned, add its independently reviewed absolute file
-path and secret version to `additional_secret_files`. Pin these values when
-reviewing the proposed revision, before collecting the provider response.
+If research linking is planned, put its absolute file path and numeric Secret
+version in `additional_secret_files`. Add a `research_link` object with that
+same `file`, the personal service's `native_issuer` payload `sha256` from the
+custody receipt's verified manifest, and a Boolean `capture_enabled`. The
+checker compares these values to the running revision's literal environment
+and mounted file. Linking for account withdrawal can use `capture_enabled: false`.
+Revisions with linking and capture both off keep the original plan format.
+Pin the plan before collecting the provider response.
 The regression fixture includes a complete example of this comparison.
 
 Exit 0 confirms the reviewed mounted inputs, app build, Sandbox product, runtime

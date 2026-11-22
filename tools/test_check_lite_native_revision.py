@@ -125,13 +125,82 @@ class RevisionTests(unittest.TestCase):
         with self.assertRaisesRegex(Mismatch,"subpath"):
             self.verify()
 
-    def test_separate_research_link_requires_reviewed_mount(self):
+    def test_additional_secret_requires_reviewed_mount(self):
         self.rev["volumes"].append(dict(name="link",secret=dict(secret="test-link",items=[dict(path="issuer",version="3")])))
         self.container["volumeMounts"].append(dict(name="link",mountPath="/etc/lite/link"))
         with self.assertRaisesRegex(Mismatch,"mount set"):
             self.verify()
         self.plan["additional_secret_files"] = {"/etc/lite/link/issuer":"projects/synthetic-lite/secrets/test-link/versions/3"}
         self.assertIn("additional-1", self.verify()["matched_roles"])
+
+
+    def research_plan(self):
+        path = "/etc/lite/link/issuer"
+        pin = "c" * 64
+        self.rev["volumes"].append(dict(name="link", secret=dict(secret="test-link", items=[dict(path="issuer", version="3")])))
+        self.container["volumeMounts"].append(dict(name="link", mountPath="/etc/lite/link"))
+        self.plan["additional_secret_files"] = {path: "projects/synthetic-lite/secrets/test-link/versions/3"}
+        self.plan["research_link"] = dict(file=path, sha256=pin, capture_enabled=True)
+        self.container["env"].extend([
+            dict(name="LITE_RESEARCH_LINK_FILE", value=path),
+            dict(name="LITE_RESEARCH_LINK_SHA256", value=pin),
+            dict(name="LITE_RESEARCH_CAPTURE_ENABLED", value="1"),
+        ])
+
+    def test_research_link_and_capture_match_review(self):
+        self.research_plan()
+        self.assertTrue(self.verify()["research_link"]["capture_enabled"])
+        self.plan["research_link"]["capture_enabled"] = False
+        self.container["env"].pop()
+        self.assertFalse(self.verify()["research_link"]["capture_enabled"])
+
+    def test_research_settings_must_reach_the_reviewed_file(self):
+        self.research_plan()
+        entries = {e["name"]:e for e in self.container["env"]}
+        for key, wrong in (("LITE_RESEARCH_LINK_FILE", "/etc/other/issuer"),
+                           ("LITE_RESEARCH_LINK_SHA256", "d"*64),
+                           ("LITE_RESEARCH_CAPTURE_ENABLED", "0")):
+            with self.subTest(key=key):
+                value = entries[key]["value"]
+                entries[key]["value"] = wrong
+                with self.assertRaises(Mismatch):
+                    self.verify()
+                entries[key]["value"] = value
+        self.container["env"].remove(entries["LITE_RESEARCH_LINK_FILE"])
+        with self.assertRaises(Mismatch):
+            self.verify()
+
+    def test_reviewed_research_file_must_have_a_pinned_volume(self):
+        self.research_plan()
+        self.plan["additional_secret_files"] = {}
+        with self.assertRaises(Mismatch):
+            self.verify()
+
+    def test_research_issuer_version_must_match_and_capture_flag_is_boolean(self):
+        self.research_plan()
+        volume = self.rev["volumes"][-1]["secret"]
+        volume["items"][0]["version"] = "4"
+        with self.assertRaisesRegex(Mismatch, "secret version"):
+            self.verify()
+        volume["items"][0]["version"] = "3"
+        self.plan["research_link"]["capture_enabled"] = 1
+        with self.assertRaisesRegex(Mismatch, "capture setting"):
+            self.verify()
+
+    def test_null_research_plan_is_incomplete(self):
+        self.plan["research_link"] = None
+        with self.assertRaises(Mismatch):
+            self.verify()
+
+    def test_research_settings_without_review_are_rejected(self):
+        self.research_plan()
+        del self.plan["research_link"]
+        with self.assertRaises(Mismatch):
+            self.verify()
+
+    def test_disabled_research_without_link_keeps_existing_plans_usable(self):
+        self.container["env"].append(dict(name="LITE_RESEARCH_CAPTURE_ENABLED", value="0"))
+        self.assertNotIn("research_link", self.verify())
 
     def test_duplicate_or_incomplete_approved_evidence(self):
         with self.assertRaises(Mismatch):
