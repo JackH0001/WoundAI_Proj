@@ -1,6 +1,6 @@
 import Foundation
 
-enum LitePurchaseFailure: Error, Equatable { case invalid, accountMismatch, accountChanged, unavailable, journalConflict, offerChanged }
+enum LitePurchaseFailure: Error, Equatable { case invalid, accountMismatch, accountChanged, unavailable, journalConflict, offerChanged, contextExpired }
 
 /// Only the reviewed one-month product is offered. Storefront belongs to the
 /// quote, even where two storefronts use the same currency and display price.
@@ -18,6 +18,11 @@ struct LitePurchaseContext: Codable, Equatable, Sendable {
     let app_account_token: String, registration_sha256: String, scope_sha256: String
     let product_id: String, environment: String
     let created_at: Int, expires_at: Int
+    func isCurrent(at date: Date) -> Bool {
+        let time = Int(date.timeIntervalSince1970)
+        return created_at <= time && time < expires_at
+    }
+
     func validate() throws {
         guard v == 1, LiteServiceBytes.hex(operation,32),
               LiteAttestClient.matches(installation,"[A-Za-z0-9_-]{1,128}"),
@@ -181,7 +186,7 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
         let operation=UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased()
         let c=try await service.context(operation:operation, existingOnly: false);try c.validate()
         guard c.installation == (try await service.installation()), c.operation == operation,
-              c.created_at <= Int(now().timeIntervalSince1970), c.expires_at > Int(now().timeIntervalSince1970) else { throw LitePurchaseFailure.invalid }
+              c.isCurrent(at: now()) else { throw LitePurchaseFailure.invalid }
         try checkAccount(generation)
         if let account, account.token != c.app_account_token { throw LitePurchaseFailure.accountChanged }
         _=try await save(operation,nil,LitePurchaseCheckpoint(version:1,origin:service.origin.absoluteString,context:c))
@@ -307,6 +312,7 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
             }
             let outcome = try await provider.purchase(offer: displayed, token: UUID(uuidString:c.app_account_token)!) {
                 try self.checkAccount(generation)
+                guard c.isCurrent(at: self.now()) else { throw LitePurchaseFailure.contextExpired }
             }
             try checkAccount(generation)
             switch outcome {
@@ -314,6 +320,8 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
             case .pending:message="購買等待核准，尚未增加額度；核准後會核對原交易。"
             case .cancelled:message="已取消購買；原紀錄、額度與研究同意不變。"
             }
+        } catch LitePurchaseFailure.contextExpired {
+            message = "購買前的帳號核對已逾時。請再按一次訂閱，重新核對帳號與月費。"
         } catch LitePurchaseFailure.offerChanged {
             offer = nil
             message = "商店或商品資料已變更。請重新讀取價格後再決定是否訂閱。"

@@ -23,7 +23,7 @@ App Attest 只證明安裝；不以它當人類登入，不接受客戶端自選
 仍須先有經驗證的服務帳號與裝置映射。人類登入提供者、換機復原與解除關聯的正式整合未在本輪完成；不能直接對公眾啟用此組件。
 
 `POST /api/v1/lite/purchase/context` 與 `/confirm` 只有在 `install_lite_attest(...,commerce=...,purchases=...)` 以相同 registry 注入時註冊。
-使用既有 App Attest 規範化簽章、防重放與請求限流。context 為15分鐘；過期 context 不可開始新購買，但可核對已待核准／尚未完成的同筆交易。
+使用既有 App Attest 規範化簽章、防重放與請求限流。購買前的帳號核對有效 15 分鐘。App 在 StoreKit 開啟付款前再核對一次帳號與期限。若已到期，由使用者再按一次訂閱，重新取得當次月費與帳號核對結果。期限內已開始的交易可在到期後繼續確認與恢復。
 confirm 只收 operation 和有上限的 Apple JWS；驗證簽章、bundle、environment、商品、PURCHASED ownership、token 與交易欄位，再用 Server API 檢查目前關聯。
 同一 original 只能關聯同帳號。完成回執是歷史證據，**不是付費權益或額度**；真正的新辨識仍需當時有效權益。
 

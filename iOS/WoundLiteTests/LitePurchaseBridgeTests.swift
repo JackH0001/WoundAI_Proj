@@ -22,10 +22,13 @@ private func event(_ token:String=purchaseToken,signed:String="synthetic-jws",en
 }
 private actor PurchaseJournal:LiteServiceJournal {
     var rows=[String:Data](),writes=0,failAt=0
+    var afterFirstWrite: (@Sendable () async -> Void)?
+    func onFirstWrite(_ action: @escaping @Sendable () async -> Void) { afterFirstWrite = action }
     func load(_ id:String)->Data? {rows[id]}
-    func replace(_ id:String,expected:Data?,with data:Data) throws {
+    func replace(_ id:String,expected:Data?,with data:Data) async throws {
         writes+=1;if writes==failAt{throw LitePurchaseFailure.unavailable}
         guard rows[id]==expected else{throw LitePurchaseFailure.journalConflict};rows[id]=data
+        if writes == 1 { await afterFirstWrite?() }
     }
     func fail(_ n:Int){failAt=n}
     func values()->[Data]{Array(rows.values)}
@@ -35,6 +38,7 @@ private actor PurchaseJournal:LiteServiceJournal {
     var owner="synthetic-device",token=purchaseToken,environment="Sandbox",calls=0,contexts=0,fail=false,wrongAck=false,expired=false
     var afterConfirm:(()->Void)?
     var generation = 0
+    var issuedAt = purchaseNow
     var account = String(repeating:"a",count:64)
     func installation() async throws ->String{owner}
     var lookups = [String]()
@@ -43,7 +47,7 @@ private actor PurchaseJournal:LiteServiceJournal {
         contexts+=1
         return LitePurchaseContext(v:1,operation:operation,installation:owner,account_sha256:account,
             app_account_token:token,registration_sha256:String(repeating:"b",count:64),scope_sha256:String(repeating:"c",count:64),
-            product_id:purchaseProduct,environment:environment,created_at:purchaseNow-(expired ? 900:0),expires_at:purchaseNow+(expired ? 0:900))
+            product_id:purchaseProduct,environment:environment,created_at:issuedAt-(expired ? 900:0),expires_at:issuedAt+(expired ? 0:900))
     }
     func confirm(_ c:LitePurchaseContext,event:LitePurchaseEvent) async throws ->LitePurchaseAcknowledgment {
         calls+=1;if fail{throw LitePurchaseFailure.unavailable};afterConfirm?()
@@ -450,6 +454,39 @@ private actor PurchaseJournal:LiteServiceJournal {
     func testExpiredContextNeverStartsPurchase()async {
         let(s,p,_,m)=setup();s.expired=true;await m.purchaseDisplayedTestOffer();XCTAssertEqual(p.purchases,0)
     }
+    func testStorefrontDelayAtExpiryRequiresAnotherTapAndNewContext() async {
+        let service = PurchaseService(), provider = PurchaseProvider(), journal = PurchaseJournal()
+        var time = purchaseNow
+        let store = LiteNativePurchaseStore(service: service, provider: provider, journal: journal,
+            accountGeneration: { service.generation }, now: { Date(timeIntervalSince1970: Double(time)) })
+        provider.beforePurchase = { time += 900 }
+        await store.purchaseDisplayedTestOffer()
+        XCTAssertEqual(provider.purchases, 0)
+        XCTAssertEqual(service.calls, 0)
+        XCTAssertTrue(store.message.contains("逾時"), store.message)
+        let english = LiteServiceCopy.text(store.message, locale: Locale(identifier: "en"))
+        XCTAssertTrue(english.contains("expired"), english)
+        provider.beforePurchase = nil
+        service.issuedAt = time
+        await store.purchaseDisplayedTestOffer()
+        XCTAssertEqual(service.contexts, 2)
+        XCTAssertEqual(provider.purchases, 1)
+        XCTAssertEqual(service.calls, 1)
+        XCTAssertEqual(provider.finishes, 1)
+    }
+
+    func testPaymentStartedBeforeExpiryCanFinishAfterExpiry() async {
+        let service = PurchaseService(), provider = PurchaseProvider(), journal = PurchaseJournal()
+        var time = purchaseNow
+        let store = LiteNativePurchaseStore(service: service, provider: provider, journal: journal,
+            accountGeneration: { service.generation }, now: { Date(timeIntervalSince1970: Double(time)) })
+        provider.beforePurchase = { time += 899 }
+        provider.afterPayment = { time += 3600 }
+        await store.purchaseDisplayedTestOffer()
+        XCTAssertEqual(provider.purchases, 1)
+        XCTAssertEqual(service.calls, 1)
+        XCTAssertEqual(provider.finishes, 1)
+    }
     func testPurchaseContextFailureDoesNotClaimAPendingAppleTransaction() async {
         let (service, provider, _, store) = setup()
         service.expired = true
@@ -517,6 +554,24 @@ import StoreKitTest
         XCTAssertEqual(checked, 1)
         XCTAssertTrue(localStore.allTransactions().isEmpty)
     }
+    func testLocalStoreKitDoesNotStartPaymentIfSavedContextHasExpired() async throws {
+        let config = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "WoundLiteCommerce", withExtension: "storekit"))
+        let session = try freshCommerceTestSession(url: config)
+        defer { session.clearTransactions() }
+        let service = PurchaseService(), journal = PurchaseJournal()
+        service.environment = "Xcode"
+        let provider = LiteStoreKitPurchaseProvider(xcodeTest: true)
+        let store = LiteNativePurchaseStore(service: service, provider: provider, journal: journal,
+            accountGeneration: { service.generation }, now: { Date(timeIntervalSince1970: Double(service.issuedAt)) })
+        await journal.onFirstWrite { await MainActor.run { service.issuedAt += 900 } }
+        store.startObserving(accountToken: purchaseToken)
+        defer { store.stopObserving() }
+        await store.purchaseDisplayedTestOffer()
+        XCTAssertTrue(session.allTransactions().isEmpty)
+        XCTAssertEqual(service.calls, 0)
+        XCTAssertTrue(store.message.contains("逾時"), store.message)
+    }
+
     func testOfferPreviewDisplaysTheStoreKitPriceWithoutATransaction() async throws {
         let config = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "WoundLiteCommerce", withExtension: "storekit"))
         let session = try freshCommerceTestSession(url: config)
