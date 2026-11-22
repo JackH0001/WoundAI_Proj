@@ -59,6 +59,15 @@ class RolloutTests(unittest.TestCase):
         self.assertEqual(self.executor.execute()['phase'],'active')
         self.assertEqual(before,self.ledger._load('synthetic-a',self.now//86400))
 
+    def test_missing_migrated_account_cannot_preview_zero_on_cutover_day(self):
+        self.activate()
+        subject = 'unlisted-legacy-account'
+        grant = free_grant(subject, self.now)
+        with self.assertRaises(StateUnavailable):
+            self.ledger.current_balance(subject, grant)
+        self.assertIsNone(self.ledger._load(subject, self.now // 86400, allow_missing=True))
+        self.assertEqual(self.ledger.current_balance('synthetic-a', free_grant('synthetic-a', self.now))['used'], 1)
+
     def test_rollback_keeps_usage_receipts_and_never_reopens_legacy(self):
         self.activate();t=self.ledger.reserve('synthetic-a',self.now//86400,'1'*32,'d'*64,free_grant('synthetic-a',self.now))
         self.assertTrue(self.ledger.claim(t,'a'*32))

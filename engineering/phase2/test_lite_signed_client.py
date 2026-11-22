@@ -20,6 +20,8 @@ def b64(value):
 
 
 class SignedHTTPClient:
+    bundle_version = '33'
+
     def register(self):
         challenge = self.client.post(CHALLENGE_PATH, json=dict(key_id=self.key, purpose='register'))
         self.assertEqual(challenge.status_code, 200, challenge.json)
@@ -43,7 +45,7 @@ class SignedHTTPClient:
             challenge=base64.b64decode(challenge['challenge']), request_id=rid,
             method=method, path=path, content_type=content_type, body=raw)
         auth = hashlib.sha256(self.e.r.policy.app_id.encode()).digest() + b'\x80' + self.counter.to_bytes(4, 'big')
-        auth += cbor2.dumps({CATEGORY: 2, VERSION: '33'})
+        auth += cbor2.dumps({CATEGORY: 2, VERSION: self.bundle_version})
         signature = self.e.r.key.sign(hashlib.sha256(auth + hashlib.sha256(data).digest()).digest(),
                                       ec.ECDSA(hashes.SHA256()))
         assertion = cbor2.dumps(dict(signature=signature, authenticatorData=auth))

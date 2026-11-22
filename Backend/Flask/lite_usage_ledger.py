@@ -311,7 +311,7 @@ class UsageLedger:
         policy = self.cutover.read(self.namespace, now, admission=True) if self.cutover is not None else None
         row = self._load(subject, day, allow_missing=True)
         if row is None:
-            if policy is None or day <= policy['day']:
+            if policy is None or not self._zero_day(day, policy):
                 raise StateUnavailable('current baseline has not been confirmed')
             used, pending, attempts = 0, 0, 0
         else:

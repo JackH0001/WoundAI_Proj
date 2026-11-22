@@ -204,6 +204,11 @@ class FirstInstallTests(SignedServiceClient, unittest.TestCase):
         self.assertEqual(self.h.grant.calls,calls)
         self.assertEqual(links.audit.load(key)[1],dict(receipt,unexpected=True))
 
+    def test_external_purchase_and_restore_across_fresh_installations(self):
+        from lite_external_subscription_fixture import verify_external_subscription
+        verify_external_subscription(self, team="TSTTEAM123", bundle="com.woundai.lite",
+                                     build="91", audience="external-fixture")
+
     def test_first_person_can_use_two_on_opening_day_and_no_extra_on_replay(self):
         self.signed_client()
         self.assertEqual(rows(self.stores['quota']),[])
@@ -225,6 +230,14 @@ class FirstInstallTests(SignedServiceClient, unittest.TestCase):
         self.rollout.service_release=None
         self.assertFalse(self.rollout.admission_allowed(self.usage))
         self.assertEqual(rows(self.stores['quota']),[])
+
+    def test_paused_first_day_balance_never_creates_a_quota_row(self):
+        self.signed_client()
+        self.controller.apply(self.approval('pause'))
+        response = self.post('service/balance', account_sha256=self.login_result['account_sha256'])
+        self.assertEqual(response.status_code, 503, response.json)
+        self.assertEqual(rows(self.stores['quota']), [])
+        self.assertEqual(self.h.model_calls, 0)
 
     def test_paid_restore_on_first_day_preserves_free_usage(self):
         self.signed_client()

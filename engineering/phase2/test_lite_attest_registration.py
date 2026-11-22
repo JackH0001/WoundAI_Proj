@@ -56,6 +56,8 @@ def der(cert): return cert.public_bytes(serialization.Encoding.DER)
 
 
 class RegistrationTests(unittest.TestCase):
+    bundle_version = '33'
+
     def setUp(self):
         self.root_key = ec.generate_private_key(ec.SECP384R1())
         self.intermediate_key = ec.generate_private_key(ec.SECP384R1())
@@ -74,7 +76,7 @@ class RegistrationTests(unittest.TestCase):
                 (aaguid if aaguid is not None else b'appattest' + b'\x00' * 7) + len(cid).to_bytes(2, 'big') + cid +
                 cbor2.dumps(key if cose is None else cose))
         if flags & 0x80:
-            data += cbor2.dumps({CATEGORY: 2, VERSION: '33'} if ext is None else ext)
+            data += cbor2.dumps({CATEGORY: 2, VERSION: self.bundle_version} if ext is None else ext)
         return data
 
     def object(self, *, auth=None, nonce=None, omit_nonce=False, cert_changes=None, leaf_key=None):
