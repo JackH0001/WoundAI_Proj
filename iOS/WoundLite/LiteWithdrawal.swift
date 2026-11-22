@@ -6,12 +6,13 @@ import CryptoKit
 enum LiteWithdrawalOutcome: Equatable { case pending, pendingUntil(Date), liveMediaRemoved }
 
 enum LiteWithdrawalFailure: LocalizedError {
-    case noIdentity, invalidReceipt, unavailable, invalidState, cancellationRequiresServer, renewalUnconfirmed
+    case noIdentity, invalidReceipt, unavailable, verificationRejected, invalidState, cancellationRequiresServer, renewalUnconfirmed
     var errorDescription: String? {
         switch self {
         case .noIdentity: return "找不到可驗證的原安裝身分，尚未送出雲端撤回。舊版資料或遺失身分的資料需聯絡支援處理。"
         case .invalidReceipt: return "尚未取得符合範圍的雲端刪除確認，請稍後重試。"
         case .unavailable: return "雲端尚未確認撤回，請檢查網路後重試。"
+        case .verificationRejected: return "研究服務未接受這次撤回驗證，尚未確認清除。研究上傳已停止，原撤回要求已保留。請保留此 App，點「聯絡資料處理支援」核對版本。服務恢復後可點「重試／查核撤回」。"
         case .invalidState: return "無法讀取或保存撤回狀態；研究上傳已停用，請聯絡支援。"
         case .cancellationRequiresServer: return "此服務已有上傳身分或綁定紀錄，不能在手機直接取消撤回；需先取得伺服器的重新同意確認。原紀錄與撤回要求保留。"
         case .renewalUnconfirmed: return "尚未取得重新加入的雲端確認，研究上傳保持關閉。原紀錄與這次同意要求已保留；請稍後核對同一次要求，不必重拍或重新登記裝置。"
@@ -30,6 +31,7 @@ struct LiteWithdrawalRecord: Codable, Equatable {
     var requestedAt: Date? = Date()
     var researchEpoch: String? = nil
     var reconsentAudit: String? = nil
+    var verificationRejected: Bool? = nil
 }
 
 private struct LiteUnsentWithdrawalCancellation: Codable {
@@ -166,8 +168,15 @@ extension LiteSignedCloudTransport {
         guard epoch == nil || LiteAttestClient.matches(epoch!, "[0-9a-f]{32}") else { throw LiteWithdrawalFailure.invalidState }
         var request = URLRequest(url: origin.appendingPathComponent("api/v1/lite/data/" + owner + (epoch.map { "/" + $0 } ?? "")))
         request.httpMethod = "DELETE"
-        let (data, response) = try await client.send(request, installation: owner, requestID: UUID(), allowSending: { true })
+        let data: Data
+        let response: HTTPURLResponse
+        do {
+            (data, response) = try await client.send(request, installation: owner, requestID: UUID(), allowSending: { true })
+        } catch LiteAttestFailure.registrationRejected, LiteAttestFailure.http(401), LiteAttestFailure.http(403) {
+            throw LiteWithdrawalFailure.verificationRejected
+        }
         try ResearchCapacityWait.check(response, data: data)
+        if response.statusCode == 401 || response.statusCode == 403 { throw LiteWithdrawalFailure.verificationRejected }
         struct Receipt: Decodable {
             let status: String
             let anon_id: String
@@ -242,6 +251,8 @@ final class LiteWithdrawalModel: ObservableObject {
                 message = "先前的研究同意與撤回紀錄保留。因刪帳要求，目前研究上傳已暫停。"
             } else if record?.phase == .pending, record?.owner == nil {
                 message = "尚未確認此服務的原上傳身分，未取得雲端撤回收據；本機紀錄保留，不能視為雲端資料已刪除。"
+            } else if record?.phase == .pending, record?.verificationRejected == true {
+                message = LiteWithdrawalFailure.verificationRejected.localizedDescription
             } else if record?.phase == .cancelledBeforeSubmission {
                 message = "已保留原撤回與重新同意紀錄。舊服務資料未轉移，也未因本次操作刪除。"
             } else if record?.phase == .liveMediaRemoved {
@@ -347,6 +358,7 @@ final class LiteWithdrawalModel: ObservableObject {
                     value.owner = previous.owner; value.researchEpoch = previous.researchEpoch
                 }
             }
+            value.verificationRejected = nil
             value.retryAt = Date().addingTimeInterval(60)
             try journal.save(value); record = value
             if value.owner == nil {
@@ -372,7 +384,12 @@ final class LiteWithdrawalModel: ObservableObject {
             }
             message = "後端忙碌；撤回要求已保留，等待後自動查核。研究上傳保持停用。"
         } catch let error as LiteWithdrawalFailure {
-            if var value = record { value.retryAt = nil; do { try journal.save(value); record = value } catch { message = LiteWithdrawalFailure.invalidState.localizedDescription; return } }
+            if var value = record {
+                value.retryAt = nil
+                value.verificationRejected = error == .verificationRejected ? true : nil
+                do { try journal.save(value); record = value }
+                catch { message = LiteWithdrawalFailure.invalidState.localizedDescription; return }
+            }
             message = error.localizedDescription
         } catch {
             message = LiteWithdrawalFailure.unavailable.localizedDescription
