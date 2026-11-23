@@ -65,7 +65,7 @@ final class LiteGuideCopyTests: XCTestCase {
         let expected = ["report": history.text("匯出此傷口時間軸 PDF"),
                         "photos": history.text("比較最近兩次照片"), "outline": history.text("修正圈選並更新紀錄"),
                         "deletion": service.text("服務帳號與刪除", locale: en),
-                        "subscription": service.text("服務登入、訂閱與刪帳", locale: en)]
+                        "subscription": service.text("Plus 方案與價格", locale: en)]
         for (id, label) in expected { XCTAssertTrue(try XCTUnwrap(topics.first { $0.id == id }).path.contains(label)) }
     }
 

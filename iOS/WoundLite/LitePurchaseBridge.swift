@@ -156,10 +156,11 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
 
 /// Server acknowledgment is persisted before StoreKit finish. No local paid flag.
 @MainActor final class LiteNativePurchaseStore: ObservableObject {
-    @Published private(set) var message="請先確認服務帳號；訂閱與研究同意分開處理。"
+    @Published private(set) var message = ""
     @Published private(set) var busy=false
     @Published private(set) var offer: LiteMonthlyOffer?
     @Published private(set) var loadingOffer = false
+    @Published private(set) var confirmedUpdates = 0
     let service: any LitePurchaseService, provider: any LitePurchaseProvider, journal: any LiteServiceJournal
     private let now: () -> Date
     private let accountGeneration: () -> Int
@@ -241,6 +242,7 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
             record.finished=true;_=try await save(key,old,record)
         }
         try checkAccount(generation)
+        confirmedUpdates += 1
         message="購買與服務帳號關聯已確認；可用次數依伺服器核對，不會重設今日已用額度。"
     }
     private func failed(_ e:Error) {

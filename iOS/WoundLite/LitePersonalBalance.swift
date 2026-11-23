@@ -16,6 +16,17 @@ struct LitePersonalBalance: Decodable, Equatable {
               remaining == max(0, max(0, limit - used) - pending) else { throw LiteAccountFailure.invalid }
     }
 
+    func availabilityMessage(locale: Locale) -> String {
+        if attempt_limit_reached { return LiteServiceCopy.text("今日辨識嘗試已達上限", locale: locale) }
+        if remaining > 0 {
+            return LiteServiceCopy.format("今天還可辨識 %@ 次", locale: locale, String(remaining))
+        }
+        if used < limit && pending > 0 {
+            return LiteServiceCopy.text("剩餘名額正由處理中的辨識使用，完成後可再查看。", locale: locale)
+        }
+        return LiteServiceCopy.text("今天的辨識額度已用完。", locale: locale)
+    }
+
     func isFresh(at date: Date) -> Bool {
         let now = date.timeIntervalSince1970
         return now >= Double(as_of) - 60 && now < min(Double(resets_at), Double(as_of) + 300)

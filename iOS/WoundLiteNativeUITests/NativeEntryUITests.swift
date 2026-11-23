@@ -128,23 +128,21 @@ final class NativeEntryUITests: XCTestCase {
         let gate = app.buttons["Settings and data withdrawal"]
         let settings = gate.waitForExistence(timeout: 3) ? gate : app.buttons["Settings"].firstMatch
         XCTAssertTrue(settings.waitForExistence(timeout: 8)); settings.tap()
-        let entry = app.buttons["Sign-in, subscriptions and account deletion"]
+        let entry = app.buttons["lite.settings.plus"]
         XCTAssertTrue(entry.waitForExistence(timeout: 5)); entry.tap()
-        XCTAssertTrue(app.buttons["Verify device registration (no photo sent)"].waitForExistence(timeout: 5))
-        app.buttons["Plus plan and price"].tap()
         XCTAssertTrue(app.navigationBars["Plus plan and price"].waitForExistence(timeout: 5))
-        let quota = app.staticTexts["lite.offer.quota"]
-        XCTAssertTrue(quota.label.contains("2 successful")); XCTAssertTrue(quota.label.contains("total of 10"))
+        XCTAssertTrue(app.staticTexts["Plus includes 10 analyses per day and tracking for up to 5 wounds at a time."].exists)
         let button = app.buttons["lite.offer.signIn"]
         for _ in 0..<8 where !button.isHittable { app.swipeUp() }
         XCTAssertTrue(button.isHittable)
         XCTAssertEqual(button.label.lowercased(), "sign in with apple")
         XCTAssertGreaterThanOrEqual(button.frame.height, 44)
         XCTAssertFalse(app.buttons["lite.offer.buy"].exists)
-        XCTAssertFalse(app.buttons["Restore purchases"].exists)
+        let restore = app.buttons["lite.offer.restore"]
+        XCTAssertTrue(restore.exists)
+        XCTAssertEqual(restore.label, "Restore purchases")
         XCTAssertTrue(app.staticTexts["lite.offer.preparationStatus"].label.contains("does not charge"))
         XCTAssertEqual(app.buttons.matching(identifier: "lite.offer.signIn").count, 1)
-        XCTAssertTrue(app.staticTexts["lite.offer.preview"].label.contains("Restore purchases"))
         attach(app, "english-apple-sign-in")
     }
     #endif
@@ -512,10 +510,10 @@ final class NativeEntryUITests: XCTestCase {
         XCTAssertTrue(preview.isHittable)
         preview.tap()
         XCTAssertTrue(app.navigationBars["Plus 方案與價格"].waitForExistence(timeout: 8))
-        XCTAssertTrue(app.staticTexts["lite.offer.quota"].exists)
+        XCTAssertTrue(app.staticTexts["Plus 每天共 10 次辨識，可同時追蹤 5 處傷口。"].exists)
         XCTAssertTrue(app.staticTexts["lite.offer.captureRequirement"].exists)
         XCTAssertFalse(app.buttons["lite.offer.buy"].exists)
-        XCTAssertFalse(app.buttons["恢復購買"].exists)
+        XCTAssertTrue(app.buttons["lite.offer.restore"].exists)
         XCTAssertFalse(app.buttons["核對未完成購買"].exists)
         XCTAssertFalse(app.staticTexts["nativePurchaseStatus"].exists)
         let continueSubscription = app.buttons["lite.offer.signIn"]
@@ -525,13 +523,12 @@ final class NativeEntryUITests: XCTestCase {
         XCTAssertTrue(continueSubscription.label.contains("Apple"))
         XCTAssertTrue(continueSubscription.label.contains("登入"))
         XCTAssertGreaterThanOrEqual(continueSubscription.frame.height, 44)
-        XCTAssertTrue(app.staticTexts["lite.offer.preview"].label.contains("恢復購買"))
         attach(app, "subscription-sign-in-before-registration")
         continueSubscription.tap()
         // Simulator App Attest cannot register. The same page must explain
         // the unfinished step without opening an Apple purchase or hiding retry.
         let failure = app.staticTexts["lite.offer.preparationStatus"]
-        let finished = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", "可能是連線或服務尚未就緒"), object: failure)
+        let finished = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "目前無法連上訂閱服務。請稍後再試。"), object: failure)
         XCTAssertEqual(XCTWaiter.wait(for: [finished], timeout: 15), .completed)
         XCTAssertTrue(continueSubscription.isEnabled)
         XCTAssertFalse(app.buttons["lite.offer.buy"].exists)

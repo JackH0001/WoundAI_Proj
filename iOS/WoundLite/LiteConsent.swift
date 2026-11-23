@@ -227,6 +227,8 @@ struct LiteSettingsView: View {
                 }
                 if let nativeSession {
                     Section(LiteServiceCopy.text("個人服務")) {
+                        NavigationLink(LiteServiceCopy.text("Plus 方案與價格")) { LiteNativePurchaseView(session: nativeSession) }
+                            .accessibilityIdentifier("lite.settings.plus")
                         NavigationLink(LiteServiceCopy.text("服務登入、訂閱與刪帳")) { LiteNativeSessionView(session:nativeSession) }
                     }
                 } else if let nativeSetupNotice {

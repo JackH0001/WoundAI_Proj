@@ -185,3 +185,15 @@
 "服務帳號已變更。請登入原帳號後核對訂閱狀態。" = "The service account changed. Sign in to the original account to check your subscription.";
 "此裝置沒有可用的後置 LiDAR 相機。訂閱 Plus 後仍無法在這部裝置拍攝新紀錄。您仍可恢復或管理既有訂閱。" = "This device has no available rear LiDAR camera. A Plus subscription cannot enable new captures here. You can still restore or manage an existing subscription.";
 "購買前的帳號核對已逾時。請再按一次訂閱，重新核對帳號與月費。" = "Your account check expired. Tap Subscribe again to confirm your account and monthly price.";
+"目前無法連上訂閱服務。請稍後再試。" = "The subscription service is unavailable. Please try again later.";
+"Plus 每天共 10 次辨識，可同時追蹤 5 處傷口。" = "Plus includes 10 analyses per day and tracking for up to 5 wounds at a time.";
+"目前方案：Plus" = "Current plan: Plus";
+"目前方案：免費" = "Current plan: Free";
+"今日辨識嘗試已達上限" = "You have reached today’s analysis attempt limit.";
+"今天還可辨識 %@ 次" = "Analyses left today: %@";
+"暫時無法確認目前方案。" = "Your current plan could not be verified.";
+"重新查詢方案" = "Check plan again";
+"正在讀取目前方案…" = "Checking your plan…";
+"方案內容" = "Plan details";
+"剩餘名額正由處理中的辨識使用，完成後可再查看。" = "Analyses in progress are holding the remaining uses. Check again when they finish.";
+"今天的辨識額度已用完。" = "You have used today’s analysis allowance.";

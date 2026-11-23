@@ -317,11 +317,12 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     }
 
     /// Only an explicit tap on the offer page may start this sequence. It never
-    /// invokes StoreKit purchase/restore or changes research consent. An unreadable
+    /// invokes a payment. An explicit restore may continue after authentication. An unreadable
     /// installation is not permission to replace it with a fresh registration.
-    func prepareForPurchase() async {
+    func prepareForPurchase(restoring: Bool = false) async {
         guard !preparingPurchase, !registering, !identity.busy, !purchases.busy else { return }
         preparingPurchase = true; defer { preparingPurchase = false }
+        preparationCopy = nil
         let started = identity.generation
         purchasePreparationMessage = "正在核對裝置登記…尚未付款。"
         await checkExistingRegistration()
@@ -334,27 +335,36 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
         }
         if registration == .required { await registerDevice() }
         if registration == .pending {
-            purchasePreparationMessage = "先登入服務帳號，再確認月費並訂閱；登入不會付款或開啟研究上傳。"
+            purchasePreparationMessage = "上次的裝置登記尚待確認。點選「續接裝置登記」，服務會先核對原登記。"
             return
         }
         guard registration == .confirmed else {
-            purchasePreparationMessage = "裝置登記尚未完成，可能是連線或服務尚未就緒。請稍後再試；尚未付款，也未開啟 Apple 購買。"; return
+            purchasePreparationMessage = "目前無法連上訂閱服務。請稍後再試。"; return
         }
         guard started == identity.generation, !identity.busy else {
             purchasePreparationMessage = "帳號狀態已變更，請重新核對後再繼續；尚未付款。"; return
         }
+        var expectedGeneration = started
         if await identity.purchaseAccessDeadline() == nil {
             guard started == identity.generation, !identity.busy else {
                 purchasePreparationMessage = "帳號狀態已變更，請重新核對後再繼續；尚未付款。"; return
             }
             purchasePreparationMessage = "正在登入服務帳號…請完成 Apple 登入，尚未付款。"
+            expectedGeneration = started + 1
             await identity.signIn()
         }
-        guard await identity.purchaseAccessDeadline() != nil else {
+        guard let access = await identity.localPurchaseAccess(), identity.generation == expectedGeneration else {
+            if identity.message == "目前無法連上訂閱服務。請稍後再試。" {
+                purchasePreparationMessage = identity.message
+                return
+            }
             preparationCopy = .init(pieces: [.init(identity.message), .init(" 尚未付款，也未開啟 Apple 購買。")])
             purchasePreparationMessage = preparationCopy!.source; return
         }
         purchasePreparationMessage = "服務帳號已確認。請核對月費，再按訂閱並在 Apple 確認；已有訂閱請使用恢復購買。"
+        if restoring {
+            await purchases.restore(for: PurchaseAccount(generation: expectedGeneration, token: access.token))
+        }
     }
 
     func trackingContext() async throws -> LiteDeletionContext? {

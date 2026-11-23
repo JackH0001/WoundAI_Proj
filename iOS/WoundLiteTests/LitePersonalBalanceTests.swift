@@ -77,6 +77,21 @@ private actor BalanceTransport: LiteAuthenticatedTransport {
         XCTAssertNil(receipt.current(at:reset,scope:scope,registeredOwner:context.installation))
     }
 
+    func testOfferSeparatesAttemptsPendingCompletedAndRemainingUses() throws {
+        let cases: [([String: Any], String)] = [
+            (["attempt_limit_reached": true], "今日辨識嘗試已達上限"),
+            ([:], "剩餘名額正由處理中的辨識使用，完成後可再查看。"),
+            (["used": 2, "pending": 0], "今天的辨識額度已用完。"),
+            (["limit": 10, "remaining": 8], "今天還可辨識 8 次")
+        ]
+        for (fields, expected) in cases {
+            let value = try JSONDecoder().decode(LitePersonalBalance.self, from: data(fields))
+            try value.validate(account: account, at: date)
+            XCTAssertEqual(value.availabilityMessage(locale: Locale(identifier: "zh-Hant")), expected)
+            XCTAssertNotEqual(value.availabilityMessage(locale: Locale(identifier: "en")), expected)
+        }
+    }
+
     func testOnlyCurrentDaySnapshotIsFreshAtUTCReset() throws {
         let end=(day/86400+1)*86400, stamp=end-3
         let v = try JSONDecoder().decode(LitePersonalBalance.self,from:data(["as_of":stamp,"attempt_limit_reached":true]))

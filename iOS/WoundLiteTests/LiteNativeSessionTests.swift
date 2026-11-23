@@ -68,6 +68,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
     var paths = [String](), session: [String: Any]?, ended = false, closed = false
     var production = false, lostConfirmation = false, lostRun = false
     var statusUnavailable = false, woundResponseCode = 200
+    var challengeStatus = 200
     var afterContext: (@Sendable () async -> Void)?
     var activeWounds = [String](), woundRevision = 0
     var afterWoundSnapshot: (@Sendable () async -> Void)?
@@ -88,6 +89,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
     func onWoundRead(_ closure: @escaping @Sendable () async -> Void) { afterWoundSnapshot = closure }
     func changeOwner() { owner = "other-installation" }
     func failStatus() { statusUnavailable = true }
+    func setChallengeStatus(_ code: Int) { challengeStatus = code }
     func rejectWoundResponse() { woundResponseCode = 401 }
     func send(_ request: URLRequest, installation: String) async throws -> (Data, HTTPURLResponse) {
         XCTAssertEqual(installation, owner)
@@ -98,6 +100,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
         var result = [String: Any](), code = 200
         switch path {
         case "account/challenge":
+            code = challengeStatus
             ended = false
             result = ["v": 1, "installation": owner, "operation": operation, "nonce": sessionHash,
                 "state": String(repeating: "b", count: 64), "created_at": sessionTime,
@@ -552,6 +555,40 @@ private actor SessionWire: LiteAuthenticatedTransport {
         XCTAssertTrue(r.purchasePreparationMessage.contains("再按訂閱"))
     }
 
+    func testExplicitRestoreFromSignedOutChecksOriginalAccountAndNeverBuys() async throws {
+        let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit()
+        let session = try runtime(wire, SessionJournal(), apple: apple, storeKit: kit)
+        await session.prepareForPurchase(restoring: true)
+        let counts = await wire.counts()
+        XCTAssertEqual(apple.calls, 1)
+        XCTAssertEqual(kit.restores, 1)
+        XCTAssertEqual(kit.finishes, 1)
+        XCTAssertEqual(kit.buys, 0)
+        XCTAssertEqual(counts["purchase/confirm"], 1)
+    }
+
+    func testMissingLoginEndpointLeavesActionableStatusAfterRegistrationReadback() async throws {
+        let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit()
+        let session = try runtime(wire, SessionJournal(), apple: apple, storeKit: kit)
+        await wire.setChallengeStatus(404)
+        await session.prepareForPurchase(restoring: true)
+        await session.checkExistingRegistration()
+        XCTAssertEqual(session.purchasePreparationMessage, "目前無法連上訂閱服務。請稍後再試。")
+        XCTAssertEqual(apple.calls, 0)
+        XCTAssertEqual(kit.restores, 0)
+        XCTAssertEqual(kit.buys, 0)
+    }
+
+    func testCancelledRestoreSignInNeverContactsStoreKit() async throws {
+        let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit()
+        apple.cancelled = true
+        let session = try runtime(wire, SessionJournal(), apple: apple, storeKit: kit)
+        await session.prepareForPurchase(restoring: true)
+        XCTAssertTrue(session.purchasePreparationMessage.contains("已取消登入"))
+        XCTAssertEqual(kit.restores, 0)
+        XCTAssertEqual(kit.buys, 0)
+    }
+
     func testPurchasePreparationReusesRegistrationAndActiveAccountAfterRestart() async throws {
         let wire = try SessionWire(), journal = SessionJournal(), apple = SessionApple(), kit = SessionStoreKit()
         let first = try runtime(wire, journal, apple: apple, storeKit: kit)
@@ -587,7 +624,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
         XCTAssertEqual(r.registration, .unreadable); XCTAssertEqual(counts, ["registration": 0])
         XCTAssertEqual(apple.calls, 0); XCTAssertEqual(kit.buys, 0)
         XCTAssertFalse(r.preparingPurchase)
-        XCTAssertTrue(r.purchasePreparationMessage.contains("服務尚未就緒"))
+        XCTAssertEqual(r.purchasePreparationMessage, "目前無法連上訂閱服務。請稍後再試。")
     }
 
     func testPurchasePreparationCancelledAppleLoginKeepsRecordsAndDoesNotBuy() async throws {

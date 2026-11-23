@@ -413,7 +413,14 @@ struct LiteOwnerReviewReference: Encodable, Equatable {
             guard try await !hasDeletionIntent(owner),previous?.phase != "deleting" else{message="刪帳要求處理中；請核對原刪帳進度，不能重新開啟登入。";return}
             guard generation==started else{throw LiteAccountFailure.conflict}
             guard (previous?.phase != "confirm" || (previous?.challenge.expires_at ?? 0)<=Int(now().timeIntervalSince1970)),previous?.phase != "logout",previous?.phase != "renew" else{message="上次登入或登出尚未確認，請先按重試；不用重新購買。";return}
-            let c=try await service.challenge(operation:UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased());try c.validate()
+            let c: LiteAccountChallenge
+            do {
+                c = try await service.challenge(operation: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())
+            } catch where (error as? LiteAccountFailure) == .unavailable || error is URLError {
+                message = "目前無法連上訂閱服務。請稍後再試。"
+                return
+            }
+            try c.validate()
             guard generation==started else{try? await service.logout(c);throw LiteAccountFailure.conflict}
             guard c.installation==owner,c.created_at<=Int(now().timeIntervalSince1970),c.expires_at>Int(now().timeIntervalSince1970) else{throw LiteAccountFailure.invalid}
             var r=LiteAccountCheckpoint(version:1,origin:service.origin.absoluteString,challenge:c,phase:"apple")
