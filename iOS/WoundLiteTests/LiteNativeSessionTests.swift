@@ -732,6 +732,39 @@ private actor SessionWire: LiteAuthenticatedTransport {
         XCTAssertEqual(f.kit.restores, 1, "A stale combined action cannot start a second restore")
     }
 
+    func testCapturePendingRegistrationReturnsOnlyAfterSuccessfulSignInWithoutSendingPhoto() async throws {
+        let f = try await interruptedRegistration()
+        let original = await f.registration.snapshot().0
+        var returned = 0
+        let result = await f.session.signInFromSettings(resumePending: true, returnToCapture: { returned += 1 })
+        let requests = await f.registration.snapshot().0
+        let counts = await f.wire.counts()
+        if LiteNativeBuild.showsOwnerReview {
+            XCTAssertEqual(requests, original)
+            XCTAssertEqual(returned, 0)
+            XCTAssertEqual(f.apple.calls, 0)
+        } else {
+            XCTAssertEqual(result, "已登入個人服務。")
+            XCTAssertEqual(requests, original + original)
+            XCTAssertEqual(returned, 1)
+            XCTAssertEqual(f.apple.calls, 1)
+        }
+        XCTAssertEqual(f.kit.buys + f.kit.restores, 0)
+        XCTAssertFalse(counts.keys.contains { $0.hasPrefix("service/") || $0.hasPrefix("research/") || $0.hasPrefix("purchase/") })
+    }
+
+    func testCancelledCaptureSignInKeepsSheetOpenAndShowsTheReason() async throws {
+        let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit()
+        let session = try runtime(wire, SessionJournal(), apple: apple, storeKit: kit)
+        apple.cancelled = true
+        let result = await session.signInFromSettings(returnToCapture: { XCTFail("Cancelled sign-in closed the draft sheet") })
+        XCTAssertEqual(result, "已取消登入；原紀錄與研究同意不變。")
+        XCTAssertEqual(apple.calls, 1)
+        let counts = await wire.counts()
+        XCTAssertEqual(kit.buys + kit.restores, 0)
+        XCTAssertFalse(counts.keys.contains { $0.hasPrefix("service/") || $0.hasPrefix("research/") })
+    }
+
     func testPendingRegistrationOpensPlanWithOneSignInAndNoStoreKitAction() async throws {
         let f = try await interruptedRegistration()
         let originalProof = await f.registration.snapshot().0
@@ -1527,7 +1560,7 @@ extension LiteNativeSessionTests {
             XCTAssertFalse(vm.note?.contains("續接裝置登記") == true)
         } else {
             XCTAssertEqual(f.session.registration, .pending)
-            XCTAssertEqual(vm.note, "請在個人服務點「續接裝置登記」，再回到這張照片。")
+            XCTAssertEqual(vm.note, "請續接裝置登記並登入，完成後會回到這張照片。")
             vm.showRecognitionAccount = false
             await vm.recognitionAccountDismissed()
             XCTAssertEqual(vm.note, "裝置登記仍待續接。照片已存在手機，可先圈選，或點辨識返回個人服務。")
@@ -1577,9 +1610,10 @@ extension LiteNativeSessionTests {
         XCTAssertEqual(vm.draft, draft)
         let afterTap = await wire.counts()
         XCTAssertEqual(afterTap, before)
-        await session.identity.signIn()
+        let signIn = await session.signInFromSettings(returnToCapture: { vm.showRecognitionAccount = false })
+        XCTAssertEqual(signIn, "已登入個人服務。")
+        XCTAssertFalse(vm.showRecognitionAccount)
         let afterSignIn = await wire.counts()
-        vm.showRecognitionAccount = false
         await vm.recognitionAccountDismissed()
         await vm.resumePendingRecognition()
         XCTAssertEqual(vm.note, "可用這張照片繼續雲端辨識，也可以直接在手機圈選。")

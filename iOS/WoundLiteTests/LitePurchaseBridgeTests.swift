@@ -65,11 +65,15 @@ private actor PurchaseJournal:LiteServiceJournal {
     var catalog: LiteMonthlyOffer? = nativeTestOffer
     var lookups = 0, unfinishedReads = 0
     var beforeKnown: (() -> Void)?
+    var duringKnownRead: (() async throws -> Void)?
+    private(set) var knownReads = 0
     var afterPayment: (() -> Void)?
     var duringRestore: (() -> Void)?
     var duringUnfinished: (() async -> Void)?
     func knownPurchases() async throws -> [LitePurchaseEvent] {
+        knownReads += 1
         beforeKnown?()
+        try await duringKnownRead?()
         return pending + restored
     }
     func monthlyOffer() async throws -> LiteMonthlyOffer {
@@ -565,9 +569,93 @@ private actor PurchaseJournal:LiteServiceJournal {
         XCTAssertEqual(service.contexts, 0)
         XCTAssertTrue(store.message.contains("沒有待完成的交易"), store.message)
     }
-    func testEmptyRestoreDoesNotRegisterOrResetQuota()async {
-        let(s,p,_,m)=setup();await m.restore();XCTAssertEqual(s.calls,0);XCTAssertEqual(p.purchases,0)
-        XCTAssertTrue(m.message.contains("沒有找到"))
+    func testEmptyRestoreDoesNotRegisterOrResetQuota() async {
+        let (service, provider, _, store) = setup()
+        await store.restore()
+        XCTAssertEqual(provider.restoreCalls, 1)
+        XCTAssertEqual(provider.knownReads, 1)
+        XCTAssertEqual(provider.purchases, 0)
+        XCTAssertEqual(provider.finishes, 0)
+        XCTAssertEqual(service.calls, 0)
+        XCTAssertEqual(store.confirmedUpdates, 0)
+        XCTAssertTrue(store.message.contains("管理 Apple 訂閱"), store.message)
+    }
+
+    func testRestoreObservesDelayedEntitlementWithoutStartingAnotherAppleAction() async {
+        let (service, provider, _, store) = setup()
+        provider.duringKnownRead = {
+            XCTAssertEqual(store.activity, .recheckingEntitlements)
+            await store.restore()
+            await store.purchase(accepting: nativeTestOffer)
+            provider.pending = [event()]
+        }
+        await store.restore()
+        XCTAssertNil(store.activity)
+        XCTAssertEqual(provider.knownReads, 1)
+        XCTAssertEqual(provider.restoreCalls, 1)
+        XCTAssertEqual(provider.purchases, 0)
+        XCTAssertEqual(provider.finishes, 1)
+        XCTAssertEqual(service.calls, 1)
+        XCTAssertEqual(store.confirmedUpdates, 1)
+    }
+
+    func testFirstNonemptyRestoreSkipsSecondReadEvenWhenAccountDoesNotMatch() async {
+        let (service, provider, _, store) = setup()
+        provider.restored = [event("20000000-0000-4000-8000-000000000001")]
+        await store.restore()
+        XCTAssertEqual(provider.knownReads, 0)
+        XCTAssertEqual(provider.restoreCalls, 1)
+        XCTAssertEqual(provider.purchases + provider.finishes + service.calls, 0)
+        XCTAssertTrue(store.message.contains("不符"), store.message)
+    }
+
+    func testUnavailableEntitlementReadOffersRestoreAgainWithoutMarkingFree() async {
+        let (service, provider, _, store) = setup()
+        provider.duringKnownRead = { throw LitePurchaseFailure.unavailable }
+        await store.restore()
+        XCTAssertEqual(provider.knownReads, 1)
+        XCTAssertEqual(provider.restoreCalls, 1)
+        XCTAssertEqual(provider.purchases + provider.finishes + service.calls, 0)
+        XCTAssertTrue(store.message.contains("未能確認 Apple"), store.message)
+        XCTAssertFalse(store.busy)
+    }
+
+    func testRestoreDropsDelayedEntitlementWhenAccountOrInstallationChanges() async {
+        for switchAccount in [true, false] {
+            let (service, provider, _, store) = setup()
+            provider.duringKnownRead = {
+                provider.pending = [event()]
+                if switchAccount { service.generation += 1 }
+                else { service.owner = "other-installation" }
+            }
+            await store.restore()
+            XCTAssertEqual(provider.knownReads, 1)
+            XCTAssertEqual(provider.finishes + provider.purchases + service.calls, 0)
+            XCTAssertTrue(store.message.contains(switchAccount ? "帳號已變更" : "不符"), store.message)
+        }
+    }
+
+    func testRestoreDropsEntitlementIfAccountCheckExpiresDuringRead() async {
+        let (service, provider, journal, _) = setup()
+        var clock = purchaseNow
+        let store = LiteNativePurchaseStore(service: service, provider: provider, journal: journal,
+            accountGeneration: { service.generation }, now: { Date(timeIntervalSince1970: Double(clock)) })
+        provider.duringKnownRead = { clock += 900; provider.pending = [event()] }
+        await store.restore()
+        XCTAssertEqual(provider.knownReads, 1)
+        XCTAssertEqual(provider.finishes + provider.purchases + service.calls, 0)
+        XCTAssertTrue(store.message.contains("逾時"), store.message)
+    }
+
+    func testCancellationAfterSyncDoesNotStartAnotherStoreKitRead() async {
+        let (service, provider, _, store) = setup()
+        provider.duringRestore = { withUnsafeCurrentTask { $0?.cancel() } }
+        let task = Task { await store.restore() }
+        await task.value
+        XCTAssertEqual(provider.restoreCalls, 1)
+        XCTAssertEqual(provider.knownReads, 0)
+        XCTAssertEqual(provider.finishes + provider.purchases + service.calls, 0)
+        XCTAssertFalse(store.busy)
     }
     func testDuplicateConcurrentUpdatesFinishOnlyOnce()async throws {
         let(s,p,_,m)=setup();m.startObserving(accountToken: purchaseToken);await Task.yield()
@@ -702,18 +790,58 @@ import StoreKitTest
         XCTAssertEqual(session.allTransactions().count, 1)
     }
 
-    func testRenewalAfterAccountSwitchRestoresOnlyToOriginalAccountOnSecondInstallation() async throws {
+    private func purchaseStore(_ service: PurchaseService, journal: PurchaseJournal) -> LiteNativePurchaseStore {
+        service.environment = "Xcode"
+        return LiteNativePurchaseStore(service: service, provider: LiteStoreKitPurchaseProvider(xcodeTest: true),
+            journal: journal, accountGeneration: { service.generation },
+            now: { Date(timeIntervalSince1970: Double(purchaseNow)) })
+    }
+
+    func testFinishedPurchaseRestoresToSameAccountWithFreshProviderAndEmptyJournal() async throws {
         let config = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "WoundLiteCommerce", withExtension: "storekit"))
         let session = try freshCommerceTestSession(url: config)
         defer { session.clearTransactions() }
 
-        func purchaseStore(_ service: PurchaseService, journal: PurchaseJournal) -> LiteNativePurchaseStore {
-            service.environment = "Xcode"
-            return LiteNativePurchaseStore(service: service, provider: LiteStoreKitPurchaseProvider(xcodeTest: true),
-                journal: journal, accountGeneration: { service.generation },
-                now: { Date(timeIntervalSince1970: Double(purchaseNow)) })
-        }
+        let service = PurchaseService()
+        let original = purchaseStore(service, journal: PurchaseJournal())
+        await original.purchaseDisplayedTestOffer()
+        XCTAssertEqual(service.calls, 1, original.message)
+        let purchaseIDs = session.allTransactions().map(\.identifier)
+        XCTAssertEqual(purchaseIDs.count, 1)
 
+        let freshJournal = PurchaseJournal()
+        let reopened = purchaseStore(service, journal: freshJournal)
+        let unfinishedBefore = try await reopened.provider.unfinished()
+        XCTAssertTrue(unfinishedBefore.isEmpty)
+        let before = try await reopened.provider.knownPurchases()
+        XCTAssertEqual(before.count, 1)
+        let transaction = try XCTUnwrap(before.first)
+        XCTAssertEqual(transaction.token, service.token)
+
+        await reopened.restore()
+
+        let unfinishedAfter = try await reopened.provider.unfinished()
+        XCTAssertTrue(unfinishedAfter.isEmpty)
+        let after = try await reopened.provider.knownPurchases()
+        XCTAssertEqual(after.count, 1)
+        XCTAssertTrue(try XCTUnwrap(after.first).sameTransaction(as: transaction))
+        XCTAssertEqual(session.allTransactions().map(\.identifier), purchaseIDs)
+        XCTAssertEqual(service.calls, 2, reopened.message)
+        let finished = try await freshJournal.values().map {
+            try JSONDecoder().decode(LitePurchaseCheckpoint.self, from: $0)
+        }.filter { $0.finished }
+        XCTAssertEqual(finished.count, 1)
+        let acknowledgment = try XCTUnwrap(finished.first?.acknowledgment)
+        XCTAssertEqual(acknowledgment.account_sha256, service.account)
+        XCTAssertEqual(acknowledgment.app_account_token, transaction.token)
+        XCTAssertEqual(acknowledgment.transaction_id, transaction.transaction)
+        XCTAssertEqual(acknowledgment.original_transaction_id, transaction.original)
+    }
+
+    func testRenewalAfterAccountSwitchRestoresOnlyToOriginalAccountOnSecondInstallation() async throws {
+        let config = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "WoundLiteCommerce", withExtension: "storekit"))
+        let session = try freshCommerceTestSession(url: config)
+        defer { session.clearTransactions() }
         let originalService = PurchaseService()
         let originalStore = purchaseStore(originalService, journal: PurchaseJournal())
         await originalStore.purchaseDisplayedTestOffer()

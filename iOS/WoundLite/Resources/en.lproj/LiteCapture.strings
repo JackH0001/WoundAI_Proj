@@ -132,7 +132,7 @@
 "%@ 後可再試" = "Try again at %@";
 "繼續辨識這張照片" = "Continue with this photo";
 "請先開啟個人服務完成登入。回到量測後，可用同一張照片繼續辨識。" = "Sign in to Personal Service. Return to this capture to analyze the same photo.";
-"請在個人服務點「續接裝置登記」，再回到這張照片。" = "In Personal Service, tap “Resume device registration”, then return to this photo.";
+"請續接裝置登記並登入，完成後會回到這張照片。" = "Resume device registration and sign in to return to this photo.";
 "暫時無法讀取這部裝置的登記。請解鎖後再點辨識，或先在手機圈選。" = "This device’s registration could not be read. Unlock the device and tap Analyze again, or outline the wound on your phone.";
 "裝置登記仍待續接。照片已存在手機，可先圈選，或點辨識返回個人服務。" = "Device registration is still pending. Your photo is saved on this device. You can outline it now or tap Analyze to return to Personal Service.";
 "正在確認個人服務帳號，請稍候再點一次辨識。" = "Checking your service account. Tap Analyze again in a moment.";
@@ -163,3 +163,6 @@
 "選擇量測目標" = "Choose an outline";
 "原草稿目前無法讀取。請解鎖手機後再按「完成圈選」。" = "The original draft could not be read. Unlock the device and tap “Done outlining” again.";
 "上次連線時裝置離線。照片已保存，連網後可查詢同一筆，或先在手機圈選。" = "Your device was offline on the last attempt. Your photo is saved. Check this capture when you reconnect, or outline it on your phone now.";
+"正在讀取追蹤名單…" = "Reading your tracked wounds…";
+"正在確認傷口名額並存入紀錄…" = "Checking your wound limit and saving…";
+"暫時無法確認追蹤名額。這次拍攝仍在，可稍後再按「存入紀錄」。" = "Your capture is still here. Your wound limit could not be checked. Tap “Save record” to try again.";

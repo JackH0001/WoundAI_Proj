@@ -184,6 +184,10 @@
 "上次的裝置登記尚待確認。點選「續接裝置登記」，服務會先核對原登記。" = "Your previous device registration is awaiting confirmation. Tap “Resume device registration” to check the original registration first.";
 "續接裝置登記並恢復購買" = "Resume device registration and restore purchases";
 "正在恢復既有訂閱…" = "Restoring your subscription…";
+"登入後會回到這張照片。準備好時，再按辨識送出。" = "After sign-in, you’ll return to this photo. Tap recognition when you’re ready to send it.";
+"已與 Apple 同步，正在再次查看訂閱權益…" = "Apple has synced. Checking your subscription again…";
+"恢復購買的帳號核對已逾時。請再按一次「恢復購買」。" = "The account check expired. Tap Restore purchases again.";
+"目前沒有找到可恢復的訂閱。若已訂閱，請在「管理 Apple 訂閱」確認購買帳號後再試。" = "No subscription is available to restore yet. If you already subscribed, check the Apple Account under Manage Apple subscriptions and try again.";
 "續接裝置登記" = "Resume device registration";
 "服務尚未確認這次登記。原登記資料已保留，請稍後再續接。" = "The service could not confirm this registration. Your registration details are saved. Try resuming later.";
 "服務帳號已變更。請登入原帳號後核對訂閱狀態。" = "The service account changed. Sign in to the original account to check your subscription.";

@@ -180,8 +180,12 @@ struct LiteNativePurchaseView: View {
                             Task { await session.prepareForPurchase() }
                         }.disabled(busy)
                     }
-                    Text(session.registration == .pending && !session.preparingAccount ? copy(session.message) : session.presentationPurchasePreparation(locale: locale))
-                        .accessibilityIdentifier("lite.offer.preparationStatus")
+                    if let activity = store.activity, activity == .restoring || activity == .recheckingEntitlements {
+                        ProgressView(copy(activity.progress)).accessibilityIdentifier("lite.offer.transactionProgress")
+                    } else {
+                        Text(session.registration == .pending && !session.preparingAccount ? copy(session.message) : session.presentationPurchasePreparation(locale: locale))
+                            .accessibilityIdentifier("lite.offer.preparationStatus")
+                    }
                     if session.registration == .confirmed, let account = try? session.accountView() {
                         NavigationLink(copy("核對未完成登入或帳號狀態")) { account }
                     }

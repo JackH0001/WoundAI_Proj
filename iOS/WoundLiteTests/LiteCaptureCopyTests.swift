@@ -21,11 +21,23 @@ import SwiftUI
             return try XCTUnwrap(PropertyListSerialization.propertyList(from: Data(contentsOf: url), format: nil) as? [String:String])
         }
         let a = try table("en"), b = try table("zh-Hant")
-        XCTAssertEqual(a.count, 164); XCTAssertEqual(Set(a.keys), Set(b.keys))
+        XCTAssertEqual(a.count, 167); XCTAssertEqual(Set(a.keys), Set(b.keys))
         for (key, value) in a {
             XCTAssertEqual(b[key],key); XCTAssertFalse(value.isEmpty)
             XCTAssertEqual(key.components(separatedBy: "%@").count,value.components(separatedBy: "%@").count)
             XCTAssertFalse(value.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) },key)
+        }
+    }
+    func testSaveProgressAndRetryNameTheActionInBothLanguages() {
+        let saving = "正在確認傷口名額並存入紀錄…"
+        let roster = "正在讀取追蹤名單…"
+        let retry = "暫時無法確認追蹤名額。這次拍攝仍在，可稍後再按「存入紀錄」。"
+        XCTAssertEqual(zh.text(saving), saving)
+        XCTAssertEqual(zh.text(roster), roster)
+        XCTAssertEqual(en.text(saving), "Checking your wound limit and saving…")
+        XCTAssertEqual(en.text(roster), "Reading your tracked wounds…")
+        for copy in [en, zh] {
+            XCTAssertTrue(copy.message(retry).contains(copy.text("存入紀錄")))
         }
     }
     func testCaptureGuidanceMatchesBuildForBothLanguages() {

@@ -39,7 +39,7 @@ final class LiteMeasureVM: ObservableObject {
     @Published private(set) var manualSaveProblem: String?
     private var recognitionAwaitingTap: Int?
     private static let recognitionSignInPrompt = "請先開啟個人服務完成登入。回到量測後，可用同一張照片繼續辨識。"
-    private static let pendingRegistrationPrompt = "請在個人服務點「續接裝置登記」，再回到這張照片。"
+    private static let pendingRegistrationPrompt = "請續接裝置登記並登入，完成後會回到這張照片。"
     private static let unreadableRegistrationPrompt = "暫時無法讀取這部裝置的登記。請解鎖後再點辨識，或先在手機圈選。"
     @Published private(set) var serviceResult: LiteServiceRecord?
     @Published private var verifiedTargets: LiteContourTargets?
@@ -968,7 +968,9 @@ struct LiteMeasureView: View {
     @State private var showSaveConfirmation = false
     @State private var saveNotice: String?
     @State private var confirmRetake = false
-    @State private var checkingWound = false
+    private enum WoundCheck { case readingRoster, saving }
+    @State private var woundCheck: WoundCheck?
+    @State private var measureVisible = false
     @State private var roster: LiteWoundRoster?
 
     private var availableGroups: [LiteWoundGroup] {
@@ -1044,7 +1046,7 @@ struct LiteMeasureView: View {
                 }
                 .padding()
             }
-            .disabled(checkingWound)
+            .disabled(woundCheck != nil)
             .navigationTitle(copy.text("量測"))
             .alert(copy.text("重新拍攝？"), isPresented: $confirmRetake) {
                 Button(copy.text("保留目前量測"), role: .cancel) { }
@@ -1052,7 +1054,10 @@ struct LiteMeasureView: View {
             } message: {
                 Text(copy.text("目前量測尚未存入紀錄。拍下新照片後會取代這個畫面；已存入的紀錄不受影響。取消相機可回到目前量測。"))
             }
-            .onAppear { if vm.image == nil { selectLastWound() } }
+            .onAppear {
+                measureVisible = true
+                if vm.image == nil { selectLastWound() }
+            }
             .sheet(item: $vm.presentedTargets) { targets in
                 if let image = vm.image, targets == vm.availableTargets {
                     LiteContourTargetPicker(image: image, targets: targets,
@@ -1071,7 +1076,7 @@ struct LiteMeasureView: View {
             }) {
                 if let nativeSession {
                     NavigationStack {
-                        LiteNativeSessionView(session: nativeSession)
+                        LiteNativeSessionView(session: nativeSession, returnToCapture: { vm.showRecognitionAccount = false })
                             .toolbar {
                                 ToolbarItem(placement: .confirmationAction) {
                                     Button(copy.text("返回這次拍攝")) { vm.showRecognitionAccount = false }
@@ -1155,6 +1160,7 @@ struct LiteMeasureView: View {
                     }
             }
         }
+        .onDisappear { measureVisible = false }
     }
 
     @ViewBuilder
@@ -1284,10 +1290,11 @@ struct LiteMeasureView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let nativeSession {
-                Button(copy.text("核對帳戶正在追蹤的傷口")) {
-                    checkingWound = true
+                Button(copy.text(woundCheck == .readingRoster ? "正在讀取追蹤名單…" : "核對帳戶正在追蹤的傷口")) {
+                    guard woundCheck == nil else { return }
+                    woundCheck = .readingRoster
                     Task { @MainActor in
-                        defer { checkingWound = false }
+                        defer { woundCheck = nil }
                         do {
                             roster = try await store.refreshTracking(from: nativeSession)
                             saveNotice = roster?.summary
@@ -1300,13 +1307,23 @@ struct LiteMeasureView: View {
                 .font(.caption).foregroundStyle(.secondary)
             if let error = store.storageError { Text(copy.message(error)).font(.footnote).foregroundStyle(.orange) }
             if let saveNotice { Text(roster?.summary == saveNotice ? copy.history.roster(roster) : copy.message(saveNotice)).font(.footnote).foregroundStyle(.orange) }
-            Button(copy.text(vm.savedId == nil ? "存入紀錄" : "✓ 已存入紀錄")) {
-                guard let target = currentSaveTarget else { return }
+            Button {
+                guard woundCheck == nil, let target = currentSaveTarget else { return }
                 saveTarget = target
                 showSaveConfirmation = true
+            } label: {
+                if woundCheck == .saving {
+                    HStack {
+                        ProgressView().accessibilityHidden(true)
+                        Text(copy.text("正在確認傷口名額並存入紀錄…"))
+                    }
+                } else {
+                    Text(copy.text(vm.savedId == nil ? "存入紀錄" : "✓ 已存入紀錄"))
+                }
             }
             .buttonStyle(.bordered)
             .disabled(vm.savedId != nil || vm.busy || target == nil || store.needsReload)
+            .accessibilityIdentifier("lite.capture.saveRecord")
             if let message = vm.uploadMessage {
                 Text(copy.message(message)).font(.footnote).foregroundStyle(.secondary)
             }
@@ -1333,14 +1350,15 @@ struct LiteMeasureView: View {
             saveNotice = "傷口或位置已變更，請重新確認後存入。"
             return
         }
-        guard !checkingWound else { return }
-        checkingWound = true
+        guard woundCheck == nil else { return }
+        woundCheck = .saving
+        saveNotice = nil
         let draftID = vm.draft?.id
         let image = vm.image
         let accountGeneration = nativeSession?.identity.generation
         let owner = availableGroups.first(where: { $0.id == target.woundID })?.account
         Task { @MainActor in
-            defer { checkingWound = false }
+            defer { woundCheck = nil }
             do {
                 let id = target.woundID.isEmpty
                     ? try LiteWoundRoster.newID(for: draftID ?? UUID().uuidString) : target.woundID
@@ -1354,7 +1372,12 @@ struct LiteMeasureView: View {
                 }
                 persistConfirmed(target, permit: permit)
             } catch {
-                saveNotice = ((error as? LiteWoundTrackingError) ?? .unavailable).localizedDescription
+                let failure = (error as? LiteWoundTrackingError) ?? .unavailable
+                if case .unavailable = failure {
+                    saveNotice = "暫時無法確認追蹤名額。這次拍攝仍在，可稍後再按「存入紀錄」。"
+                } else {
+                    saveNotice = failure.localizedDescription
+                }
             }
         }
     }
@@ -1372,7 +1395,7 @@ struct LiteMeasureView: View {
         let committedDraft = vm.draft
         if let id = vm.finishSavedCapture(in: store) {
             saveNotice = nil
-            onSaved(id)
+            if measureVisible { onSaved(id) }
         }
         Task { @MainActor in
             if let committedDraft { await vm.markDraftSaved(committedDraft, in: store) }

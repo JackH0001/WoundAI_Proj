@@ -366,10 +366,11 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
 
     // Both entry points use the same installation and identity checks. A pending
     // registration is resumed only through its dedicated, user-initiated action.
-    private func authenticateForTap(resumePending: Bool = false, willSignIn: () -> Void) async -> SignInPreparation {
+    private func authenticateForTap(resumePending: Bool = false, allowFreshRegistration: Bool = true,
+                                    willSignIn: () -> Void) async -> SignInPreparation {
         let started = identity.generation
         await checkExistingRegistration()
-        guard started == identity.generation, !identity.busy else { return .changed }
+        guard !Task.isCancelled, started == identity.generation, !identity.busy else { return .changed }
         guard registration != .unreadable else { return .unreadable }
         if resumePending {
             // The combined action must never fall back to a fresh enrollment.
@@ -378,6 +379,7 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
             guard started == identity.generation, !identity.busy else { return .changed }
             if registration == .unreadable { return .unreadable }
         } else if registration == .required {
+            guard allowFreshRegistration else { return .unavailable }
             await registerDevice()
         }
         if registration == .pending { return .pending }
@@ -385,7 +387,7 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
         guard started == identity.generation, !identity.busy else { return .changed }
         var expectedGeneration = started
         if await identity.purchaseAccessDeadline() == nil {
-            guard started == identity.generation, !identity.busy else { return .changed }
+            guard !Task.isCancelled, started == identity.generation, !identity.busy else { return .changed }
             willSignIn()
             expectedGeneration = started + 1
             await identity.signIn()
@@ -398,12 +400,15 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
 
     private var canPrepareAccount: Bool { !preparingAccount && !registering && !identity.busy && !purchases.busy }
 
-    func signInFromSettings() async -> String? {
-        guard !LiteNativeBuild.showsOwnerReview, canPrepareAccount else { return nil }
+    func signInFromSettings(resumePending: Bool = false, returnToCapture: (() -> Void)? = nil) async -> String? {
+        guard !LiteNativeBuild.showsOwnerReview || returnToCapture != nil, canPrepareAccount else { return nil }
         preparingAccount = true
         defer { preparingAccount = false }
-        switch await authenticateForTap(willSignIn: {}) {
-        case .ready: return "已登入個人服務。"
+        switch await authenticateForTap(resumePending: resumePending,
+                                       allowFreshRegistration: !LiteNativeBuild.showsOwnerReview, willSignIn: {}) {
+        case .ready:
+            if !Task.isCancelled { returnToCapture?() }
+            return "已登入個人服務。"
         case .changed: return "帳號已變更，請再登入一次。"
         case .unreadable, .pending: return message
         case .unavailable: return "目前無法連上個人服務。請稍後再試。"
@@ -514,16 +519,21 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
 
 struct LiteNativeSessionView: View {
     @ObservedObject var session: LiteNativeSession
+    var returnToCapture: (() -> Void)? = nil
+    private enum CaptureSignIn { case signIn, resumeRegistration }
+    @State private var captureSignIn: CaptureSignIn?
     @State private var signInStatus: String?
     @Environment(\.locale) private var locale
     private func copy(_ source: String) -> String { LiteServiceCopy.text(source, locale: locale) }
     var body: some View {
         Form {
-            if !LiteNativeBuild.showsOwnerReview {
+            if returnToCapture != nil {
+                Text(copy("登入後會回到這張照片。準備好時，再按辨識送出。"))
+            } else if !LiteNativeBuild.showsOwnerReview {
                 NavigationLink(copy("Plus 方案與價格")) { LiteNativePurchaseView(session: session) }
             }
             Section(copy("服務連線")) {
-                if LiteNativeBuild.showsOwnerReview {
+                if LiteNativeBuild.showsOwnerReview && (returnToCapture == nil || session.registration == .required) {
                     Text(copy("先核對裝置，再登入同一服務帳號。此入口不會自動開啟研究上傳或清除手機紀錄。"))
                     Text(copy(session.message)).font(.footnote)
                 } else if session.preparingAccount {
@@ -549,12 +559,17 @@ struct LiteNativeSessionView: View {
                     }
                     Button(copy("核對裝置登記（不傳照片）")) { Task { await session.registerDevice() } }
                         .disabled(session.registering)
-                } else if !LiteNativeBuild.showsOwnerReview, !session.preparingAccount,
+                } else if !session.preparingAccount, !LiteNativeBuild.showsOwnerReview || returnToCapture != nil,
                           session.registration == .required || session.registration == .confirmed,
                           session.purchaseObservationAccount == nil {
                     LiteAppleSignInButton(identifier: "lite.settings.signIn") {
-                        Task { signInStatus = await session.signInFromSettings() }
+                        if returnToCapture != nil { captureSignIn = .signIn }
+                        else { Task { signInStatus = await session.signInFromSettings() } }
                     }.disabled(session.registering)
+                } else if session.registration == .pending, returnToCapture != nil {
+                    Button(copy("續接裝置登記並以 Apple 登入")) { captureSignIn = .resumeRegistration }
+                        .disabled(session.registering || session.preparingAccount)
+                        .accessibilityIdentifier("lite.capture.resumeSignIn")
                 } else if session.registration == .pending {
                     Button(copy("續接裝置登記")) { Task { signInStatus = nil; await session.registerDevice(resumePending: true) } }
                         .disabled(session.registering)
@@ -562,18 +577,23 @@ struct LiteNativeSessionView: View {
                     Button(copy("重讀原裝置登記")) { Task { signInStatus = nil; await session.checkExistingRegistration() } }
                         .disabled(session.registering)
                 }
-                if session.registration == .confirmed, !session.preparingAccount, let account = try? session.accountView() {
+                if returnToCapture == nil, session.registration == .confirmed, !session.preparingAccount, let account = try? session.accountView() {
                     NavigationLink(copy("服務帳號與刪除")) { account }
-                } else if LiteNativeBuild.showsOwnerReview {
+                } else if returnToCapture == nil, LiteNativeBuild.showsOwnerReview {
                     Text(copy("可先查看方案。完成裝置登記後，可登入服務帳號使用訂閱或恢復購買。"))
                 }
             }
-            if LiteNativeBuild.showsOwnerReview {
+            if returnToCapture == nil, LiteNativeBuild.showsOwnerReview {
                 NavigationLink(copy("Plus 方案與價格")) { LiteNativePurchaseView(session: session) }
             }
             Text(copy("拍攝後可自行選擇個人雲端辨識。使用個人服務或恢復購買不會開啟研究上傳。"))
                 .font(.footnote).foregroundStyle(.secondary)
         }.navigationTitle(copy("個人服務"))
+        .task(id: captureSignIn) {
+            guard let action = captureSignIn, let returnToCapture else { return }
+            signInStatus = await session.signInFromSettings(resumePending: action == .resumeRegistration, returnToCapture: returnToCapture)
+            captureSignIn = nil
+        }
         .task {
             signInStatus = nil
             await session.checkExistingRegistration()

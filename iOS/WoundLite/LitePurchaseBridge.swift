@@ -158,12 +158,13 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
 @MainActor final class LiteNativePurchaseStore: ObservableObject {
     @Published private(set) var message = ""
     enum Activity {
-        case purchasing, restoring, checkingTransactions, observingTransactions
+        case purchasing, restoring, recheckingEntitlements, checkingTransactions, observingTransactions
 
         var progress: String {
             switch self {
             case .purchasing: return "正在處理訂閱…"
             case .restoring: return "正在恢復既有訂閱…"
+            case .recheckingEntitlements: return "已與 Apple 同步，正在再次查看訂閱權益…"
             case .checkingTransactions: return "正在查詢未完成的交易…"
             case .observingTransactions: return "正在查看既有訂閱，完成後即可操作。"
             }
@@ -357,18 +358,47 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
             message = "服務帳號尚未核對，尚未向 Apple 查詢既有訂閱。請確認連線並登入原服務帳號後再試。"
             return
         }
-        let events: [LitePurchaseEvent]
-        do { events = try await provider.restore() }
-        catch {
+        func checkRestoreContext() async throws {
+            try Task.checkCancellation()
+            let installation = try await service.installation()
+            try Task.checkCancellation()
+            try checkAccount(generation)
+            guard installation == c.installation else { throw LitePurchaseFailure.accountMismatch }
+            guard c.isCurrent(at: now()) else { throw LitePurchaseFailure.contextExpired }
+        }
+        var events: [LitePurchaseEvent]
+        do {
+            try await checkRestoreContext()
+            events = try await provider.restore()
+            try await checkRestoreContext()
+            if events.isEmpty {
+                // StoreKit can briefly return an empty entitlement snapshot after sync.
+                // Read it once more without repeating the user-initiated Apple sync.
+                activity = .recheckingEntitlements
+                try await Task.sleep(for: .milliseconds(500))
+                try await checkRestoreContext()
+                events = try await provider.knownPurchases()
+                try await checkRestoreContext()
+            }
+        } catch is CancellationError {
+            return
+        } catch LitePurchaseFailure.contextExpired {
+            message = "恢復購買的帳號核對已逾時。請再按一次「恢復購買」。"
+            return
+        } catch LitePurchaseFailure.accountMismatch {
+            failed(LitePurchaseFailure.accountMismatch)
+            return
+        } catch {
+            guard !Task.isCancelled else { return }
+            guard generation == accountGeneration() else { failed(LitePurchaseFailure.accountChanged); return }
             message = "未能確認 Apple 的既有訂閱。請稍後再按「恢復購買」。"
             return
         }
+        guard !events.isEmpty else {
+            message = "目前沒有找到可恢復的訂閱。若已訂閱，請在「管理 Apple 訂閱」確認購買帳號後再試。"
+            return
+        }
         do {
-            try checkAccount(generation)
-            if events.isEmpty {
-                message = "沒有找到可恢復的訂閱；未建立新帳號或重設額度。"
-                return
-            }
             try await reconcileKnown(events, using: c, generation: generation)
         } catch { failed(error) }
     }
