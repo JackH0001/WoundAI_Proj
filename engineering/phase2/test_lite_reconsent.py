@@ -1,4 +1,6 @@
 """Same authenticated identity; no resurrection, replacement key or cloud calls."""
+import base64
+from dataclasses import replace
 import json
 from pathlib import Path
 import sys
@@ -7,7 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'Backend/Flask'))
 from lite_reconsent import Reconsent, ReconsentRejected, CONSENT, DISCLOSURE
 from lite_fenced_objects import ObjectRef
-from lite_attest_state import StateUnavailable
+from lite_attest_state import CHALLENGE_TTL, StateUnavailable
 import test_lite_fenced_http as fixture
 
 class ReconsentTests(unittest.TestCase):
@@ -179,5 +181,121 @@ class ReconsentTests(unittest.TestCase):
         self.assertTrue(self.renew.store.compare_exchange(key, generation, event))
         with self.assertRaises(StateUnavailable): self.renew.resolve(self.owner, self.new)
         self.assertEqual(self.new_upload().status_code, 503)
+
+
+class WithdrawalBuildTests(unittest.TestCase):
+    """A synthetic production-category installation registered on build 46."""
+    def setUp(self):
+        from test_lite_attest_registration import RegistrationTests
+        self.flow = ReconsentTests()
+        self.addCleanup(self.flow.doCleanups)
+        with patch.object(RegistrationTests, 'bundle_version', '46'):
+            self.flow.setUp()
+        self.h = self.flow.h
+        self.h.bundle_version = '46'
+        self.assertEqual(self.flow.f.upload().status_code, 200)
+        self.path = '/api/v1/lite/data/' + self.flow.owner
+
+    def release(self, ordinary, extra=()):
+        from lite_attest_enrollment import RegistrationService
+        old = self.h.e.service.admission
+        service = RegistrationService(self.h.e.store, audience=old.audience, clock=old.clock,
+            policy=replace(old.policy, allowed_bundle_versions=frozenset({ordinary})),
+            withdrawal_versions=frozenset(extra))
+        self.h.app.extensions['lite_attest_http']['service'] = service
+
+    def withdraw(self, *, epoch=None, purpose='withdraw'):
+        path = self.path if epoch is None else self.path + '/' + epoch
+        return self.h.client.delete(path, headers=self.h.headers(path, b'', '', method='DELETE', purpose=purpose))
+
+    def test_upgrade_with_existing_media_requires_explicit_list_and_privacy_challenge(self):
+        self.h.bundle_version = '60'
+        original_media = dict(self.flow.f.bucket.live)
+        self.assertEqual(self.withdraw().status_code, 401)
+        self.release('46', ['60', '62'])
+        self.assertEqual(self.withdraw(purpose='assert').status_code, 401)
+        self.h.bundle_version = '61'
+        self.assertEqual(self.withdraw().status_code, 401)
+        self.assertFalse(self.flow.privacy.is_withdrawn(self.flow.owner))
+        self.assertEqual(original_media, self.flow.f.bucket.live)
+        self.h.e.now += CHALLENGE_TTL  # Prior rejected assertions retain their unused challenges until expiry.
+        self.h.bundle_version = '60'
+        self.assertEqual(self.withdraw().status_code, 200)
+        self.assertTrue(self.flow.privacy.is_withdrawn(self.flow.owner))
+        self.flow.f.assert_sealed()
+        sealed = dict(self.flow.f.bucket.live)
+        self.h.bundle_version = '62'
+        self.assertEqual(self.withdraw().status_code, 200)
+        self.assertEqual(sealed, self.flow.f.bucket.live)
+
+    def test_roll_forward_then_back_preserves_epoch_and_retries(self):
+        self.release('46', ['62'])
+        self.h.bundle_version = '62'
+        self.assertEqual(self.flow.f.upload().status_code, 401)
+        self.assertEqual(self.withdraw().status_code, 200)
+        self.assertEqual(self.flow.rejoin().status_code, 401)
+        self.release('62', ['46', '60'])
+        self.assertEqual(self.flow.f.upload().status_code, 410)
+        self.assertEqual(self.flow.rejoin().status_code, 200)
+        self.assertEqual(self.flow.new_upload().status_code, 200)
+        self.release('46', ['62'])
+        self.assertEqual(self.flow.new_upload().status_code, 401)
+        self.assertEqual(self.withdraw().status_code, 200)
+        privacy = self.flow.privacy.scoped(self.flow.new)
+        self.assertFalse(privacy.is_withdrawn(self.flow.owner))
+        self.assertEqual(self.withdraw(epoch=self.flow.new).status_code, 200)
+        self.assertTrue(privacy.is_withdrawn(self.flow.owner))
+        after = dict(self.flow.f.bucket.live)
+        self.flow.f.restart()
+        self.release('46', ['62'])
+        self.assertEqual(self.withdraw(epoch=self.flow.new).status_code, 200)
+        self.assertEqual(after, self.flow.f.bucket.live)
+        self.assertTrue(self.flow.f.privacy.scoped(self.flow.new).is_withdrawn(self.flow.owner))
+
+    def test_new_installation_cannot_register_with_withdrawal_only_build(self):
+        from lite_attest_http import REGISTER_PATH
+        from test_lite_attest_http import HTTPTests
+        from test_lite_signed_client import b64
+        client = HTTPTests()
+        self.addCleanup(client.doCleanups)
+        client.setUp()
+        self.h = client
+        self.release('46', ['62'])
+        client.e.r.bundle_version = '62'
+        attempt = dict(key_id=client.key, challenge_id=client.e.challenge.identifier,
+                       attestation=b64(client.e.make_proof()))
+        self.assertEqual(client.client.post(REGISTER_PATH, json=attempt).status_code, 401)
+        self.assertEqual(client.e.store.load(client.e.key_id)[1]['status'], 'pending')
+        client.e.r.bundle_version = '46'
+        attempt['attestation'] = b64(client.e.make_proof())
+        self.assertEqual(client.client.post(REGISTER_PATH, json=attempt).status_code, 200)
+
+    def test_account_privacy_posts_still_require_ordinary_build(self):
+        from lite_attest_request import RESEARCH_ACCEPT_PATH
+        from lite_attest_state import AdmissionRejected
+        self.release('46', ['62'])
+        admission = self.h.app.extensions['lite_attest_http']['service'].admission
+        for path in (RESEARCH_ACCEPT_PATH, '/api/v1/lite/account/deletion/status'):
+            for version in ('62', '46'):
+                with self.subTest(path=path, version=version):
+                    self.h.e.now += CHALLENGE_TTL
+                    self.h.bundle_version = version
+                    headers = self.h.headers(path, b'{}', 'application/json', purpose='withdraw')
+                    args = (self.h.e.key_id, headers['X-Lite-Challenge-ID'],
+                            base64.b64decode(headers['X-Lite-Assertion']))
+                    binding = dict(request_id=headers['X-Lite-Request-ID'], method='POST', path=path,
+                                   content_type='application/json', body=b'{}')
+                    if version == '62':
+                        with self.assertRaises(AdmissionRejected):
+                            admission.admit(*args, **binding)
+                    else:
+                        self.assertEqual(admission.admit(*args, **binding).installation, self.flow.owner)
+
+    def test_optional_policy_requires_attested_version_extension(self):
+        from lite_attest_enrollment import RegistrationService
+        old = self.h.e.service.admission
+        with self.assertRaises(ValueError):
+            RegistrationService(self.h.e.store, policy=replace(old.policy, require_extensions=False),
+                                audience=old.audience, withdrawal_versions=frozenset({'62'}))
 
 if __name__ == '__main__': unittest.main()

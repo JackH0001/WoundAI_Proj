@@ -25,10 +25,11 @@ class Enrollment:
 
 
 class RegistrationService:
-    def __init__(self, store, *, policy, audience, environment='production', clock=time.time):
+    def __init__(self, store, *, policy, audience, environment='production', clock=time.time,
+                 withdrawal_versions=frozenset()):
         # Reuse trusted configuration and clock validation, not client input.
         self.admission = AssertionAdmission(store, policy=policy, audience=audience,
-                                            environment=environment, clock=clock)
+                                            environment=environment, clock=clock, withdrawal_versions=withdrawal_versions)
         self.store = store
 
     def _pending(self, key_id, row):

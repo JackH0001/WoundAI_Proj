@@ -67,7 +67,7 @@ class RegistrationTests(unittest.TestCase):
         self.point = self.key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
         self.key_id = hashlib.sha256(self.point).digest()
         self.challenge = b'c' * 32
-        self.policy = AssertionPolicy('ABCDEFGHIJ.com.woundai.lite', frozenset({2, 4}), frozenset({'33'}))
+        self.policy = AssertionPolicy('ABCDEFGHIJ.com.woundai.lite', frozenset({2, 4}), frozenset({self.bundle_version}))
 
     def auth(self, *, app_id=None, counter=0, aaguid=None, credential_id=None, cose=None, ext=None, flags=0xc0):
         key = {1: 2, 3: -7, -1: 1, -2: self.point[1:33], -3: self.point[33:]}

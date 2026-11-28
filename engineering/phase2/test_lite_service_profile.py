@@ -35,6 +35,33 @@ class ProfileConfigurationTests(unittest.TestCase):
     def setUp(self):
         self.folder=tempfile.TemporaryDirectory();self.addCleanup(self.folder.cleanup)
         self.env=lite_environment(self.folder.name)
+    def test_withdrawal_only_versions_rejected_before_storage_if_invalid(self):
+        import lite_attest_config as config
+        field = 'WOUNDAI_LITE_ATTEST_WITHDRAWAL_VERSIONS'
+        for env, value in [(environment(), '62'), (self.env, ''), (self.env, '33'),
+                           (self.env, '62,62'), (self.env, '*'), (self.env, '62, 63')]:
+            with self.subTest(value=value), patch.object(config.storage, 'Client') as sdk:
+                with self.assertRaises(ValueError):
+                    config.build_lite_security(dict(env, **{field: value}))
+                sdk.assert_not_called()
+
+    def test_valid_withdrawal_versions_reach_only_research_assertion_policy(self):
+        import lite_attest_config as config
+        from test_lite_bucket_policy import metadata
+        from unittest.mock import Mock
+        buckets = {}
+        for name in ('synthetic-media','synthetic-security'):
+            bucket = Mock()
+            bucket.name = name
+            bucket._properties = metadata(name)
+            bucket.list_blobs.return_value = []
+            buckets[name] = bucket
+        with patch.object(config.storage, 'Client') as sdk, patch.object(config, '_refuse_cloud_in_test_process'):
+            sdk.return_value.bucket.side_effect = buckets.__getitem__
+            service, _, _ = config.build_lite_security(dict(self.env, WOUNDAI_LITE_ATTEST_WITHDRAWAL_VERSIONS='60,62'))
+        self.assertEqual(service.admission.policy.allowed_bundle_versions, frozenset({'33'}))
+        self.assertEqual(service.admission.withdrawal_policy.allowed_bundle_versions, frozenset({'33','60','62'}))
+
     def test_default_medical_and_strict_profile(self):
         self.assertEqual(service_profile({}),'medical');self.assertEqual(service_profile(self.env),'lite')
         for value in ('','Lite','public',None):

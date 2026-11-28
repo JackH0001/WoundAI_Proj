@@ -7,7 +7,7 @@ GCS FUSE. GCS uses one generation-guarded object per key for counter+challenges.
 """
 import base64
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import re
@@ -192,7 +192,8 @@ class Admission:
 
 
 class AssertionAdmission:
-    def __init__(self, store, *, policy, audience, environment='production', clock=time.time):
+    def __init__(self, store, *, policy, audience, environment='production', clock=time.time,
+                 withdrawal_versions=frozenset()):
         if not isinstance(policy, AssertionPolicy):
             raise ValueError('trusted assertion policy required')
         if type(audience) is not str or re.fullmatch(r'[a-z0-9-]{1,64}', audience) is None:
@@ -200,6 +201,12 @@ class AssertionAdmission:
         allowed = {'production': {2, 4}, 'development': {3}}
         if environment not in allowed or not policy.allowed_categories <= allowed[environment]:
             raise ValueError('incompatible environment policy')
+        if (type(withdrawal_versions) is not frozenset or len(withdrawal_versions) > 16 or
+                any(type(v) is not str or not re.fullmatch(r'[0-9]{1,10}(?:\.[0-9]{1,10}){0,2}', v)
+                    for v in withdrawal_versions) or (withdrawal_versions and not policy.require_extensions)):
+            raise ValueError('explicit signed withdrawal versions required')
+        self.withdrawal_policy = (replace(policy, allowed_bundle_versions=policy.allowed_bundle_versions | withdrawal_versions)
+                                  if withdrawal_versions else policy)
         self.store, self.policy, self.audience, self.environment, self.clock = store, policy, audience, environment, clock
 
     def _now(self):
@@ -298,16 +305,20 @@ class AssertionAdmission:
             deletion_path = re.fullmatch(re.escape('/api/v1/lite/data/' + state['installation']) + r'(?:/[0-9a-f]{32})?', path) is not None
             account_deletion = method == 'POST' and path in (RESEARCH_OFFER_PATH, RESEARCH_ACCEPT_PATH,
                 '/api/v1/lite/account/deletion/request', '/api/v1/lite/account/deletion/status', '/api/v1/lite/account/deletion/reauth/challenge', '/api/v1/lite/account/deletion/reauth/confirm')
-            if account_deletion and challenge.get('purpose', 'assert') != 'withdraw':
+            privacy_challenge = challenge.get('purpose') == 'withdraw'
+            research_withdrawal = method == 'DELETE' and deletion_path
+            if account_deletion and not privacy_challenge:
                 raise AdmissionRejected('account deletion requires privacy challenge')
-            if challenge.get('purpose', 'assert') == 'withdraw' and not ((method == 'DELETE' and deletion_path) or account_deletion):
+            if privacy_challenge and not (research_withdrawal or account_deletion):
                 raise AdmissionRejected('withdrawal challenge is deletion-only')
+            # Additional builds can exercise only the existing installation's research withdrawal.
+            policy = self.withdrawal_policy if privacy_challenge and research_withdrawal else self.policy
             try:
                 data = client_data(audience=state['audience'], installation=state['installation'],
                                    key_id=key_id, challenge=base64.b64decode(challenge['nonce'], validate=True),
                                    request_id=request_id, method=method, path=path, content_type=content_type, body=body)
                 verified = verify_assertion(assertion, public_key_x962=point, expected_key_id=key_id,
-                                            client_data=data, previous_counter=state['counter'], policy=self.policy)
+                                            client_data=data, previous_counter=state['counter'], policy=policy)
             except (ValueError, AssertionRejected) as exc:
                 raise AdmissionRejected('assertion not valid for this request') from exc
             if before_commit is not None:

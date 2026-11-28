@@ -19,10 +19,23 @@ def build_lite_security(environment):
         if type(value) is not str or re.fullmatch(pattern, value) is None:
             raise ValueError('invalid or missing ' + name)
         return value
+
+    def versions(name):
+        entries = setting(name, r'[0-9]{1,10}(?:\.[0-9]{1,10}){0,2}(?:,[0-9]{1,10}(?:\.[0-9]{1,10}){0,2}){0,15}').split(',')
+        result = frozenset(entries)
+        if len(result) != len(entries):
+            raise ValueError('duplicate bundle version policy')
+        return result
+
     app_id = setting('WOUNDAI_LITE_ATTEST_APP_ID', r'[A-Z0-9]{10}\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+')
-    versions = setting('WOUNDAI_LITE_ATTEST_VERSIONS', r'[0-9]{1,10}(?:\.[0-9]{1,10}){0,2}(?:,[0-9]{1,10}(?:\.[0-9]{1,10}){0,2}){0,15}')
-    if len(set(versions.split(','))) != len(versions.split(',')):
-        raise ValueError('duplicate bundle version policy')
+    allowed_versions = versions('WOUNDAI_LITE_ATTEST_VERSIONS')
+    withdrawal_versions = frozenset()
+    if 'WOUNDAI_LITE_ATTEST_WITHDRAWAL_VERSIONS' in environment:
+        if profile != 'lite':
+            raise ValueError('withdrawal-only builds require the Lite research profile')
+        withdrawal_versions = versions('WOUNDAI_LITE_ATTEST_WITHDRAWAL_VERSIONS')
+        if allowed_versions & withdrawal_versions:
+            raise ValueError('withdrawal-only builds overlap ordinary builds')
     audience = setting('WOUNDAI_LITE_ATTEST_AUDIENCE', r'[a-z0-9-]{1,64}')
     project = setting('WOUNDAI_LITE_SECURITY_PROJECT', r'[a-z][a-z0-9-]{4,28}[a-z0-9]')
     project_number = setting('WOUNDAI_LITE_SECURITY_PROJECT_NUMBER', r'[1-9][0-9]{5,19}')
@@ -33,7 +46,7 @@ def build_lite_security(environment):
     day = int(setting('WOUNDAI_LITE_BUDGET_DAY', r'[1-9][0-9]{0,7}'))
     if minute > day:
         raise ValueError('minute budget exceeds daily budget')
-    policy = AssertionPolicy(app_id, frozenset({2, 4}), frozenset(versions.split(',')))
+    policy = AssertionPolicy(app_id, frozenset({2, 4}), allowed_versions)
     # Public server accepts production App Attest only. Development must remain
     # an explicitly isolated test harness, not a client-selectable downgrade.
     _refuse_cloud_in_test_process()
@@ -59,5 +72,6 @@ def build_lite_security(environment):
     budget_state = GCSStateStore(bucket, prefix=prefix+'/budget')
     privacy_state = GCSStateStore(bucket, prefix=prefix+('/privacy-fenced' if profile == 'lite' else '/privacy'))
     privacy = FencedPrivacy(privacy_state, media) if profile == 'lite' else PrivacyState(privacy_state)
-    return (RegistrationService(state, policy=policy, audience=audience, environment='production'),
+    return (RegistrationService(state, policy=policy, audience=audience, environment='production',
+                                withdrawal_versions=withdrawal_versions),
             RequestBudget(budget_state, minute_limit=minute, day_limit=day), privacy)

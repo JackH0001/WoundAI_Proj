@@ -28,12 +28,12 @@ APP_ID = 'LY2F24ZM68.com.woundai.lite'
 AUDIENCE = 'woundlite-research-v1'
 
 
-def runtime_environment(version, source_sha):
+def runtime_environment(version, source_sha, *, withdrawal_versions=()):
     if type(version) is not str or re.fullmatch(r'[1-9][0-9]{0,8}', version) is None:
         raise ValueError('one explicit numeric candidate build version required')
     if type(source_sha) is not str or re.fullmatch(r'[0-9a-f]{64}', source_sha) is None:
         raise ValueError('source manifest digest required')
-    return {
+    environment = {
         'WOUNDAI_SERVICE_PROFILE': 'lite', 'WOUNDAI_ENABLE_LITE_API': '1',
         'WOUNDAI_STORE': 'gcs', 'WOUNDAI_GCS_BUCKET': MEDIA,
         'WOUNDAI_GCS_PREFIX': 'lite-public-v1', 'WOUNDAI_RUNTIME_DIR': '/tmp/woundlite',
@@ -45,6 +45,13 @@ def runtime_environment(version, source_sha):
         'LITE_LIMIT_ANNOTATION_ANON': '30', 'LITE_LIMIT_IP': '200',
         'SOURCE_MANIFEST_SHA256': source_sha, 'PYTHONDONTWRITEBYTECODE': '1',
     }
+    if withdrawal_versions:
+        if (not isinstance(withdrawal_versions, (list, tuple)) or len(withdrawal_versions) > 16 or
+                any(type(v) is not str or not re.fullmatch(r'[1-9][0-9]{0,8}', v) for v in withdrawal_versions) or
+                len(set(withdrawal_versions)) != len(withdrawal_versions) or version in withdrawal_versions):
+            raise ValueError('distinct numeric withdrawal-only candidate builds required')
+        environment['WOUNDAI_LITE_ATTEST_WITHDRAWAL_VERSIONS'] = ','.join(withdrawal_versions)
+    return environment
 
 
 def bucket_request(name):
@@ -77,8 +84,8 @@ def deploy_argv(image_digest, environment_path):
             '--quiet', '--format=json']
 
 
-def generate(context, expected, probe, fixture, version, output):
-    environment = runtime_environment(version, expected)
+def generate(context, expected, probe, fixture, version, output, *, withdrawal_versions=()):
+    environment = runtime_environment(version, expected, withdrawal_versions=withdrawal_versions)
     data = build.verify_context(context, expected)
     output = Path(output).absolute()
     if output.exists() or output.is_symlink() or output.resolve().is_relative_to(Path(context).resolve()):
@@ -159,7 +166,10 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     for key in ('context','probe','fixture','output'):parser.add_argument('--'+key,type=Path,required=True)
     parser.add_argument('--manifest-sha256',required=True);parser.add_argument('--version',required=True)
-    args=parser.parse_args();plan=generate(args.context,args.manifest_sha256,args.probe,args.fixture,args.version,args.output)
+    parser.add_argument('--withdrawal-version', action='append', default=[], help='Additional build for existing research withdrawals only (repeatable).')
+    args = parser.parse_args()
+    plan = generate(args.context, args.manifest_sha256, args.probe, args.fixture, args.version, args.output,
+                    withdrawal_versions=args.withdrawal_version)
     print(json.dumps({'plan':str(args.output/'plan.json'),'plan_sha256':build.sha(args.output/'plan.json'),
                       'source_manifest_sha256':plan['source_manifest_sha256'],'cloud_changes':False},indent=2))
 
