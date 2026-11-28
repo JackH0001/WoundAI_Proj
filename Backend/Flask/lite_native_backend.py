@@ -76,6 +76,10 @@ class NativeBackend:
 
         @app.before_request
         def service_routes_only():
+            # Gunicorn opens its socket before the worker has finished the factory.
+            # A response here proves that the personal-service application can serve.
+            if request.method == 'GET' and request.path == '/startupz' and not request.query_string:
+                return '', 204
             if request.method != 'POST' or request.path not in paths:
                 return jsonify(error='lite_candidate_route_not_supported'), 404
 

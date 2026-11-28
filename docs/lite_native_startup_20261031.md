@@ -164,6 +164,29 @@ Run the following offline, keeping the inputs in the operator's workspace.
 python tools/check_lite_native_revision.py plan.json revision.json settings.json
 ```
 
+For a worker-probe-capable personal-service image, pin `"worker_startup":"http-worker/1"`
+in the independent release plan. Apply the checked-in probe fragment to the
+complete candidate Cloud Run v2 Service request **offline** before review:
+
+```sh
+jq --slurpfile probe deployment/lite-native-startup-probe.json \
+  '.template.containers[0].startupProbe = $probe[0]' candidate-service.json > candidate-with-probe.json
+```
+
+The HTTP/1 probe uses `GET /startupz` on port 8080 with a 5-second timeout,
+10-second period and failure threshold of 20. Gunicorn binds the TCP socket
+before the worker loads its configuration, mounted files and application.
+Only a completed personal-service factory serves an empty HTTP 204 at this path.
+Keep first traffic closed if startup fails, retain the revision logs and use the
+approved recovery procedure. Apply the same probe to the recovered personal
+revision. Continue to verify signed device/account access, quota and Apple
+Sandbox separately. To audit a previously archived plan without the contract,
+pass `--historical`. Its worker verification result is `unverified-historical`.
+Older images that return 404 on every GET need a separately reviewed replacement
+before adopting the new probe. The temporary enrollment revision uses its own
+startup application and verifier.
+See [Cloud Run startup probes](https://docs.cloud.google.com/run/docs/configuring/healthchecks).
+
 The plan records the signed app's `team` and `build` (strings), `revision` (full resource name), `image`
 (registry path at SHA-256 digest), `settings_sha256` (original file bytes), and
 `secret_versions`. The latter maps `config`, `identity`, `oauth`, `api` and each

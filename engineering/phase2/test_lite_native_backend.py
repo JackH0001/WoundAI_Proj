@@ -123,6 +123,25 @@ class NativeBackendTests(SignedServiceClient, unittest.TestCase):
         self.complete(1)
         self.assertEqual((self.h.model_calls,self.quota()['used']),(1,1))
 
+    def test_worker_startup_response_has_no_payload_or_service_side_effects(self):
+        self.restrict_to('different-installation', 'another-person')
+        before = self.h.snapshot()
+        budget = rows(self.h.budget.store)
+        for _ in range(2):
+            response = self.client.get('/startupz')
+            self.assertEqual((response.status_code, response.data), (204, b''))
+            self.assertEqual(response.headers['Cache-Control'], 'no-store')
+        self.assertEqual(self.h.snapshot(), before)
+        self.assertEqual(rows(self.h.budget.store), budget)
+        self.assertEqual((self.h.model_calls, self.h.grant.calls), (0, []))
+
+    def test_worker_probe_keeps_other_methods_and_targets_closed(self):
+        for method, path in [('HEAD', '/startupz'), ('POST', '/startupz'), ('OPTIONS', '/startupz'),
+                             ('GET', '/startupz?account=1'), ('GET', '/startupz/'),
+                             ('GET', '/'), ('GET', '/api/v1/lite/service/prepare')]:
+            with self.subTest(method=method, path=path):
+                self.assertEqual(self.client.open(path, method=method).status_code, 404)
+
     def test_other_installation_has_no_new_account_challenge(self):
         self.restrict_to('other-device','apple-human-1')
         before=self.h.snapshot()

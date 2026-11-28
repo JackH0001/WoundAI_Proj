@@ -1,0 +1,9 @@
+{
+  "httpGet": {
+    "path": "/startupz",
+    "port": 8080
+  },
+  "timeoutSeconds": 5,
+  "periodSeconds": 10,
+  "failureThreshold": 20
+}

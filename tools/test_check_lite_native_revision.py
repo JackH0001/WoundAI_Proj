@@ -29,11 +29,11 @@ def example():
         "secrets": {name: {"file": "value"} for name in ("api", "oauth", "identity")},
     }
     raw = json.dumps(settings).encode()
-    plan = dict(build="54", team="TESTTEAM01", revision=revision, settings_sha256=hashlib.sha256(raw).hexdigest(),
+    plan = dict(build="54", team="TESTTEAM01", worker_startup="http-worker/1", revision=revision, settings_sha256=hashlib.sha256(raw).hexdigest(),
                 image=image, secret_versions={k: f"projects/{project}/secrets/test-{k}/versions/2" for k in files})
     variables = dict(LITE_NATIVE_CONFIG=files["config"], LITE_NATIVE_SECRET_DIR="/etc/lite/inputs",
                      LITE_NATIVE_CONFIG_SHA256=plan["settings_sha256"], LITE_NATIVE_SOURCE=source, LITE_NATIVE_IMAGE_SHA256=digest)
-    spec = dict(name=revision, serviceAccount=account, containers=[dict(image=image,
+    spec = dict(name=revision, serviceAccount=account, containers=[dict(image=image, startupProbe={"httpGet": {"path": "/startupz"}},
                 env=[dict(name=k,value=v) for k,v in variables.items()], volumeMounts=[])], volumes=[])
     for role, path in files.items():
         folder, filename = path.rsplit("/", 1)
@@ -69,6 +69,39 @@ class RevisionTests(unittest.TestCase):
                 with self.assertRaises(Mismatch):
                     self.verify()
                 obj[key] = old
+
+    def test_startup_probe_requires_the_exact_worker_and_http_port(self):
+        for probe in (None, {"tcpSocket": {"port": 8080}}, {"grpc": {"port": 8080}},
+                      {"httpGet": {"path": "/"}}, {"httpGet": {"path": "/startupz", "port": 8888}},
+                      {"httpGet": {"path": "/startupz", "httpHeaders": [{"name": "Test", "value": "1"}]}},
+                      {"tcpSocket": {}, "httpGet": {"path": "/startupz"}}):
+            with self.subTest(probe=probe):
+                self.container["startupProbe"] = probe
+                with self.assertRaisesRegex(Mismatch, "HTTP startup probe"):
+                    self.verify()
+        self.container["startupProbe"] = {"httpGet": {"path": "/startupz", "port": 8080, "httpHeaders": []}}
+        self.container["ports"] = [{"name": "http1", "containerPort": 8080}]
+        self.verify()
+        for port in ({"name": "h2c", "containerPort": 8080}, {"containerPort": 8000}):
+            with self.subTest(port=port):
+                self.container["ports"] = [port]
+                with self.assertRaisesRegex(Mismatch, "HTTP/1 on port"):
+                    self.verify()
+
+    def test_historical_check_is_explicit_and_cannot_downgrade_new_contract(self):
+        self.container["startupProbe"] = {"tcpSocket": {"port": 8080}}
+        with self.assertRaisesRegex(Mismatch, "HTTP startup probe"):
+            check(self.plan, self.rev, self.raw, historical=True)
+        del self.plan["worker_startup"]
+        with self.assertRaisesRegex(Mismatch, "contract required"):
+            self.verify()
+        result = check(self.plan, self.rev, self.raw, historical=True)
+        self.assertEqual(result["worker_startup"], "unverified-historical")
+
+    def test_deployment_probe_template_matches_provider_readback(self):
+        file = Path(__file__).resolve().parents[1] / "deployment" / "lite-native-startup-probe.json"
+        self.container["startupProbe"] = json.loads(file.read_bytes())
+        self.assertEqual(self.verify()["worker_startup"], "http-worker/1-configured")
 
     def test_internal_and_enrollment_modes(self):
         for k in ["LITE_INTERNAL_OWNER_MODE","LITE_OWNER_ENROLLMENT_PLAN","LITE_INTERNAL_INSTALLATION_SHA256"]:

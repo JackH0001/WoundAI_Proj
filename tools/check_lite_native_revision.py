@@ -97,7 +97,7 @@ def serving_route(service, settings, revision, origin):
     return {"origin": origin, "generation": generation, "percent": 100}
 
 
-def check_owner(plan_raw, expected_sha256, revision, settings_raw, service, *, clock=time.time):
+def check_owner(plan_raw, expected_sha256, revision, settings_raw, service, *, clock=time.time, historical=False):
     need(hashlib.sha256(plan_raw).hexdigest() == expected_sha256, "reviewed owner plan bytes differ")
     plan = parse(plan_raw)
     owner = plan["owner"]
@@ -127,7 +127,7 @@ def check_owner(plan_raw, expected_sha256, revision, settings_raw, service, *, c
          and len(ready) == 1 and ready[0].get("state") == "CONDITION_SUCCEEDED", "owner revision is not ready")
     need(not any(row.get("tag") for field in ("traffic", "trafficStatuses") for row in service.get(field, [])),
          "unexpected tagged route on owner service")
-    result = _check(plan, revision, settings_raw, service=service, internal=internal)
+    result = _check(plan, revision, settings_raw, service=service, internal=internal, historical=historical)
     if mode == "owner-review":
         finished_at = clock()
         need(observed_at <= finished_at < until, "owner-review window changed during check")
@@ -136,12 +136,28 @@ def check_owner(plan_raw, expected_sha256, revision, settings_raw, service, *, c
     return result
 
 
-def check(plan, revision, settings_raw, *, service=None):
+def check(plan, revision, settings_raw, *, service=None, historical=False):
     need("owner" not in plan, "private owner plan requires separate verification")
-    return _check(plan, revision, settings_raw, service=service, internal=None)
+    return _check(plan, revision, settings_raw, service=service, internal=None, historical=historical)
 
 
-def _check(plan, revision, settings_raw, *, service, internal):
+def worker_probe(contract, container, historical):
+    if contract is None and historical:
+        return "unverified-historical"
+    need(contract == "http-worker/1", "reviewed worker_startup contract required for a candidate revision")
+    ports = container.get("ports") or [{"containerPort": 8080}]
+    need(isinstance(ports, list) and len(ports) == 1 and isinstance(ports[0], dict)
+         and ports[0].get("containerPort") == 8080 and ports[0].get("name", "") in ("", "http1"),
+         "personal worker requires HTTP/1 on port 8080")
+    probe = container.get("startupProbe")
+    http = probe.get("httpGet") if isinstance(probe, dict) else None
+    need(isinstance(http, dict) and "tcpSocket" not in probe and "grpc" not in probe
+         and http.get("path") == "/startupz" and http.get("port", 8080) == 8080 and http.get("httpHeaders", []) == [],
+         "personal worker requires an HTTP startup probe on /startupz")
+    return "http-worker/1-configured"
+
+
+def _check(plan, revision, settings_raw, *, service, internal, historical):
     settings = parse(settings_raw)
     deployment = settings["deployment"]
     need(hashlib.sha256(settings_raw).hexdigest() == plan["settings_sha256"], "settings bytes differ")
@@ -166,6 +182,7 @@ def _check(plan, revision, settings_raw, *, service, internal):
     need(container["image"] == plan["image"] and re.fullmatch(r"[^@]+@sha256:[0-9a-f]{64}", plan["image"])
          and plan["image"].endswith("@sha256:" + deployment["image"]), "immutable image differs")
     need(not container.get("command") and not container.get("args"), "candidate startup command differs")
+    startup = worker_probe(plan.get("worker_startup"), container, historical)
     env = index(container["env"], "name")
     need(not any("valueSource" in entry for entry in env.values()), "unexpected environment secret")
     if internal is None:
@@ -243,7 +260,7 @@ def _check(plan, revision, settings_raw, *, service, internal):
         actual = version_ref(secret["secret"], items[0]["version"], deployment)
         need(actual == expected[role], f"{role} secret version differs")
     scope = "owner-personal-service-serving-metadata" if internal is not None else "external-personal-service-mounted-inputs"
-    result = {"scope": scope, "build": app["version"],
+    result = {"scope": scope, "build": app["version"], "worker_startup": startup,
               "revision": name, "settings_sha256": plan["settings_sha256"], "image": plan["image"],
               "matched_roles": sorted(paths)}
     if research is not None:
@@ -261,6 +278,7 @@ def main():
         parser.add_argument(name, type=Path)
     parser.add_argument("--service", type=Path, help="Cloud Run v2 Service JSON for the app's untagged origin")
     parser.add_argument("--owner-plan-sha256", help="SHA-256 of the separately reviewed private owner plan file")
+    parser.add_argument("--historical", action="store_true", help="audit archived plans that predate worker probes")
     args = parser.parse_args()
     try:
         service = None
@@ -271,9 +289,9 @@ def main():
         revision = parse(args.revision.read_bytes())
         settings_raw = args.settings.read_bytes()
         if args.owner_plan_sha256 is None:
-            result = check(parse(plan_raw), revision, settings_raw, service=service)
+            result = check(parse(plan_raw), revision, settings_raw, service=service, historical=args.historical)
         else:
-            result = check_owner(plan_raw, args.owner_plan_sha256, revision, settings_raw, service)
+            result = check_owner(plan_raw, args.owner_plan_sha256, revision, settings_raw, service, historical=args.historical)
     except Mismatch as exc:
         print(str(exc), file=sys.stderr)
         return 1
