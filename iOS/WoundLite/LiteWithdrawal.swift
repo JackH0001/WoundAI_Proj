@@ -6,12 +6,13 @@ import CryptoKit
 enum LiteWithdrawalOutcome: Equatable { case pending, pendingUntil(Date), liveMediaRemoved }
 
 enum LiteWithdrawalFailure: LocalizedError {
-    case noIdentity, invalidReceipt, unavailable, invalidState, cancellationRequiresServer, renewalUnconfirmed
+    case noIdentity, invalidReceipt, unavailable, verificationRejected, invalidState, cancellationRequiresServer, renewalUnconfirmed
     var errorDescription: String? {
         switch self {
         case .noIdentity: return "找不到可驗證的原安裝身分，尚未送出雲端撤回。舊版資料或遺失身分的資料需聯絡支援處理。"
         case .invalidReceipt: return "尚未取得符合範圍的雲端刪除確認，請稍後重試。"
         case .unavailable: return "雲端尚未確認撤回，請檢查網路後重試。"
+        case .verificationRejected: return "研究服務未接受這次撤回驗證，尚未確認清除。研究上傳已停止，原撤回要求已保留。請保留此 App，點「聯絡資料處理支援」核對版本。服務恢復後可點「重試／查核撤回」。"
         case .invalidState: return "無法讀取或保存撤回狀態；研究上傳已停用，請聯絡支援。"
         case .cancellationRequiresServer: return "此服務已有上傳身分或綁定紀錄，不能在手機直接取消撤回；需先取得伺服器的重新同意確認。原紀錄與撤回要求保留。"
         case .renewalUnconfirmed: return "尚未取得重新加入的雲端確認，研究上傳保持關閉。原紀錄與這次同意要求已保留；請稍後核對同一次要求，不必重拍或重新登記裝置。"
@@ -30,6 +31,7 @@ struct LiteWithdrawalRecord: Codable, Equatable {
     var requestedAt: Date? = Date()
     var researchEpoch: String? = nil
     var reconsentAudit: String? = nil
+    var verificationRejected: Bool? = nil
 }
 
 private struct LiteUnsentWithdrawalCancellation: Codable {
@@ -166,8 +168,15 @@ extension LiteSignedCloudTransport {
         guard epoch == nil || LiteAttestClient.matches(epoch!, "[0-9a-f]{32}") else { throw LiteWithdrawalFailure.invalidState }
         var request = URLRequest(url: origin.appendingPathComponent("api/v1/lite/data/" + owner + (epoch.map { "/" + $0 } ?? "")))
         request.httpMethod = "DELETE"
-        let (data, response) = try await client.send(request, installation: owner, requestID: UUID(), allowSending: { true })
+        let data: Data
+        let response: HTTPURLResponse
+        do {
+            (data, response) = try await client.send(request, installation: owner, requestID: UUID(), allowSending: { true })
+        } catch LiteAttestFailure.registrationRejected, LiteAttestFailure.http(401), LiteAttestFailure.http(403) {
+            throw LiteWithdrawalFailure.verificationRejected
+        }
         try ResearchCapacityWait.check(response, data: data)
+        if response.statusCode == 401 || response.statusCode == 403 { throw LiteWithdrawalFailure.verificationRejected }
         struct Receipt: Decodable {
             let status: String
             let anon_id: String
@@ -212,11 +221,13 @@ final class LiteWithdrawalModel: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var message: String?
     private let journal: LiteWithdrawalJournal
+    private let accountPaused: (String) -> Bool
     private let stopUploads: () -> Void
     private let owner: (String) async throws -> String?
     private let send: (String, String) async throws -> LiteWithdrawalOutcome
     private let sendScoped: (String, String, String) async throws -> LiteWithdrawalOutcome
     init(journal: LiteWithdrawalJournal = .standard,
+         accountPaused: @escaping (String) -> Bool = LiteAccountResearchPause.standard.blocks,
          stopUploads: @escaping () -> Void = { LitePrefs.researchConsent = false },
          owner: @escaping (String) async throws -> String? = { try await LiteSignedCloudTransport(baseURL: $0).withdrawalOwner() },
          send: @escaping (String, String) async throws -> LiteWithdrawalOutcome = {
@@ -226,7 +237,7 @@ final class LiteWithdrawalModel: ObservableObject {
              try await LiteSignedCloudTransport(baseURL: $0).withdraw(server: $0, owner: $1, epoch: $2)
          }) {
         self.journal = journal; self.stopUploads = stopUploads; self.owner = owner; self.send = send
-        self.sendScoped = sendScoped
+        self.sendScoped = sendScoped; self.accountPaused = accountPaused
         do {
             record = try journal.load()
             // Normalize a legacy excessive wait once and persist it; reopening
@@ -235,8 +246,13 @@ final class LiteWithdrawalModel: ObservableObject {
                 let bounded = ResearchCapacityWait.privacyDeadline(raw)
                 if bounded != raw { value.retryAt = bounded; try journal.save(value); record = value }
             }
-            if record?.phase == .pending, record?.owner == nil {
+            if let record, accountPaused(record.server),
+               record.phase == .reconsented || record.phase == .cancelledBeforeSubmission {
+                message = "先前的研究同意與撤回紀錄保留。因刪帳要求，目前研究上傳已暫停。"
+            } else if record?.phase == .pending, record?.owner == nil {
                 message = "尚未確認此服務的原上傳身分，未取得雲端撤回收據；本機紀錄保留，不能視為雲端資料已刪除。"
+            } else if record?.phase == .pending, record?.verificationRejected == true {
+                message = LiteWithdrawalFailure.verificationRejected.localizedDescription
             } else if record?.phase == .cancelledBeforeSubmission {
                 message = "已保留原撤回與重新同意紀錄。舊服務資料未轉移，也未因本次操作刪除。"
             } else if record?.phase == .liveMediaRemoved {
@@ -249,9 +265,20 @@ final class LiteWithdrawalModel: ObservableObject {
     var blocksUploads: Bool { journal.blocksUploads }
     var finished: Bool { record?.phase == .liveMediaRemoved }
     var cancelledBeforeSubmission: Bool { record?.phase == .cancelledBeforeSubmission }
-    var mayReviewUnsentCancellation: Bool { record?.phase == .pending && record?.owner == nil }
+    private var accountAllowsRejoining: Bool {
+        guard let record else { return false }
+        return !accountPaused(record.server)
+    }
+    private func mayResume(_ server: String) -> Bool {
+        guard !accountPaused(server) else {
+            message = "這部手機已因刪帳要求暫停研究上傳。原撤回與同意紀錄保留。"
+            return false
+        }
+        return true
+    }
+    var mayReviewUnsentCancellation: Bool { accountAllowsRejoining && record?.phase == .pending && record?.owner == nil }
     var renewed: Bool { record?.phase == .reconsented }
-    var mayReviewCompletedRenewal: Bool { finished && record?.owner != nil }
+    var mayReviewCompletedRenewal: Bool { accountAllowsRejoining && finished && record?.owner != nil }
     static func hasBoundRecords(_ records: [LiteRecord], server: String) throws -> Bool {
         let target = try LiteWithdrawalJournal.origin(server)
         return try records.contains { record in
@@ -261,6 +288,9 @@ final class LiteWithdrawalModel: ObservableObject {
     }
     var statusTitle: String {
         if finished { return "已確認清除目前可見媒體" }
+        if (renewed || cancelledBeforeSubmission) && !accountAllowsRejoining {
+            return "先前已重新同意，目前因刪帳暫停上傳"
+        }
         if renewed { return "已重新同意：僅啟用新的研究上傳" }
         if cancelledBeforeSubmission { return "已取消尚未送出的撤回要求" }
         if record?.owner == nil { return "撤回對象尚未確認" }
@@ -270,19 +300,21 @@ final class LiteWithdrawalModel: ObservableObject {
         sendRenewal: (LiteReconsentIntent) async throws -> LiteReconsentReceipt = {
             try await LiteSignedCloudTransport(baseURL: $0.server).rejoin($0)
         }) async -> Bool {
-        guard !busy else { return false }
+        guard !busy, mayResume(server) else { return false }
         busy = true; defer { busy = false }
         do {
             guard let previous = try journal.load(), previous.phase == .liveMediaRemoved,
                   try LiteWithdrawalJournal.origin(server) == LiteWithdrawalJournal.origin(previous.server),
                   try await owner(previous.server) == previous.owner else { throw LiteWithdrawalFailure.noIdentity }
+            guard mayResume(server) else { return false }
             let intent = try journal.prepareRenewal(previous)
             let receipt = try await sendRenewal(intent)
             record = try journal.finishRenewal(intent, receipt: receipt)
+            guard mayResume(server) else { return false }
             message = "已確認重新加入。僅新的拍攝可研究上傳；先前撤回、舊待傳版本與手機紀錄保留，不會自動重傳。"
             return true
         } catch {
-            message = (error as? LiteWithdrawalFailure)?.localizedDescription ?? LiteWithdrawalFailure.renewalUnconfirmed.localizedDescription
+            message = LiteReconsentFailure.explanation(error)
             return false
         }
     }
@@ -290,7 +322,7 @@ final class LiteWithdrawalModel: ObservableObject {
     /// migrate old records, or claim that old media was deleted.
     func reconsentUnsentWithdrawal(server: String, consentVersion: String,
                                   hasBoundRecords: () throws -> Bool) async -> Bool {
-        guard !busy else { return false }
+        guard !busy, mayResume(server) else { return false }
         busy = true; defer { busy = false }
         do {
             guard let value = try journal.load(), value.phase == .pending, value.owner == nil,
@@ -298,6 +330,7 @@ final class LiteWithdrawalModel: ObservableObject {
                   try !hasBoundRecords() else { throw LiteWithdrawalFailure.cancellationRequiresServer }
             guard try await owner(value.server) == nil else { throw LiteWithdrawalFailure.cancellationRequiresServer }
             guard try journal.load() == value, try !hasBoundRecords() else { throw LiteWithdrawalFailure.invalidState }
+            guard mayResume(server) else { return false }
             record = try journal.cancelUnsent(value, consentVersion: consentVersion)
             message = "已保留原撤回與本次重新同意紀錄。這只恢復今後的研究上傳，不代表舊服務資料已刪除或轉移。"
             return true
@@ -325,6 +358,7 @@ final class LiteWithdrawalModel: ObservableObject {
                     value.owner = previous.owner; value.researchEpoch = previous.researchEpoch
                 }
             }
+            value.verificationRejected = nil
             value.retryAt = Date().addingTimeInterval(60)
             try journal.save(value); record = value
             if value.owner == nil {
@@ -350,7 +384,12 @@ final class LiteWithdrawalModel: ObservableObject {
             }
             message = "後端忙碌；撤回要求已保留，等待後自動查核。研究上傳保持停用。"
         } catch let error as LiteWithdrawalFailure {
-            if var value = record { value.retryAt = nil; do { try journal.save(value); record = value } catch { message = LiteWithdrawalFailure.invalidState.localizedDescription; return } }
+            if var value = record {
+                value.retryAt = nil
+                value.verificationRejected = error == .verificationRejected ? true : nil
+                do { try journal.save(value); record = value }
+                catch { message = LiteWithdrawalFailure.invalidState.localizedDescription; return }
+            }
             message = error.localizedDescription
         } catch {
             message = LiteWithdrawalFailure.unavailable.localizedDescription

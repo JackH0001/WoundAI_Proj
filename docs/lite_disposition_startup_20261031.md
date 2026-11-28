@@ -28,7 +28,7 @@ routes, rather than Python module imports alone, enforce these operation limits.
 
 - Required environment: `LITE_DISPOSITION_CONFIG`, `LITE_DISPOSITION_CONFIG_SHA256`,
   `LITE_DISPOSITION_SOURCE`, `LITE_DISPOSITION_IMAGE_SHA256`, `LITE_DISPOSITION_SECRETS`,
-  and `DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA=true`.
+  `LITE_DISPOSITION_RESEARCH_ORIGIN_SHA256`, and `DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA=true`.
 - The regular JSON file is at most 64 KiB; the mounted signing key is at most
   16 KiB and has an independent SHA-256. No secret value is part of the JSON.
 - Configuration schema `lite-disposition-startup/2` requires a separate
@@ -36,11 +36,26 @@ routes, rather than Python module imports alone, enforce these operation limits.
   pins the project, project number, named runtime identity, asia-east1 key ring,
   source commit and image digest. Lite issuer/audience/namespace and identity-key
   **digest** must match existing native bindings. The HMAC key itself is not loaded.
-- `buckets` pins complete metadata snapshots of 2–4 named buckets. Reload must
+- `buckets` pins complete metadata snapshots of 3–4 named buckets. Reload must
   match the hash, project, region, public-access prevention and uniform access.
   Even a harmless metadata update requires a newly reviewed snapshot; this is an
   intentional conservative startup refusal, not an assertion that all changes
   are unsafe. Research media must occupy a separate bucket from every state store.
+- Before staging the worker, read back the intended research service revision.
+  Confirm it has the Lite GCS profile. Compute the origin pin as SHA-256 of the
+  compact UTF-8 JSON array below, with strings throughout and no whitespace.
+  Use the research writer's project, project number, media and security bucket
+  settings. Derive its prefix as `lite_security/v1/<App Attest audience>/privacy-fenced`.
+  Never compute the independent pin from the worker's proposed settings. Repeat
+  the comparison before a traffic change. An unavailable writer readback blocks
+  rollout. The existing writer's objects stay at their original names.
+  ```json
+  ["lite-research-origin/1","PROJECT","PROJECT_NUMBER","MEDIA_BUCKET","SECURITY_BUCKET","PRIVACY_PREFIX"]
+  ```
+  Only the worker's `research` state can use the security bucket. It must resolve
+  to the pinned physical prefix both before and after provider budget activation.
+  An incorrect address requires correcting the candidate configuration and
+  repeating acceptance; copying receipts to a new prefix would split withdrawal state.
 - `stores` names all 32 state locations. Declared prefixes cannot overlap, and
   resolved store locations are checked again. No bucket is silently discovered.
 - Existing native lifecycle, account catalog, identity/grant, per-account-key,

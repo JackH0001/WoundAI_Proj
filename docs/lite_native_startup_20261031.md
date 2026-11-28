@@ -151,3 +151,121 @@ only the explicitly pinned model artifacts into the local build context.
 No patient images, research data, real tokens or keys are required for this local
 validation. No deployment, IAM mutation, real data deletion or store update was
 performed by these tests.
+
+## Attached Cloud Run identity
+
+### External beta revision and secret versions
+
+For the external Lite personal service, save the approved settings JSON, the
+operator's independent release plan, and the Cloud Run **v2 Revision** response.
+Run the following offline, keeping the inputs in the operator's workspace.
+
+```sh
+python tools/check_lite_native_revision.py plan.json revision.json settings.json
+```
+
+For a worker-probe-capable personal-service image, pin `"worker_startup":"http-worker/1"`
+in the independent release plan. Apply the checked-in probe fragment to the
+complete candidate Cloud Run v2 Service request **offline** before review:
+
+```sh
+jq --slurpfile probe deployment/lite-native-startup-probe.json \
+  '.template.containers[0].startupProbe = $probe[0]' candidate-service.json > candidate-with-probe.json
+```
+
+The HTTP/1 probe uses `GET /startupz` on port 8080 with a 5-second timeout,
+10-second period and failure threshold of 20. Gunicorn binds the TCP socket
+before the worker loads its configuration, mounted files and application.
+Only a completed personal-service factory serves an empty HTTP 204 at this path.
+Keep first traffic closed if startup fails, retain the revision logs and use the
+approved recovery procedure. Apply the same probe to the recovered personal
+revision. Continue to verify signed device/account access, quota and Apple
+Sandbox separately. To audit a previously archived plan without the contract,
+pass `--historical`. Its worker verification result is `unverified-historical`.
+Older images that return 404 on every GET need a separately reviewed replacement
+before adopting the new probe. The temporary enrollment revision uses its own
+startup application and verifier.
+See [Cloud Run startup probes](https://docs.cloud.google.com/run/docs/configuring/healthchecks).
+
+The plan records the signed app's `team` and `build` (strings), `revision` (full resource name), `image`
+(registry path at SHA-256 digest), `settings_sha256` (original file bytes), and
+`secret_versions`. The latter maps `config`, `identity`, `oauth`, `api` and each
+configured `root-N` to `projects/PROJECT_ID/secrets/NAME/versions/NUMBER`.
+If research linking is planned, put its absolute file path and numeric Secret
+version in `additional_secret_files`. Add a `research_link` object with that
+same `file`, the personal service's `native_issuer` payload `sha256` from the
+custody receipt's verified manifest, and a Boolean `capture_enabled`. The
+checker compares these values to the running revision's literal environment
+and mounted file. Linking for account withdrawal can use `capture_enabled: false`.
+Revisions with linking and capture both off keep the original plan format.
+Pin the plan before collecting the provider response.
+The regression fixture includes a complete example of this comparison.
+
+Exit 0 confirms the reviewed mounted inputs, app build, Sandbox product, runtime
+identity and image references for the named revision. Owner enrollment and
+owner-only settings fail this external-beta check. The output covers configuration.
+Collect the serving traffic allocation, effective IAM, in-container mount metadata,
+successful startup and a tester's actual App Attest and Sandbox receipts separately.
+The comparison runs on the operator's machine and takes metadata files as input.
+The signed IPA and retained service image can be used with this tool as issued.
+[Revision resource](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services.revisions)
+and [secret volume fields](https://docs.cloud.google.com/run/docs/reference/rest/v2/Volume).
+
+### Verify the URL in the TestFlight build
+
+For external beta acceptance, add `serving_origin` to the reviewed plan. Copy
+the `LiteNativeSandboxOrigin` value from the verified, signed IPA for the build.
+Collect a Cloud Run v2 **Service** resource alongside the **Revision** resource.
+Use both snapshots from the same deployment after traffic has settled.
+
+```sh
+python tools/check_lite_native_revision.py plan.json revision.json settings.json --service service.json
+```
+
+Plans with `serving_origin` require the service snapshot. The check verifies that
+the service advertises that exact default app URL with external ingress, that
+the observed generation has reconciled successfully, and that the requested
+and observed traffic both direct 100% of ordinary app requests to the reviewed
+revision. Explicit revision routing and the Cloud Run latest-ready default are
+supported. A tagged URL with zero traffic can still exist during staging.
+A successful result includes the observed generation, origin and percentage.
+Existing mount-only plans can continue to check a revision before traffic moves.
+
+This is a point-in-time comparison of control-plane metadata. Also verify IAM
+and a signed request from a fresh installation at the app URL, followed by
+Apple Sandbox sign-in and purchase restoration before inviting external testers.
+[Cloud Run v2 Service fields and traffic allocation](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services)
+
+### 本人 TestFlight 的兩階段服務讀回
+
+`owner-review` 讓一個已登記的安裝先提交 Apple 身分。取得本人帳號的私有核對收據、完成額度與服務啟用後，`owner-only` 才接受該安裝與帳號的訂閱操作。裝置初次登記仍用獨立的 `check_lite_owner_enrollment_revision.py`。
+
+先依發行 IPA、受限執行身分、固定映像及實際 Secret 數字版本建立本頁的方案，包含 `serving_origin`。將 `owner` 加入私有方案，欄位由該階段決定。
+
+| mode | 其他必填欄位 |
+| --- | --- |
+| `owner-review` | `installation_sha256`、`starts`、`until`。後兩者是 epoch 秒，期間最長 3600 秒。工具在此時段內讀回修訂，核對執行環境上的截止時間。 |
+| `owner-only` | `installation_sha256`、`account_sha256`。帳號摘要取自已私下核對的本人收據。 |
+
+在採集雲端讀回前保存已覆核方案的檔案 SHA-256。以服務和修訂的同次部署快照執行：
+
+```sh
+python tools/check_lite_native_revision.py owner-plan.json revision.json settings.json --service service.json --owner-plan-sha256 "$OWNER_PLAN_SHA256"
+```
+
+比對涵蓋實際 Ready 的修訂、已收斂的服務、預期的單一目標與全量流量、掛載及模式專用欄位。帶有其他修訂標籤的路由會停止驗收。輸出列出模式與時間，個人安裝及帳號摘要只留在私有輸入。外測沿用原呼叫方式，遇到本人模式仍會拒絕。實際 IAM、生效端點、本人手機登入與 Sandbox 交易另以對應的現場讀回確認。
+
+### Runtime metadata
+
+The native service and the separate key preparation worker check the attached service
+account email, project ID, project number, and asia-east1 region through the fixed
+Cloud Run metadata endpoint before constructing Storage or KMS clients. Bundle,
+signature, local mounts and model checks retain their existing order before
+provider access. A mismatched or unreadable field stops startup; the process does
+not try an alternate account. A configured credential object can echo the account
+passed to its constructor even on the wrong machine, so it cannot establish the
+deployment identity. The checks are GET-only and do not acquire an access token.
+
+Use the actual logged service identity and platform fields in a separately authorized
+deployment smoke test. The loopback tests use fabricated metadata; passing them does
+not attest a live revision. See [Cloud Run container runtime contract](https://docs.cloud.google.com/run/docs/container-contract#metadata-server).

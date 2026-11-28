@@ -5,31 +5,77 @@ import AuthenticationServices
 
 /// One explicit Sandbox composition. Ordinary startup does not construct this.
 /// Account/revocation requests remain usable when ordinary service is fenced.
-@MainActor private final class LiteSandboxAccess {
+struct LiteSandboxPermit: Equatable, Sendable {
+    let generation: Int
+    let session: LiteAccountSession
+}
+
+@MainActor final class LiteSandboxAccess {
     weak var identity: LiteAccountIdentityStore?
-    func permits(_ ordinary: Bool) async -> Bool {
-        if !ordinary { return true }
-        return await identity?.canUseService() ?? false
+    func authorize(owner: String, ordinary: Bool) async throws -> LiteSandboxPermit? {
+        if !ordinary { return nil }
+        guard let identity else { throw LiteAccountFailure.unavailable }
+        let generation = identity.generation
+        // Fresh remote admission (and renewal if needed) for EACH request.
+        guard await identity.canUseService(),
+              let session = await identity.dispatchSession(for: owner),
+              identity.generation == generation else { throw LiteAccountFailure.conflict }
+        return LiteSandboxPermit(generation: generation, session: session)
+    }
+    func matches(_ permit: LiteSandboxPermit, owner: String) async -> Bool {
+        guard let identity, identity.generation == permit.generation else { return false }
+        // This response belongs to the same locally active session, not merely
+        // any session that happens to be signed in now. No second status HTTP
+        // call: the backend separately authorizes the protected request itself.
+        let current = await identity.dispatchSession(for: owner)
+        return current == permit.session && identity.generation == permit.generation
     }
 }
 
-private struct LiteSandboxScopeTransport: LiteAuthenticatedTransport {
+private struct LiteSandboxScopeTransport: LiteAccountBoundServiceTransport {
     let origin: URL
     let base: any LiteAuthenticatedTransport
     let paths: Set<String>
-    let permits: @Sendable () async -> Bool
+    let access: LiteSandboxAccess
+    let ordinary: Bool
     func installation() async throws -> String {
         // Reading the already registered installation never enrolls or renews.
         // Admission is checked around HTTP, not repeatedly for local identity reads.
         try await base.installation()
     }
     func send(_ request: URLRequest, installation owner: String) async throws -> (Data, HTTPURLResponse) {
+        let (data, http, _) = try await sendScoped(request, installation: owner, expectedAccount: nil)
+        return (data, http)
+    }
+    func verifyRecognitionAccount(_ expected: String, installation owner: String) async throws {
+        guard ordinary, let permit = try await access.authorize(owner: owner, ordinary: true),
+              permit.session.account_sha256 == expected else { throw LiteServiceFailure.conflict }
+    }
+    func sendRecognition(_ request: URLRequest, installation owner: String, expectedAccount: String?) async throws
+        -> (data: Data, http: HTTPURLResponse, accountSHA256: String) {
+        guard ordinary else { throw LiteServiceFailure.conflict }
+        let (data, http, permit) = try await sendScoped(request, installation: owner, expectedAccount: expectedAccount)
+        guard let permit else { throw LiteServiceFailure.conflict }
+        return (data, http, permit.session.account_sha256)
+    }
+    private func sendScoped(_ request: URLRequest, installation owner: String, expectedAccount: String?) async throws
+        -> (Data, HTTPURLResponse, LiteSandboxPermit?) {
         guard let url = request.url, request.httpMethod == "POST", paths.contains(url.path),
               url == origin.appendingPathComponent(String(url.path.dropFirst())),
-              try await installation() == owner, await permits() else { throw LiteAccountFailure.conflict }
-        let reply = try await base.send(request, installation: owner)
-        guard reply.1.url == url, try await installation() == owner, await permits() else { throw LiteAccountFailure.conflict }
-        return reply
+              try await installation() == owner else { throw LiteAccountFailure.conflict }
+        let permit = try await access.authorize(owner: owner, ordinary: ordinary)
+        if let expectedAccount, permit?.session.account_sha256 != expectedAccount { throw LiteServiceFailure.conflict }
+        let reply: (Data, HTTPURLResponse)
+        if let permit, let signed = base as? LiteSandboxSignedTransport {
+            reply = try await signed.send(request, installation: owner, permit: permit)
+        } else {
+            reply = try await base.send(request, installation: owner)
+        }
+        guard reply.1.url == url, try await installation() == owner else { throw LiteAccountFailure.conflict }
+        if ordinary {
+            guard let permit, await access.matches(permit, owner: owner) else { throw LiteAccountFailure.conflict }
+        }
+        return (reply.0, reply.1, permit)
     }
 }
 
@@ -48,34 +94,101 @@ private struct LiteSandboxJournal: LiteServiceJournal {
     }
 }
 
-private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
+struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     let client: LiteAttestClient
     let access: LiteSandboxAccess
     func installation() async throws -> String {
         guard let owner = try await client.existingInstallation() else { throw LiteAccountFailure.unavailable }
         return owner
     }
+    /// Recheck the very same authorization inside the App Attest signing lane.
+    func send(_ request: URLRequest, installation: String, permit: LiteSandboxPermit) async throws -> (Data, HTTPURLResponse) {
+        try await client.send(request, installation: installation, requestID: UUID(), allowSending: {
+            await access.matches(permit, owner: installation)
+        })
+    }
     func send(_ request: URLRequest, installation: String) async throws -> (Data, HTTPURLResponse) {
         let path = request.url?.path ?? ""
         let ordinary = path.hasPrefix("/api/v1/lite/service/") || path.hasPrefix("/api/v1/lite/purchase/")
-        // Recheck after assertion preparation, immediately before media dispatch.
+        // Session renewal runs before signing. Inside the signing lane, only
+        // validate the captured session and deletion journal using the supplied
+        // owner. Asking this same client for its installation here would deadlock.
+        let permit = ordinary ? await access.identity?.dispatchSession(for: installation) : nil
+        guard !ordinary || permit != nil else { throw LiteAccountFailure.unavailable }
         return try await client.send(request, installation: installation, requestID: UUID(),
-                                     allowSending: { await access.permits(ordinary) })
+            allowSending: {
+                if !ordinary { return true }
+                return await access.identity?.dispatchSession(for: installation) == permit
+            })
     }
 }
 
 @MainActor final class LiteNativeSession: ObservableObject {
-    enum Registration { case checking, required, confirmed, unreadable }
+    enum Registration { case checking, required, pending, confirmed, unreadable }
     let origin: URL
     let identity: LiteAccountIdentityStore
     let purchases: LiteNativePurchaseStore
     let service: LiteServiceClient
+    let captures: LiteCaptureDraftStore
+    var researchDelivery: LiteResearchCaptureDelivery?
     let deletionService: LiteAccountDeletionHTTPService
+    private let balanceTransport: any LiteAuthenticatedTransport
+    let woundTransport: any LiteAuthenticatedTransport
+    private var researchLink: LiteResearchDeletionLink?
+    private var deletingLocalRecords = Set<String>()
     private let access: LiteSandboxAccess
     private let register: @Sendable () async throws -> String
     private let existing: @Sendable () async throws -> String?
+    private let resumableEnrollment: LiteAttestClient?
+    private var enrollmentKeyID: (@Sendable () async throws -> String)?
+    @Published private(set) var preparedEnrollmentKeyID: String?
     @Published private(set) var registration: Registration = .checking
     @Published private(set) var registering = false
+    @Published private(set) var preparingAccount = false
+    struct PurchaseAccount: Equatable {
+        let generation: Int
+        let token: String
+    }
+    private struct ObservedPurchaseAccess: Equatable {
+        let account: PurchaseAccount
+        let deadline: Date
+    }
+    @Published private var observedPurchaseAccess: ObservedPurchaseAccess?
+    var purchaseObservationAccount: PurchaseAccount? {
+        guard registration == .confirmed, let access = observedPurchaseAccess,
+              access.account.generation == identity.generation, access.deadline > identity.now() else { return nil }
+        return access.account
+    }
+
+    /// Only a completed, local account check can expose a new purchasing identity.
+    /// If a live service check overlaps that read, keep the existing display until its deadline.
+    func trackPurchaseAccess(foreground: Bool) async {
+        guard foreground, registration == .confirmed else { observedPurchaseAccess = nil; return }
+        let generation = identity.generation
+        let result = await identity.readPurchaseAccess()
+        guard !Task.isCancelled, generation == identity.generation else { return }
+        switch result {
+        case let .available(token, deadline):
+            let access = ObservedPurchaseAccess(account: PurchaseAccount(generation: generation, token: token), deadline: deadline)
+            if observedPurchaseAccess != access { observedPurchaseAccess = access }
+        case .unavailable:
+            observedPurchaseAccess = nil
+            return
+        case .checking:
+            break
+        }
+        guard let access = observedPurchaseAccess, access.account.generation == generation else { return }
+        do { try await Task.sleep(for: .seconds(max(0, access.deadline.timeIntervalSince(identity.now())))) }
+        catch { return }
+        if !Task.isCancelled, observedPurchaseAccess == access { observedPurchaseAccess = nil }
+    }
+    private static let initialPurchasePrompt = "先登入服務帳號，再確認月費並訂閱；登入不會付款或開啟研究上傳。"
+    @Published private(set) var purchasePreparationMessage = LiteNativeSession.initialPurchasePrompt
+    private var preparationCopy: LiteServiceCopy.Message?
+    func presentationPurchasePreparation(locale: Locale) -> String {
+        preparationCopy?.render(matching: purchasePreparationMessage, locale: locale)
+            ?? LiteServiceCopy.text(purchasePreparationMessage, locale: locale)
+    }
     @Published private(set) var message = "內部 Sandbox 驗收；服務登入、訂閱與研究同意分開處理。"
 
     /// Explicit injected transport also permits signed synthetic HTTP replay.
@@ -83,27 +196,38 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     convenience init(origin: URL, transport: any LiteAuthenticatedTransport,
                      identityProvider: any LiteAppleIdentityProvider, purchaseProvider: any LitePurchaseProvider,
                      journal: any LiteServiceJournal,
+                     captures: LiteCaptureDraftStore? = nil,
                      register: @escaping @Sendable () async throws -> String,
                      existing: (@Sendable () async throws -> String?)? = nil,
+                     resumableEnrollment: LiteAttestClient? = nil,
                      now: @escaping @Sendable () -> Date = { Date() }) throws {
         try self.init(origin: origin, transport: transport, identityProvider: identityProvider,
                       purchaseProvider: purchaseProvider, journal: journal, register: register,
-                      existing: existing ?? { try await transport.installation() }, access: LiteSandboxAccess(), now: now)
+                      existing: existing ?? { try await transport.installation() }, resumableEnrollment: resumableEnrollment,
+                      captures: captures, access: LiteSandboxAccess(), now: now)
     }
 
     private init(origin: URL, transport: any LiteAuthenticatedTransport,
                  identityProvider: any LiteAppleIdentityProvider, purchaseProvider: any LitePurchaseProvider,
                  journal: any LiteServiceJournal, register: @escaping @Sendable () async throws -> String,
                  existing: @escaping @Sendable () async throws -> String?,
-                 access: LiteSandboxAccess, now: @escaping @Sendable () -> Date) throws {
+                 resumableEnrollment: LiteAttestClient?,
+                 captures: LiteCaptureDraftStore? = nil, access: LiteSandboxAccess, now: @escaping @Sendable () -> Date) throws {
         guard origin.scheme == "https", origin.host != nil, origin.port == nil, origin.path.isEmpty,
               origin.user == nil, origin.password == nil, origin.query == nil, origin.fragment == nil,
-              !origin.absoluteString.contains("%") else { throw LiteAccountFailure.invalid }
+              !origin.absoluteString.contains("%"),
+              resumableEnrollment == nil || resumableEnrollment?.origin == origin else { throw LiteAccountFailure.invalid }
+        // The owner-only enrollment window is pinned to a pre-approved key.
+        self.resumableEnrollment = LiteNativeBuild.showsOwnerReview ? nil : resumableEnrollment
+        self.captures = captures ?? LiteCaptureDraftStore(directory:
+            FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("lite-capture-drafts")
+                .appendingPathComponent(LiteServiceBytes.hash(Data(origin.absoluteString.utf8))))
         self.origin = origin; self.access = access; self.register = register; self.existing = existing
         func scoped(_ prefix: String, _ actions: [String], ordinary: Bool) -> LiteSandboxScopeTransport {
             LiteSandboxScopeTransport(origin: origin, base: transport,
                 paths: Set(actions.map { "/api/v1/lite/" + prefix + "/" + $0 }),
-                permits: { await access.permits(ordinary) })
+                access: access, ordinary: ordinary)
         }
         func storage(_ purpose: String) -> LiteSandboxJournal {
             LiteSandboxJournal(base: journal, scope: origin.absoluteString + "\0" + purpose)
@@ -114,10 +238,12 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
         access.identity = identity
         purchases = LiteNativePurchaseStore(service: try LitePurchaseHTTPService(origin: origin, environment: "Sandbox",
             transport: scoped("purchase", ["context", "confirm"], ordinary: true)),
-            provider: purchaseProvider, journal: storage("purchases"), now: now)
+            provider: purchaseProvider, journal: storage("purchases"), accountGeneration: { [identity] in identity.generation }, now: now)
         service = try LiteServiceClient(origin: origin,
             transport: scoped("service", ["prepare", "run", "status", "recover", "resubmit"], ordinary: true),
             journal: storage("recognition"), now: now)
+        balanceTransport = scoped("service", ["balance"], ordinary: true)
+        woundTransport = scoped("service", ["wounds"], ordinary: true)
         deletionService = try LiteAccountDeletionHTTPService(origin: origin,
             transport: scoped("account/deletion", ["request", "status", "reauth/challenge", "reauth/confirm"], ordinary: false))
     }
@@ -129,11 +255,37 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     }
     static func sandbox(client: LiteAttestClient, window: @escaping () -> ASPresentationAnchor?, directory: URL) throws -> LiteNativeSession {
         let access = LiteSandboxAccess()
-        return try LiteNativeSession(origin: client.origin,
+        let session = try LiteNativeSession(origin: client.origin,
             transport: LiteSandboxSignedTransport(client: client, access: access),
             identityProvider: LiteAppleSignInProvider(window: window), purchaseProvider: LiteStoreKitPurchaseProvider(),
             journal: LiteServiceFileJournal(directory: directory), register: { try await client.registeredInstallation() },
-            existing: { try await client.existingInstallation() }, access: access, now: { Date() })
+            existing: { try await client.existingInstallation() }, resumableEnrollment: client,
+            captures: LiteCaptureDraftStore(directory: directory.appendingPathComponent("capture-drafts")), access: access, now: { Date() })
+        session.enrollmentKeyID = { try await client.prepareEnrollmentKeyID() }
+        // Create the transport lazily. Viewing account settings never registers
+        // an installation, re-enables research or sends an association request.
+        let configured = AppSettings.backendURL()
+        if configured == LiteBackendConfiguration.dedicatedOrigin, let original = URL(string: configured) {
+            session.researchLink = try LiteResearchDeletionLink(nativeOrigin: client.origin, researchOrigin: original,
+                native: LiteSandboxSignedTransport(client: client, access: access),
+                research: LiteExistingResearchTransport(origin: original), journal: session.identity.journal)
+            if Bundle.main.object(forInfoDictionaryKey: "LiteResearchCaptureEnabled") as? String == "YES" {
+                let native = LiteSandboxScopeTransport(origin: client.origin,
+                    base: LiteSandboxSignedTransport(client: client, access: access),
+                    paths: ["/api/v1/lite/service/research-source"], access: access, ordinary: true)
+                session.researchDelivery = LiteResearchCaptureDelivery(source: native,
+                    currentAccount: { [identity = session.identity] in try await identity.savedResearchContext() },
+                    researchOwner: { server in
+                        guard server == original.absoluteString else { throw LiteAttestFailure.serviceChanged }
+                        return try await LiteExistingResearchTransport(origin: original).installation()
+                    },
+                    permits: { $0.permits(server: AppSettings.backendURL(), consent: LitePrefs.researchConsent == true) },
+                    researchTransport: { pin, guardScope in
+                        LiteSignedCloudTransport(baseURL: pin.scope.origin, scopeGuard: guardScope)
+                    })
+            }
+        }
+        return session
     }
 
     /// A fresh installation is expected. Never turn a missing local identity into
@@ -143,8 +295,12 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
         registering = true; defer { registering = false }
         do {
             guard let owner = try await existing() else {
-                registration = .required
-                message = "請先核對這部裝置的登記，之後即可使用 Apple 登入。"
+                if try await resumableEnrollment?.canResumePendingRegistration() == true {
+                    showPendingRegistration()
+                } else {
+                    registration = .required
+                    message = "請先核對這部裝置的登記，之後即可使用 Apple 登入。"
+                }
                 return
             }
             guard try await identity.service.installation() == owner else { throw LiteAccountFailure.conflict }
@@ -156,25 +312,218 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
         }
     }
 
-    func registerDevice() async {
-        guard registration != .unreadable else { return }
-        guard !registering else { return }; registering = true; defer { registering = false }
+    func prepareOwnerEnrollment() async {
+        guard LiteNativeBuild.showsOwnerReview, registration == .required, !registering,
+              let enrollmentKeyID else { return }
+        registering = true
+        defer { registering = false }
+        preparedEnrollmentKeyID = nil
+        do { preparedEnrollmentKeyID = try await enrollmentKeyID() }
+        catch { message = "暫時無法準備裝置登記識別碼。請解鎖後再試。" }
+    }
+
+    private func showPendingRegistration() {
+        registration = .pending
+        message = "原裝置登記正等待確認。"
+    }
+
+    func registerDevice(resumePending: Bool = false) async {
+        guard !registering, registration != .unreadable,
+              (registration == .pending) == resumePending else { return }
+        registering = true; defer { registering = false }
+        preparedEnrollmentKeyID = nil
         do {
+            if resumePending {
+                guard let resumableEnrollment, !identity.busy, !purchases.busy else { return }
+                let generation = identity.generation
+                _ = try await resumableEnrollment.recoverUnregisteredIdentity {
+                    await MainActor.run {
+                        self.identity.generation == generation && !self.identity.busy && !self.purchases.busy
+                    }
+                }
+                guard generation == identity.generation, !identity.busy, !purchases.busy else {
+                    throw LiteAccountFailure.conflict
+                }
+            }
             let owner = try await register()
             guard try await identity.service.installation() == owner else { throw LiteAccountFailure.conflict }
             registration = .confirmed
             message = "裝置登記已核對；可接續 Apple 服務帳號登入。尚未送出照片或變更研究同意。"
         } catch {
-            registration = .unreadable
-            message = "裝置登記尚未確認。請先重讀原裝置登記，再決定是否續接。"
+            if (try? await resumableEnrollment?.canResumePendingRegistration()) == true {
+                showPendingRegistration()
+                if resumePending { message = "服務尚未確認這次登記。原登記資料已保留，請稍後再續接。" }
+            } else {
+                registration = .unreadable
+                message = "請先檢查手機儲存的登記資料，再繼續登入。"
+            }
         }
     }
 
-    func accountView() throws -> LiteAccountManagementView {
-        try LiteAccountManagementView(identity: identity, service: deletionService)
+    private enum SignInPreparation {
+        case ready(PurchaseAccount)
+        case changed, unreadable, pending, unavailable, unconfirmed
     }
-    func deletion() -> LiteAccountDeletionStore {
-        LiteAccountDeletionStore(service: deletionService, identity: identity, journal: identity.journal, now: identity.now)
+
+    // Both entry points use the same installation and identity checks. A pending
+    // registration is resumed only through its dedicated, user-initiated action.
+    private func authenticateForTap(resumePending: Bool = false, allowFreshRegistration: Bool = true,
+                                    willSignIn: () -> Void) async -> SignInPreparation {
+        let started = identity.generation
+        await checkExistingRegistration()
+        guard !Task.isCancelled, started == identity.generation, !identity.busy else { return .changed }
+        guard registration != .unreadable else { return .unreadable }
+        if resumePending {
+            // The combined action must never fall back to a fresh enrollment.
+            guard registration == .pending else { return .unavailable }
+            await registerDevice(resumePending: true)
+            guard started == identity.generation, !identity.busy else { return .changed }
+            if registration == .unreadable { return .unreadable }
+        } else if registration == .required {
+            guard allowFreshRegistration else { return .unavailable }
+            await registerDevice()
+        }
+        if registration == .pending { return .pending }
+        guard registration == .confirmed else { return .unavailable }
+        guard started == identity.generation, !identity.busy else { return .changed }
+        var expectedGeneration = started
+        if await identity.purchaseAccessDeadline() == nil {
+            guard !Task.isCancelled, started == identity.generation, !identity.busy else { return .changed }
+            willSignIn()
+            expectedGeneration = started + 1
+            await identity.signIn()
+        }
+        let access = await identity.localPurchaseAccess()
+        guard identity.generation == expectedGeneration else { return .changed }
+        guard let access else { return .unconfirmed }
+        return .ready(PurchaseAccount(generation: expectedGeneration, token: access.token))
+    }
+
+    private var canPrepareAccount: Bool { !preparingAccount && !registering && !identity.busy && !purchases.busy }
+
+    func signInFromSettings(resumePending: Bool = false, returnToCapture: (() -> Void)? = nil) async -> String? {
+        guard !LiteNativeBuild.showsOwnerReview || returnToCapture != nil, canPrepareAccount else { return nil }
+        preparingAccount = true
+        defer { preparingAccount = false }
+        switch await authenticateForTap(resumePending: resumePending,
+                                       allowFreshRegistration: !LiteNativeBuild.showsOwnerReview, willSignIn: {}) {
+        case .ready:
+            if !Task.isCancelled { returnToCapture?() }
+            return "已登入個人服務。"
+        case .changed: return "帳號已變更，請再登入一次。"
+        case .unreadable, .pending: return message
+        case .unavailable: return "目前無法連上個人服務。請稍後再試。"
+        case .unconfirmed:
+            return identity.message == "目前無法連上訂閱服務。請稍後再試。" ? "目前無法連上個人服務。請稍後再試。" : identity.message
+        }
+    }
+
+    enum OfferAction { case subscribe, resumeRegistrationAndSignIn, restore, resumeRegistrationAndRestore }
+
+    /// Identify the recipient of completed restore feedback while an allowance check is in flight.
+    /// Starting another purchase still requires available access.
+    func accountForRestoreFeedback() async -> PurchaseAccount? {
+        let generation = identity.generation
+        let state = await identity.readPurchaseAccess()
+        guard !Task.isCancelled, generation == identity.generation else { return nil }
+        switch state {
+        case let .available(token, deadline), let .checking(token, deadline):
+            guard deadline > identity.now() else { return nil }
+            return PurchaseAccount(generation: generation, token: token)
+        case .unavailable:
+            return nil
+        }
+    }
+
+    func restorePurchases(for account: PurchaseAccount) async {
+        await purchases.restore(for: account) {
+            await self.accountForRestoreFeedback()
+        }
+    }
+
+    func prepareForPurchase(_ action: OfferAction = .subscribe) async {
+        guard canPrepareAccount else { return }
+        purchases.clearRestoreSignInHint()
+        preparingAccount = true
+        defer { preparingAccount = false }
+        preparationCopy = nil
+        let restoring = action == .restore || action == .resumeRegistrationAndRestore
+        let resuming = action == .resumeRegistrationAndSignIn || action == .resumeRegistrationAndRestore
+        purchasePreparationMessage = "正在確認裝置登記…"
+        let result = await authenticateForTap(resumePending: resuming) {
+            purchasePreparationMessage = "請完成 Apple 登入，以確認服務帳號。"
+        }
+        switch result {
+        case .ready(let account):
+            if restoring {
+                purchasePreparationMessage = "正在恢復既有訂閱…"
+                await restorePurchases(for: account)
+                purchasePreparationMessage = Self.initialPurchasePrompt
+            } else {
+                purchasePreparationMessage = "服務帳號已確認。請核對月費，再按訂閱並在 Apple 確認；已有訂閱請使用恢復購買。"
+            }
+        case .changed:
+            purchasePreparationMessage = "帳號狀態已變更，請重新核對後再繼續；尚未付款。"
+        case .unreadable:
+            let detail = LiteServiceCopy.Message(pieces: [.init(message), .init(" 尚未付款。")])
+            preparationCopy = detail
+            purchasePreparationMessage = detail.source
+        case .pending:
+            purchasePreparationMessage = message
+        case .unavailable:
+            purchasePreparationMessage = "目前無法連上訂閱服務。請稍後再試。"
+        case .unconfirmed:
+            if identity.message == "目前無法連上訂閱服務。請稍後再試。" {
+                purchasePreparationMessage = identity.message
+            } else {
+                let detail = LiteServiceCopy.Message(pieces: [.init(identity.message), .init(" 尚未付款，也未開啟 Apple 購買。")])
+                preparationCopy = detail
+                purchasePreparationMessage = detail.source
+            }
+        }
+    }
+
+    func trackingContext() async throws -> LiteDeletionContext? {
+        let start = identity.generation
+        guard let owner = try await existing() else {
+            guard start == identity.generation else { throw LiteAccountFailure.conflict }
+            return nil
+        }
+        guard try await identity.hasTrackingAccount(owner: owner) else {
+            guard start == identity.generation else { throw LiteAccountFailure.conflict }
+            return nil
+        }
+        let context = try await identity.activeServiceContext()
+        guard context.installation == owner, start == identity.generation else { throw LiteAccountFailure.conflict }
+        return context
+    }
+
+    func personalBalance() async throws -> LitePersonalBalance {
+        let generation = identity.generation
+        let context = try await identity.activeServiceContext()
+        let value = try await LitePersonalBalance.fetch(context: context, transport: balanceTransport, now: identity.now)
+        guard try await identity.activeServiceContext() == context, identity.generation == generation else {
+            throw LiteAccountFailure.conflict
+        }
+        return value
+    }
+
+    func accountView() throws -> LiteAccountManagementView {
+        try LiteAccountManagementView(identity: identity, service: deletionService, researchLink: researchLink)
+    }
+
+    /// Retire unfinished RGB-D before the history index is removed. The store's
+    /// durable marker also prevents resurrection if another view/restart races.
+    func deleteLocalRecord(_ record: LiteRecord, in store: LiteStore) async -> Bool {
+        guard deletingLocalRecords.insert(record.id).inserted else { return false }
+        defer { deletingLocalRecords.remove(record.id) }
+        guard store.retireCapture(record.id, requireSavedRecord: true) else { return false }
+        do { try await captures.retire([record.id]) }
+        catch { store.captureCleanupFailed(); return false }
+        return store.delete(record)
+    }
+    func deletion(pauseResearch: @escaping () throws -> Void = LitePrefs.pauseResearchForAccountDeletion) -> LiteAccountDeletionStore {
+        LiteAccountDeletionStore(service: deletionService, identity: identity, journal: identity.journal, pauseResearch:pauseResearch, now: identity.now)
     }
 
     static func captureID(recordID: String) throws -> String {
@@ -193,29 +542,86 @@ private struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
 
 struct LiteNativeSessionView: View {
     @ObservedObject var session: LiteNativeSession
+    var returnToCapture: (() -> Void)? = nil
+    private enum CaptureSignIn { case signIn, resumeRegistration }
+    @State private var captureSignIn: CaptureSignIn?
+    @State private var signInStatus: String?
+    @Environment(\.locale) private var locale
+    private func copy(_ source: String) -> String { LiteServiceCopy.text(source, locale: locale) }
     var body: some View {
         Form {
-            Section("內部服務驗收") {
-                Text("先核對裝置，再登入同一服務帳號。此入口不會自動開啟研究上傳或清除手機紀錄。")
-                Text(session.message).font(.footnote)
-                if session.registration == .required {
-                    Button("核對裝置登記（不傳照片）") { Task { await session.registerDevice() } }
+            if returnToCapture != nil {
+                Text(copy("登入後會回到這張照片。準備好時，再按辨識送出。"))
+            } else if !LiteNativeBuild.showsOwnerReview {
+                NavigationLink(copy("Plus 方案與價格")) { LiteNativePurchaseView(session: session) }
+            }
+            Section(copy("服務連線")) {
+                if LiteNativeBuild.showsOwnerReview && (returnToCapture == nil || session.registration == .required) {
+                    Text(copy("先核對裝置，再登入同一服務帳號。此入口不會自動開啟研究上傳或清除手機紀錄。"))
+                    Text(copy(session.message)).font(.footnote)
+                } else if session.preparingAccount {
+                    ProgressView(copy("正在登入個人服務…"))
+                } else if session.purchaseObservationAccount != nil {
+                    Text(copy("已登入個人服務。"))
+                } else if let signInStatus, signInStatus != "已登入個人服務。" {
+                    Text(copy(signInStatus)).accessibilityIdentifier("lite.settings.signInStatus")
+                } else if session.registration == .pending || session.registration == .unreadable {
+                    Text(copy(session.message)).font(.footnote)
+                } else if session.registration == .checking {
+                    ProgressView()
+                } else if session.registration == .required {
+                    Text(copy("登入即可使用個人服務，研究上傳可另外選擇。"))
+                }
+                if LiteNativeBuild.showsOwnerReview && session.registration == .required {
+                    Button(copy("準備本人裝置登記識別碼")) { Task { await session.prepareOwnerEnrollment() } }
+                        .disabled(session.registering)
+                    if let digest = session.preparedEnrollmentKeyID {
+                        Text(copy("請將這個登記識別碼私下交給自己的 Mac，待登記時段確認後再核對裝置登記。"))
+                        Text(verbatim: digest).font(.footnote.monospaced()).textSelection(.enabled)
+                        ShareLink(item: digest) { Text(copy("分享裝置登記識別碼")) }
+                    }
+                    Button(copy("核對裝置登記（不傳照片）")) { Task { await session.registerDevice() } }
+                        .disabled(session.registering)
+                } else if !session.preparingAccount, !LiteNativeBuild.showsOwnerReview || returnToCapture != nil,
+                          session.registration == .required || session.registration == .confirmed,
+                          session.purchaseObservationAccount == nil {
+                    LiteAppleSignInButton(identifier: "lite.settings.signIn") {
+                        if returnToCapture != nil { captureSignIn = .signIn }
+                        else { Task { signInStatus = await session.signInFromSettings() } }
+                    }.disabled(session.registering)
+                } else if session.registration == .pending, returnToCapture != nil {
+                    Button(copy("續接裝置登記並以 Apple 登入")) { captureSignIn = .resumeRegistration }
+                        .disabled(session.registering || session.preparingAccount)
+                        .accessibilityIdentifier("lite.capture.resumeSignIn")
+                } else if session.registration == .pending {
+                    Button(copy("續接裝置登記")) { Task { signInStatus = nil; await session.registerDevice(resumePending: true) } }
                         .disabled(session.registering)
                 } else if session.registration == .unreadable {
-                    Button("重讀原裝置登記") { Task { await session.checkExistingRegistration() } }
+                    Button(copy("檢查手機上的登記資料")) { Task { signInStatus = nil; await session.checkExistingRegistration() } }
                         .disabled(session.registering)
+                        .accessibilityIdentifier("lite.settings.checkLocalRegistration")
+                }
+                if returnToCapture == nil, session.registration == .confirmed, !session.preparingAccount, let account = try? session.accountView() {
+                    NavigationLink(copy("服務帳號與刪除")) { account }
+                } else if returnToCapture == nil, LiteNativeBuild.showsOwnerReview {
+                    Text(copy("可先查看方案。完成裝置登記後，可登入服務帳號使用訂閱或恢復購買。"))
                 }
             }
-            if session.registration == .confirmed, let account = try? session.accountView() {
-                NavigationLink("服務帳號與刪除") { account }
-                NavigationLink("Sandbox 訂閱與恢復購買") { LiteNativePurchaseView(store: session.purchases) }
-            } else {
-                Text("完成裝置登記後，這裡會顯示帳號登入、刪帳及訂閱與恢復購買。")
+            if returnToCapture == nil, LiteNativeBuild.showsOwnerReview {
+                NavigationLink(copy("Plus 方案與價格")) { LiteNativePurchaseView(session: session) }
             }
-            Text("登入後可從既有紀錄開啟服務辨識驗收。正式拍攝流程與完整刪帳驗收尚未啟用。")
+            Text(copy("拍攝後可自行選擇個人雲端辨識。使用個人服務或恢復購買不會開啟研究上傳。"))
                 .font(.footnote).foregroundStyle(.secondary)
-        }.navigationTitle("內部服務驗收")
-        .task { await session.checkExistingRegistration() }
+        }.navigationTitle(copy("個人服務"))
+        .task(id: captureSignIn) {
+            guard let action = captureSignIn, let returnToCapture else { return }
+            signInStatus = await session.signInFromSettings(resumePending: action == .resumeRegistration, returnToCapture: returnToCapture)
+            captureSignIn = nil
+        }
+        .task {
+            signInStatus = nil
+            await session.checkExistingRegistration()
+        }
     }
 }
 
@@ -250,10 +656,10 @@ struct LiteSavedServiceView: View {
                     LiteServiceStatusView(record: result, client: session.service,
                         loadJPEG: { _ in await MainActor.run { jpeg } }, onRecord: { self.result = $0 })
                         .disabled(session.registration != .confirmed)
-                    if let answer = result.reply?.result, let raw = jpeg, let image = UIImage(data: raw) {
-                        LitePreview(image: image, polys: answer.wound_polygons.map { $0.map { $0.map { Int($0) } } },
-                                    imageW: answer.image_w, imageH: answer.image_h)
-                        Text("服務圈選參照；未覆寫原紀錄或重新計算原面積。")
+                    if let answer = result.reply?.result {
+                        LiteSavedServicePreview(journal: result, answer: answer, images: records.images,
+                                                name: record?.imageName)
+                            .id([result.captureID, String(result.revision), record?.imageName ?? ""])
                     }
                 }
                 if result == nil || (result?.next != "none" && result?.canResubmit != true) {
@@ -265,7 +671,8 @@ struct LiteSavedServiceView: View {
                             catch { failureMessage = "尚未確認；請先核對服務帳號登入及原紀錄，勿重新拍攝或重建工作。" }
                         }
                     }.buttonStyle(.borderedProminent)
-                        .disabled(session.registration != .confirmed || busy || !reviewed || records.needsReload || jpeg == nil)
+                        .disabled(session.registration != .confirmed || busy || !reviewed || records.needsReload ||
+                                  record.map { records.images.exists($0.imageName) } != true)
                 }
                 if busy { ProgressView() }
                 if let failureMessage { Text(failureMessage).foregroundStyle(.orange) }
@@ -274,6 +681,48 @@ struct LiteSavedServiceView: View {
         }.navigationTitle("服務辨識驗收").task {
             await reload()
             await session.checkExistingRegistration()
+        }
+    }
+}
+
+extension ImageLoadQueue {
+    func verifiedServiceImage(journal: LiteServiceRecord, store: LocalImageStore, name: String) -> UIImage? {
+        guard !Task.isCancelled, journal.note == "confirmed", (try? journal.validate()) != nil else { return nil }
+        return autoreleasepool {
+            guard let bytes = store.rawBytes(name), let size = try? LiteServiceBytes.imageSize(bytes),
+                  size.0 == journal.width, size.1 == journal.height,
+                  LiteServiceBytes.hash(bytes) == journal.imageSHA256 else { return nil }
+            return UIImage(data: bytes)
+        }
+    }
+}
+
+private struct LiteSavedServicePreview: View {
+    let journal: LiteServiceRecord
+    let answer: LiteServiceResult
+    let images: LocalImageStore
+    let name: String?
+    @State private var image: UIImage?
+    @State private var checked = false
+
+    var body: some View {
+        Group {
+            if let image {
+                LitePreview(image: image, polys: answer.wound_polygons.map { $0.map { $0.map(Int.init) } },
+                            imageW: answer.image_w, imageH: answer.image_h)
+                Text("服務圈選參照；未覆寫原紀錄或重新計算原面積。")
+            } else if checked {
+                Text("無法核對原照片，這次不顯示服務圈選。原紀錄與辨識回執保留。")
+            } else {
+                ProgressView("正在核對原照片…")
+            }
+        }.task {
+            if let name {
+                let verified = await ImageLoadQueue.shared.verifiedServiceImage(journal: journal, store: images, name: name)
+                guard !Task.isCancelled else { return }
+                image = verified
+            }
+            checked = true
         }
     }
 }

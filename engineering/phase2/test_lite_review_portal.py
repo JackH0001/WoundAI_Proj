@@ -344,6 +344,185 @@ class RuntimeBoundary(unittest.TestCase):
         with self.assertRaises(ReviewError):backend('https://mmh.invalid/',{},'human-iap',False)
         self.assertEqual(http.get.call_count,1)
 
+class ReviewFeedback(unittest.TestCase):
+    CONTRACT='student-onnx-logits-sigmoid-before-resize/v1'
+
+    def metadata(self,fixture,**changes):
+        name=object_name(OWNER,'legacy','metadata',IID)
+        gen,data,meta=fixture.media.live[name]
+        value=decode(data);value.update(changes);data=encoded(value)
+        meta=dict(meta,sha256=hashlib.sha256(data).hexdigest())
+        fixture.media.live[name]=(gen,data,meta)
+        fixture.backend.catalogue=Catalogue(fixture.catalogue())
+
+    def test_initial_output_version_is_separate_from_manual_revision_and_accuracy(self):
+        for route in ('student','cloud_escalated(AU)'):
+            with self.subTest(route=route):
+                f=Fixture();self.metadata(f,route=route,student_output_contract=self.CONTRACT)
+                before=copy.deepcopy((f.media.live,f.state.live))
+                d=f.backend.detail(f.viewer,f.rid)
+                self.assertEqual(d['segmentation'],dict(status='identified_contract',route=route,
+                    output_contract=self.CONTRACT,accuracy='not_verified'))
+                self.assertEqual([(r['source'],r['surface_cm2'],r['projected_cm2']) for r in d['revisions']],
+                    [('manual',18.5,18),('manual',19.5,19)])
+                self.assertEqual(before,(f.media.live,f.state.live))
+                self.assertEqual(d['training_admission'],'not_evaluated')
+
+    def test_unknown_contract_route_and_oversized_values_are_not_upgraded(self):
+        for route,contract in ((None,None),('student',None),('other',self.CONTRACT),
+                ('student','future-version'),(['student'],self.CONTRACT),('student',{'v':1}),
+                ('x'*65,self.CONTRACT),('student','x'*129)):
+            with self.subTest(route=route,contract=contract):
+                f=Fixture();self.metadata(f,route=route,student_output_contract=contract)
+                d=f.backend.detail(f.viewer,f.rid)
+                self.assertEqual(d['segmentation']['status'],'unconfirmed_contract')
+                self.assertEqual(d['segmentation']['accuracy'],'not_verified')
+
+    def test_browser_warns_unknown_output_preserves_values_and_escapes_route(self):
+        f=Fixture();before=copy.deepcopy((f.media.live,f.state.live))
+        app=portal_app(lambda _:f.viewer,lambda *_:f.backend.detail(f.viewer,f.rid))
+        response=app.test_client().get('/records/'+f.rid,headers={'Accept':'text/html'})
+        self.assertEqual(response.status_code,200)
+        for text in ('範圍與面積可能偏小','19.5 cm²','19 cm²','使用者修訂','&lt;script&gt;',
+                     '此快照沒有深度檔案或收據','尚未獨立驗證量測品質'):
+            self.assertIn(text,response.text)
+        self.assertNotIn('<script>',response.text)
+        self.assertEqual(before,(f.media.live,f.state.live))
+
+    def test_identified_output_is_not_presented_as_validated_measurement(self):
+        f=Fixture();self.metadata(f,route='cloud_escalated(AU)',student_output_contract=self.CONTRACT)
+        app=portal_app(lambda _:f.viewer,lambda *_:f.backend.detail(f.viewer,f.rid))
+        r=app.test_client().get('/records/'+f.rid,headers={'Accept':'text/html'})
+        self.assertIn('雲端集成圈選（Student 第 1 版）',r.text)
+        self.assertIn('不代表輪廓或面積精確度已通過',r.text)
+        self.assertNotIn('範圍與面積可能偏小',r.text)
+
+    def test_metadata_only_still_omits_all_pixels_and_polygons(self):
+        f=Fixture();v=Viewer(SUB,frozenset({'lite.review.metadata'}))
+        detail=f.backend.detail(v,f.rid)
+        self.assertNotIn('ai_polygons',detail)
+        self.assertTrue(all('polygons' not in r for r in detail['revisions']))
+        app=portal_app(lambda _:v,lambda *_:detail)
+        result=app.test_client().get('/records/'+f.rid)
+        self.assertIn('僅有中繼資料權限',result.text)
+        self.assertIn('圈選版本未確認',result.text)
+        self.assertNotIn('<svg',result.text)
+        self.assertNotIn('<image ',result.text)
+
+    def test_older_reader_without_provenance_defaults_to_unconfirmed(self):
+        f=Fixture();d=f.backend.detail(f.viewer,f.rid);d.pop('segmentation',None)
+        app=portal_app(lambda _:f.viewer,lambda *_:d)
+        r=app.test_client().get('/records/'+f.rid)
+        self.assertEqual(r.status_code,200);self.assertIn('圈選版本未確認',r.text)
+
+    def test_browser_errors_show_actions_without_payload_or_automatic_retry(self):
+        f=Fixture()
+        cases={'review_catalogue_refresh_required':(503,'快照已過期'),
+               'review_permission_denied':(403,'權限不足'),
+               'record_not_in_review_snapshot':(404,'不在目前覆核快照'),
+               'source_changed_refresh_snapshot':(409,'資料版本已變更'),
+               'consent_changed_refresh_required':(409,'研究同意狀態已變更'),
+               'media_access_blocked':(410,'停止媒體檢視'),
+               'review_audit_unavailable':(503,'稽核暫時無法保存')}
+        for code,(status,phrase) in cases.items():
+            with self.subTest(code=code):
+                backend=Mock(side_effect=ReviewError(code,status))
+                app=portal_app(lambda _:f.viewer,backend)
+                r=app.test_client().get('/',headers={'Accept':'text/html,application/xhtml+xml'})
+                self.assertEqual(r.status_code,status);self.assertEqual(r.mimetype,'text/html')
+                self.assertIn(phrase,r.text);self.assertIn('返回收件清單',r.text)
+                self.assertIn('no-store',r.headers['Cache-Control']);self.assertIn('Accept',r.headers['Vary'])
+                self.assertIn("frame-ancestors 'none'",r.headers['Content-Security-Policy'])
+                self.assertNotIn('http-equiv',r.text);self.assertNotIn('<script',r.text)
+                self.assertNotIn('<svg',r.text);self.assertNotIn('<image',r.text)
+                backend.assert_called_once()
+
+    def test_sign_in_denial_is_readable_without_invoking_reader(self):
+        backend=Mock(side_effect=AssertionError('must not call reader'))
+        auth=Mock(side_effect=ReviewError('review_sign_in_required',401))
+        r=portal_app(auth,backend).test_client().get('/',headers={'Accept':'text/html'})
+        self.assertEqual(r.status_code,401);self.assertIn('App 的裝置登記不能代替後台登入',r.text)
+        backend.assert_not_called()
+
+    def test_unknown_exception_is_not_reflected_and_json_probe_contract_is_preserved(self):
+        f=Fixture();secret='sensitive-object-name-or-token'
+        for exc in (RuntimeError(secret),ReviewError(secret,503)):
+            backend=Mock(side_effect=exc);app=portal_app(lambda _:f.viewer,backend)
+            r=app.test_client().get('/',headers={'Accept':'text/html'})
+            self.assertEqual(r.status_code,503);self.assertNotIn(secret,r.text)
+            self.assertIn('檢視服務暫時無法使用',r.text)
+        app=portal_app(lambda _:f.viewer,Mock(side_effect=ReviewError('review_audit_unavailable',503)))
+        for accept in ('','application/json','*/*','application/json,text/html;q=0.8'):
+            r=app.test_client().get('/',headers={'Accept':accept})
+            self.assertEqual(r.json,{'error':'review_audit_unavailable'})
+            self.assertEqual(r.status_code,503)
+
+    def test_reader_and_image_failures_never_return_an_html_document(self):
+        f=Fixture();f.privacy.manifest.withdraw(OWNER)
+        app=reader_app(f.backend,lambda _:f.viewer,lambda _:None)
+        r=app.test_client().get('/v1/records/'+f.rid+'/image',headers={'Accept':'text/html'})
+        self.assertEqual(r.status_code,410);self.assertEqual(r.json,{'error':'media_access_blocked'})
+        portal=portal_app(lambda _:f.viewer,Mock(side_effect=ReviewError('media_access_blocked',410)))
+        r=portal.test_client().get('/records/'+f.rid+'/image',headers={'Accept':'text/html'})
+        self.assertEqual(r.status_code,410);self.assertEqual(r.json,{'error':'media_access_blocked'})
+
+    def test_backend_preserves_only_bounded_known_error_codes_with_matching_status(self):
+        from unittest.mock import MagicMock
+        for status,body,mime,want in (
+                (503,b'{"error":"review_catalogue_refresh_required"}','application/json','review_catalogue_refresh_required'),
+                (403,b'{"error":"review_permission_denied"}','application/json','review_permission_denied'),
+                (409,b'{"error":"source_changed_refresh_snapshot"}','application/json','source_changed_refresh_snapshot'),
+                (503,b'{"error":"sensitive-secret"}','application/json','review_reader_request_failed'),
+                (503,b'{"error":"review_permission_denied"}','application/json','review_reader_request_failed'),
+                (503,b'{"error":"review_audit_unavailable","token":"sensitive-secret"}','application/json','review_reader_request_failed'),
+                (503,b'{"error":"review_audit_unavailable"}','text/html','review_reader_request_failed'),
+                (503,b'{"error":[]}','application/json','review_reader_request_failed'),
+                (503,b'not-json','application/json','review_reader_request_failed'),
+                (503,b'x'*1025,'application/json','review_response_too_large')):
+            with self.subTest(status=status,body=body[:60]):
+                http=Mock();response=Mock(status_code=status,headers={'Content-Type':mime})
+                response.iter_content.return_value=[body]
+                context=MagicMock();context.__enter__.return_value=response;http.get.return_value=context
+                backend=Backend(http,'https://reader.invalid',lambda:'fake-service-token')
+                with self.assertRaises(ReviewError) as result:backend('/v1/records',{},'fake-iap',False)
+                self.assertEqual(result.exception.code,want)
+                self.assertEqual(http.get.call_count,1)
+                self.assertNotIn('sensitive-secret',str(result.exception))
+
+    def test_depth_text_is_readable_without_claiming_registration(self):
+        f=Fixture();d=f.backend.detail(f.viewer,f.rid)
+        for status,expected in (
+                ('receipt_present_bundle_missing_from_snapshot','快照缺少對應深度檔案'),
+                ('receipt_and_generation_bound_not_geometry_verified','影像對位與幾何精確度尚未驗證')):
+            d['depth_status']=status
+            r=portal_app(lambda _:f.viewer,lambda *_:d).test_client().get('/records/'+f.rid)
+            self.assertIn(expected,r.text);self.assertIn(status,r.text)
+
+    def test_two_hop_audit_failure_keeps_code_but_releases_no_detail(self):
+        from unittest.mock import MagicMock
+        f=Fixture();before=copy.deepcopy((f.media.live,f.state.live))
+        auth=Authentication();auth.setUp()
+        private=reader_app(f.backend,auth.verify,lambda token:require(token=='Bearer fake-service','unauthorized',401)).test_client()
+        http=Mock()
+        def get(url,*,params,headers,**options):
+            self.assertFalse(options['allow_redirects'])
+            r=private.get(url.removeprefix('https://reader.invalid'),query_string=params,
+                headers={'Authorization':headers['Authorization'],'X-Lite-Review-IAP':headers['X-Lite-Review-IAP']})
+            response=Mock(status_code=r.status_code,headers=dict(r.headers))
+            response.iter_content.return_value=[r.data]
+            context=MagicMock();context.__enter__.return_value=response
+            return context
+        http.get.side_effect=get
+        portal=portal_app(auth.verify,Backend(http,'https://reader.invalid',lambda:'fake-service')).test_client()
+        f.audit.upload_error=RuntimeError('sensitive-bucket-path')
+        r=portal.get('/records/'+f.rid,headers={'Accept':'text/html','X-Goog-IAP-JWT-Assertion':auth.token()})
+        self.assertEqual(r.status_code,503);self.assertIn('稽核暫時無法保存',r.text)
+        self.assertIn('review_audit_unavailable',r.text)
+        self.assertNotIn('19.5',r.text);self.assertNotIn('<svg',r.text)
+        self.assertNotIn('sensitive-bucket-path',r.text)
+        self.assertEqual(http.get.call_count,1);self.assertEqual(f.audit.live,{})
+        self.assertEqual(before,(f.media.live,f.state.live))
+
 class Rollout(unittest.TestCase):
     def test_plan_is_nonexecuting_and_environment_specific(self):
         value=plan('a'*40,{'file':'b'*64})

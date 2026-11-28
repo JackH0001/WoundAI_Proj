@@ -145,12 +145,17 @@ targets:
         buildPhase: resources
       - path: WoundLite/Info.plist
         buildPhase: none
+      # Same bilingual source as the reviewed website. Included for offline reading.
+      - path: ../site/privacy/woundlite.html
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.woundai.lite
         CURRENT_PROJECT_VERSION: "38"
         WOUNDLITE_BACKEND_URL: "https://woundai-lite-candidate-421209514056.asia-east1.run.app"
         WOUNDLITE_NATIVE_SANDBOX_ORIGIN: ""
+        WOUNDLITE_RESEARCH_CAPTURE: "NO"
+        WOUNDLITE_SAVED_RECORD_TEST: "NO"
         CODE_SIGN_ENTITLEMENTS: WoundLite/WoundLite.entitlements
         INFOPLIST_FILE: WoundLite/Info.plist
         GENERATE_INFOPLIST_FILE: NO

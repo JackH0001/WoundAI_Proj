@@ -20,19 +20,25 @@ on:
     branches: [main, develop]
     paths:
       - 'iOS/**'
+      - 'site/privacy/woundlite.html'
       - 'engineering/contracts/**'
       - 'tools/generate_medical_wound_catalog.py'
       - '.github/workflows/ios.yml'
       - 'tools/verify_xctest_results.py'
       - 'tools/test_verify_xctest_results.py'
+      - 'tools/verify_lite_release_privacy.py'
+      - 'tools/test_verify_lite_release_privacy.py'
   pull_request:
     paths:
       - 'iOS/**'
+      - 'site/privacy/woundlite.html'
       - 'engineering/contracts/**'
       - 'tools/generate_medical_wound_catalog.py'
       - '.github/workflows/ios.yml'
       - 'tools/verify_xctest_results.py'
       - 'tools/test_verify_xctest_results.py'
+      - 'tools/verify_lite_release_privacy.py'
+      - 'tools/test_verify_lite_release_privacy.py'
   workflow_dispatch:
 
 jobs:
@@ -48,6 +54,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check release privacy comparison with offline fixtures
+        run: python3 -B -m unittest discover -s ../tools -p test_verify_lite_release_privacy.py
 
       # ⚠ 不再釘死 Xcode 版本（原本是 15.4）。brew 裝的 XcodeGen 是最新版，
       #   產出的專案格式（objectVersion 77）舊 Xcode 讀不懂——

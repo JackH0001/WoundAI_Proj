@@ -29,6 +29,8 @@ threshold 去切。2026-08-19 的教訓有兩層：
 import os
 import sys
 import tempfile
+from types import SimpleNamespace
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FLASK_DIR = os.path.abspath(os.path.join(HERE, "..", "..", "Backend", "Flask"))
@@ -76,6 +78,38 @@ def main():
     thr = A.student_threshold()
     check("門檻是合理的機率值", isinstance(thr, float) and 0.0 < thr < 1.0, thr)
 
+    # Same logits as the CoreML export's final sigmoid. Use unequal image and
+    # tensor sizes to distinguish converting before interpolation from after.
+    class SyntheticSession:
+        def get_inputs(self):
+            return [SimpleNamespace(name="rgb", shape=[1, 3, 2, 2])]
+
+        def run(self, outputs, inputs):
+            return [scores[None, None]]
+
+    rgb = np.zeros((3, 5, 3), dtype=np.uint8)
+    scores = np.array([[-4., 0.1], [0.35, 2.]], dtype=np.float32)
+    with patch.object(A, "ONNX_AVAILABLE", True), \
+            patch.object(A, "ort", SimpleNamespace(InferenceSession=SyntheticSession), create=True), \
+            patch.object(A, "wound_segmentation_model", SyntheticSession()), \
+            patch.object(A, "_active_model_key", return_value="student"), \
+            patch.object(A, "_load_cloud_au", return_value=(None, None)):
+        expected_prob = A.cv2.resize(1 / (1 + np.exp(-scores)), (5, 3))
+        actual, _ = A.segment_wound_ai(rgb)
+        check("Student sigmoid precedes resize", np.allclose(actual, expected_prob, atol=1e-6))
+        mask, meta = A.segment_for_lite(rgb)
+        check("Lite classifies the converted probabilities", np.array_equal(mask, expected_prob > thr))
+        check("successful Student reports its output version", meta.get("student_output_contract") == A.STUDENT_OUTPUT_CONTRACT)
+        with patch.object(A, "_active_model_key", return_value="wsm"):
+            plain, _ = A.segment_wound_ai(rgb)
+            check("other models keep their own output contract",
+                  np.allclose(plain, np.clip(A.cv2.resize(scores, (5, 3)), 0, 1)))
+        with patch.object(A.wound_segmentation_model, "run", side_effect=ValueError("test failure")), \
+                patch.object(A, "segment_wound_traditional", return_value=(np.zeros((3, 5)), 0)):
+            _, fallback = A.segment_for_lite(rgb)
+            check("traditional fallback never reports a successful Student conversion",
+                  fallback.get("student_output_contract") is None)
+
     # ── 逐像素等值 ────────────────────────────────────────────────
     print("\n── 逐像素等值 ──")
     rng = np.random.default_rng(20260819)
@@ -99,7 +133,7 @@ def main():
     orig = A.segment_wound_ai
     orig_esc = A.escalate_mask
     try:
-        A.segment_wound_ai = lambda img: (prob, 0.9)
+        A.segment_wound_ai = lambda img, **kw: (prob, 0.9)
         # 關掉升級：這支測的是門檻，不是升級策略。
         A.escalate_mask = lambda img, m, w, h, policy="always": (m, {})
         got, info = A.segment_for_lite(np.zeros((64, 48, 3), np.uint8))

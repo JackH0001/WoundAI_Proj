@@ -165,7 +165,7 @@ actor LiteAttestClient {
               replacing == value.replaces_challenge_id else { throw LiteAttestFailure.invalidResponse }
         return value
     }
-    private func enroll() async throws -> Identity {
+    private func prepareRegistrationIdentity() async throws -> Identity {
         guard await device.supported() else { throw LiteAttestFailure.unsupported }
         var identity = try await stored()
         if let interrupted = identity, interrupted.phase == "attesting" {
@@ -186,7 +186,21 @@ actor LiteAttestClient {
             identity = Identity(origin: origin.absoluteString, audience: audience, key: key, phase: "generated")
             try await persist(identity!)
         }
-        var value = identity!
+        guard let identity else { throw LiteAttestFailure.invalidState }
+        return identity
+    }
+
+    /// Owner-mediated commissioning binds the server window to this key before
+    /// the server has assigned an installation. The private key stays in App Attest.
+    func prepareEnrollmentKeyID() async throws -> String {
+        try await acquire(); defer { release() }; try Task.checkCancellation()
+        let value = try await prepareRegistrationIdentity()
+        guard ["generated", "pending"].contains(value.phase) else { throw LiteAttestFailure.invalidState }
+        return try keyData(value.key).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func enroll() async throws -> Identity {
+        var value = try await prepareRegistrationIdentity()
         if value.phase == "generated" {
             let c = try await challenge(key: value.key, purpose: "register")
             try Task.checkCancellation()
@@ -223,6 +237,14 @@ actor LiteAttestClient {
         guard let identity = try await stored(), identity.phase == "registered" else { return nil }
         return identity.installation
     }
+    /// A local read for the explicit first-enrollment continuation. A locked or
+    /// invalid item throws, and a confirmed installation can never be replaced.
+    func canResumePendingRegistration() async throws -> Bool {
+        try await acquire(); defer { release() }; try Task.checkCancellation()
+        guard let value = try await stored(), value.phase == "pending" else { return false }
+        return (value.registrationRecoveries?.count ?? 0) < 4
+    }
+
     func registeredInstallation() async throws -> String {
         try await acquire(); defer { release() }; try Task.checkCancellation()
         return try await enroll().installation!
@@ -234,7 +256,8 @@ actor LiteAttestClient {
     /// exact original expired pending challenge. Missing/active/revoked/corrupt
     /// states are rejected. Its echoed lineage and DIFFERENT challenge prove
     /// old proof invalidation, closing a race with a delayed registration.
-    /// The caller must re-read consent, withdrawal and records on every check.
+    /// The caller rechecks its scope on every step (including consent,
+    /// withdrawal and records when the identity is used for research).
     /// No media is sent and no record is rebound by this operation.
     func recoverUnregisteredIdentity(
         allowRecovery: @Sendable () async throws -> Bool
@@ -299,10 +322,10 @@ actor LiteAttestClient {
               original.value(forHTTPHeaderField: "Authorization") == nil, original.value(forHTTPHeaderField: "Cookie") == nil,
               let method = original.httpMethod else { throw LiteAttestFailure.invalidRequest }
         let body = original.httpBody ?? Data(), type = original.value(forHTTPHeaderField: "Content-Type") ?? ""
-        // Only the two reviewed deletion POSTs share the privacy budget.
+        // Only reviewed account-deletion POSTs share the privacy budget.
         // Other POSTs must never bypass ordinary service admission.
         let privacy = method == "DELETE" || (method == "POST" &&
-            ["/api/v1/lite/account/deletion/request", "/api/v1/lite/account/deletion/status", "/api/v1/lite/account/deletion/reauth/challenge", "/api/v1/lite/account/deletion/reauth/confirm"].contains(url.path))
+            ["/api/v1/lite/account/deletion/request", "/api/v1/lite/account/deletion/status", "/api/v1/lite/account/deletion/reauth/challenge", "/api/v1/lite/account/deletion/reauth/confirm", LiteResearchLinkPath.offer, LiteResearchLinkPath.accept].contains(url.path))
         let c = try await challenge(key: value.key, purpose: privacy ? "withdraw" : "assert")
         let bytes = try LiteAttestRequest.clientData(audience: audience, installation: installation,
             keyID: keyData(value.key), challenge: Data(base64Encoded: c.challenge)!, requestID: requestID.uuidString.lowercased(),

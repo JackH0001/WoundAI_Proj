@@ -32,14 +32,14 @@ POLICY=ApplePolicy('com.woundai.lite',6825208065,'com.woundai.lite.plus.monthly'
 BINDING=ServiceBinding('synthetic-account',TOKEN,'1000000000001')
 
 
-def synthetic_chain():
+def synthetic_chain(*, ocsp_url=None):
     keys=[ec.generate_private_key(ec.SECP256R1()) for _ in range(3)]
     certs=[]
+    now = datetime.now(timezone.utc) if ocsp_url else datetime.fromtimestamp(NOW, timezone.utc)
     for i,key in enumerate(keys):
         issuer=keys[max(0,i-1)]
         subject=x509.Name([x509.NameAttribute(NameOID.COMMON_NAME,f'SYNTHETIC TEST ONLY {i}')])
         issuer_name=subject if i==0 else certs[-1].subject
-        now=datetime.fromtimestamp(NOW,timezone.utc)
         b=(x509.CertificateBuilder().subject_name(subject).issuer_name(issuer_name)
            .public_key(key.public_key()).serial_number(x509.random_serial_number())
            .not_valid_before(now-timedelta(days=1)).not_valid_after(now+timedelta(days=2))
@@ -49,6 +49,10 @@ def synthetic_chain():
                 encipher_only=False,decipher_only=False),True)
            .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()),False)
            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(issuer.public_key()),False))
+        if ocsp_url and i > 0:
+            endpoint = x509.AccessDescription(x509.oid.AuthorityInformationAccessOID.OCSP,
+                                              x509.UniformResourceIdentifier(ocsp_url))
+            b = b.add_extension(x509.AuthorityInformationAccess([endpoint]), critical=False)
         if i in (1,2):
             oid='1.2.840.113635.100.6.2.1' if i==1 else '1.2.840.113635.100.6.11.1'
             b=b.add_extension(x509.UnrecognizedExtension(ObjectIdentifier(oid),b'\x05\x00'),False)

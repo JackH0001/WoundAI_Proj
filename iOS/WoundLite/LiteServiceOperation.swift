@@ -7,6 +7,13 @@ import Darwin
 // account enrollment, automatic background task or public UI is changed here.
 enum LiteServiceFailure: Error { case invalidState, conflict, busy, missingImage, invalidResponse }
 
+/// Account-aware transports return the subject that authorized this exact response.
+protocol LiteAccountBoundServiceTransport: LiteAuthenticatedTransport {
+    func verifyRecognitionAccount(_ expected: String, installation: String) async throws
+    func sendRecognition(_ request: URLRequest, installation: String, expectedAccount: String?) async throws
+        -> (data: Data, http: HTTPURLResponse, accountSHA256: String)
+}
+
 enum LiteServiceBytes {
     static func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
     static func hex(_ text: String, _ count: Int = 64) -> Bool {
@@ -29,11 +36,17 @@ struct LiteServiceResult: Codable, Equatable, Sendable {
     let wound_polygons: [[[Double]]]
     let confidence: Double
     let route: String
+    var student_output_contract: String? = nil
     func validate() throws {
         guard (1...8192).contains(image_w), (1...8192).contains(image_h), image_w*image_h <= 16_000_000,
               confidence.isFinite, (0...1).contains(confidence), (1...64).contains(route.count),
               wound_polygons.count <= 32, wound_polygons.reduce(0, { $0+$1.count }) <= 512 else {
             throw LiteServiceFailure.invalidResponse
+        }
+        if let contract = student_output_contract {
+            guard (1...128).contains(contract.utf8.count),
+                  contract.range(of: #"\A[a-z0-9][a-z0-9._/-]*\z"#, options: .regularExpression) != nil
+            else { throw LiteServiceFailure.invalidResponse }
         }
         for polygon in wound_polygons {
             guard (3...512).contains(polygon.count) else { throw LiteServiceFailure.invalidResponse }
@@ -154,9 +167,15 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
     var revision = 1
     var next = "prepare"
     var note = "local"
+    var lastRequestWasOffline: Bool?
+    var attemptLimitReached: Bool?
+    enum SuccessQuotaState: String, Codable { case pending, used }
+    var successQuotaState: SuccessQuotaState?
     var retryAt: Double = 0
     var day: Int?
     var requestDigest: String?
+    /// Learned only from an admitted prepare response. Existing journals decode as nil.
+    var accountSHA256: String?
     var reply: LiteServiceReply?
     var recoveryHistory: [LiteServiceRecoveryCheckpoint]? = nil
     var resubmitRequested: Bool? = nil
@@ -164,13 +183,17 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
     func validate() throws {
         guard [1,2].contains(version), LiteServiceBytes.hex(captureID,32), LiteServiceBytes.hex(operation,32),
               LiteServiceBytes.hex(imageSHA256), revision > 0,
+              accountSHA256.map({ LiteServiceBytes.hex($0) }) ?? true,
               LiteAttestClient.matches(installation,"[A-Za-z0-9_-]{1,128}"),
               (1...8192).contains(width), (1...8192).contains(height), width*height <= 16_000_000,
               ["prepare","run","status","recover","resubmit","none"].contains(next),
-              ["local","checking","ready","pending","confirmed","quota","capacity","unavailable","review","expired","rejected","missingImage","recovering","reservationExpired","cancelled","resubmitting"].contains(note),
+              ["local","checking","ready","pending","confirmed","quota","capacity","unavailable","review","expired","rejected","missingImage","recovering","reservationExpired","cancelled","resubmitting","resultTooComplex"].contains(note),
               retryAt.isFinite, retryAt >= 0, day == nil || day! >= 0,
               requestDigest == nil || LiteServiceBytes.hex(requestDigest!) else { throw LiteServiceFailure.invalidState }
         let history=recoveryHistory ?? []
+        if accountSHA256 != nil, reply?.receipt == nil, !history.contains(where: { $0.priorReply?.receipt != nil }) {
+            throw LiteServiceFailure.invalidState
+        }
         if version == 1 {
             guard history.isEmpty, operation == captureID else { throw LiteServiceFailure.invalidState }
         } else {
@@ -205,18 +228,32 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
                 throw LiteServiceFailure.invalidState
             }
         }
+        if note == "resultTooComplex" {
+            guard next == "none", reply?.state != "completed" else { throw LiteServiceFailure.invalidState }
+        }
         if note == "confirmed" { guard next == "none", reply?.state == "completed" else { throw LiteServiceFailure.invalidState } }
     }
 
     var message: String {
         switch note {
         case "confirmed": return "辨識結果與回執已核對；尚未存入量測紀錄或研究庫。"
-        case "quota": return "今日辨識額度已用完或已有工作待確認；保留原照片，待額度可用後核對。"
+        case "quota":
+            if attemptLimitReached == true { return "今日辨識嘗試已達上限，請在額度重置後繼續使用這張照片。" }
+            switch successQuotaState {
+            case .pending: return "其他辨識暫時占用名額。名額釋出後，可繼續辨識這張照片。"
+            case .used: return "今天的辨識額度已用完。額度可用時，可繼續辨識這張照片。"
+            case nil: return "這次辨識正在等候可用額度，原照片已保留。"
+            }
         case "capacity": return "服務忙碌，稍後核對原工作；不需重新拍攝。"
         case "pending", "checking": return "正在核對原辨識工作；尚未確認完成，不會另建一筆重複辨識。"
         case "recovering": return "原工作已核對並保留；正在恢復跨日辨識，不需重新拍攝。"
-        case "unavailable": return "連線或裝置驗證尚未完成；下次先查原工作，不會直接重傳照片。"
+        case "unavailable":
+            if lastRequestWasOffline == true {
+                return "上次連線時裝置離線。照片已保存，連網後可查詢同一筆，或先在手機圈選。"
+            }
+            return "個人服務暫時無法確認結果。照片已保存，可稍後查詢同一筆，或在手機圈選傷口。"
         case "expired": return "雲端結果查詢期限已過；本機資料保留，需核對後再處理。"
+        case "resultTooComplex": return "雲端無法傳回完整輪廓，這次未計入成功辨識次數。可在這張照片上圈選，或重新拍攝。"
         case "rejected": return "本次影像未通過檢查；未執行辨識，原資料保留。"
         case "reservationExpired": return "預留已逾時，尚未執行辨識。原照片保留；按「重新送出」後將重新檢查額度。"
         case "resubmitting": return "已記錄重新送出的選擇，正在核對原工作與可用額度。"
@@ -344,20 +381,45 @@ actor LiteServiceClient {
         guard !busy else { throw LiteServiceFailure.busy }; busy=true; defer { busy=false }
         var (previous,r)=try await read(id)
         guard r.canResubmit, try await transport.installation() == r.installation else { throw LiteServiceFailure.invalidState }
+        if let expected = r.accountSHA256 {
+            guard let verified = transport as? any LiteAccountBoundServiceTransport else { throw LiteServiceFailure.conflict }
+            try await verified.verifyRecognitionAccount(expected, installation: r.installation)
+        }
         r.resubmitRequested=true;r.next="resubmit";r.note="resubmitting";r.retryAt=0
         try await save(&r,previous:&previous);return r
     }
 
-    func resume(_ id: String, loadJPEG: @Sendable (String) async throws -> Data?) async throws -> LiteServiceRecord {
+    private struct FailureDisposition: Decodable {
+        let retry_action: String
+        let keep_local: Bool
+    }
+
+    /// Only an intermediary's response is ambiguous. An application error or malformed
+    /// receipt stays on the existing review path, even if its HTTP status is the same.
+    private static func isGatewayFailure(_ response: HTTPURLResponse, body: Data) -> Bool {
+        guard [404, 502, 504].contains(response.statusCode),
+              let text = String(data: body, encoding: .utf8) else { return false }
+        let mime = response.mimeType?.lowercased()
+        guard mime == nil || mime == "text/html" || mime == "text/plain" else { return false }
+        let message = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if message.isEmpty || message.hasPrefix("<html") || message.hasPrefix("<!doctype html") { return true }
+        if mime == "text/plain", message.first?.isLetter == true,
+           (try? JSONSerialization.jsonObject(with: body, options: .fragmentsAllowed)) == nil { return true }
+        return ["not found", "bad gateway", "gateway timeout"].contains(message)
+    }
+
+    func resume(_ id: String, statusOnly: Bool = false,
+                loadJPEG: @Sendable (String) async throws -> Data?) async throws -> LiteServiceRecord {
         guard !busy else { throw LiteServiceFailure.busy }; busy=true; defer { busy=false }
         var (previous,r)=try await read(id)
         guard try await transport.installation() == r.installation else { throw LiteAttestFailure.identityMismatch }
+        guard !statusOnly || r.next == "status" else { return r }
         if r.retryAt > now().timeIntervalSince1970+3600 {
             r.retryAt=now().timeIntervalSince1970+3600;try await save(&r,previous:&previous)
         }
         guard r.next != "none", r.retryAt <= now().timeIntervalSince1970 else { return r }
         // One explicit resume has a bounded prepare/run or status/prepare/run chain.
-        for _ in 0..<3 {
+        for _ in 0..<(statusOnly ? 1 : 3) {
             let action=r.next
             var request=URLRequest(url:origin.appendingPathComponent("api/v1/lite/service/"+action))
             request.httpMethod="POST"
@@ -380,14 +442,26 @@ actor LiteServiceClient {
                 request.setValue("application/json",forHTTPHeaderField:"Content-Type")
             }
             // Durable uncertainty marker BEFORE any media/security network work.
+            r.lastRequestWasOffline = nil
             r.next="status";r.note="checking";try await save(&r,previous:&previous)
-            let response: (Data,HTTPURLResponse)
-            do { response=try await transport.send(request,installation:r.installation) }
+            let data: Data, http: HTTPURLResponse, account: String?
+            do {
+                if let verified = transport as? any LiteAccountBoundServiceTransport {
+                    let reply = try await verified.sendRecognition(request, installation: r.installation, expectedAccount: r.accountSHA256)
+                    guard LiteServiceBytes.hex(reply.accountSHA256),
+                          r.accountSHA256 == nil || r.accountSHA256 == reply.accountSHA256 else { throw LiteServiceFailure.conflict }
+                    (data, http, account) = (reply.data, reply.http, reply.accountSHA256)
+                } else {
+                    guard r.accountSHA256 == nil else { throw LiteServiceFailure.conflict }
+                    (data, http) = try await transport.send(request, installation: r.installation)
+                    account = nil
+                }
+            }
             catch {
+                if (error as? URLError)?.code == .notConnectedToInternet { r.lastRequestWasOffline = true }
                 r.note="unavailable";r.retryAt=now().timeIntervalSince1970+5
                 try await save(&r,previous:&previous); return r
             }
-            let (data,http)=response
             guard http.url == request.url, data.count <= 32_768 else {
                 r.note="review";r.next="none";try await save(&r,previous:&previous);return r
             }
@@ -396,6 +470,7 @@ actor LiteServiceClient {
                     let reply=try JSONDecoder().decode(LiteServiceReply.self,from:data)
                     try reply.validate(for:r)
                     guard (http.statusCode == 202) == (reply.state == "pending") else { throw LiteServiceFailure.invalidResponse }
+                    if action == "prepare", reply.receipt != nil, r.accountSHA256 == nil { r.accountSHA256 = account }
                     if reply.state == "new_operation_required" {
                         guard let auth=reply.recovery, (r.recoveryHistory?.count ?? 0) < 8 else { throw LiteServiceFailure.invalidResponse }
                         let checkpoint=LiteServiceRecoveryCheckpoint(authorization:auth,priorRevision:r.revision,
@@ -424,12 +499,25 @@ actor LiteServiceClient {
             if http.statusCode == 404, error?["error"] as? String == "lite_operation_unknown", r.requestDigest == nil {
                 r.next="prepare";r.note="local";try await save(&r,previous:&previous);continue
             }
-            if http.statusCode == 429 || http.statusCode == 503 || http.statusCode == 401 || http.statusCode == 403 {
+            if [401, 403, 429, 503].contains(http.statusCode) || Self.isGatewayFailure(http, body: data) {
                 let wait=Double(http.value(forHTTPHeaderField:"Retry-After") ?? "") ?? 5
                 r.retryAt=now().timeIntervalSince1970+min(3600,max(1,wait.isFinite ? wait : 5))
                 r.note=http.statusCode == 429 ? (error?["error"] as? String == "lite_usage_limit" ? "quota":"capacity") : "unavailable"
+                r.attemptLimitReached = r.note == "quota" && error?["reason"] as? String == "attempt_quota" ? true : nil
+                if r.note == "quota", error?["reason"] as? String == "success_quota",
+                   let state = error?["success_quota_state"] as? String {
+                    r.successQuotaState = LiteServiceRecord.SuccessQuotaState(rawValue: state)
+                } else {
+                    r.successQuotaState = nil
+                }
                 // A rejected initial prepare can be retried with the same id/hash.
                 if http.statusCode == 429, action == "prepare", r.requestDigest == nil { r.next="prepare" }
+            } else if http.statusCode == 422, error?["error"] as? String == "lite_result_too_complex",
+                      ["prepare", "run", "status"].contains(action) {
+                let disposition = try? JSONDecoder().decode(FailureDisposition.self, from: data)
+                r.next = "none"
+                r.retryAt = 0
+                r.note = disposition?.retry_action == "none" && disposition?.keep_local == true ? "resultTooComplex" : "review"
             } else {
                 r.next="none";r.note=http.statusCode == 410 ? "expired" : http.statusCode == 422 ? "rejected" : "review"
             }

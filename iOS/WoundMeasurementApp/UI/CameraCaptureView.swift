@@ -15,6 +15,8 @@ struct CameraCaptureView: View {
     /// 取景提示。預設是醫療版的貼紙構圖文案；WoundLite（免貼紙）傳入自己的版本。
     /// 放在 closure 參數之前且帶預設值——既有呼叫端（省略此參數）不需改動。
     var hintText: String = "請讓校正貼紙**完整入鏡且清晰**（約佔畫面 1/6）——沒有貼紙就沒有尺度，面積無法回推。"
+    /// Display only. The medical caller keeps its existing wording; Lite supplies its own copy.
+    var displayText: (String) -> String = { $0 }
     let onCapture: (UIImage, DepthCapture?) -> Void
     let onCancel: () -> Void
 
@@ -32,7 +34,7 @@ struct CameraCaptureView: View {
                     .strokeBorder(cam.focusing ? Color.yellow : Color.green, lineWidth: 2)
                     .frame(width: 130, height: 130)
                     .overlay(alignment: .bottom) {
-                        Text(cam.focusing ? "對焦中…" : "✓ 完成對焦")
+                        Text(displayText(cam.focusing ? "對焦中…" : "✓ 完成對焦"))
                             .font(.caption2).bold()
                             .foregroundStyle(cam.focusing ? Color.yellow : Color.green)
                             .padding(.horizontal, 8).padding(.vertical, 3)
@@ -44,7 +46,7 @@ struct CameraCaptureView: View {
             }
             VStack {
                 if let e = cam.error {
-                    Text(e)
+                    Text(displayText(e))
                         .font(.footnote).foregroundStyle(.white)
                         .padding(10)
                         .background(Color.red.opacity(0.7))
@@ -58,9 +60,9 @@ struct CameraCaptureView: View {
                     .cornerRadius(8)
                     .padding(.horizontal)
                 // WoundAI3D：深度擷取狀態常駐顯示——「有沒有收到深度」不該事後才發現。
-                Text(cam.depthSupported
+                Text(displayText(cam.depthSupported
                      ? "📐 LiDAR 深度：擷取中（隨照片加密保存，供 3D 重建研究）"
-                     : "📐 此裝置無 LiDAR 深度（照片照常可量測）")
+                     : "📐 此裝置無 LiDAR 深度（照片照常可量測）"))
                     .font(.caption2)
                     .foregroundStyle(cam.depthSupported ? .green : .white.opacity(0.7))
                     .padding(6)
@@ -68,15 +70,16 @@ struct CameraCaptureView: View {
                     .cornerRadius(6)
                 #if DEBUG
                 if !CameraModel.requestsFilteredDepth() {
-                    Text("深度診斷：停用拍攝濾波（只供合成模型）")
+                    Text(displayText("深度診斷：停用拍攝濾波（只供合成模型）"))
                         .font(.caption).foregroundStyle(.yellow)
                         .padding(6).background(Color.black.opacity(0.7))
                 }
                 #endif
                 Spacer()
                 HStack {
-                    Button("取消") { cam.stop(); onCancel() }
+                    Button(displayText("取消")) { cam.stop(); onCancel() }
                         .buttonStyle(.bordered).tint(.white)
+                        .accessibilityIdentifier("camera.cancel")
                     Spacer()
                     // 快門：拍到後先 stop 再回呼，避免關閉動畫期間 session 還在跑。
                     Button {
@@ -91,9 +94,11 @@ struct CameraCaptureView: View {
                             .background(Circle().fill(Color.white.opacity(cam.ready ? 0.85 : 0.2)))
                     }
                     .disabled(!cam.ready)
+                    .accessibilityLabel(displayText("拍照"))
+                    .accessibilityIdentifier("camera.shutter")
                     Spacer()
                     // 佔位讓快門置中
-                    Button("取消") {}.buttonStyle(.bordered).hidden()
+                    Button(displayText("取消")) {}.buttonStyle(.bordered).hidden()
                 }
                 .padding(.horizontal, 24)
                 .padding(.bottom, 30)

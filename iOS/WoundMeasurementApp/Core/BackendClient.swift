@@ -600,6 +600,7 @@ actor BackendClient {
         var rawPolyCount: Int
         var quota: LiteCloudQuota? = nil
         var storageReceipt: LiteStorageReceipt? = nil
+        var studentOutputContract: String? = nil
     }
 
     /**
@@ -699,7 +700,8 @@ actor BackendClient {
                                  rawPolyCount: rawCount,
                                  quota: LiteCloudQuota.parse(j["quota"].raw),
                                  storageReceipt: LiteStorageReceipt.parse(j["storage_receipt"].raw, rawPacket: rawCapture,
-                                     installationID: anonId, captureID: iid))
+                                     installationID: anonId, captureID: iid),
+                                 studentOutputContract: j["student_output_contract"].string)
     }
 
     /**

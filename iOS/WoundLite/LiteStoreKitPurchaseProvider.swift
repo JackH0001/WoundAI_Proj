@@ -38,11 +38,13 @@ import StoreKit
         return offer
     }
 
-    func purchase(offer: LiteMonthlyOffer, token: UUID) async throws -> LitePurchaseOutcome {
+    func purchase(offer: LiteMonthlyOffer, token: UUID, checkAccount: @MainActor () throws -> Void) async throws -> LitePurchaseOutcome {
         guard await Storefront.current?.id == offer.storefront,
               let quote = quotedProduct, quote.offer == offer else {
             throw LitePurchaseFailure.offerChanged
         }
+        // Storefront lookup can suspend while the user signs out or switches accounts.
+        try checkAccount()
         switch try await quote.item.purchase(options:[.appAccountToken(token)]) {
         case .success(let r):return .completed(try event(r))
         case .pending:return .pending

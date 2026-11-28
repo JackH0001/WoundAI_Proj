@@ -1,0 +1,20 @@
+// Device-local optional reminder. No health data in notification content.
+"本機紀錄提醒" = "Local record reminder";
+"您設定的紀錄時間到了。有需要時可開啟 App。" = "It's the time you chose for a record reminder. Open the app if needed.";
+"依您的需要設定每天一次的紀錄提醒。這不是換藥、治療或就醫時程建議。" = "Choose a once-daily record reminder if useful. This is not a schedule for dressing changes, treatment or medical visits.";
+"只在這部裝置提醒，不需登入或研究同意，不上傳資料、不扣辨識額度。通知不包含傷口照片、部位或面積。" = "Reminders stay on this device. No sign-in, research consent, uploads or recognition credits are needed. Notifications contain no wound photos, locations or areas.";
+"提醒時間" = "Reminder time";
+"每天" = "Every day";
+"儲存提醒時間" = "Save reminder time";
+"啟用每天提醒" = "Enable daily reminder";
+"關閉提醒" = "Turn off reminder";
+"狀態" = "Status";
+"正在核對提醒…" = "Checking reminder…";
+"已保存時間" = "Saved time";
+"開啟 iOS 通知設定" = "Open iOS notification settings";
+"提醒已關閉。" = "Reminders are off.";
+"已設定每天提醒；時間以這部裝置的當地時間為準。" = "Daily reminder scheduled using this device's local time.";
+"系統通知未允許。請到 iOS 設定允許通知，再回來儲存提醒。" = "Notifications are not allowed. Enable them in iOS Settings, then return here and save the reminder.";
+"提醒排程尚未確認。請檢查時間後重新儲存。" = "The reminder schedule is not confirmed. Check the time and save it again.";
+"提醒設定無法保存或讀取。請解鎖後再試；原傷口紀錄不受影響。" = "Reminder settings could not be saved or read. Unlock the device and try again. Existing wound records are unaffected.";
+"專注模式、通知摘要及系統設定可能延後或隱藏提醒；請勿依賴通知安排必要照護。更換 App 語言後，可重新儲存以更新通知文字。" = "Focus, notification summaries and system settings may delay or hide reminders. Do not rely on notifications for essential care. After changing the app language, save again to update notification text.";

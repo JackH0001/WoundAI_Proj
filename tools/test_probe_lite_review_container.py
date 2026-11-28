@@ -21,5 +21,10 @@ class ExternalProbeTests(unittest.TestCase):
  def test_wrong_application_root_is_not_silently_accepted(self):
   result=subprocess.run([sys.executable,'-I','-B',str(self.external/'probe.py'),'--application-root',str(self.root)],cwd=self.app,capture_output=True,text=True)
   self.assertNotEqual(result.returncode,0);self.assertIn('isolated application root missing',result.stderr)
+ def test_release_probe_requires_provenance_before_starting_factories(self):
+  result=subprocess.run([sys.executable,'-I','-B',str(self.external/'probe.py'),'--application-root',str(self.app),'--require-provenance'],cwd=self.root,capture_output=True,text=True)
+  self.assertNotEqual(result.returncode,0)
+  self.assertIn('unexpected or missing package file',result.stderr)
+  self.assertNotIn('PASS:',result.stdout)
 
 if __name__=='__main__':unittest.main(verbosity=2)

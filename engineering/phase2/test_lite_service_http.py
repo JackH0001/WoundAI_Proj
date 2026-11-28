@@ -13,7 +13,7 @@ from lite_attest_http import install_lite_attest
 from lite_attest_budget import RequestBudget,BudgetExceeded
 from lite_privacy_state import PrivacyState
 from lite_attest_state import SQLiteStateStore,StateUnavailable
-from lite_usage_ledger import UsageLedger,free_grant,digest,UsageConflict,UsageLimit
+from lite_usage_ledger import DailyGrant,UsageLedger,free_grant,digest,UsageConflict,UsageLimit
 from lite_service_operations import ServiceOperations,ServiceAccounts,RasterInference,RESULT_TTL
 from lite_service_http import PREFIX
 from test_lite_signed_client import SignedServiceClient
@@ -47,6 +47,81 @@ class ServiceHTTPTests(SignedServiceClient, unittest.TestCase):
     def quota(self):
         return self.ledger.snapshot(self.subject,self.e.now//86400,free_grant(self.subject,self.e.now))
 
+    def use_complex_raster(self):
+        import numpy as np
+        def model(rgb):
+            self.model_calls+=1
+            mask=np.zeros(rgb.shape[:2],np.uint8)
+            for y in range(1,52,10):
+                for x in range(1,52,10):
+                    mask[y:y+9,x:x+9]=1
+            return mask
+        self.inference.model=model
+
+    def test_valid_raster_over_component_bound_replays_terminal_without_charge(self):
+        from PIL import Image
+        photo=io.BytesIO()
+        Image.new('RGB',(2048,1536),'white').save(photo,format='JPEG')
+        self.f.jpeg=photo.getvalue();self.image_hash=hashlib.sha256(self.f.jpeg).hexdigest()
+        self.use_complex_raster()
+        self.assertEqual(self.json_request('prepare').json['state'],'ready')
+        expected=dict(error='lite_result_too_complex',retry_action='none',keep_local=True)
+        for response in (self.run_request(),self.json_request('status'),self.run_request(),self.json_request('prepare')):
+            self.assertEqual((response.status_code,response.json),(422,expected))
+        row=self.ops.load(self.subject,f'{1:032x}')[1]
+        self.assertNotIn('wound_polygons',row['result'])
+        self.assertEqual(self.ledger.receipt(self.ops.ticket(self.subject,row))['outcome'],'failed')
+        quota=self.quota()
+        self.assertEqual((self.model_calls,quota['used'],quota['pending'],quota['attempts']),(1,0,0,1))
+
+    def test_lost_complexity_marker_ack_then_concurrent_status_settles_original_failure(self):
+        from lite_service_operations import ResultTooComplex
+        self.use_complex_raster();self.json_request('prepare')
+        write=self.ops.store.compare_exchange
+        def lost(*args):
+            self.assertTrue(write(*args))
+            raise StateUnavailable('failure marker ack lost')
+        with patch.object(self.ops.store,'compare_exchange',side_effect=lost):
+            self.assertEqual(self.run_request().status_code,503)
+        self.assertEqual(self.quota()['pending'],1)
+        barrier=threading.Barrier(4)
+        def replay(_):
+            barrier.wait(5)
+            with self.assertRaises(ResultTooComplex):
+                self.ops.status(self.owner,f'{1:032x}')
+        with ThreadPoolExecutor(max_workers=4) as pool:list(pool.map(replay,range(4)))
+        self.assertEqual((self.model_calls,self.quota()['used'],self.quota()['pending']),(1,0,0))
+        self.assertEqual(self.run_request().status_code,422)
+
+    def test_lost_failed_ledger_ack_replays_same_receipt(self):
+        self.use_complex_raster();self.json_request('prepare')
+        settle=self.ledger.settle
+        def lost(*args):
+            self.assertEqual(settle(*args)['outcome'],'failed')
+            raise StateUnavailable('settlement ack lost')
+        with patch.object(self.ledger,'settle',side_effect=lost):
+            self.assertEqual(self.run_request().status_code,503)
+        self.assertEqual(self.json_request('status').status_code,422)
+        self.assertEqual((self.model_calls,self.quota()['used'],self.quota()['pending']),(1,0,0))
+
+    def test_new_raster_distinguishes_valid_excess_from_invalid_or_untrusted_geometry(self):
+        from lite_result_contract import RasterResultTooComplex, validate_result
+        base=dict(image_w=2048,image_h=1536,route='student',confidence=.01)
+        triangle=[[0,0],[2,0],[0,2]]
+        many_points=[[n,n] for n in range(513)]
+        verbose_points=[[i+.123456789012345,i+.987654321098765] for i in range(400)]
+        for polygons in ([triangle]*33,[many_points],[many_points[:260]]*2,[verbose_points]):
+            with self.assertRaises(RasterResultTooComplex):
+                validate_result(dict(base,wound_polygons=polygons),fresh_raster=True)
+            with self.assertRaises(StateUnavailable) as stored:
+                validate_result(dict(base,wound_polygons=polygons))
+            self.assertNotIsInstance(stored.exception,RasterResultTooComplex)
+        for bad in ([triangle]*33+[[[0,0],[1,1],[-1,0]]], [triangle]*33+[[]]):
+            with self.assertRaises(StateUnavailable) as malformed:
+                validate_result(dict(base,wound_polygons=bad),fresh_raster=True)
+            self.assertNotIsInstance(malformed.exception,RasterResultTooComplex)
+        self.assertEqual(validate_result(dict(base,wound_polygons=[triangle]*32),fresh_raster=True)['wound_polygons'],[triangle]*32)
+
     def test_signed_prepare_execute_and_receipt_without_research_media(self):
         prepared=self.json_request('prepare');self.assertEqual(prepared.json['state'],'ready')
         result=self.run_request();self.assertEqual(result.json['state'],'completed');self.assertEqual(self.model_calls,1)
@@ -57,8 +132,20 @@ class ServiceHTTPTests(SignedServiceClient, unittest.TestCase):
         self.assertNotIn(self.f.jpeg,payload);self.assertNotIn(b'raw_depth',payload)
         self.assertEqual(self.quota()['used'],1)
 
+    def test_confirmed_mask_version_survives_receipt_replay(self):
+        contract = 'student-onnx-logits-sigmoid-before-resize/v1'
+        model = self.inference.model
+        with patch.object(self.inference, 'model', side_effect=lambda rgb: (
+                model(rgb), {'route': 'student', 'student_output_contract': contract})):
+            first = self.complete().json
+        self.assertEqual(first['result']['student_output_contract'], contract)
+        self.assertEqual(self.json_request('status').json, first)
+        self.assertEqual(self.model_calls, 1)
+        self.assertEqual(self.quota()['used'], 1)
+
     def test_completed_readback_needs_no_image_or_entitlement_query(self):
         first=self.complete()
+        self.assertNotIn('student_output_contract', first.json['result'])
         with patch.object(self.accounts,'grant',side_effect=AssertionError('do not reauthorize a receipt')):
             repeat=self.json_request('status');self.assertEqual(repeat.json,first.json)
             prepared=self.json_request('prepare');self.assertEqual(prepared.json,first.json)
@@ -114,10 +201,44 @@ class ServiceHTTPTests(SignedServiceClient, unittest.TestCase):
         def prepare(n):
             start.wait(5)
             try:return self.ops.prepare(self.owner,f'{n:032x}',self.image_hash)['state']
-            except UsageLimit:return 'quota'
+            except UsageLimit as exc:
+                self.assertEqual((exc.reason, exc.success_quota_state, exc.retry_after),
+                                 ('success_quota', 'pending', 30))
+                return 'quota'
         with ThreadPoolExecutor(max_workers=8) as pool:states=list(pool.map(prepare,range(1,9)))
         self.assertEqual(states.count('ready'),2);self.assertEqual(states.count('quota'),6)
         self.assertEqual(self.quota()['pending'],2);self.assertEqual(self.model_calls,0)
+
+    def test_pending_allowance_reopens_for_the_original_photo_after_release(self):
+        self.complete(1)
+        self.assertEqual(self.json_request('prepare', 2).status_code, 200)
+        blocked = self.json_request('prepare', 3)
+        self.assertEqual(blocked.status_code, 429)
+        self.assertEqual(blocked.json.get('success_quota_state'), 'pending')
+        self.assertEqual(blocked.headers['Retry-After'], '30')
+        self.assertEqual(self.quota()['attempts'], 2)
+        ticket = self.ops.ticket(self.subject, self.ops.load(self.subject, f'{2:032x}')[1])
+        self.ledger.cancel_unstarted(ticket, digest('synthetic-cancellation'))
+        self.e.now += 30
+        receipt = self.complete(3)
+        self.assertEqual(self.run_request(3).json, receipt.json)
+        self.assertEqual((self.model_calls, self.quota()['used']), (2, 2))
+
+    def test_spent_free_allowance_rechecks_after_upgrade_without_changing_operation(self):
+        self.complete(1)
+        self.complete(2)
+        blocked = self.json_request('prepare', 3)
+        self.assertEqual(blocked.status_code, 429)
+        self.assertEqual(blocked.json.get('success_quota_state'), 'used')
+        self.assertEqual(blocked.json['retry_after'], 30)
+        self.assertEqual(self.quota()['attempts'], 2)
+        self.e.now += 30
+        plus = DailyGrant(self.subject, 10, digest('synthetic-plus'), self.e.now, self.e.now + 30)
+        with patch.object(self.accounts, 'grant', return_value=plus):
+            receipt = self.complete(3)
+            self.assertEqual(self.run_request(3).json, receipt.json)
+        self.assertEqual(self.ledger.snapshot(self.subject, self.e.now // 86400, plus)['remaining'], 7)
+        self.assertEqual(self.model_calls, 3)
 
     def test_concurrent_same_prepare_preserves_one_ticket(self):
         start=threading.Barrier(8)
@@ -136,6 +257,69 @@ class ServiceHTTPTests(SignedServiceClient, unittest.TestCase):
         self.assertEqual(blocked.status_code,410)
         self.assertTrue(self.privacy._load(self.owner)[1]['withdrawn'])
         self.assertEqual(self.privacy._load(self.owner)[1]['writers'],[])
+
+    def test_busy_worker_preserves_the_same_ticket_while_control_requests_finish(self):
+        for n in (1, 2):
+            self.assertEqual(self.json_request('prepare', n).json['state'], 'ready')
+        entered, release = threading.Event(), threading.Event()
+        infer = self.inference.infer
+        def hold(rgb):
+            entered.set()
+            self.assertTrue(release.wait(10))
+            return infer(rgb)
+        with ThreadPoolExecutor(max_workers=1) as pool, patch.object(self.inference, 'infer', hold):
+            task = pool.submit(self.ops.run, self.owner, f'{1:032x}', self.f.jpeg)
+            try:
+                self.assertTrue(entered.wait(10))
+                self.assertEqual(self.run_request(1).status_code, 202)
+                busy = self.run_request(2)
+                self.assertEqual((busy.status_code, busy.json['error'], busy.json['retry_action']),
+                                 (429, 'lite_model_busy', 'status'))
+                self.assertEqual(busy.headers['Retry-After'], '5')
+                self.assertTrue(busy.json['keep_local'])
+                status = self.json_request('status', 2)
+                self.assertEqual((status.json['state'], status.json['receipt']['outcome']), ('ready', 'reserved'))
+                self.assertEqual((self.quota()['attempts'], self.quota()['used']), (2, 0))
+                path = '/api/v1/lite/data/' + self.owner
+                self.assertEqual(self.client.delete(path, headers=self.headers(path, b'', '',
+                    method='DELETE', purpose='withdraw')).status_code, 200)
+            finally:
+                release.set()
+            self.assertEqual(task.result()['receipt']['outcome'], 'succeeded')
+        result = self.run_request(2)
+        self.assertEqual(result.json['receipt']['outcome'], 'succeeded')
+        self.assertEqual(self.run_request(2).json, result.json)
+        self.assertEqual((self.quota()['attempts'], self.quota()['used'], self.model_calls), (2, 2, 2))
+
+    def test_model_failure_releases_worker_without_rerunning_uncertain_work(self):
+        for n in (1, 2):
+            self.assertEqual(self.json_request('prepare', n).json['state'], 'ready')
+        with patch.object(self.inference, 'infer', side_effect=StateUnavailable('interrupted')):
+            self.assertEqual(self.run_request(1).status_code, 503)
+        self.assertEqual(self.run_request(1).status_code, 202)
+        self.assertEqual(self.run_request(2).json['receipt']['outcome'], 'succeeded')
+        self.assertEqual((self.quota()['used'], self.model_calls), (1, 1))
+
+    def test_settlement_between_operation_and_receipt_reads_returns_original_result(self):
+        self.json_request('prepare')
+        operation=f'{1:032x}'
+        earlier=self.ops._require(self.subject,operation)
+        result=self.run_request().json
+        latest=self.ops._require(self.subject,operation)
+        with patch.object(self.ops,'_require',side_effect=[earlier,latest]) as read:
+            self.assertEqual(self.json_request('status').json,result)
+            self.assertEqual(read.call_count,2)
+        self.assertEqual((self.model_calls,self.quota()['used']),(1,1))
+
+    def test_terminal_receipt_alone_cannot_recreate_an_unavailable_result(self):
+        self.json_request('prepare')
+        earlier=self.ops._require(self.subject,f'{1:032x}')
+        self.run_request()
+        with patch.object(self.ops,'_require',return_value=earlier):
+            response=self.json_request('status')
+            self.assertEqual(response.status_code,503)
+            self.assertEqual(response.json['error'],'lite_operation_unconfirmed')
+        self.assertEqual((self.model_calls,self.quota()['used']),(1,1))
 
     def test_unprovisioned_authenticated_device_cannot_choose_account(self):
         self.ops.accounts=ServiceAccounts(SQLiteStateStore(self.root/'empty-accounts.sqlite'))

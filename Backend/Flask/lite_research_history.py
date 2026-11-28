@@ -55,16 +55,25 @@ class ResearchMediaHistory(ExactGenerationHistory):
         b=self.w.c.audit.load(key('account-research-node-outcome',digest(intent)))
         out=None if b is None else b[1]
         if (a is None or a[1]!=intent or type(out) is not dict
-                or set(out)!={'v','intent_sha256','state','retirement_sha256','media_disposition','account_deleted'}
-                or type(out['v']) is not int or out['v']!=1 or out['intent_sha256']!=digest(intent)
+                or set(out)!={'v','intent_sha256','state','retirement_sha256','media_disposition','account_deleted','research_owner','association_sha256'}
+                or type(out['v']) is not int or out['v']!=2 or out['intent_sha256']!=digest(intent)
                 or out['media_disposition']!='not_started' or out['account_deleted'] is not False
                 or out['state'] not in ('linked_admission_closed','unresolved_installation_format','unresolved_registration')):
             raise StateUnavailable('original research association proof required')
         if out['state']!='linked_admission_closed':
-            if out['retirement_sha256'] is not None:raise StateUnavailable('unresolved retirement contradiction')
+            if any(out[k] is not None for k in ('retirement_sha256','research_owner','association_sha256')):raise StateUnavailable('unresolved retirement contradiction')
             return n,None
-        bound=self.w._bound(p['media'],n['installation']);owner=self.w._owner(bound)
-        retired=self.w.r._state(n['installation'])[3]
+        if self.w.c.associations is None:
+            raise StateUnavailable('verified research association required')
+        account=self.w.d.bridge.registry.registration(n['installation'])
+        subject,proof=self.w.c.associations.resolve(self.w.d.scope,self.bucket.name,c['person'],
+            n['installation'],c['closure']['operation'],account['proof'])
+        if (out['research_owner'],out['association_sha256'])!=(subject,proof):
+            raise StateUnavailable('original research owner proof changed')
+        bound=self.w._bound(p['media'],subject);owner=self.w._owner(bound)
+        retired=self.w.r._state(subject)[3]
+        if retired is None or retired['association_sha256']!=proof:
+            raise StateUnavailable('original research retirement evidence differs')
         if owner is None or owner[1]['phase']!='done' or digest(retired)!=out['retirement_sha256']:
             raise StateUnavailable('original completed media closure required')
         return n,bound
@@ -83,7 +92,7 @@ class ResearchMediaHistory(ExactGenerationHistory):
             raise StateUnavailable('original consent epoch traversal proof required')
         event=self.w._event(b,dict(epoch=current,audit_sha256=visit['audit_sha256']))
         privacy=self.w.r.privacy.scoped(current)
-        if not privacy.is_withdrawn(n['installation']) or privacy.manifest._load(n['installation'])[1]['writers']:
+        if not privacy.is_withdrawn(b['owner']) or privacy.manifest._load(b['owner'])[1]['writers']:
             raise StateUnavailable('research admission or pending writers changed')
         return n,b,event
 
@@ -91,7 +100,7 @@ class ResearchMediaHistory(ExactGenerationHistory):
         if type(operation) is not dict or set(operation)!={'grant','epoch','kind','identifier'}:
             raise StateUnavailable('exact research slot required')
         p=self._plan(person);n,b,_=self._scope(p,operation['grant'],operation['epoch'])
-        ref=ObjectRef(n['installation'],operation['kind'],operation['identifier'])
+        ref=ObjectRef(b['owner'],operation['kind'],operation['identifier'])
         objects=self.w.r.privacy.scoped(operation['epoch']).objects;name=objects.name(ref)
         identity=dict(v=1,bound_sha256=digest(b),epoch=operation['epoch'],kind=ref.kind,identifier=ref.identifier)
         a=self.w.audit.load(key('research-media-object-intent',digest(identity)))
@@ -209,11 +218,11 @@ class ResearchMediaHistory(ExactGenerationHistory):
                              remaining=j['remaining']-1,unresolved=j['unresolved']+1)
             else:value.update(phase='select',epoch=b['initial_epoch'])
         elif j['phase']=='select':
-            n,_,_=self._scope(p,j['grant'],j['epoch'])
+            n,b,_=self._scope(p,j['grant'],j['epoch'])
             page=dict(plan_sha256=digest(p),round=j['round'],grant=j['grant'],epoch=j['epoch'],token=j['token'],step=j['step'])
             self.immutable(self.audit,key('research-history-page',digest([p,j['round'],j['grant'],j['epoch'],j['token']])),page)
             refs,following,last=self.w.r.privacy.scoped(j['epoch']).objects.page_refs(
-                n['installation'],token=j['token'],after=j['after'],limit=1)
+                b['owner'],token=j['token'],after=j['after'],limit=1)
             if refs:
                 ref=refs[0];op=dict(grant=j['grant'],epoch=j['epoch'],kind=ref.kind,identifier=ref.identifier)
                 self._bound(person,op)

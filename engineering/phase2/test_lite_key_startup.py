@@ -100,6 +100,49 @@ class StartupTests(unittest.TestCase):
             with self.subTest(field=field,value=value),self.assertRaises(ValueError):self.f.build()
             self.f.c.clear();self.f.c.update(c)
         self.assertEqual(self.f.providers.calls,[])
+    def test_external_beta_requires_its_own_profile_and_pinned_limits(self):
+        original = copy.deepcopy(self.f.c)
+        pilot = dict(original['manifest'], v=2, purpose='external-testflight',
+                     expires_at=self.f.now + 7 * 86400, max_creates=10)
+        profile = 'lite-key-startup/external-testflight-1'
+        invalid = [
+            ('lite-key-startup/1', pilot), (profile, original['manifest']),
+            (profile, dict(pilot, v=True)), (profile, dict(pilot, purpose='owner-only')),
+            (profile, dict(pilot, expires_at=pilot['expires_at'] + 1)),
+            (profile, dict(pilot, max_creates=11)), (profile, dict(pilot, max_creates=False)),
+        ]
+        for schema, plan in invalid:
+            with self.subTest(schema=schema, plan=plan):
+                self.f.c.update(schema=schema, manifest=plan, manifest_sha256=digest(plan))
+                with self.assertRaises(ValueError):
+                    self.f.build()
+        self.f.c.update(schema=profile, manifest=pilot, manifest_sha256=original['manifest_sha256'])
+        with self.assertRaises(ValueError):
+            self.f.build()
+        self.assertEqual(self.f.providers.calls, [])
+        self.assertEqual(self.f.kms.creates(), 0)
+
+    def test_delayed_first_login_after_worker_restart_obeys_absolute_expiry(self):
+        start = self.f.now
+        plan = dict(self.f.c['manifest'], v=2, purpose='external-testflight',
+                    expires_at=start + 7 * 86400, max_creates=2)
+        self.f.c.update(schema='lite-key-startup/external-testflight-1',
+                        manifest=plan, manifest_sha256=digest(plan))
+        self.f.now = start + 3 * 86400
+        saved = self.f.build().ensure(self.f.body)
+        self.assertEqual(saved['state'], 'ready')
+        self.f.now = plan['expires_at']
+        worker = self.f.build()
+        self.assertEqual(worker.ensure(self.f.body), saved)
+        other = 'e' * 64
+        self.f.life.initialize_new(other, existing_account=False)
+        node = self.f.life.reserve_grant(other, 'another-device', '2' * 32)
+        request = dict(self.f.body, person=other, grant=node['grant_id'],
+                       version=worker.provider.version(self.f.life.scope, other))
+        with self.assertRaisesRegex(StateUnavailable, 'window closed'):
+            worker.ensure(request)
+        self.assertEqual(self.f.kms.creates(), 1)
+
     def test_worker_cannot_share_web_identity(self):
         self.f.c['deployment']['service_account']=self.f.c['deployment']['invoker_account']
         with self.assertRaises(ValueError):self.f.build()
@@ -131,7 +174,8 @@ class StartupTests(unittest.TestCase):
     def test_actual_service_identity_checked_before_state_writes(self):
         self.f.providers.wrong_identity=True
         with self.assertRaises(ValueError):self.f.build()
-        self.assertEqual(rows(self.f.stores['audit']),[]);self.assertNotIn('keyring-get',self.f.providers.calls)
+        self.assertEqual(rows(self.f.stores['audit']),[])
+        self.assertEqual(self.f.providers.calls,['identity'])
     def test_missing_keyring_never_created(self):
         self.f.providers.ring_missing=True
         with self.assertRaises(StateUnavailable):self.f.build()

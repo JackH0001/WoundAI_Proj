@@ -140,6 +140,50 @@ class NativePurchaseTests(unittest.TestCase):
         c=self.h.context();self.h.a.now+=31
         with self.assertRaises(StateUnavailable):self.h.confirm(c)
         self.h.publish();self.h.confirm(c)
+    def test_second_device_restores_renewal_after_lost_receipt_without_moving_balances(self):
+        h = self.h
+        first = h.confirm()
+        h.f.use(3)
+        other = 'another-subscriber'
+        h.accounts.provision('other-device', other, '30000000-0000-4000-8000-000000000003', None, 'a'*64)
+        h.f.ledger.initialize_day(other, h.f.day, baseline_successes=1, baseline_attempts=1, manifest_sha256='f'*64)
+        initial_balances = rows(h.f.ledger.store)
+        original_link = rows(h.links.store)
+        original_receipts = rows(h.bridge.audit)
+        self.assertEqual(len(original_receipts), 1)
+
+        h.a.payload = dict(h.a.payload, transactionId='987654321')
+        renewal = h.a.sign(h.a.payload)
+        wrong = h.context('other-device')
+        with self.assertRaises(SubscriptionRejected):
+            h.bridge.confirm('other-device', wrong['operation'], renewal)
+        self.assertEqual(rows(h.bridge.audit), original_receipts)
+
+        context = h.context('second-device')
+        write = h.bridge.audit.compare_exchange
+        def lose_confirmation(*args):
+            write(*args)
+            raise StateUnavailable('simulated reply lost after durable receipt')
+
+        with patch.object(h.bridge.audit, 'compare_exchange', side_effect=lose_confirmation):
+            with self.assertRaises(StateUnavailable):
+                h.bridge.confirm('second-device', context['operation'], renewal)
+        receipts_after_loss = rows(h.bridge.audit)
+        self.assertEqual(len(receipts_after_loss), 2)
+        restored = h.bridge.confirm('second-device', context['operation'], renewal)
+        self.assertEqual(restored['transaction_id'], '987654321')
+        self.assertNotEqual(restored['transaction_id'], first['transaction_id'])
+        self.assertEqual(restored['original_transaction_id'], first['original_transaction_id'])
+        self.assertEqual(restored['account_sha256'], first['account_sha256'])
+        self.assertEqual(h.confirm(device='second-device'), restored)
+        self.assertEqual(rows(h.bridge.audit), receipts_after_loss)
+        self.assertEqual(rows(h.links.store), original_link)
+        self.assertEqual(rows(h.f.ledger.store), initial_balances)
+        for device, subject, used, limit in [('second-device', h.f.subject, 3, 10), ('other-device', other, 1, 2)]:
+            grant = h.f.grant(device)
+            self.assertEqual(grant.limit, limit)
+            self.assertEqual(h.f.ledger.snapshot(subject, h.f.day, grant)['used'], used)
+
     def test_restore_new_transaction_same_original_keeps_single_binding(self):
         h=self.h;h.confirm();before=rows(h.links.store)
         r=h.confirm(payload=dict(h.a.payload,transactionId='987654321'))
@@ -168,6 +212,63 @@ class PurchaseHTTPTests(unittest.TestCase):
         self.assertEqual(self.post('confirm',signed_transaction=signed).json,r.json)
         self.assertEqual(before,[rows(h.ledger.store),rows(h.privacy.store)])
         self.assertEqual(h.model_calls,0)
+    def test_ocsp_outage_and_recovery_preserve_same_purchase(self):
+        from datetime import datetime, timedelta, timezone
+        from types import SimpleNamespace
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.x509 import ocsp
+        from lite_subscription_authority import apple_verifier
+        from test_lite_subscription_authority import synthetic_chain
+
+        apple = self.p.a
+        endpoint = 'https://ocsp.example.invalid/status'
+        apple.keys, apple.certs = synthetic_chain(ocsp_url=endpoint)
+        root = apple.certs[0].public_bytes(serialization.Encoding.DER)
+        self.p.bridge.authority.verifier = apple_verifier(apple.a.policy, [root])
+        transaction = apple.sign()
+        h = self.h
+        self.assertEqual(self.post('context').status_code, 200)
+        kept = [self.p.bridge.store, h.ledger.store, h.privacy.store]
+        preserved = [rows(store) for store in kept]
+        untouched = [self.p.bridge.audit, self.p.links.store, self.p.links.audit, apple.store]
+        prior = [rows(store) for store in untouched]
+
+        def healthy_response(url, *, data, **options):
+            self.assertEqual(url, endpoint)
+            request = ocsp.load_der_ocsp_request(data)
+            child = next(i for i in (1, 2) if apple.certs[i].serial_number == request.serial_number)
+            issuer = apple.certs[child - 1]
+            now = datetime.now(timezone.utc)
+            response = (ocsp.OCSPResponseBuilder()
+                        .add_response(apple.certs[child], issuer, request.hash_algorithm,
+                                      ocsp.OCSPCertStatus.GOOD, now - timedelta(minutes=1),
+                                      now + timedelta(minutes=5), None, None)
+                        .responder_id(ocsp.OCSPResponderEncoding.HASH, issuer)
+                        .sign(apple.keys[child - 1], hashes.SHA256()))
+            return SimpleNamespace(status_code=200, content=response.public_bytes(serialization.Encoding.DER))
+
+        with patch('appstoreserverlibrary.signed_data_verifier.requests.post',
+                   return_value=SimpleNamespace(status_code=503)) as responder:
+            pending = self.post('confirm', signed_transaction=transaction)
+        responder.assert_called_once()
+        self.assertEqual(pending.status_code, 503, pending.json)
+        self.assertEqual(pending.json['error'], 'lite_purchase_unconfirmed')
+        self.assertIs(pending.json['keep_local'], True)
+        self.assertIs(pending.json['retryable'], True)
+        self.assertGreater(pending.json['retry_after'], 0)
+        self.assertEqual([rows(store) for store in untouched], prior)
+
+        with patch('appstoreserverlibrary.signed_data_verifier.requests.post', side_effect=healthy_response) as responder:
+            confirmed = self.post('confirm', signed_transaction=transaction)
+            self.assertEqual(confirmed.status_code, 200, confirmed.json)
+            self.assertEqual(responder.call_count, 2)  # Intermediate and leaf.
+            replay = self.post('confirm', signed_transaction=transaction)
+            self.assertEqual((replay.status_code, replay.json), (200, confirmed.json))
+            self.assertEqual(responder.call_count, 2)
+        self.assertEqual(len(rows(self.p.bridge.audit)), 1)
+        self.assertEqual([rows(store) for store in kept], preserved)
+        self.assertEqual(h.model_calls, 0)
+
     def test_unsigned_and_owner_spoofing_rejected(self):
         self.assertEqual(self.h.client.post(PREFIX+'context',json={}).status_code,401)
         raw=json.dumps(dict(anon_id='different',operation='1'*32)).encode()

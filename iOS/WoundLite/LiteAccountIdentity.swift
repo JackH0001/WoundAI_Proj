@@ -1,7 +1,7 @@
 import Foundation
 import AuthenticationServices
 
-enum LiteAccountFailure: Error, Equatable { case invalid, unavailable, cancelled, conflict, grantRecoveryRequired }
+enum LiteAccountFailure: Error, Equatable { case invalid, unavailable, cancelled, conflict, grantRecoveryRequired, ownerReviewRequired }
 
 struct LiteAccountChallenge: Codable, Equatable {
     let v: Int, installation: String, operation: String, nonce: String, state: String
@@ -14,7 +14,7 @@ struct LiteAccountChallenge: Codable, Equatable {
     }
 }
 
-struct LiteAccountSession: Codable, Equatable {
+struct LiteAccountSession: Codable, Equatable, Sendable {
     let v: Int, state: String, installation: String, operation: String, account_sha256: String, app_account_token: String
     let expires_at: Int
     var renewal_generation:Int?=nil,renewed_at:Int?=nil,family_expires_at:Int?=nil
@@ -93,6 +93,13 @@ struct LiteSignedAccountTransport:LiteAuthenticatedTransport {
         let(data,response)=try await transport.send(r,installation:owner)
         guard try await installation()==owner,data.count<=20000,
               response.url==r.url else {throw LiteAccountFailure.unavailable}
+        if kind=="confirm",response.statusCode==202 {
+            struct Review:Decodable {let error:String,keep_local:Bool,operation:String,explicit_sign_in_required:Bool,retry_saved_code:Bool}
+            if let r=try? JSONDecoder().decode(Review.self,from:data),r.error=="lite_owner_review_pending",
+               r.keep_local,r.operation==body["operation"] as? String,r.explicit_sign_in_required,!r.retry_saved_code {
+                throw LiteAccountFailure.ownerReviewRequired
+            }
+        }
         if ["confirm","renew"].contains(kind),response.statusCode==409 {
             struct Recovery:Decodable {let error:String,keep_local:Bool,explicit_sign_in_required:Bool,retry_saved_code:Bool}
             if let r=try? JSONDecoder().decode(Recovery.self,from:data),r.error=="lite_apple_grant_recovery_required",
@@ -197,12 +204,12 @@ struct LiteAccountCheckpoint:Codable,Equatable {
     var deletionOperation:String?=nil
     func validate()throws {
         try challenge.validate()
-        guard version==1,URL(string:origin)?.scheme=="https",["apple","confirm","active","logout","ended","reauthenticate","renew","deleting"].contains(phase) else {throw LiteAccountFailure.invalid}
+        guard version==1,URL(string:origin)?.scheme=="https",["apple","confirm","active","logout","ended","reauthenticate","owner_review","renew","deleting"].contains(phase) else {throw LiteAccountFailure.invalid}
         if phase=="deleting" {
             guard let op=deletionOperation,LiteServiceBytes.hex(op,32),session != nil,credential==nil else{throw LiteAccountFailure.invalid}
         } else if deletionOperation != nil {throw LiteAccountFailure.invalid}
         if let credential{try credential.validate(challenge,requireAuthorizationCode:phase=="confirm")}
-        if phase=="reauthenticate" && (credential != nil || session != nil) {throw LiteAccountFailure.invalid}
+        if ["reauthenticate","owner_review"].contains(phase) && (credential != nil || session != nil) {throw LiteAccountFailure.invalid}
         if let session{try session.validate(challenge)}
         if phase=="confirm" && credential==nil{throw LiteAccountFailure.invalid}
         if ["active","renew"].contains(phase) && (credential==nil || session==nil){throw LiteAccountFailure.invalid}
@@ -213,12 +220,22 @@ struct LiteAccountCheckpoint:Codable,Equatable {
     }
 }
 
+/// Exported only on an explicit request in the owner-review build. Never encode the checkpoint.
+struct LiteOwnerReviewReference: Encodable, Equatable {
+    let schema = "lite-owner-reference/1"
+    let origin: String
+    let installation_sha256: String
+    let installation: String?
+    let operation: String?
+}
+
 /// Candidate only: injection and a protected journal required; not a production tab.
 @MainActor final class LiteAccountIdentityStore:ObservableObject,LiteDeletionIdentity {
     @Published private(set) var message="服務帳號登入與研究同意分開處理。"
     @Published private(set) var busy=false
     let service:any LiteAccountIdentityService,provider:any LiteAppleIdentityProvider,journal:any LiteServiceJournal
-    private var blocked=false, generation=0
+    private var blocked=false
+    @Published private(set) var generation=0
     let now:()->Date
     init(service:any LiteAccountIdentityService,provider:any LiteAppleIdentityProvider,journal:any LiteServiceJournal,now:@escaping ()->Date=Date.init){
         self.service=service;self.provider=provider;self.journal=journal;self.now=now
@@ -227,11 +244,127 @@ struct LiteAccountCheckpoint:Codable,Equatable {
     private func hasDeletionIntent(_ owner:String)async throws->Bool {
         try await journal.load(LiteAccountDeletionCheckpoint.key(origin:service.origin.absoluteString,owner:owner)) != nil
     }
-    func deletionContext()async throws->LiteDeletionContext {
+    /// Snapshot from the local service registration and protected journal. The operator checks live state separately.
+    func ownerReviewReference() async throws -> LiteOwnerReviewReference {
+        let start = generation
+        guard !busy else { throw LiteAccountFailure.conflict }
+        let owner = try await service.installation()
+        guard LiteServiceBytes.hex(owner, 32) else { throw LiteAccountFailure.invalid }
+        let (bytes, record) = try await read(owner)
+        guard try await !hasDeletionIntent(owner),
+              try await service.installation() == owner, try await journal.load(key(owner)) == bytes,
+              try await !hasDeletionIntent(owner), generation == start, !busy, !Task.isCancelled else { throw LiteAccountFailure.conflict }
+        let hash = LiteServiceBytes.hash(Data(owner.utf8))
+        if record == nil {
+            return LiteOwnerReviewReference(origin: service.origin.absoluteString, installation_sha256: hash,
+                                           installation: nil, operation: nil)
+        }
+        guard let record, record.phase == "owner_review" else { throw LiteAccountFailure.unavailable }
+        return LiteOwnerReviewReference(origin: record.origin, installation_sha256: hash,
+                                       installation: owner, operation: record.challenge.operation)
+    }
+
+    func hasTrackingAccount(owner: String) async throws -> Bool {
+        let initial = generation
+        guard !busy, try await !hasDeletionIntent(owner) else { throw LiteAccountFailure.conflict }
+        let record = try await read(owner).1
+        guard initial == generation else { throw LiteAccountFailure.conflict }
+        if record == nil || record?.phase == "ended" { return false }
+        guard !blocked, let record, ["active", "renew"].contains(record.phase) else { throw LiteAccountFailure.unavailable }
+        return true
+    }
+    enum RecognitionAccess { case available, signedOut, checking, unavailable }
+
+    /// A local read can establish expiry or absence. A locked journal or a
+    /// deletion in progress does not establish that a fresh login is appropriate.
+    func readRecognitionAccess() async -> RecognitionAccess {
+        let start = generation
+        guard !busy else { return .checking }
+        do {
+            let owner = try await service.installation()
+            let record = try await read(owner).1
+            guard try await !hasDeletionIntent(owner), try await service.installation() == owner,
+                  start == generation else { return .unavailable }
+            guard !busy else { return .checking }
+            guard let record else { return .signedOut }
+            switch record.phase {
+            case "ended", "reauthenticate", "apple": return .signedOut
+            case "active", "renew":
+                guard !blocked, let session = record.session else { return .unavailable }
+                let expires = session.family_expires_at ?? session.expires_at
+                return Double(expires) > now().timeIntervalSince1970 ? .available : .signedOut
+            default: return .unavailable
+            }
+        } catch { return .unavailable }
+    }
+
+    enum PurchaseAccessRead: Equatable {
+        case available(token: String, deadline: Date), checking(token: String, deadline: Date), unavailable
+    }
+
+    /// A routine service check may become busy while the journal read is suspended.
+    func readPurchaseAccess() async -> PurchaseAccessRead {
+        let start = generation
+        do {
+            let owner = try await service.installation()
+            guard let record = try await read(owner).1, ["active", "renew"].contains(record.phase),
+                  let session = record.session, try await !hasDeletionIntent(owner),
+                  !blocked, generation == start else { return .unavailable }
+            let deadline = Date(timeIntervalSince1970: Double(session.family_expires_at ?? session.expires_at))
+            guard deadline > now() else { return .unavailable }
+            return busy ? .checking(token: session.app_account_token, deadline: deadline)
+                        : .available(token: session.app_account_token, deadline: deadline)
+        } catch { return .unavailable }
+    }
+
+    func localPurchaseAccess() async -> (token: String, deadline: Date)? {
+        guard case let .available(token, deadline) = await readPurchaseAccess() else { return nil }
+        return (token, deadline)
+    }
+    func purchaseAccessDeadline() async -> Date? {
+        await localPurchaseAccess()?.deadline
+    }
+
+    func deletionContext() async throws -> LiteDeletionContext {
+        try await activeServiceContext()
+    }
+    func activeServiceContext() async throws -> LiteDeletionContext {
+        let start = generation
         guard await canUseService() else{throw LiteAccountFailure.unavailable}
         let owner=try await service.installation();let(_,r)=try await read(owner)
-        guard let r,r.phase=="active",let account=r.session?.account_sha256 else{throw LiteAccountFailure.invalid}
+        guard generation == start, let r,r.phase=="active",let account=r.session?.account_sha256 else{throw LiteAccountFailure.invalid}
         return LiteDeletionContext(origin:service.origin.absoluteString,installation:owner,account:account)
+    }
+
+    /// Pin the signed-in account at capture time without an Apple or service request.
+    /// Transport authorization is checked again immediately before later dispatch.
+    func savedResearchContext() async throws -> LiteDeletionContext {
+        let start = generation
+        let owner = try await service.installation()
+        guard !blocked, try await !hasDeletionIntent(owner),
+              let checkpoint = try await read(owner).1, ["active", "renew"].contains(checkpoint.phase),
+              let account = checkpoint.session?.account_sha256, start == generation else {
+            throw LiteAccountFailure.unavailable
+        }
+        return LiteDeletionContext(origin: service.origin.absoluteString, installation: owner, account: account)
+    }
+
+    /// Check a known installation while its App Attest signing lane is occupied.
+    /// This operation may read the identity journal, but must never request a
+    /// device registration, renew a session, or send an account HTTP request.
+    func dispatchSession(for owner: String) async -> LiteAccountSession? {
+        let start = generation
+        do {
+            guard !busy, !blocked, try await !hasDeletionIntent(owner),
+                  let record = try await read(owner).1, record.phase == "active",
+                  let session = record.session, session.installation == owner,
+                  session.expires_at > Int(now().timeIntervalSince1970),
+                  let credential = record.credential,
+                  try await provider.authorized(user: credential.user),
+                  try await !hasDeletionIntent(owner), start == generation, !busy, !blocked
+            else { return nil }
+            return session
+        } catch { return nil }
     }
     func suspendForDeletion(_ context:LiteDeletionContext,operation:String)async throws {
         try context.validate();guard context.origin==service.origin.absoluteString,LiteServiceBytes.hex(operation,32),
@@ -283,6 +416,14 @@ struct LiteAccountCheckpoint:Codable,Equatable {
         let started=generation
         let session:LiteAccountSession
         do {session=try await service.confirm(record.challenge,credential:credential)}
+        catch LiteAccountFailure.ownerReviewRequired {
+            guard generation==started,try await !hasDeletionIntent(owner) else{throw LiteAccountFailure.conflict}
+            var next=record;next.phase="owner_review";next.credential=nil;next.session=nil
+            _=try await save(owner,old,next)
+            guard generation==started else{throw LiteAccountFailure.conflict}
+            message="本人帳號核對已送出，服務尚未開通。收到核對完成通知後再按登入；原紀錄保留，本次不會購買或使用辨識額度。"
+            return
+        }
         catch LiteAccountFailure.grantRecoveryRequired {
             guard generation==started else{throw LiteAccountFailure.conflict}
             var next=record;next.phase="reauthenticate";next.credential=nil;next.session=nil
@@ -308,7 +449,14 @@ struct LiteAccountCheckpoint:Codable,Equatable {
             guard try await !hasDeletionIntent(owner),previous?.phase != "deleting" else{message="刪帳要求處理中；請核對原刪帳進度，不能重新開啟登入。";return}
             guard generation==started else{throw LiteAccountFailure.conflict}
             guard (previous?.phase != "confirm" || (previous?.challenge.expires_at ?? 0)<=Int(now().timeIntervalSince1970)),previous?.phase != "logout",previous?.phase != "renew" else{message="上次登入或登出尚未確認，請先按重試；不用重新購買。";return}
-            let c=try await service.challenge(operation:UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased());try c.validate()
+            let c: LiteAccountChallenge
+            do {
+                c = try await service.challenge(operation: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())
+            } catch where (error as? LiteAccountFailure) == .unavailable || error is URLError {
+                message = "目前無法連上訂閱服務。請稍後再試。"
+                return
+            }
+            try c.validate()
             guard generation==started else{try? await service.logout(c);throw LiteAccountFailure.conflict}
             guard c.installation==owner,c.created_at<=Int(now().timeIntervalSince1970),c.expires_at>Int(now().timeIntervalSince1970) else{throw LiteAccountFailure.invalid}
             var r=LiteAccountCheckpoint(version:1,origin:service.origin.absoluteString,challenge:c,phase:"apple")
@@ -323,16 +471,31 @@ struct LiteAccountCheckpoint:Codable,Equatable {
     }
     func retry()async {
         guard !busy else{return};busy=true;defer{busy=false}
+        let started = generation
         do {
             let owner=try await service.installation();let(old,r)=try await read(owner)
-            guard try await !hasDeletionIntent(owner),r?.phase != "deleting" else{message="請至刪帳頁核對原進度；不會重送登入或續期。";return}
-            guard let old,let r else{return}
+            let deletionPending = try await hasDeletionIntent(owner)
+            guard generation == started else { return }
+            guard !deletionPending, r?.phase != "deleting" else{message="請至刪帳頁核對原進度；不會重送登入或續期。";return}
+            if r == nil || r?.phase == "ended" {
+                guard try await service.installation() == owner,
+                      try await journal.load(key(owner)) == old else { throw LiteAccountFailure.conflict }
+                let closing = try await hasDeletionIntent(owner)
+                guard generation == started else { return }
+                message = closing ? "請至刪帳頁核對原進度；不會重送登入或續期。" : "目前沒有待確認的登入。若要登入，請點選「使用 Apple 登入」。"
+                return
+            }
+            guard let old,let r else { throw LiteAccountFailure.invalid }
             if r.phase=="confirm"{try await confirm(owner,old,r)}
             else if r.phase=="logout"{try await finishLogout(owner,old,r)}
             else if r.phase=="renew"{try await renew(owner,old,r)}
             else if r.phase=="reauthenticate"{message="請按重新登入以取得新的 Apple 授權；不會重送舊授權碼。"}
+            else if r.phase=="owner_review"{message="本人帳號仍待核對。收到核對完成通知後再按登入；不會重送舊授權碼。"}
             else{message="目前沒有待確認的登入操作。"}
-        } catch {message="帳號核對尚未完成，請稍後重試；本機紀錄仍保留。"}
+        } catch {
+            guard generation == started else { return }
+            message="帳號核對尚未完成，請稍後重試；本機紀錄仍保留。"
+        }
     }
     private func finishLogout(_ owner:String,_ old:Data,_ r:LiteAccountCheckpoint)async throws {
         try await service.logout(r.challenge);var ended=r;ended.phase="ended";ended.credential=nil;ended.session=nil

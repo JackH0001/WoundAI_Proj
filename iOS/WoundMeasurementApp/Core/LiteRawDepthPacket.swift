@@ -65,8 +65,9 @@ struct LiteRawDepthPacket {
         guard (16...70).contains(boundary.utf8.count),
               boundary.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 })
         else { throw Failure.invalidMetadata }
-        guard Set(fields.keys).isSubset(of: ["anon_id", "client", "research_consent", "consent_version"]),
-              fields.values.allSatisfy({ $0.utf8.count <= 128 }) else { throw Failure.invalidMetadata }
+        let allowed = ["anon_id", "client", "research_consent", "consent_version", "consent_epoch", "source_ticket"]
+        guard Set(fields.keys).isSubset(of: allowed),
+              fields.allSatisfy({ $0.value.utf8.count <= ($0.key == "source_ticket" ? 16384 : 128) }) else { throw Failure.invalidMetadata }
         let delimiter = Data(("--" + boundary).utf8)
         guard ([jpeg, metadata, rawDepth] + fields.values.map { Data($0.utf8) }).allSatisfy({ $0.range(of: delimiter) == nil })
         else { throw Failure.invalidMetadata }
@@ -105,7 +106,11 @@ struct LiteRawDepthPacket {
               r.bundle_bytes == 16 + metadata.count + jpeg.count + rawDepth.count,
               r.registration == "not_verified", r.training_admission == "not_evaluated"
         else { return false }
-        // Streaming hash avoids allocating a second full RGB-D bundle.
+        return r.bundle_sha256 == bundleDigest
+    }
+
+    /// Hash the exact LRD1 packet without constructing a second media copy.
+    var bundleDigest: String {
         var digest = SHA256()
         digest.update(data:Data("LRD1".utf8))
         for size in [metadata.count,jpeg.count,rawDepth.count] {
@@ -113,8 +118,7 @@ struct LiteRawDepthPacket {
             withUnsafeBytes(of:&sizeBE) { digest.update(data:Data($0)) }
         }
         for part in [metadata,jpeg,rawDepth] { digest.update(data:part) }
-        let expected = digest.finalize().map { String(format:"%02x",$0) }.joined()
-        return r.bundle_sha256 == expected
+        return digest.finalize().map { String(format:"%02x",$0) }.joined()
     }
 
     private static func hash(_ data: Data) -> String {

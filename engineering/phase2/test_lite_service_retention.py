@@ -66,6 +66,20 @@ class RetentionTests(unittest.TestCase):
         self.h.inference.model=lambda _:None;self.complete();r=self.receipt();self.assertEqual(r['outcome'],'empty')
         self.expire();self.job.execute(self.plan());self.assertEqual(self.receipt(),r)
 
+    def test_complex_result_compacts_even_when_original_settlement_did_not_land(self):
+        self.h.use_complex_raster();self.prepare()
+        with patch.object(self.ops.ledger,'settle',side_effect=StateUnavailable('before settlement')):
+            self.assertEqual(self.h.run_request().status_code,503)
+        self.assertEqual(self.receipt()['outcome'],'running')
+        self.expire();plan=self.plan()
+        self.assertEqual(plan['action'],'settle_and_compact')
+        first=self.job.execute(plan);self.assertEqual(self.job.execute(plan),first)
+        self.assertEqual(first['receipt']['outcome'],'failed')
+        self.assertEqual(self.row()[1]['retention']['receipt'],self.receipt())
+        self.assertIsNone(self.row()[1]['result'])
+        self.assertEqual(self.h.json_request('status').status_code,410)
+        self.assertEqual(self.h.model_calls,1)
+
     def test_saved_unsettled_result_is_settled_before_compaction_without_model(self):
         self.prepare()
         with patch.object(self.ops.ledger,'settle',side_effect=StateUnavailable('lost')):

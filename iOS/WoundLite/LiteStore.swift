@@ -34,10 +34,14 @@ struct LiteRecord: Codable, Identifiable {
     var woundID: String? = nil
     var woundName: String? = nil
     var woundLocation: LiteWoundLocation? = nil
+    var woundAccount: String? = nil
+    var woundEnded: Bool? = nil
     var cloudSync: LiteCloudSyncState? = nil
+    var researchCapture: LitePendingResearchCapture? = nil
     var manuallyConfirmed: Bool? = nil
     /// Old values remain unchanged; missing provenance is not retroactively certified.
     var measurementContext: LiteMeasurementContext? = nil
+    var contourOrigin: LiteContourOrigin? = nil
 }
 
 @MainActor
@@ -50,33 +54,131 @@ final class LiteStore: ObservableObject {
     private let storageURL: URL?
     private let clock: () -> Date
     private let writeIndex: (Data, URL) throws -> Void
+    private let writeRetirement: (Data, URL) throws -> Void
+    private lazy var retirement = LiteCaptureRetirement(
+        file: LiteCaptureRetirement.file(for: fileURL), write: writeRetirement)
+    var retiredCaptureIDs: Set<String> { retirement.ids }
     var revisionNow: Date { clock() }
     // A failed read is not an empty library. Keep the last verified bytes so a stale
     // store cannot silently overwrite a later save by another store in this process.
     private var loadedIndex: Data?
+    private var latestTrackingRead = UUID()
     private enum IndexFailure: Error { case invalidIDs, changed }
 
     var wounds: [LiteWoundGroup] { LiteGrouping.groups(records) }
 
-    func newWound() -> LiteWoundGroup {
+    func refreshTracking(from session: LiteNativeSession?) async throws -> LiteWoundRoster? {
+        let request = UUID()
+        latestTrackingRead = request
+        guard let session else { return nil }
+        let index = loadedIndex
+        let generation = session.identity.generation
+        let roster = try await session.woundList()
+        guard latestTrackingRead == request, generation == session.identity.generation,
+              !needsReload, index == loadedIndex else { throw LiteWoundTrackingError.changed }
+        guard let roster else { return nil }
+
+        // All active slots, including those paused by a downgrade, retain their histories.
+        let active = Set(roster.active)
+        var next = records
+        var changed = false
+        for i in next.indices where next[i].woundAccount == roster.account_sha256 {
+            guard let id = next[i].woundID else { continue }
+            let ended = !active.contains(try LiteWoundRoster.wireID(id))
+            if (next[i].woundEnded == true) != ended {
+                next[i].woundEnded = ended
+                changed = true
+            }
+        }
+        if changed && !persist(next) { throw LiteWoundTrackingError.unavailable }
+        return roster
+    }
+
+    func newWound(id: String = UUID().uuidString) -> LiteWoundGroup {
         let last = wounds.compactMap { Int($0.name.replacingOccurrences(of: "傷口 ", with: "")) }.max() ?? 0
-        return LiteWoundGroup(id: UUID().uuidString, name: "傷口 \(last + 1)")
+        return LiteWoundGroup(id: id, name: "傷口 \(last + 1)")
+    }
+
+    /// Legacy folders remain readable. Only the first unended local folder is
+    /// the free offline tracking slot. A signed account needs its server permit.
+    var localTrackingID: String? {
+        let local = records.filter { $0.woundAccount == nil && $0.woundID != nil }
+        if local.contains(where: { $0.woundEnded != nil }) {
+            // Once a folder was explicitly tracked or finished, leave older folders available
+            // for selection without consuming the newly released slot.
+            return LiteGrouping.groups(local.filter { $0.woundEnded == false }).first?.id
+        }
+        return LiteGrouping.groups(local).first?.id
+    }
+    private func trackable(_ wound: LiteWoundGroup, permit: LiteWoundPermit?) -> Bool {
+        let owners = Set(records.filter { $0.woundID == wound.id }.compactMap(\.woundAccount))
+        guard owners.count <= 1 else { return false }
+        if let permit {
+            return permit.id == wound.id && (owners.isEmpty || owners.contains(permit.account))
+                && (wound.account == nil || wound.account == permit.account)
+        }
+        return owners.isEmpty && !wound.ended && wound.account == nil
+            && (localTrackingID == nil || localTrackingID == wound.id)
     }
 
     @discardableResult
-    func assign(_ record: LiteRecord, to wound: LiteWoundGroup) -> Bool {
+    func finishWound(_ id: String, account: String?) -> Bool {
+        let owners = Set(records.filter { $0.woundID == id }.compactMap(\.woundAccount))
+        guard let group = wounds.first(where:{ $0.id == id }), owners.count <= 1,
+              group.account == nil || group.account == account else { return false }
+        var next = records
+        for i in next.indices where next[i].woundID == id {
+            next[i].woundEnded = true
+            if let account { next[i].woundAccount = account }
+        }
+        return persist(next)
+    }
+    @discardableResult
+    func resumeWound(_ group: LiteWoundGroup, permit: LiteWoundPermit?) -> Bool {
+        guard let current = wounds.first(where: { $0.id == group.id }) else { return false }
+        var proposed = current
+        proposed.ended = false
+        guard trackable(proposed, permit: permit) else {
+            storageError = "目前方案的追蹤名額已滿，請先結束一處追蹤。"
+            return false
+        }
+        var next = records
+        for i in next.indices where next[i].woundID == group.id {
+            next[i].woundEnded = false
+            next[i].woundAccount = permit?.account
+        }
+        return persist(next)
+    }
+
+    func maySave(to id: String, permit: LiteWoundPermit?) -> Bool {
+        let wound = wounds.first(where: { $0.id == id }) ?? newWound(id: id)
+        return !wound.ended && trackable(wound, permit: permit)
+    }
+
+    @discardableResult
+    func assign(_ record: LiteRecord, to wound: LiteWoundGroup, permit: LiteWoundPermit? = nil) -> Bool {
         guard let index = records.firstIndex(where: { $0.id == record.id }),
               let location = wound.location, location.isComplete else {
             storageError = "請先補齊傷口側別與詳細部位，尚未變更分組。"
             return false
         }
         var next = records
+        let current = wounds.first(where:{ $0.id == wound.id }) ?? wound
+        let storedAccount = records[index].woundAccount
+        guard !current.ended, trackable(current,permit:permit),
+              storedAccount == nil || storedAccount == permit?.account else {
+            storageError = "請先核對這個帳戶的追蹤名額；原紀錄已保留。"
+            return false
+        }
         // A completed target group is authoritative; don't overwrite it from a stale sheet.
         let resolved = wounds.first(where: { $0.id == wound.id })?.location ?? location
         for i in next.indices where next[i].woundID == wound.id { next[i].woundLocation = resolved }
         next[index].woundID = wound.id
         next[index].woundName = wound.name
         next[index].woundLocation = resolved
+        for i in next.indices where next[i].woundID == wound.id {
+            next[i].woundAccount = permit?.account; next[i].woundEnded = false
+        }
         return persist(next)
     }
 
@@ -88,8 +190,9 @@ final class LiteStore: ObservableObject {
     }
 
     init(fileURL: URL? = nil, now: @escaping () -> Date = { Date() },
-         writeIndex: @escaping (Data, URL) throws -> Void = { try HealthDataFiles.write($0, to: $1) }) {
-        storageURL = fileURL; clock = now; self.writeIndex = writeIndex; reload()
+         writeIndex: @escaping (Data, URL) throws -> Void = { try HealthDataFiles.write($0, to: $1) },
+         writeRetirement: @escaping (Data, URL) throws -> Void = { try HealthDataFiles.write($0, to: $1) }) {
+        storageURL = fileURL; clock = now; self.writeIndex = writeIndex; self.writeRetirement = writeRetirement; reload()
     }
 
     @discardableResult
@@ -101,27 +204,44 @@ final class LiteStore: ObservableObject {
     /// Legacy records remain readable; completing their location and adding the new record is one write.
     func saveMeasurement(_ record: LiteRecord, selectedWoundID: String,
                          enteredLocation: LiteWoundLocation,
-                         queueResearchSync: Bool = false) -> LiteRecord? {
+                         queueResearchSync: Bool = false, permit: LiteWoundPermit? = nil) -> LiteRecord? {
         let wound: LiteWoundGroup
         if selectedWoundID.isEmpty {
-            wound = newWound()
+            wound = newWound(id: permit?.id ?? UUID().uuidString)
         } else if let existing = wounds.first(where: { $0.id == selectedWoundID }) {
             wound = existing
+        } else if let permit, permit.id == selectedWoundID {
+            wound = newWound(id:permit.id)
         } else {
             storageError = "所選傷口已不存在，請重新選擇；尚未儲存。"
             return nil
         }
         let location = wound.location ?? enteredLocation
+        guard !wound.ended, trackable(wound,permit:permit) else {
+            storageError = "這個傷口目前無可用追蹤名額。請選擇正在追蹤的傷口，或先結束一處追蹤。照片已保留。"
+            return nil
+        }
         guard location.isComplete else {
             storageError = "請先選擇側別與詳細部位，再存入紀錄。"
             return nil
         }
         var next = records
-        for i in next.indices where next[i].woundID == wound.id { next[i].woundLocation = location }
+        for i in next.indices where next[i].woundID == wound.id {
+            next[i].woundLocation = location
+            next[i].woundAccount = permit?.account
+            next[i].woundEnded = false
+        }
         var saved = record
         saved.woundID = wound.id
         saved.woundName = wound.name
         saved.woundLocation = location
+        saved.woundAccount = permit?.account
+        saved.woundEnded = false
+        if var job = saved.researchCapture {
+            // Freeze the first annotation before the measurement leaves the screen.
+            job.firstRevision = try? saved.revisionJSON(width: job.width, height: job.height)
+            saved.researchCapture = queueResearchSync && job.firstRevision != nil ? job : nil
+        }
         // Persist the first exact revision with the local record before the UI
         // clears its capture. An interrupted first send can then resume safely.
         if queueResearchSync, var sync = saved.cloudSync, sync.pending == nil,
@@ -141,6 +261,7 @@ final class LiteStore: ObservableObject {
             storageError = "這筆紀錄已不存在，未刪除任何影像或深度資料。"
             return false
         }
+        guard retireCapture(r.id, requireSavedRecord: true) else { return false }
         let remaining = records.filter { $0.id != r.id }
         guard persist(remaining) else { return false }
         let stillReferenced = Set(remaining.flatMap { [$0.imageName] + [$0.depthName].compactMap { $0 } })
@@ -151,6 +272,53 @@ final class LiteStore: ObservableObject {
             return false
         }
         return true
+    }
+
+    /// An acknowledged local deletion/discard is fenced before media/index
+    /// removal. If later work fails, existing saved records remain usable.
+    func retireCapture(_ id: String, requireSavedRecord: Bool) -> Bool {
+        guard !needsReload, !requireSavedRecord || records.contains(where: { $0.id == id }) else { return false }
+        do {
+            guard try readIndex() == loadedIndex else { throw IndexFailure.changed }
+            try retirement.retire(id)
+            return true
+        } catch {
+            storageError = "刪除標記尚未確認保存，未清除原紀錄；請重新讀取後再試。"
+            return false
+        }
+    }
+
+    func captureCanResume(_ id: String) -> Bool {
+        guard refreshCaptureRetirement() else { return false }
+        return !retirement.ids.contains(id)
+    }
+
+    func refreshCaptureRetirement() -> Bool {
+        guard !needsReload else { return false }
+        do { try retirement.reload(); return true }
+        catch {
+            needsReload = true
+            storageError = "無法核對已刪除的拍攝，暫停恢復與儲存；原檔保留，請重新讀取紀錄。"
+            return false
+        }
+    }
+
+    /// Check the persisted index before treating any draft as saved or available.
+    /// A second scene may have committed a different index since our last read.
+    func confirmCaptureIndex() -> Bool {
+        guard refreshCaptureRetirement() else { return false }
+        do {
+            guard try readIndex() == loadedIndex else { throw IndexFailure.changed }
+            return true
+        } catch {
+            needsReload = true
+            storageError = "拍攝清單與目前的紀錄檔尚未核對。請至「紀錄」點「重新讀取紀錄」。"
+            return false
+        }
+    }
+
+    func captureCleanupFailed() {
+        storageError = "刪除要求已保存，但拍攝草稿尚未確認清理完成；原紀錄仍保留，請解鎖後重試刪除。"
     }
 
     /// 重新量測後覆寫同 id 的那一筆（詳情頁「重新圈選」用）。
@@ -209,6 +377,7 @@ final class LiteStore: ObservableObject {
             guard data != nil || loadedIndex == nil else { throw IndexFailure.changed }
             let rows = try data.map { try JSONDecoder().decode([LiteRecord].self, from: $0) } ?? []
             try validateIDs(rows)
+            try retirement.reload()
             records = rows
             loadedIndex = data
             needsReload = false
@@ -242,6 +411,11 @@ final class LiteStore: ObservableObject {
         // 原子寫入：中途被殺不會留半個 JSON（下次 load 解不開＝整份紀錄消失）。
         do {
             try validateIDs(next)
+            try retirement.reload()
+            let existing = Set(records.map(\.id))
+            guard next.allSatisfy({ existing.contains($0.id) || !retirement.ids.contains($0.id) }) else {
+                throw IndexFailure.invalidIDs
+            }
             guard try readIndex() == loadedIndex else { throw IndexFailure.changed }
             let d = try JSONEncoder().encode(next)
             try writeIndex(d, fileURL)

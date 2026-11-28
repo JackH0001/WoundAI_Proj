@@ -21,10 +21,8 @@ class LiteRevisionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.store = LocalStore(self.tmp.name)
-        self.charges = []
         for obj, key, value in [(fw, "FLYWHEEL_DIR", self.tmp.name), (fw, "_store", lambda: self.store),
-                                (lite, "rate_check", lambda *a: (True, 0, "")),
-                                (lite, "rate_record", lambda *a: self.charges.append(a))]:
+                                (lite, "rate_check", lambda *a: (True, 0, ""))]:
             p = patch.object(obj, key, value); p.start(); self.addCleanup(p.stop)
         self.app = Flask(__name__); self.app.register_blueprint(lite.lite_bp)
         self.store.put_blob("lite/install/image.jpg", b"synthetic placeholder")
@@ -44,6 +42,11 @@ class LiteRevisionTests(unittest.TestCase):
 
     def rows(self):
         return lite._lite_label_rows_fresh()
+
+    @property
+    def charges(self):
+        return [json.loads(line) for p in Path(self.tmp.name).glob("lite_annotation_rate_*.jsonl")
+                for line in self.store.read_lines(p.name)]
 
     def test_current_ios_disclosure_is_accepted_for_ai_and_manual_revisions(self):
         import re
@@ -149,9 +152,57 @@ class LiteRevisionTests(unittest.TestCase):
         self.assertEqual(len(self.rows()), 1)
 
     def test_failure_after_durable_append_can_retry_without_duplicate(self):
-        with patch.object(lite, "rate_record", side_effect=IOError("simulated crash before acknowledgement")):
+        with patch.object(lite, "_confirm_revision_usage", side_effect=IOError("simulated crash before accounting")):
             self.assertEqual(self.post().status_code, 503)
-        self.assertEqual(self.post().status_code, 200); self.assertEqual(len(self.rows()), 1)
+        self.assertEqual((len(self.rows()), len(self.charges)), (1, 0))
+        self.assertEqual(self.post().status_code, 200)
+        self.assertEqual(self.post().status_code, 200)
+        self.assertEqual((len(self.rows()), len(self.charges)), (1, 1))
+
+    def test_lost_rate_write_response_replay_keeps_first_charge(self):
+        write = self.store.append_record_once
+        def lose_reply(key, slot, row):
+            created = write(key, slot, row)
+            if key.startswith("lite_annotation_rate_"):
+                raise IOError("committed before disconnect")
+            return created
+        with patch.object(self.store, "append_record_once", side_effect=lose_reply):
+            self.assertEqual(self.post().status_code, 503)
+        original = self.charges
+        self.assertEqual(len(original), 1)
+        with patch.object(lite, "_client_ip", return_value="192.0.2.2"):
+            self.assertEqual(self.post().status_code, 200)
+        self.assertEqual(self.charges, original)
+
+    def test_delayed_confirmation_uses_original_utc_day_and_keeps_network_out_of_label(self):
+        with patch.object(fw, "utc_now", return_value="2026-11-02T23:59:59Z"), patch.object(
+                lite, "_confirm_revision_usage", side_effect=OSError("unavailable before midnight")):
+            self.assertEqual(self.post().status_code, 503)
+        label = self.rows()[0]
+        self.assertNotIn("ip_hash", label)
+        with patch.object(fw, "utc_now", return_value="2026-11-03T00:00:01Z"):
+            self.assertEqual(self.post().status_code, 200)
+        self.assertEqual(len(self.store.read_lines("lite_annotation_rate_20261102.jsonl")), 1)
+        self.assertEqual(self.store.read_lines("lite_annotation_rate_20261103.jsonl"), [])
+        self.assertEqual(self.rows(), [label])
+
+    def test_legacy_revision_replay_never_invents_a_rate_entry(self):
+        with patch.object(lite, "_confirm_revision_usage", side_effect=OSError("fixture")):
+            self.assertEqual(self.post().status_code, 503)
+        old = self.rows()[0]
+        del old["rate_accounting"]
+        self.store.put_blob("lite_labels.jsonl", (json.dumps(old)+"\n").encode())
+        self.assertEqual(self.post().status_code, 200)
+        self.assertEqual(self.rows(), [old])
+        self.assertEqual(self.charges, [])
+
+    def test_different_payload_cannot_complete_pending_accounting(self):
+        with patch.object(lite, "_confirm_revision_usage", side_effect=OSError("before accounting")):
+            self.assertEqual(self.post().status_code, 503)
+        self.assertEqual(self.post(self.body(payload=dict(self.payload, surface_cm2=9))).status_code, 409)
+        self.assertEqual(self.charges, [])
+        self.assertEqual(self.post().status_code, 200)
+        self.assertEqual(len(self.charges), 1)
 
     def test_retry_allowed_when_daily_annotation_limit_exhausted(self):
         self.assertEqual(self.post().status_code, 200)
@@ -211,7 +262,13 @@ class LiteRevisionTests(unittest.TestCase):
             self.assertEqual(len(rows), 2)
             self.assertEqual(lite._latest_lite_labels(rows)[("install", "image")]["revision"], 2)
         writes = [c for c in fake.calls if c[0] == "upload"]
-        self.assertEqual(len(writes), 2)
+        label_writes = [call for call in writes if "lite_labels.jsonl/" in call[1]]
+        rate_writes = [call for call in writes if "lite_annotation_rate_" in call[1]]
+        self.assertEqual(len(label_writes), 2)
+        self.assertEqual(len(set(call[1] for call in rate_writes)), 2)
+        self.assertEqual({call[1] for call in rate_writes},
+                         {name for name in fake.objects if "lite_annotation_rate_" in name})
+        self.assertEqual(len(rate_writes) + len(label_writes), len(writes))
         self.assertTrue(all(c[2] == 0 for c in writes))
 
     def test_wrong_payload_readback_is_not_acknowledged(self):

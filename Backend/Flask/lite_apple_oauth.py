@@ -42,6 +42,11 @@ def bounded_secret(value, maximum=4096):
     return value
 
 
+def is_bearer(token_type):
+    # OAuth 2.0 §5.1 makes this ASCII value case-insensitive.
+    return isinstance(token_type, str) and token_type.isascii() and token_type.lower() == 'bearer'
+
+
 class AppleClientSecret:
     """Caller supplies a protected P-256 key; never discovers credentials on disk."""
     def __init__(self, *, team, key_id, client_id, private_key, clock):
@@ -138,7 +143,7 @@ class AppleOAuthProvider:
         try:
             value = loads_json_object_strict(raw.decode('utf-8'))
             required = {'access_token', 'refresh_token', 'id_token', 'token_type', 'expires_in'}
-            if not required <= set(value) or value['token_type'] != 'Bearer': raise ValueError()
+            if not required <= set(value) or not is_bearer(value['token_type']): raise ValueError()
             if type(value['expires_in']) is not int or not 0 < value['expires_in'] <= 86400: raise ValueError()
             for field in ('access_token', 'refresh_token'): bounded_secret(value[field], 2048)
             bounded_secret(value['id_token'], 6000)
@@ -159,7 +164,7 @@ class AppleOAuthProvider:
         try:
             value = loads_json_object_strict(raw.decode('utf-8'))
             if (not {'access_token','id_token','token_type','expires_in'} <= set(value)
-                    or value['token_type'] != 'Bearer' or type(value['expires_in']) is not int
+                    or not is_bearer(value['token_type']) or type(value['expires_in']) is not int
                     or not 0 < value['expires_in'] <= 86400): raise ValueError()
             # Apple normally omits refresh_token on refresh. Never erase it.
             value['refresh_token'] = value.get('refresh_token', old)

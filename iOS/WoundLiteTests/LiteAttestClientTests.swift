@@ -148,6 +148,8 @@ actor AttestHTTPDouble: LiteAttestTransport {
     }
     var challenges = 0
     var failRegistration = false
+    private var rejectedKey: String?
+    func rejectRegistration(for key: String) { rejectedKey = key }
     var rejectRegistration = false
     var rejectChallenge = false
     var omitRecoveryLineage = false
@@ -193,7 +195,7 @@ actor AttestHTTPDouble: LiteAttestTransport {
             if failRegistration { failRegistration = false; throw URLError(.timedOut) }
             let input = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: String]
             json = ["key_id": input["key_id"]!, "installation": owner]
-            status = rejectRegistration ? 401 : 200
+            status = rejectRegistration || input["key_id"] == rejectedKey ? 401 : 200
         } else {
             business.append(request); inFlight += 1; peak = max(peak, inFlight)
             if delay { try await Task.sleep(nanoseconds: 50_000_000) }
@@ -206,8 +208,10 @@ actor AttestHTTPDouble: LiteAttestTransport {
 
 final class LiteAttestClientTests: XCTestCase {
     private let origin = URL(string: "https://lite.invalid")!
-    private func client(_ device: AttestDeviceDouble, _ vault: AttestMemory, _ http: AttestHTTPDouble) throws -> LiteAttestClient {
-        try LiteAttestClient(origin: origin, audience: "lite-test", device: device, persistence: vault,
+    private let personalOrigin = URL(string: "https://personal.example")!
+    private func client(_ device: AttestDeviceDouble, _ vault: AttestMemory, _ http: AttestHTTPDouble,
+                        at address: URL? = nil) throws -> LiteAttestClient {
+        try LiteAttestClient(origin: address ?? origin, audience: "lite-test", device: device, persistence: vault,
                             transport: http, now: { Date(timeIntervalSince1970: 1000) })
     }
     private func request(_ path: String = "/api/v1/lite/segment", body: Data = Data([0, 1, 255, 10])) -> URLRequest {
@@ -226,15 +230,71 @@ final class LiteAttestClientTests: XCTestCase {
         XCTAssertEqual(purposes,["register","withdraw","withdraw","withdraw","withdraw","assert"])
         let calls=await http.snapshot();XCTAssertEqual(calls.1.count,5)
     }
+    func testPreparedKeyIDSurvivesRestartAndUsesNoRegistrationRequest() async throws {
+        let device = AttestDeviceDouble(), vault = AttestMemory(), http = AttestHTTPDouble()
+        let first = try client(device, vault, http)
+        let pin = try await first.prepareEnrollmentKeyID()
+        let relaunched = try client(device, vault, http)
+        let restored = try await relaunched.prepareEnrollmentKeyID()
+        XCTAssertEqual(restored, pin)
+        let data = try XCTUnwrap(Data(base64Encoded: device.key))
+        XCTAssertEqual(pin, data.map { String(format: "%02x", $0) }.joined())
+        let before = await http.snapshot()
+        XCTAssertEqual(before.2, 0)
+        XCTAssertTrue(before.0.isEmpty)
+        let owner = try await relaunched.registeredInstallation()
+        let saved = try await first.existingInstallation()
+        XCTAssertEqual(saved, owner)
+        let counts = await device.counts()
+        XCTAssertEqual(counts.0, 1)
+        XCTAssertEqual(counts.1, 1)
+        do { _ = try await first.prepareEnrollmentKeyID(); XCTFail("already registered") }
+        catch LiteAttestFailure.invalidState {}
+    }
+
+    func testPendingRegistrationRetainsOriginalKeyIDAndProofAfterLostAcknowledgement() async throws {
+        let device = AttestDeviceDouble(), vault = AttestMemory(), http = AttestHTTPDouble()
+        let c = try client(device, vault, http)
+        let pin = try await c.prepareEnrollmentKeyID()
+        await http.options(failRegistration: true)
+        do { _ = try await c.registeredInstallation(); XCTFail() } catch is URLError {}
+        let before = await vault.load()
+        let reread = try await c.prepareEnrollmentKeyID()
+        let after = await vault.load()
+        XCTAssertEqual(reread, pin)
+        XCTAssertEqual(before, after)
+        let sent = await http.snapshot()
+        XCTAssertEqual(sent.0.count, 1)
+        _ = try await c.registeredInstallation()
+        let retried = await http.snapshot()
+        XCTAssertEqual(retried.0, [sent.0[0], sent.0[0]])
+    }
+
+    func testPreparationStorageFailureDoesNotStartRegistration() async throws {
+        let device = AttestDeviceDouble(), vault = AttestMemory(), http = AttestHTTPDouble()
+        await vault.fail(at: 1)
+        do { _ = try await client(device, vault, http).prepareEnrollmentKeyID(); XCTFail() }
+        catch LiteAttestFailure.unavailable {}
+        let sent = await http.snapshot()
+        XCTAssertEqual(sent.2, 0)
+        XCTAssertTrue(sent.0.isEmpty)
+        let record = await vault.load()
+        XCTAssertNil(record)
+    }
+
     func testRegistrationPersistsKeyAndDropsAcknowledgedProof() async throws {
         let device = AttestDeviceDouble(), vault = AttestMemory(), http = AttestHTTPDouble()
         let c = try client(device, vault, http), owner = try await c.registeredInstallation()
         let stored = try JSONDecoder().decode(LiteAttestClient.Identity.self, from: await vault.load()!)
         XCTAssertEqual(stored.installation, owner); XCTAssertEqual(stored.phase, "registered")
         XCTAssertNil(stored.attestation); XCTAssertNil(stored.challengeID)
+        let before = await http.snapshot()
         let second = try client(device, vault, http)
         let restored = try await second.registeredInstallation(); XCTAssertEqual(restored, owner)
         let counts = await device.counts(); XCTAssertEqual(counts.0, 1); XCTAssertEqual(counts.1, 1)
+        let after = await http.snapshot()
+        XCTAssertEqual(after.0, before.0); XCTAssertEqual(after.1.count, before.1.count)
+        XCTAssertEqual(after.2, before.2, "Saved registration is not a live cloud health check")
     }
     func testLostRegistrationResponseRetriesExactProofAfterRestart() async throws {
         let device = AttestDeviceDouble(), vault = AttestMemory(), http = AttestHTTPDouble()
@@ -278,13 +338,95 @@ final class LiteAttestClientTests: XCTestCase {
         let counts = await device.counts(); XCTAssertEqual(counts.0, 1); XCTAssertEqual(counts.1, 1)
     }
 
-    private func rejectedPending() async throws -> (LiteAttestClient, AttestDeviceDouble, AttestMemory, AttestHTTPDouble) {
+    private func rejectedPending(at address: URL? = nil) async throws -> (LiteAttestClient, AttestDeviceDouble, AttestMemory, AttestHTTPDouble) {
         let device = AttestDeviceDouble(), vault = AttestMemory(), http = AttestHTTPDouble()
         await http.options(rejectRegistration: true)
-        let c = try client(device, vault, http)
+        let c = try client(device, vault, http, at: address)
         do { _ = try await c.registeredInstallation(); XCTFail() }
         catch { XCTAssertEqual(error as? LiteAttestFailure, .registrationRejected) }
         return (c, device, vault, http)
+    }
+
+    @MainActor
+    func testPersonalEnrollmentAfterLostRequestResumesOnlyOnExplicitTap() async throws {
+        let device = AttestDeviceDouble(), vault = AttestMemory(), http = AttestHTTPDouble()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = try LiteNativeSession.sandbox(client: client(device, vault, http, at: personalOrigin), window: { nil }, directory: directory)
+        await http.options(failRegistration: true)
+        await first.registerDevice()
+        let oldProof = await http.snapshot().0
+        XCTAssertEqual(oldProof.count, 1)
+
+        let relaunched = try LiteNativeSession.sandbox(client: client(device, vault, http, at: personalOrigin), window: { nil }, directory: directory)
+        await http.rejectRegistration(for: device.key)
+        await relaunched.checkExistingRegistration()
+        if LiteNativeBuild.showsOwnerReview {
+            XCTAssertEqual(relaunched.registration, .required)
+            await relaunched.registerDevice(resumePending: true)
+            let calls = await http.snapshot(), counts = await device.counts()
+            XCTAssertEqual(calls.0, oldProof); XCTAssertTrue(calls.1.isEmpty)
+            XCTAssertEqual(counts.0, 1)
+            return
+        }
+        XCTAssertEqual(relaunched.registration, .pending)
+        await relaunched.prepareForPurchase()
+        await relaunched.registerDevice()
+        let beforeTap = await http.snapshot()
+        XCTAssertEqual(beforeTap.0, oldProof)
+        XCTAssertTrue(beforeTap.1.isEmpty)
+        await relaunched.registerDevice(resumePending: true)
+        XCTAssertEqual(relaunched.registration, .confirmed)
+        await relaunched.registerDevice(resumePending: true)
+        let calls = await http.snapshot(), purposes = await http.purposes(), counts = await device.counts()
+        XCTAssertEqual(purposes, ["register", "recover_register", "register"])
+        XCTAssertEqual(calls.0.count, 3)
+        XCTAssertEqual(Array(calls.0.prefix(2)), oldProof + oldProof)
+        XCTAssertTrue(calls.1.isEmpty)
+        XCTAssertEqual(counts.0, 2); XCTAssertEqual(counts.1, 2)
+        let saved = await vault.load()
+        let identity = try JSONDecoder().decode(LiteAttestClient.Identity.self, from: XCTUnwrap(saved))
+        XCTAssertEqual(identity.registrationRecoveries?.count, 1)
+        XCTAssertEqual(identity.registrationRecoveries?.first?.oldKey, device.key)
+        XCTAssertEqual(identity.installation, http.owner)
+    }
+
+    @MainActor
+    func testPersonalEnrollmentCanRecoverTheOriginalAcknowledgement() async throws {
+        let device = AttestDeviceDouble(), vault = AttestMemory(), http = AttestHTTPDouble()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let session = try LiteNativeSession.sandbox(client: client(device, vault, http, at: personalOrigin), window: { nil }, directory: directory)
+        await http.options(failRegistration: true)
+        await session.registerDevice()
+        await session.checkExistingRegistration()
+        await session.registerDevice(resumePending: !LiteNativeBuild.showsOwnerReview)
+        XCTAssertEqual(session.registration, .confirmed)
+        let calls = await http.snapshot(), counts = await device.counts(), purposes = await http.purposes()
+        XCTAssertEqual(calls.0.count, 2)
+        XCTAssertEqual(calls.0.first, calls.0.last)
+        XCTAssertTrue(calls.1.isEmpty)
+        XCTAssertEqual(counts.0, 1); XCTAssertEqual(counts.1, 1)
+        XCTAssertEqual(purposes, ["register"])
+    }
+
+    @MainActor
+    func testPersonalEnrollmentRefusalKeepsThePendingProofForAnotherAttempt() async throws {
+        let (c, device, vault, http) = try await rejectedPending(at: personalOrigin)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let session = try LiteNativeSession.sandbox(client: c, window: { nil }, directory: directory)
+        let original = await vault.load()
+        await http.recoveryOptions(rejectChallenge: true)
+        await session.checkExistingRegistration()
+        await session.registerDevice(resumePending: true)
+        let saved = await vault.load(), counts = await device.counts(), calls = await http.snapshot()
+        XCTAssertEqual(session.registration, LiteNativeBuild.showsOwnerReview ? .required : .pending)
+        XCTAssertEqual(original, saved)
+        XCTAssertEqual(counts.0, 1); XCTAssertTrue(calls.1.isEmpty)
     }
 
     func testExplicitRecoveryArchivesExactProofAndPreservesAuditAfterRegistration() async throws {

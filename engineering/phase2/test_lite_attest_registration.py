@@ -56,6 +56,8 @@ def der(cert): return cert.public_bytes(serialization.Encoding.DER)
 
 
 class RegistrationTests(unittest.TestCase):
+    bundle_version = '33'
+
     def setUp(self):
         self.root_key = ec.generate_private_key(ec.SECP384R1())
         self.intermediate_key = ec.generate_private_key(ec.SECP384R1())
@@ -65,7 +67,7 @@ class RegistrationTests(unittest.TestCase):
         self.point = self.key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
         self.key_id = hashlib.sha256(self.point).digest()
         self.challenge = b'c' * 32
-        self.policy = AssertionPolicy('ABCDEFGHIJ.com.woundai.lite', frozenset({2, 4}), frozenset({'33'}))
+        self.policy = AssertionPolicy('ABCDEFGHIJ.com.woundai.lite', frozenset({2, 4}), frozenset({self.bundle_version}))
 
     def auth(self, *, app_id=None, counter=0, aaguid=None, credential_id=None, cose=None, ext=None, flags=0xc0):
         key = {1: 2, 3: -7, -1: 1, -2: self.point[1:33], -3: self.point[33:]}
@@ -74,7 +76,7 @@ class RegistrationTests(unittest.TestCase):
                 (aaguid if aaguid is not None else b'appattest' + b'\x00' * 7) + len(cid).to_bytes(2, 'big') + cid +
                 cbor2.dumps(key if cose is None else cose))
         if flags & 0x80:
-            data += cbor2.dumps({CATEGORY: 2, VERSION: '33'} if ext is None else ext)
+            data += cbor2.dumps({CATEGORY: 2, VERSION: self.bundle_version} if ext is None else ext)
         return data
 
     def object(self, *, auth=None, nonce=None, omit_nonce=False, cert_changes=None, leaf_key=None):

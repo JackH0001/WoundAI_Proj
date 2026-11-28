@@ -165,6 +165,75 @@ final class LiteWithdrawalSigningTests: XCTestCase {
         let calls = await http.snapshot(); XCTAssertEqual(calls.1.count, 1)
         let existing = try await transport.withdrawalOwner(); XCTAssertEqual(existing, owner)
     }
+
+    @MainActor
+    func testRejectedWithdrawalExplainsNextStepAfterReopeningAndUsesOriginalEpoch() async throws {
+        let (transport, client, http, device, permission) = try setup()
+        let owner = try await client.registeredInstallation()
+        await permission.deny()
+        let epoch = String(repeating: "e", count: 32)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let journal = LiteWithdrawalJournal(url: folder.appendingPathComponent("request.json"))
+        let initial = LiteWithdrawalRecord(server: server, owner: owner, researchEpoch: epoch)
+        try journal.save(initial)
+        func model() -> LiteWithdrawalModel {
+            LiteWithdrawalModel(journal: journal, stopUploads: {}, owner: { _ in XCTFail("Owner replaced"); return nil },
+                send: { _, _ in XCTFail("Lost original epoch"); return .pending },
+                sendScoped: { try await transport.withdraw(server: $0, owner: $1, epoch: $2) })
+        }
+        for status in [401, 403] {
+            await http.options(status: status)
+            let view = model()
+            await view.request(server: "https://changed.invalid")
+            let pending = try XCTUnwrap(journal.load())
+            XCTAssertEqual(pending.phase, .pending)
+            XCTAssertEqual(pending.requestedAt, initial.requestedAt)
+            XCTAssertEqual(pending.owner, owner)
+            XCTAssertEqual(pending.researchEpoch, epoch)
+            XCTAssertNil(pending.retryAt)
+            XCTAssertTrue(view.blocksUploads)
+            let message = try XCTUnwrap(view.message)
+            XCTAssertTrue(message.contains("聯絡資料處理支援"), message)
+            XCTAssertTrue(message.contains("尚未確認清除"), message)
+            let english = LiteResearchCopy(locale: Locale(identifier: "en")).text(message)
+            XCTAssertTrue(english.contains("Contact data handling support"), english)
+            XCTAssertEqual(model().message, message)
+        }
+        let originalAttempts = await http.snapshot()
+        XCTAssertEqual(originalAttempts.1.count, 2)
+        XCTAssertTrue(originalAttempts.1.allSatisfy {
+            $0.httpMethod == "DELETE" && $0.url?.absoluteString == server + "/api/v1/lite/data/" + owner + "/" + epoch
+        })
+        await http.options(status: 200)
+        await http.businessReply(["status":"deleted", "anon_id":owner, "consent_epoch":epoch,
+                                  "deletion_scope":"live_media", "writers_drained":true])
+        let resumed = model()
+        await resumed.request(server: "https://changed.invalid")
+        XCTAssertTrue(resumed.finished)
+        let reopened = model()
+        XCTAssertTrue(reopened.finished)
+        XCTAssertFalse(reopened.message?.contains("聯絡資料處理支援") == true)
+        let counts = await device.counts()
+        XCTAssertEqual(counts.0, 1)
+        let allowed = await permission.read()
+        XCTAssertFalse(allowed)
+    }
+
+    func testRejectedPrivacyChallengeUsesSupportGuidanceBeforeSendingDelete() async throws {
+        let (transport, client, http, _, _) = try setup()
+        let owner = try await client.registeredInstallation()
+        await http.recoveryOptions(rejectChallenge: true)
+        do {
+            _ = try await transport.withdraw(server: server, owner: owner)
+            XCTFail("Withdrawal confirmed without a verified request")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("聯絡資料處理支援"), error.localizedDescription)
+        }
+        let snapshot = await http.snapshot()
+        XCTAssertTrue(snapshot.1.isEmpty)
+        XCTAssertEqual(snapshot.0.count, 1)
+    }
 }
 
 @MainActor

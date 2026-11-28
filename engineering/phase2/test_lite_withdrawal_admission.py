@@ -81,8 +81,10 @@ class WithdrawalAdmissionTests(unittest.TestCase):
             if str(path).endswith('lite_index.jsonl'):
                 raise OSError('injected index append failure')
             return original(path, row)
-        with patch.object(fixture.fw, 'append_jsonl', side_effect=append):
+        with self.assertLogs('api_lite', level='ERROR') as logged, \
+                patch.object(fixture.fw, 'append_jsonl', side_effect=append):
             self.assertEqual(self.f.post().status_code, 500)
+        self.assertIn('injected index append failure', '\n'.join(logged.output))
         self.assertEqual(len(self.f.store.list_keys('lite/' + self.aid)), 2)
         r = self.withdraw()
         self.assertEqual(r.status_code, 200)
@@ -96,8 +98,10 @@ class WithdrawalAdmissionTests(unittest.TestCase):
             if row.get('action') == 'deleted':
                 raise OSError('injected completion marker failure')
             return original(path, row)
-        with patch.object(fixture.fw, 'append_jsonl', side_effect=append):
+        with self.assertLogs('api_lite', level='ERROR') as logged, \
+                patch.object(fixture.fw, 'append_jsonl', side_effect=append):
             self.assertEqual(self.withdraw().status_code, 503)
+        self.assertIn('injected completion marker failure', '\n'.join(logged.output))
         self.assertEqual(self.f.post().status_code, 410)
         self.assertEqual(self.withdraw().status_code, 200)
 

@@ -110,6 +110,26 @@ class LedgerTests(unittest.TestCase):
         with self.assertRaises(UsageLimit):self.reserve(11,self.grant(10))
         self.assertEqual(self.snapshot(10)['used'],10)
 
+    def test_pending_retry_is_clipped_at_midnight_and_returns_same_ticket(self):
+        self.now = (self.day + 1) * 86400 - 4
+        pending = self.reserve(1)
+        self.reserve(2)
+        with self.assertRaises(UsageLimit) as blocked:
+            self.reserve(3)
+        self.assertEqual((blocked.exception.success_quota_state, blocked.exception.retry_after), ('pending', 4))
+        self.l.cancel_unstarted(pending, digest('fixture-cancel'))
+        self.assertEqual(self.reserve(3), self.reserve(3))
+        self.assertEqual(self.snapshot()['attempts'], 3)
+
+    def test_spent_plus_keeps_daily_reset_even_after_downgrade(self):
+        for n in range(1, 11):
+            self.complete(n, limit=10)
+        for limit in (2, 10):
+            with self.assertRaises(UsageLimit) as blocked:
+                self.reserve(11, self.grant(limit))
+            self.assertEqual((blocked.exception.success_quota_state, blocked.exception.retry_after),
+                             ('used', (self.day + 1) * 86400 - self.now))
+
     def test_downgrade_preserves_usage_and_old_receipts(self):
         a=self.complete(1,limit=10)
         for n in range(2,5):self.complete(n,limit=10)
@@ -126,6 +146,8 @@ class LedgerTests(unittest.TestCase):
         for n in range(1,31):self.complete(n,'empty')
         with self.assertRaises(UsageLimit) as e:self.reserve(31)
         self.assertEqual(e.exception.reason,'attempt_quota')
+        self.assertIsNone(e.exception.success_quota_state)
+        self.assertEqual(e.exception.retry_after, (self.day+1)*86400-self.now)
         _,state=self.l._load(SUBJECT,self.day)
         self.assertLessEqual(len(_encode(state)),MAX_STATE)
         self.assertEqual(self.snapshot()['used'],0)

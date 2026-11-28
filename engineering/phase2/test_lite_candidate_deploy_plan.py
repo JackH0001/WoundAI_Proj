@@ -25,6 +25,21 @@ class CandidatePlanTests(unittest.TestCase):
         self.fixture=self.base/'fixture.json';self.fixture.write_text('{}');self.output=self.base/'plan'
     def generate(self):return plan.generate(self.context,self.sha,self.probe,self.fixture,'35',self.output)
 
+    def test_withdrawal_builds_are_pinned_separately_in_reviewed_runtime(self):
+        p = plan.generate(self.context, self.sha, self.probe, self.fixture, '46', self.output,
+                          withdrawal_versions=['60', '62'])
+        data = (self.output / 'runtime-env.json').read_bytes()
+        env = json.loads(data)
+        self.assertEqual(env['WOUNDAI_LITE_ATTEST_VERSIONS'], '46')
+        self.assertEqual(env['WOUNDAI_LITE_ATTEST_WITHDRAWAL_VERSIONS'], '60,62')
+        self.assertEqual(hashlib.sha256(data).hexdigest(), p['artifact_sha256']['runtime-env.json'])
+        self.assertNotIn('WOUNDAI_LITE_ATTEST_WITHDRAWAL_VERSIONS', plan.runtime_environment('46', self.sha))
+
+    def test_invalid_withdrawal_builds_in_plan(self):
+        for versions in (['*'], ['46'], ['62', '62'], [''], [str(n) for n in range(60, 77)]):
+            with self.subTest(versions=versions), self.assertRaises(ValueError):
+                plan.runtime_environment('46', self.sha, withdrawal_versions=versions)
+
     def test_new_runtime_is_private_digest_pinned_zero_idle_and_isolated(self):
         argv=plan.deploy_argv('sha256:'+'a'*64,self.base/'runtime-env.json')
         self.assertEqual(argv[:4],['gcloud','run','deploy','woundai-lite-candidate'])

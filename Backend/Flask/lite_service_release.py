@@ -12,6 +12,7 @@ from lite_attest_state import StateUnavailable
 from lite_usage_ledger import UsageConflict, digest, _hex, _subject
 from lite_subscription_executor import key, StoredObservation, EvidenceContradiction, EvidenceUnavailable
 from lite_usage_rollout import ObservationContradiction, ObservationUnavailable
+from lite_usage_cutover import FIRST_INSTALL
 
 
 def marker_key(component, scope):
@@ -147,6 +148,10 @@ class ServiceReleaseController:
                 p = r._policy(policy, verify_admission=False)
                 if p['identity'] != identity or p['fence'] != m['fence']:
                     raise EvidenceContradiction('policy origin or writer fence changed')
+                if self.rollout.manifest['schema']==FIRST_INSTALL and (
+                        p['accounts']!=0 or p['entries_sha256']!=digest([])
+                        or p['inventory']!=self.rollout.manifest['fresh_inventory_sha256']):
+                    raise EvidenceContradiction('subscription and quota first-install inventories differ')
                 proofs[policy] = StoredObservation(r.observations, r.evidence, p['namespace']).observe(
                     p, drained=True, manifest_digest=identity)
             except (EvidenceUnavailable, EvidenceContradiction) as exc:

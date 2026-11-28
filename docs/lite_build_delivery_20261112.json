@@ -1,0 +1,91 @@
+{
+  "schema": "woundailite-build-delivery/1",
+  "recorded_at": "2026-11-12T07:17:16.860091+00:00",
+  "build": 46,
+  "version": "1.0",
+  "bundle": "com.woundai.lite",
+  "apple_app_id": "6825208065",
+  "source": "a8a81e6e9a6d5042b8592a2671c1fed6c732e1a1",
+  "ipa_sha256": "3481984c3ef89802a709dafe2a8125009b724eadf779c3dc64bf1f503fcb56dc",
+  "ipa_bytes": 5231135,
+  "project": "iOS/project.lite-sandbox.yml",
+  "scheme": "WoundLite",
+  "configuration": "Release",
+  "source_project_build": "43",
+  "effective_overrides": {
+    "CURRENT_PROJECT_VERSION": "46",
+    "WOUNDLITE_NATIVE_SANDBOX_ORIGIN": "https://woundai-lite-native-sandbox-421209514056.asia-east1.run.app",
+    "WOUNDLITE_RESEARCH_CAPTURE": "YES",
+    "WOUNDLITE_SAVED_RECORD_TEST": "NO"
+  },
+  "source_config_sha256": {
+    "iOS/project.yml": "f8d03ef3d0d576419bd8e22710811c39608557c6bfede21ce76f93d4d6dc2aa4",
+    "iOS/project.lite-sandbox.yml": "bc3cb56a0a6a267d488ddc7f325a590a8b26ec16f499cf0b4a0b05550865e5e1",
+    "iOS/WoundLite/Info.plist": "fbc06653256ea46660c81a0a2d923d992b2d7bb19389ac4c1a79622d7a775ed7",
+    "site/privacy/woundlite.html": "54f031764d65c858592afd0a7e0773d2bd85d051015600ebe19ccea5d896d4fb",
+    "generated_project.pbxproj": "d7118c40fa73346d37a21380591cc248c953a3626246256a4f4d24426bf90565"
+  },
+  "binary_uuid": "4A828687-0EB6-3438-948E-E061F9A2F3C0",
+  "xcode": "Xcode 27.2\nBuild version 27B52",
+  "ci": {
+    "source": "a8a81e6e9a6d5042b8592a2671c1fed6c732e1a1",
+    "runs": 8,
+    "jobs": 12,
+    "passed": true
+  },
+  "distribution_checks": 63,
+  "delivery": {
+    "transporter_delivered": true,
+    "displayed_local_time": "2026-11-12 15:10 Asia/Taipei",
+    "apple_processing_observed": "processing",
+    "apple_build_id": null,
+    "owner_group_verified": false,
+    "external_testers_added": false,
+    "review_submitted": false,
+    "note": "Append a later observation after Apple processing and group readback; transmission success does not prove availability."
+  },
+  "backend_at_delivery": {
+    "changed": false,
+    "native_deployed_by_this_work": false,
+    "allowed_build_changed": false,
+    "live_backend_revision_verified_in_this_delivery": false,
+    "note": "App source is not proof of backend revision. The personal candidate service remains a separate deployment task."
+  },
+  "evidence": [
+    {
+      "path": "woundailite-beta46-20261112/source.json",
+      "sha256": "4e14edf3864789f08a9ad86ec529c873de9482dfd19acacf0a6e3217ed7ba77e"
+    },
+    {
+      "path": "woundailite-beta46-20261112/source-files.json",
+      "sha256": "b5e54d964f5ed745bfee1eb37d4a5c01bb25b85b138416a3fb15686e37d1686a"
+    },
+    {
+      "path": "woundailite-beta46-20261112/archive-verification.json",
+      "sha256": "4accfc1ce98d628f7ac24372761c3c4997a93d29826b3fad970ad85947d3f8a9"
+    },
+    {
+      "path": "woundailite-beta46-20261112/build-admission.json",
+      "sha256": "e9f0ba5eb699bce8296f1a766d71dffaace407faea31f109dd46f05ab60e0dc3"
+    },
+    {
+      "path": "woundailite-beta46-20261112/export-after-login/distribution-verification.json",
+      "sha256": "297c82392a85c602178e42ff4dcfacf6d62f5e92f1c13d954b69accba244617a"
+    },
+    {
+      "path": "woundailite-beta46-20261112/export-after-login/signed-export/DistributionSummary.plist",
+      "sha256": "7318bd7bcb2ec267549c8b69df5789998df888609a4d47fc42d86fc905cf4e03"
+    },
+    {
+      "path": "woundailite-beta46-20261112/owner-delivery/owner-authorization.json",
+      "sha256": "01fd6631325d0f86200a1cbfd1f23544c395f2253933f9ff0c2d59864bbaab86"
+    },
+    {
+      "path": "woundailite-beta46-20261112/owner-delivery/transporter-delivered.png",
+      "sha256": "c0d61aade6363f7ddbf0fe95f4ab5eb674dfcdd7eef6bd81df9eb197cf5792dc"
+    }
+  ],
+  "local_source_tag": "testflight/woundailite-1.0-46",
+  "remote_tag_pushed": false,
+  "historical_ledger": "docs/lite_build_provenance_20261107.json"
+}

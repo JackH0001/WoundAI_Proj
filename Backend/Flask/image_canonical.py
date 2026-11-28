@@ -27,7 +27,7 @@ def _size_ok(width, height):
         raise InvalidImage("影像尺寸無效或超過 3200 萬像素")
 
 
-def jpeg_safe_pass(raw):
+def jpeg_safe_pass(raw, *, inspect_metadata=None):
     """Parse the complete stream (including progressive scans and EOI).
 
     Repeated DQT/DHT/SOS markers are legal table/scan structure, not metadata.
@@ -61,6 +61,8 @@ def jpeg_safe_pass(raw):
             raise InvalidImage("JPEG segment 截斷")
         data = raw[pos + 2:pos + length]
         pos += length
+        if inspect_metadata is not None and (0xE0 <= marker <= 0xEF or marker == 0xFE):
+            inspect_metadata(marker, data)
         if marker == 0xE0:
             safe &= not jfif and len(data) == 14 and data[:5] == b"JFIF\0" and data[12:14] == b"\0\0"
             jfif = True
@@ -92,7 +94,7 @@ def jpeg_safe_pass(raw):
     raise InvalidImage("JPEG 缺少 EOI")
 
 
-def png_metadata(raw):
+def png_metadata(raw, *, inspect_chunk=None):
     pos, chunks, metadata = 8, [], False
     if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
         raise InvalidImage("不是 PNG")
@@ -119,6 +121,8 @@ def png_metadata(raw):
         if kind == b"tRNS":
             raise InvalidImage("不接受帶透明度 tRNS 的 PNG")
         metadata |= kind not in (b"IHDR", b"PLTE", b"IDAT", b"IEND")
+        if inspect_chunk is not None:
+            inspect_chunk(kind, data)
         chunks.append(kind)
         pos = end
         if kind == b"IEND":

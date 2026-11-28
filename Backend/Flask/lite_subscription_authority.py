@@ -23,6 +23,11 @@ def enum_value(value):
     return getattr(value, 'value', value)
 
 
+def matches_apple_account_token(signed_value, registered_token):
+    """The validated registry UUID is lowercase. Apple may vary ASCII hex case."""
+    return type(signed_value) is str and signed_value.isascii() and signed_value.lower() == registered_token
+
+
 @dataclass(frozen=True)
 class ApplePolicy:
     bundle: str
@@ -83,6 +88,17 @@ def apple_verifier(policy, root_certificates, *, allowed_products=None):
     return SignedDataVerifier(root_certificates, True, Environment(policy.environment), policy.bundle, policy.app_id)
 
 
+def verify_apple_jws(decode, signed):
+    """Keep temporary online certificate checks distinct from rejected transactions."""
+    from appstoreserverlibrary.signed_data_verifier import VerificationException, VerificationStatus
+    try:
+        return decode(signed)
+    except Exception as exc:
+        if isinstance(exc, VerificationException) and exc.status == VerificationStatus.RETRYABLE_VERIFICATION_FAILURE:
+            raise StateUnavailable('Apple certificate status temporarily unavailable') from exc
+        raise SubscriptionRejected('Apple signed data rejected') from exc
+
+
 class AppleSubscriptionAuthority:
     def __init__(self, *, policy, verifier, client, proof_store, clock=time.time, allowed_products=None):
         policy.validate(allowed_products)
@@ -108,8 +124,8 @@ class AppleSubscriptionAuthority:
             raise StateUnavailable('billing grace renewal proof unavailable; refresh')
         if type(signed) is not str or not 1<=len(signed)<=12000:
             raise SubscriptionRejected('bounded signed renewal required')
+        renewal = verify_apple_jws(self.verifier.verify_and_decode_renewal_info, signed)
         try:
-            renewal=self.verifier.verify_and_decode_renewal_info(signed)
             encoded=signed.split('.')[1]
             raw=loads_json_object_strict(base64.b64decode(encoded+'='*(-len(encoded)%4),
                 altchars=b'-_',validate=True).decode('utf-8'))
@@ -127,7 +143,7 @@ class AppleSubscriptionAuthority:
         if (getattr(renewal,'originalTransactionId',None)!=binding.original_transaction
                 or getattr(renewal,'productId',None)!=self.policy.product
                 or enum_value(getattr(renewal,'environment',None))!=self.policy.environment
-                or ('appAccountToken' in raw and raw['appAccountToken']!=binding.app_account_token)):
+                or ('appAccountToken' in raw and not matches_apple_account_token(raw['appAccountToken'], binding.app_account_token))):
             raise SubscriptionRejected('renewal product/owner/environment mismatch')
         # The token is optional in renewal info; the transaction token is always
         # required and verified above. A future autoRenewProductId is not the
@@ -172,9 +188,8 @@ class AppleSubscriptionAuthority:
         row=matches[0]; signed=getattr(row,'signedTransactionInfo',None)
         if type(signed) is not str or not 1 <= len(signed) <= 12000:
             raise SubscriptionRejected('bounded signed transaction required')
+        transaction = verify_apple_jws(self.verifier.verify_and_decode_signed_transaction, signed)
         try:
-            # Name is pinned to Apple library 3.1.2; upstream main uses another name.
-            transaction=self.verifier.verify_and_decode_signed_transaction(signed)
             # Official model conversion can coerce booleans/numbers into expected
             # types. Inspect the SAME already signature-verified payload to reject
             # such coercion and duplicate JSON keys; this is not JWS verification.
@@ -197,7 +212,7 @@ class AppleSubscriptionAuthority:
                 enum_value(getattr(transaction,'environment',None))==p.environment,
                 getattr(transaction,'productId',None)==p.product,
                 getattr(transaction,'originalTransactionId',None)==binding.original_transaction,
-                getattr(transaction,'appAccountToken',None)==binding.app_account_token,
+                matches_apple_account_token(raw['appAccountToken'], binding.app_account_token),
                 enum_value(getattr(transaction,'type',None))=='Auto-Renewable Subscription',
                 enum_value(getattr(transaction,'inAppOwnershipType',None))=='PURCHASED',
                 getattr(transaction,'isUpgraded',False) in (None,False))

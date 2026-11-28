@@ -18,6 +18,7 @@ targets:
     settings:
       base:
         CODE_SIGN_ENTITLEMENTS: LiteNativeSandbox/WoundLite.entitlements
+        CURRENT_PROJECT_VERSION: "43"
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WOUND_LITE WOUND_LITE_NATIVE_SANDBOX"
       configs:
         Debug:

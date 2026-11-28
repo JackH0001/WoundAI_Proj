@@ -1,5 +1,6 @@
 import XCTest
 import CryptoKit
+import UIKit
 @testable import WoundLite
 
 private struct ServiceRecoveryFixture: Decodable {
@@ -47,7 +48,7 @@ extension LiteServiceOperationTests {
     }
     func testLostRecoveryResponseAfterRestartReadsAuthorizationInsteadOfNewPhoto() async throws {
         let (f,w,m,c)=try await recoverySetup(),image=f.image
-        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.available)),ServiceStep(action:"recover",data:Data(),fail:true)])
+        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.available)),ServiceStep(action:"recover",data:Data(),networkError:.timedOut)])
         let waiting=try await c.resume(f.capture_id) { _ in XCTFail();return nil }
         XCTAssertEqual(waiting.operation,f.capture_id);XCTAssertNil(waiting.recoveryHistory)
         try await w.plan([ServiceStep(action:"status",data:f.bytes(f.authorization))]+recoveryFinish(f))
@@ -94,7 +95,7 @@ extension LiteServiceOperationTests {
     }
     func testExistingPinnedReceiptCannotBecomeSuccessor() async throws {
         let (f,w,m,c)=try await setup(),image=f.image
-        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.prepare)),ServiceStep(action:"run",data:Data(),fail:true)])
+        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.prepare)),ServiceStep(action:"run",data:Data(),networkError:.timedOut)])
         _=try await c.resume(f.capture_id) { _ in image }
         let recovery=try ServiceRecoveryFixture.load()
         await w.plan([ServiceStep(action:"status",data:try recovery.bytes(recovery.authorization))])
@@ -192,7 +193,7 @@ extension LiteServiceOperationTests {
     func testLostResubmitReplyRestartsWithSameExplicitIntent() async throws {
         let (f,w,m,c)=try await expiredSetup(),image=f.image
         _=try await c.requestResubmission(f.capture_id)
-        await w.plan([ServiceStep(action:"resubmit",data:Data(),fail:true)])
+        await w.plan([ServiceStep(action:"resubmit",data:Data(),networkError:.timedOut)])
         let waiting=try await c.resume(f.capture_id) { _ in XCTFail();return nil }
         XCTAssertEqual(waiting.operation,f.capture_id);XCTAssertTrue(waiting.resubmitRequested == true)
         try await w.plan([ServiceStep(action:"status",data:f.bytes(f.cancelled))]+resubmitSteps(f))
@@ -289,12 +290,37 @@ private actor ServiceMemory: LiteServiceJournal {
     func corrupt(_ id:String,_ data:Data) { entries[id]=data }
 }
 
+private actor VerifiedServiceWire: LiteAccountBoundServiceTransport {
+    let wire: ServiceWire
+    let account = String(repeating: "a", count: 64)
+    private(set) var actions: [String] = []
+    private(set) var expectations: [String?] = []
+    init(_ wire: ServiceWire) { self.wire = wire }
+    func installation() async throws -> String { await wire.installation() }
+    func verifyRecognitionAccount(_ expected: String, installation: String) async throws {
+        guard expected == account, await wire.installation() == installation else { throw LiteServiceFailure.conflict }
+    }
+    func send(_ request: URLRequest, installation: String) async throws -> (Data, HTTPURLResponse) {
+        XCTFail("Account-aware transport must verify every recognition request")
+        throw LiteServiceFailure.conflict
+    }
+    func sendRecognition(_ request: URLRequest, installation: String, expectedAccount: String?) async throws
+        -> (data: Data, http: HTTPURLResponse, accountSHA256: String) {
+        actions.append(request.url!.lastPathComponent)
+        expectations.append(expectedAccount)
+        if let expectedAccount { try await verifyRecognitionAccount(expectedAccount, installation: installation) }
+        let reply = try await wire.send(request, installation: installation)
+        return (reply.0, reply.1, account)
+    }
+}
+
 private struct ServiceStep: Sendable {
     let action: String, data: Data
     var code=200
-    var fail=false
+    var networkError: URLError.Code?
     var wait: String?
     var delay=false
+    var contentType: String?
 }
 private actor ServiceWire: LiteAuthenticatedTransport {
     var owner: String
@@ -310,16 +336,18 @@ private actor ServiceWire: LiteAuthenticatedTransport {
         let s=steps.removeFirst()
         guard request.url?.lastPathComponent == s.action else { throw LiteServiceFailure.invalidState }
         if s.delay { try await Task.sleep(nanoseconds:100_000_000) }
-        if s.fail { throw URLError(.timedOut) }
-        return (s.data,HTTPURLResponse(url:request.url!,statusCode:s.code,httpVersion:nil,
-            headerFields:s.wait.map { ["Retry-After":$0] })!)
+        if let networkError = s.networkError { throw URLError(networkError) }
+        var headers = [String: String]()
+        headers["Retry-After"] = s.wait
+        headers["Content-Type"] = s.contentType
+        return (s.data,HTTPURLResponse(url:request.url!,statusCode:s.code,httpVersion:nil,headerFields:headers)!)
     }
 }
 
 @MainActor
 final class LiteServiceOperationTests: XCTestCase {
     private let origin=URL(string:"https://lite.invalid")!
-    private func client(_ wire:ServiceWire,_ store:any LiteServiceJournal,_ time:Double=1000) throws -> LiteServiceClient {
+    private func client(_ wire:any LiteAuthenticatedTransport,_ store:any LiteServiceJournal,_ time:Double=1000) throws -> LiteServiceClient {
         try LiteServiceClient(origin:origin,transport:wire,journal:store,now:{ Date(timeIntervalSince1970:time) })
     }
     private func setup() async throws -> (ServiceFixture,ServiceWire,ServiceMemory,LiteServiceClient) {
@@ -332,6 +360,57 @@ final class LiteServiceOperationTests: XCTestCase {
     }
     private func error(_ name:String) -> Data { try! JSONSerialization.data(withJSONObject:["error":name]) }
 
+    func testVerifiedAccountSurvivesResubmissionAndSuccessorPrepare() async throws {
+        let f = try ServiceResubmitFixture.load(), wire = ServiceWire(owner: f.installation)
+        let checked = VerifiedServiceWire(wire), memory = ServiceMemory()
+        let service = try client(checked, memory), image = f.image
+        _ = try await service.enqueue(captureID: f.capture_id, jpeg: image)
+        await wire.plan([ServiceStep(action: "prepare", data: try f.bytes(f.cancelled))])
+        let expired = try await service.resume(f.capture_id) { _ in XCTFail(); return nil }
+        let account = String(repeating: "a", count: 64)
+        XCTAssertEqual(expired.accountSHA256, account)
+        _ = try await service.requestResubmission(f.capture_id)
+        try await wire.plan(resubmitSteps(f))
+        let done = try await client(checked, memory).resume(f.capture_id) { _ in image }
+        XCTAssertEqual(done.note, "confirmed")
+        XCTAssertEqual(done.accountSHA256, account)
+        let actions = await checked.actions, expected = await checked.expectations
+        XCTAssertEqual(actions, ["prepare", "resubmit", "prepare", "run"])
+        XCTAssertEqual(expected, [nil, account, account, account])
+    }
+
+    func testBoundReceiptRefusesLegacyTransportWithoutDispatch() async throws {
+        let (f, wire, memory, _) = try await setup(), checked = VerifiedServiceWire(wire)
+        await wire.plan([ServiceStep(action: "prepare", data: try f.bytes(f.prepare)),
+                         ServiceStep(action: "run", data: Data(), networkError: .timedOut)])
+        let image = f.image
+        let interrupted = try await client(checked, memory).resume(f.capture_id) { _ in image }
+        XCTAssertEqual(interrupted.accountSHA256, String(repeating: "a", count: 64))
+        let blocked = try await client(wire, memory, 1010).resume(f.capture_id) { _ in XCTFail(); return nil }
+        XCTAssertEqual(blocked.accountSHA256, interrupted.accountSHA256)
+        XCTAssertEqual(blocked.note, "unavailable")
+        let requests = await wire.requests()
+        XCTAssertEqual(requests.map { $0.url!.lastPathComponent }, ["prepare", "run"])
+    }
+
+    func testUnauthenticatedOrInvalidPrepareReceiptDoesNotBind() async throws {
+        let (f, wire, memory, service) = try await setup(), image = f.image
+        let original = try await service.stored(f.capture_id)
+        let raw = try XCTUnwrap(try JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+        XCTAssertNil(raw["accountSHA256"])
+        try await wire.plan(doneSteps(f))
+        let legacy = try await service.resume(f.capture_id) { _ in image }
+        XCTAssertNil(legacy.accountSHA256)
+        let restarted = try await client(VerifiedServiceWire(wire), memory).resume(f.capture_id) { _ in XCTFail(); return nil }
+        XCTAssertEqual(restarted, legacy)
+        let (other, badWire, badMemory, _) = try await setup()
+        let invalid = try other.changed { $0["operation"] = String(repeating: "f", count: 32) }
+        await badWire.plan([ServiceStep(action: "prepare", data: invalid)])
+        let rejected = try await client(VerifiedServiceWire(badWire), badMemory).resume(other.capture_id) { _ in XCTFail(); return nil }
+        XCTAssertEqual(rejected.note, "review")
+        XCTAssertNil(rejected.accountSHA256)
+    }
+
     func testPythonGoldenResponsePersistsResultAndExactImageOnce() async throws {
         let (f,w,m,c)=try await setup();try await w.plan(doneSteps(f));let image=f.image
         let result=try await c.resume(f.capture_id) { _ in image }
@@ -342,6 +421,42 @@ final class LiteServiceOperationTests: XCTestCase {
         for forbidden in ["raw_depth","consent_epoch","paid","research_consent"] { XCTAssertNil(body.range(of:Data(forbidden.utf8))) }
         let stored=try await client(w,m).stored(f.capture_id);XCTAssertEqual(stored,result)
     }
+
+    func testSavedPreviewRequiresTheExactCompletedPhotoEvenAtIdenticalDimensions() async throws {
+        let (fixture, wire, _, client) = try await setup()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = LocalImageStore(directory: directory)
+        let jpeg = fixture.image
+        let original = try XCTUnwrap(store.save(jpeg: jpeg))
+        let ready = try await client.stored(fixture.capture_id)
+        let pendingImage = await ImageLoadQueue.shared.verifiedServiceImage(journal: ready, store: store, name: original)
+        XCTAssertNil(pendingImage)
+        try await wire.plan(doneSteps(fixture))
+        let completed = try await client.resume(fixture.capture_id) { _ in jpeg }
+        let sameSize = CGSize(width: completed.width, height: completed.height)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let replacement = UIGraphicsImageRenderer(size: sameSize, format: format).image { ctx in
+            UIColor.cyan.setFill()
+            ctx.fill(CGRect(origin: .zero, size: sameSize))
+        }
+        let otherJPEG = try XCTUnwrap(replacement.jpegData(compressionQuality: 0.92))
+        let other = try XCTUnwrap(store.save(jpeg: otherJPEG))
+        XCTAssertNotEqual(LiteServiceBytes.hash(jpeg), LiteServiceBytes.hash(otherJPEG))
+        let originalImage = await ImageLoadQueue.shared.verifiedServiceImage(journal: completed, store: store, name: original)
+        let otherImage = await ImageLoadQueue.shared.verifiedServiceImage(journal: completed, store: store, name: other)
+        let missing = await ImageLoadQueue.shared.verifiedServiceImage(journal: completed, store: store, name: "missing")
+        XCTAssertNotNil(originalImage)
+        XCTAssertNil(otherImage)
+        XCTAssertNil(missing)
+        XCTAssertEqual(store.rawBytes(original), jpeg)
+        XCTAssertEqual(store.rawBytes(other), otherJPEG)
+        let reread = try await client.stored(fixture.capture_id)
+        XCTAssertEqual(reread, completed)
+        let sent = await wire.requests()
+        XCTAssertEqual(sent.map { $0.url?.lastPathComponent }, ["prepare", "run"])
+    }
     func testCompletedOperationIsLocalReadWithoutImageOrNetwork() async throws {
         let (f,w,m,c)=try await setup();try await w.plan(doneSteps(f));let image=f.image
         _=try await c.resume(f.capture_id) { _ in image }
@@ -350,7 +465,7 @@ final class LiteServiceOperationTests: XCTestCase {
     }
     func testLostRunResponseAfterRestartUsesStatusWithoutImage() async throws {
         let (f,w,m,c)=try await setup();let image=f.image
-        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.prepare)),ServiceStep(action:"run",data:Data(),fail:true)])
+        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.prepare)),ServiceStep(action:"run",data:Data(),networkError:.timedOut)])
         let waiting=try await c.resume(f.capture_id) { _ in image };XCTAssertEqual(waiting.next,"status")
         await w.plan([ServiceStep(action:"status",data:try f.bytes(f.completed))])
         let result=try await client(w,m,1006).resume(f.capture_id) { _ in throw LiteServiceFailure.missingImage }
@@ -360,7 +475,7 @@ final class LiteServiceOperationTests: XCTestCase {
     }
     func testLostPrepareAndUnknownStatusReuseSameOperation() async throws {
         let (f,w,m,c)=try await setup();let image=f.image
-        await w.plan([ServiceStep(action:"prepare",data:Data(),fail:true)])
+        await w.plan([ServiceStep(action:"prepare",data:Data(),networkError:.timedOut)])
         _=try await c.resume(f.capture_id) { _ in image }
         await w.plan([ServiceStep(action:"status",data:error("lite_operation_unknown"),code:404)]+(try doneSteps(f)))
         let result=try await client(w,m,1006).resume(f.capture_id) { _ in image }
@@ -370,7 +485,7 @@ final class LiteServiceOperationTests: XCTestCase {
     }
     func testPreparedStatusAllowsSendingOnlyWhenServerSaysReady() async throws {
         let (f,w,m,c)=try await setup();let image=f.image
-        await w.plan([ServiceStep(action:"prepare",data:Data(),fail:true)])
+        await w.plan([ServiceStep(action:"prepare",data:Data(),networkError:.timedOut)])
         _=try await c.resume(f.capture_id) { _ in image }
         await w.plan([ServiceStep(action:"status",data:try f.bytes(f.prepare)),ServiceStep(action:"run",data:try f.bytes(f.completed))])
         let result=try await client(w,m,1006).resume(f.capture_id) { _ in image };XCTAssertEqual(result.note,"confirmed")
@@ -434,11 +549,80 @@ final class LiteServiceOperationTests: XCTestCase {
         XCTAssertEqual(r.note,"quota");XCTAssertEqual(r.retryAt,4600);XCTAssertEqual(r.next,"prepare")
         XCTAssertTrue(r.message.contains("額度"));let sent=await w.requests();XCTAssertEqual(sent.count,1)
     }
+    func testAttemptLimitAndReservedOrUsedQuotaKeepThePhotoAndOriginalOperation() async throws {
+        for reason in ["attempt_quota", "success_quota"] {
+            let (fixture, wire, _, service) = try await setup()
+            let body = try JSONSerialization.data(withJSONObject: ["error": "lite_usage_limit", "reason": reason])
+            await wire.plan([ServiceStep(action: "prepare", data: body, code: 429, wait: "30")])
+            let result = try await service.resume(fixture.capture_id) { _ in XCTFail("Asked for photo"); return nil }
+            let saved = try await service.stored(fixture.capture_id)
+            XCTAssertEqual(saved.operation, result.operation)
+            XCTAssertEqual(saved.note, "quota")
+            XCTAssertEqual(saved.attemptLimitReached == true, reason == "attempt_quota")
+            XCTAssertEqual(saved.message.contains("嘗試已達上限"), reason == "attempt_quota")
+            let requests = await wire.requests()
+            XCTAssertEqual(requests.count, 1)
+        }
+    }
+
     func testCapacityWaitIsDistinctAndMalformedWaitDoesNotLockForever() async throws {
         let (f,w,_,c)=try await setup()
         await w.plan([ServiceStep(action:"prepare",data:error("lite_service_budget"),code:429,wait:"inf")])
         let r=try await c.resume(f.capture_id) { _ in nil }
         XCTAssertEqual(r.note,"capacity");XCTAssertEqual(r.retryAt,1005)
+    }
+
+    func testQuotaReasonSurvivesRelaunchAndSamePhotoResumesOnce() async throws {
+        for state in ["pending", "used", "unknown"] {
+            let (f, wire, journal, service) = try await setup()
+            let body = try JSONSerialization.data(withJSONObject: [
+                "error": "lite_usage_limit", "reason": "success_quota", "success_quota_state": state
+            ])
+            await wire.plan([ServiceStep(action: "prepare", data: body, code: 429, wait: "30")])
+            let blocked = try await service.resume(f.capture_id) { _ in XCTFail("Read image before admission"); return nil }
+            let early = try client(wire, journal, 1029)
+            let saved = try await early.resume(f.capture_id) { _ in XCTFail(); return nil }
+            XCTAssertEqual(saved, blocked)
+            XCTAssertEqual(saved.successQuotaState?.rawValue, state == "unknown" ? nil : state)
+            let expected = ["pending": "暫時占用", "used": "已用完", "unknown": "等候可用額度"]
+            XCTAssertTrue(saved.message.contains(try XCTUnwrap(expected[state])))
+            let ready = try client(wire, journal, 1030)
+            let jpeg = f.image
+            await wire.plan([ServiceStep(action: "prepare", data: try f.bytes(f.prepare)),
+                             ServiceStep(action: "run", data: try f.bytes(f.completed))])
+            let done = try await ready.resume(f.capture_id) { _ in jpeg }
+            XCTAssertEqual(done.operation, blocked.operation)
+            XCTAssertEqual(done.note, "confirmed")
+            let sent = await wire.requests()
+            XCTAssertEqual(sent.map { $0.url?.lastPathComponent }, ["prepare", "prepare", "run"])
+        }
+    }
+    func testBusyRunKeepsOriginalWorkAndQueriesStatusBeforeResendingPhoto() async throws {
+        let (fixture, wire, journal, service) = try await setup()
+        let jpeg = fixture.image
+        await wire.plan([
+            ServiceStep(action: "prepare", data: try fixture.bytes(fixture.prepare)),
+            ServiceStep(action: "run", data: error("lite_model_busy"), code: 429, wait: "5")
+        ])
+        let waiting = try await service.resume(fixture.capture_id) { _ in jpeg }
+        XCTAssertEqual(waiting.note, "capacity")
+        XCTAssertTrue(waiting.message.contains("不需重新拍攝"))
+        XCTAssertEqual(waiting.next, "status")
+        let beforeDue = try await client(wire, journal, 1004).resume(fixture.capture_id) { _ in
+            XCTFail("照片在等待期間不應重送"); return nil
+        }
+        XCTAssertEqual(beforeDue, waiting)
+        await wire.plan([
+            ServiceStep(action: "status", data: try fixture.bytes(fixture.prepare)),
+            ServiceStep(action: "run", data: try fixture.bytes(fixture.completed))
+        ])
+        let done = try await client(wire, journal, 1005).resume(fixture.capture_id) { _ in jpeg }
+        XCTAssertEqual(done.note, "confirmed")
+        XCTAssertEqual(done.operation, waiting.operation)
+        XCTAssertEqual(done.imageSHA256, waiting.imageSHA256)
+        let requests = await wire.requests()
+        XCTAssertEqual(requests.map { $0.url?.lastPathComponent }, ["prepare","run","status","run"])
+        XCTAssertNil(requests[2].httpBody?.range(of: jpeg))
     }
     func testOldSavedDeadlineIsShortenedWithoutSending() async throws {
         let (f,w,m,c)=try await setup()
@@ -449,7 +633,7 @@ final class LiteServiceOperationTests: XCTestCase {
     }
     func testUnknownAfterPinnedReceiptCannotReprepare() async throws {
         let (f,w,m,c)=try await setup();let image=f.image
-        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.prepare)),ServiceStep(action:"run",data:Data(),fail:true)])
+        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.prepare)),ServiceStep(action:"run",data:Data(),networkError:.timedOut)])
         _=try await c.resume(f.capture_id) { _ in image }
         await w.plan([ServiceStep(action:"status",data:error("lite_operation_unknown"),code:404)])
         let r=try await client(w,m,1006).resume(f.capture_id) { _ in nil }
@@ -561,5 +745,223 @@ final class LiteServiceOperationTests: XCTestCase {
         let after=await http.snapshot();XCTAssertEqual(after.1.count,1)
         request.url=origin.appendingPathComponent("api/v1/lite/segment")
         do { _=try await transport.send(request,installation:owner);XCTFail() } catch { }
+    }
+}
+
+extension LiteServiceOperationTests {
+    func testOfflineRunSurvivesRestartAndOnlyQueriesTheOriginalResult() async throws {
+        let (fixture, wire, journal, service) = try await setup()
+        let id = fixture.capture_id
+        let jpeg = fixture.image
+        await wire.plan([
+            ServiceStep(action: "prepare", data: try fixture.bytes(fixture.prepare)),
+            ServiceStep(action: "run", data: Data(), networkError: .notConnectedToInternet)
+        ])
+        let interruption = try await service.resume(id) { _ in jpeg }
+        XCTAssertEqual(interruption.note, "unavailable")
+        XCTAssertTrue(interruption.message.contains("裝置離線"))
+        XCTAssertEqual(interruption.next, "status")
+        let reopened = try await client(wire, journal, 1005).storedIfPresent(id)
+        XCTAssertEqual(reopened, interruption)
+        await wire.plan([ServiceStep(action: "status", data: Data(), networkError: .timedOut)])
+        let timedOut = try await client(wire, journal, 1005).resume(id, statusOnly: true) { _ in
+            XCTFail("A status check must not load the photo"); return nil
+        }
+        XCTAssertFalse(timedOut.message.contains("離線"))
+        XCTAssertEqual(timedOut.operation, id)
+        await wire.plan([ServiceStep(action: "status", data: try fixture.bytes(fixture.completed))])
+        let recovered = try await client(wire, journal, 1010).resume(id, statusOnly: true) { _ in
+            XCTFail("A status check must not load the photo"); return nil
+        }
+        XCTAssertEqual(recovered.reply, fixture.completed)
+        let requests = await wire.requests()
+        XCTAssertEqual(requests.compactMap { $0.url?.lastPathComponent }, ["prepare", "run", "status", "status"])
+    }
+
+    func testGatewayLossKeepsTheOriginalOperationAndWaitsForStatus() async throws {
+        for action in ["prepare", "run"] {
+            for code in [404, 502, 503, 504] {
+                let (fixture, wire, journal, service) = try await setup()
+                let id = fixture.capture_id
+                let jpeg = fixture.image
+                let html = Data("<html>gateway unavailable</html>".utf8)
+                let failure = ServiceStep(action: action, data: html, code: code, wait: "7")
+                let ready = ServiceStep(action: "prepare", data: try fixture.bytes(fixture.prepare))
+                await wire.plan(action == "run" ? [ready, failure] : [failure])
+                let interrupted = try await service.resume(id) { _ in jpeg }
+                let label = "\(action) HTTP \(code)"
+                XCTAssertEqual(interrupted.next, "status", label)
+                guard interrupted.next == "status" else { continue }
+                XCTAssertEqual(interrupted.note, "unavailable", label)
+                XCTAssertEqual(interrupted.retryAt, 1007, label)
+                XCTAssertEqual(interrupted.operation, id, label)
+                XCTAssertEqual(interrupted.imageSHA256, fixture.image_sha256, label)
+                XCTAssertEqual(interrupted.requestDigest, action == "run" ? fixture.prepare.receipt?.request_digest : nil, label)
+                let stored = try await client(wire, journal).stored(id)
+                XCTAssertEqual(stored, interrupted, label)
+
+                let before = await wire.requests()
+                _ = try await client(wire, journal, 1006).resume(id) { _ in XCTFail(label); return nil }
+                let beforeDeadline = await wire.requests()
+                XCTAssertEqual(beforeDeadline.count, before.count, label)
+                // A second outage during the status query only extends the wait.
+                await wire.plan([ServiceStep(action: "status", data: html, code: code)])
+                let waiting = try await client(wire, journal, 1007).resume(id) { _ in XCTFail(label); return nil }
+                XCTAssertEqual(waiting.next, "status", label)
+                XCTAssertEqual(waiting.retryAt, 1012, label)
+                let done = ServiceStep(action: "status", data: try fixture.bytes(fixture.completed))
+                let recovered: LiteServiceRecord
+                if action == "prepare" {
+                    // No photo was sent earlier. Only an authoritative ready reply authorizes the first run.
+                    await wire.plan([ServiceStep(action: "status", data: ready.data),
+                                     ServiceStep(action: "run", data: done.data)])
+                    recovered = try await client(wire, journal, 1012).resume(id) { _ in jpeg }
+                } else {
+                    // The original run reached the server and completed despite the gateway failure.
+                    await wire.plan([done])
+                    recovered = try await client(wire, journal, 1012).resume(id) { _ in XCTFail(label); return nil }
+                }
+                XCTAssertEqual(recovered.note, "confirmed", label)
+                XCTAssertEqual(recovered.reply, fixture.completed, label)
+                XCTAssertEqual(recovered.operation, id, label)
+                XCTAssertNil(recovered.recoveryHistory, label)
+                let requests = await wire.requests()
+                let actions = requests.compactMap { $0.url?.lastPathComponent }
+                XCTAssertEqual(actions, action == "prepare" ? ["prepare", "status", "status", "run"] :
+                                                          ["prepare", "run", "status", "status"], label)
+                for request in requests {
+                    let body = try XCTUnwrap(request.httpBody)
+                    if request.url?.lastPathComponent == "run" {
+                        XCTAssertNotNil(body.range(of: jpeg), label)
+                        XCTAssertNotNil(body.range(of: Data("\r\n\r\n\(id)\r\n".utf8)), label)
+                    } else {
+                        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
+                        XCTAssertEqual(payload["operation"], id, label)
+                        XCTAssertNil(body.range(of: jpeg), label)
+                    }
+                }
+            }
+        }
+    }
+
+    func testGatewayFormatsPreserveStructuredOrUnrecognizableFailuresForReview() async throws {
+        for (body, type, expected) in [("", nil, "unavailable"), ("Not Found", nil, "unavailable"),
+                                       ("Bad Gateway", nil, "unavailable"), ("Gateway Timeout", nil, "unavailable"),
+                                       ("<!DOCTYPE HTML><html>Error</html>", "text/html", "unavailable"),
+                                       ("upstream connection timeout", "text/plain", "unavailable"),
+                                       ("{broken", "text/plain", "review"), ("{}", "text/html", "review"),
+                                       ("<html>error</html>", "application/json", "review"),
+                                       ("unrecognized response", nil, "review")] as [(String, String?, String)] {
+            let (fixture, wire, _, service) = try await setup()
+            await wire.plan([ServiceStep(action: "prepare", data: Data(body.utf8), code: 404, contentType: type)])
+            let saved = try await service.resume(fixture.capture_id) { _ in XCTFail(); return nil }
+            XCTAssertEqual(saved.note, expected, body)
+            XCTAssertEqual(saved.next, expected == "review" ? "none" : "status", body)
+        }
+    }
+
+    func testComplexResultAtPrepareRunOrStatusStopsAcrossRestart() async throws {
+        let body = Data(#"{"error":"lite_result_too_complex","retry_action":"none","keep_local":true}"#.utf8)
+        for action in ["prepare", "run", "status"] {
+            let (fixture, wire, journal, service) = try await setup()
+            let rejection = ServiceStep(action: action, data: body, code: 422)
+            let id = fixture.capture_id, jpeg = fixture.image
+            let prepared = ServiceStep(action: "prepare", data: try fixture.bytes(fixture.prepare))
+            let terminal: LiteServiceRecord
+            let expected: [String]
+            if action == "status" {
+                await wire.plan([prepared, ServiceStep(action: "run", data: Data(), networkError: .timedOut)])
+                _ = try await service.resume(id) { _ in jpeg }
+                await wire.plan([rejection])
+                terminal = try await client(wire, journal, 1006).resume(id, statusOnly: true) { _ in XCTFail(); return nil }
+                expected = ["prepare", "run", "status"]
+            } else {
+                await wire.plan(action == "run" ? [prepared, rejection] : [rejection])
+                terminal = try await service.resume(id) { _ in jpeg }
+                expected = action == "run" ? ["prepare", "run"] : ["prepare"]
+            }
+            XCTAssertEqual(terminal.note, "resultTooComplex", action)
+            XCTAssertEqual(terminal.next, "none"); XCTAssertEqual(terminal.retryAt, 0)
+            XCTAssertEqual(terminal.reply, action == "prepare" ? nil : fixture.prepare)
+            XCTAssertEqual(terminal.imageSHA256, fixture.image_sha256)
+            XCTAssertFalse(terminal.canResubmit)
+            let resumed = try client(wire, journal, 2000)
+            let saved = try await resumed.resume(id) { _ in XCTFail(); return nil }
+            XCTAssertEqual(saved, terminal)
+            let queries = await wire.requests()
+            XCTAssertEqual(queries.compactMap { $0.url?.lastPathComponent }, expected, action)
+        }
+    }
+
+    func testComplexResultRequiresMatchingHTTPCodeAndTerminalDirectives() async throws {
+        for (status, fields, note) in [
+            (422, #"{"error":"another","retry_action":"none","keep_local":true}"#, "rejected"),
+            (422, #"{"error":"lite_result_too_complex","retry_action":"status","keep_local":true}"#, "review"),
+            (422, #"{"error":"lite_result_too_complex","retry_action":"none","keep_local":false}"#, "review"),
+            (422, #"{"error":"lite_result_too_complex","retry_action":"none","keep_local":1}"#, "review"),
+            (422, #"{"error":"lite_result_too_complex"}"#, "review"),
+            (409, #"{"error":"lite_result_too_complex","retry_action":"none","keep_local":true}"#, "review")
+        ] {
+            let (fixture, wire, _, service) = try await setup()
+            await wire.plan([ServiceStep(action: "prepare", data: Data(fields.utf8), code: status)])
+            let saved = try await service.resume(fixture.capture_id) { _ in XCTFail(); return nil }
+            XCTAssertEqual(saved.note, note, fields)
+            XCTAssertEqual(saved.next, "none")
+        }
+    }
+
+    func testApplicationErrorsAndInvalidReceiptsStillRequireReview() async throws {
+        let rejected = Data("<html>unavailable</html>".utf8)
+        for (code, data, note) in [(404, error("other_business_error"), "review"),
+                                   (502, error("other_business_error"), "review"),
+                                   (504, Data("{broken receipt".utf8), "review"),
+                                   (410, rejected, "expired"), (422, rejected, "rejected"),
+                                   (200, rejected, "review")] {
+            let (fixture, wire, journal, service) = try await setup()
+            await wire.plan([ServiceStep(action: "prepare", data: data, code: code)])
+            let saved = try await service.resume(fixture.capture_id) { _ in XCTFail(); return nil }
+            XCTAssertEqual(saved.note, note)
+            XCTAssertEqual(saved.next, "none")
+            let after = try await client(wire, journal, 9000).resume(fixture.capture_id) { _ in XCTFail(); return nil }
+            XCTAssertEqual(after, saved)
+            let requests = await wire.requests()
+            XCTAssertEqual(requests.count, 1)
+        }
+    }
+}
+
+extension LiteServiceOperationTests {
+    func testReadOnlyUnknownReturnsPrepareForExplicitSameOperation() async throws {
+        let (f, wire, journal, service) = try await setup()
+        await wire.plan([ServiceStep(action: "prepare", data: Data(), networkError: .timedOut)])
+        _ = try await service.resume(f.capture_id) { _ in XCTFail(); return nil }
+        await wire.plan([ServiceStep(action: "status", data: error("lite_operation_unknown"), code: 404)])
+        let resumed = try client(wire, journal, 1006)
+        let waiting = try await resumed.resume(f.capture_id, statusOnly: true) { _ in XCTFail(); return nil }
+        XCTAssertEqual(waiting.next, "prepare")
+        _ = try await resumed.resume(f.capture_id, statusOnly: true) { _ in XCTFail(); return nil }
+        let queried = await wire.requests()
+        XCTAssertEqual(queried.compactMap { $0.url?.lastPathComponent }, ["prepare", "status"])
+        try await wire.plan(doneSteps(f))
+        let done = try await resumed.resume(f.capture_id) { _ in f.image }
+        XCTAssertEqual(done.note, "confirmed"); XCTAssertEqual(done.operation, f.capture_id)
+        let all = await wire.requests()
+        XCTAssertEqual(all.filter { $0.url?.lastPathComponent == "run" }.count, 1)
+    }
+
+    func testReadOnlyCrossDayOfferLeavesRecoveryForExplicitContinuation() async throws {
+        let (f, wire, journal, service) = try await recoverySetup()
+        await wire.plan([ServiceStep(action: "prepare", data: Data(), networkError: .timedOut)])
+        _ = try await service.resume(f.capture_id) { _ in XCTFail(); return nil }
+        await wire.plan([ServiceStep(action: "status", data: try f.bytes(f.available))])
+        let restarted = try client(wire, journal, 1006)
+        let offered = try await restarted.resume(f.capture_id, statusOnly: true) { _ in XCTFail(); return nil }
+        XCTAssertEqual(offered.next, "recover"); XCTAssertNil(offered.recoveryHistory)
+        XCTAssertEqual(offered.operation, f.capture_id)
+        await wire.plan([ServiceStep(action: "recover", data: try f.bytes(f.authorization))] + (try recoveryFinish(f)))
+        let done = try await restarted.resume(f.capture_id) { _ in f.image }
+        XCTAssertEqual(done.note, "confirmed"); XCTAssertEqual(done.recoveryHistory?.count, 1)
+        let requests = await wire.requests()
+        XCTAssertEqual(requests.compactMap { $0.url?.lastPathComponent }, ["prepare","status","recover","prepare","run"])
     }
 }

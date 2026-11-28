@@ -10,6 +10,7 @@ import re
 from lite_attest_state import StateUnavailable
 from lite_usage_ledger import digest, _hex, _integer, UsageConflict
 
+FIRST_INSTALL = 'lite-usage-first-install/1'
 
 def _key(namespace):
     if type(namespace) is not str or re.fullmatch(r'[a-z0-9_-]{1,64}', namespace) is None:
@@ -18,9 +19,15 @@ def _key(namespace):
 
 
 def validate(manifest):
-    if (type(manifest) is not dict or set(manifest) != {'schema', 'namespace', 'day',
-            'sealed_at', 'writer_fence_sha256', 'baseline_sha256', 'account_map_sha256',
-            'policy', 'reservation_seconds'} or manifest['schema'] != 'lite-usage-cutover/1'
+    if type(manifest) is not dict: raise UsageConflict('unsupported quota cutover')
+    fields = {'schema','namespace','day','sealed_at','writer_fence_sha256','baseline_sha256',
+              'account_map_sha256','policy','reservation_seconds'}
+    if manifest.get('schema') == FIRST_INSTALL:
+        fields.add('fresh_inventory_sha256')
+        _hex(manifest.get('fresh_inventory_sha256'))
+        if any(manifest.get(k)!=digest([]) for k in ('baseline_sha256','account_map_sha256')):
+            raise UsageConflict('first installation requires empty quota and account inventories')
+    if (set(manifest) != fields or manifest['schema'] not in ('lite-usage-cutover/1',FIRST_INSTALL)
             or manifest['policy'] != 'free2-plus10-attempt30/v1'
             or type(manifest['reservation_seconds']) is not int
             or manifest['reservation_seconds'] != 900):
@@ -46,18 +53,21 @@ def seal_cutover(store, manifest, *, verify_frozen_inputs):
 
 
 class CutoverPolicy:
-    def __init__(self, store, *, namespace, expected_sha256, verify_writer_fence):
+    def __init__(self, store, *, namespace, expected_sha256, verify_writer_fence, first_install=False):
         _key(namespace); _hex(expected_sha256)
-        if not callable(verify_writer_fence): raise ValueError('trusted live fence check required')
+        if not callable(verify_writer_fence) or type(first_install) is not bool:
+            raise ValueError('trusted live fence check and explicit mode required')
         self.store, self.namespace = store, namespace
         self.expected_sha256, self.verify_writer_fence = expected_sha256, verify_writer_fence
+        self.first_install = first_install
 
     def read(self, namespace, now, *, admission=False):
         if namespace != self.namespace: raise StateUnavailable('cutover namespace mismatch')
         row = self.store.load(_key(namespace))
         try:
             value = validate(row[1])
-            if value['namespace'] != namespace or digest(value) != self.expected_sha256 or value['sealed_at'] > now:
+            if ((value['schema']==FIRST_INSTALL) != self.first_install or value['namespace'] != namespace
+                    or digest(value) != self.expected_sha256 or value['sealed_at'] > now):
                 raise ValueError('cutover mismatch')
         except (ValueError, TypeError, KeyError, IndexError) as exc:
             raise StateUnavailable('cutover receipt missing or changed') from exc

@@ -1,4 +1,4 @@
-"""Opt-in, short-session Apple identity bridge. No discovery or startup activation.
+"""Opt-in Apple identity bridge with separately bounded owner review.
 
 App Attest must bind every HTTP request to its installation. Apple ID-token
 verification supplies the human subject; neither email nor client account IDs do.
@@ -24,6 +24,34 @@ ACCOUNT_PATHS = {PREFIX + p for p in ('challenge', 'confirm', 'status', 'logout'
 
 
 class IdentityRejected(ValueError): pass
+class OwnerReviewRestart(IdentityRejected): pass
+class SignInExpired(IdentityRejected): pass
+
+
+def _session_key(namespace, installation):
+    return key('human-session', digest([namespace, _subject(installation)]))
+
+
+def _review_key(namespace, installation, operation, kind):
+    _subject(installation)
+    _hex(operation, 32)
+    return key(kind, digest([namespace, installation, operation]))
+
+
+def owner_review_keys(namespace, installation, operation):
+    """Exact storage keys an operator may inspect for this one request."""
+    from lite_service_operations import ServiceAccounts
+
+    _subject(namespace)
+    _subject(installation)
+    _hex(operation, 32)
+    return {
+        'config': key('human-identity-config', namespace),
+        'session': _session_key(namespace, installation),
+        'proposal': _review_key(namespace, installation, operation, 'human-owner-review'),
+        'marker': _review_key(namespace, installation, operation, 'human-owner-review-only'),
+        'registration': ServiceAccounts.key(installation),
+    }
 
 
 def identity_header(signed):
@@ -207,7 +235,7 @@ class AccountIdentityBridge:
     immutable = staticmethod(SubscriptionRuntime.immutable)
 
     def _key(self, installation):
-        return key('human-session', digest([self.namespace, _subject(installation)]))
+        return _session_key(self.namespace, installation)
 
     def _read(self, installation):
         row = self.store.load(self._key(installation))
@@ -230,13 +258,34 @@ class AccountIdentityBridge:
         except (ValueError, TypeError, KeyError) as exc: raise StateUnavailable('identity state corrupt; never reset') from exc
         return row
 
-    def challenge(self, installation, operation):
+    def _sign_in_registration(self, installation):
+        registration = self.registry.registration(installation, required=False)
+        if registration is not None:
+            if self.lifecycle is not None:
+                if not registration['subject'].startswith('apple-'):
+                    raise IdentityRejected('verified Apple account required')
+                self.lifecycle.require_active(registration['subject'][6:])
+            if self.runtime.links.confirmed_registration(registration):
+                return registration, True
+        if self.runtime.service_release is not None:
+            self.runtime.service_release.require_active()
+        return registration, False
+
+    def challenge(self, installation, operation, *, owner_review_until=None):
         _hex(operation,32)
         self._lifecycle_required()
-        if self.lifecycle is not None and self.registry.store.load(self.registry.key(installation)) is not None:
-            a = self.registry.registration(installation)
-            if not a['subject'].startswith('apple-'): raise IdentityRejected('verified Apple account required')
-            self.lifecycle.require_active(a['subject'][6:])
+        if owner_review_until is not None and self.existing_account_pin(installation) is None:
+            if type(owner_review_until) is not int or not self.now()<owner_review_until<=self.now()+3600:
+                raise IdentityRejected('owner review expired')
+            # Discovery precedes the signed account/quota bootstrap. It creates
+            # only a challenge and cannot activate a release or provision users.
+            # Persist before issuing any challenge. A delayed request from this
+            # revision must never exchange its code after owner-only activation.
+            self.immutable(self.audit,self.owner_review_only_key(installation,operation),
+                dict(v=1,config_sha256=digest(self.config),expires_at=owner_review_until))
+        else:
+            self._require_normal_operation(installation,operation)
+            self._sign_in_registration(installation)
         for _ in range(CAS_ATTEMPTS):
             old = self._read(installation)
             if old and old[1]['operation'] == operation:
@@ -262,9 +311,86 @@ class AccountIdentityBridge:
         if self.grants is not None: result['authorization_code_required'] = True
         return result
 
-    def confirm(self, installation, operation, signed, state, authorization_code=None):
+    @staticmethod
+    def matches_account(account, expected):
+        return hmac.compare_digest(digest(account['subject']), expected)
+
+    def existing_account_pin(self, installation):
+        registration = self.registry.registration(installation, required=False)
+        return digest(registration['subject']) if registration is not None else None
+
+    def owner_review_key(self, installation, operation):
+        return _review_key(self.namespace, installation, operation, 'human-owner-review')
+
+    def owner_review_only_key(self, installation, operation):
+        return _review_key(self.namespace, installation, operation, 'human-owner-review-only')
+
+    def _require_normal_operation(self, installation, operation):
+        if self.audit.load(self.owner_review_only_key(installation,operation)) is not None:
+            raise OwnerReviewRestart('owner review requires a new explicit sign-in')
+
+    def owner_review(self, installation, operation, signed, state, *, until):
+        """Record a verified proposal, never an account, grant or authorization.
+
+        The caller must already enforce the reviewed installation and deadline.
+        Operator readback is private; the App receives only a pending response.
+        No authorization code is accepted or exchanged by this primitive.
+        """
+        _hex(operation,32)
+        if type(until) is not int or not self.now() < until <= self.now()+3600:
+            raise IdentityRejected('owner review expired')
+        if self.existing_account_pin(installation) is not None:
+            raise IdentityRejected('existing participant must use original account')
+        row=self._read(installation)
+        if row is None: raise IdentityRejected('saved challenge required')
+        c=row[1]
+        if (c['operation']!=operation or c['phase']!='challenge' or c['state']!=state
+                or self.now()>=c['expires_at']):
+            raise IdentityRejected('current review challenge required')
+        claims=self.verifier.verify(signed,c['nonce'])
+        if claims['issued'] < c['created_at']-30:
+            raise IdentityRejected('token predates challenge')
+        identity=hmac.new(self.secret,(self.namespace+'\0'+self.verifier.issuer+'\0'+claims['sub']).encode(),hashlib.sha256).hexdigest()
+        if self.events is not None: self.events.require_identity(identity,claims['issued'])
+        if self._read(installation)!=row:
+            raise IdentityRejected('review challenge changed')
+        proposal=dict(v=1,config_sha256=digest(self.config),
+            installation_sha256=hashlib.sha256(installation.encode()).hexdigest(),operation=operation,
+            account_sha256=digest('apple-'+identity),challenge_sha256=digest(c),
+            identity_token_sha256=digest(signed),expires_at=until)
+        self.immutable(self.audit,self.owner_review_key(installation,operation),proposal)
+        self.read_owner_review(installation,operation,until=until)
+        return dict(error='lite_owner_review_pending',keep_local=True,operation=operation,
+            explicit_sign_in_required=True,retry_saved_code=False)
+
+    def read_owner_review(self, installation, operation, *, until):
+        """Private operator readback. A proposal alone can never enable service.
+
+        A superseding challenge, logout, changed binding or expired window
+        invalidates readback. Audit remains immutable even in those cases.
+        """
+        if type(until) is not int or not self.now()<until<=self.now()+3600:
+            raise IdentityRejected('owner review expired')
+        row=self._read(installation)
+        record=self.audit.load(self.owner_review_key(installation,operation))
+        if row is None or record is None: raise StateUnavailable('owner review unconfirmed')
+        c,p=row[1],record[1]
+        fields={'v','config_sha256','installation_sha256','operation','account_sha256',
+                'challenge_sha256','identity_token_sha256','expires_at'}
+        if (type(p) is not dict or set(p)!=fields or type(p['v']) is not int or p['v']!=1
+                or c['phase']!='challenge' or c['operation']!=operation
+                or p['config_sha256']!=digest(self.config) or p['operation']!=operation
+                or p['installation_sha256']!=hashlib.sha256(installation.encode()).hexdigest()
+                or p['challenge_sha256']!=digest(c) or type(p['expires_at']) is not int
+                or p['expires_at']!=until or self.existing_account_pin(installation) is not None):
+            raise IdentityRejected('owner review binding changed')
+        _hex(p['account_sha256']); _hex(p['identity_token_sha256'])
+        return dict(p)
+
+    def confirm(self, installation, operation, signed, state, authorization_code=None, *, internal_account_sha256=None):
         _hex(operation,32)
         self._lifecycle_required()
+        self._require_normal_operation(installation,operation)
         if type(signed) is not str or not 1 <= len(signed) <= 16000: raise IdentityRejected('bounded identity required')
         for _ in range(CAS_ATTEMPTS):
             row=self._read(installation)
@@ -272,12 +398,17 @@ class AccountIdentityBridge:
             rev,c=row
             if (c['state'] != state or c['phase'] == 'ended' or
                     self.audit.load(key('human-logout',digest([self.namespace,installation,operation]))) is not None): raise IdentityRejected('sign-in state rejected')
+            existing, provisioned = self._sign_in_registration(installation)
             token_hash=digest(signed)
             if c['phase'] == 'challenge':
-                if self.now() >= c['expires_at']: raise IdentityRejected('sign-in expired')
+                if self.now() >= c['expires_at']: raise SignInExpired('sign-in expired')
                 claims=self.verifier.verify(signed,c['nonce'])
                 if claims['issued'] < c['created_at']-30: raise IdentityRejected('token predates challenge')
                 identity=hmac.new(self.secret, (self.namespace+'\0'+self.verifier.issuer+'\0'+claims['sub']).encode(),hashlib.sha256).hexdigest()
+                if existing is not None and existing['subject'] != 'apple-'+identity:
+                    raise IdentityRejected('installation belongs to another account; no implicit switch')
+                if internal_account_sha256 is not None and not hmac.compare_digest(digest('apple-'+identity), internal_account_sha256):
+                    raise IdentityRejected('not eligible for this internal service')
                 if self.lifecycle is not None:
                     self.lifecycle.initialize_new(identity,existing_account=self.store.load(key('human-account',identity)) is not None)
                 if self.events is not None:
@@ -299,15 +430,17 @@ class AccountIdentityBridge:
                              session_expires_at=min(claims['expires'],self.now()+900))
                 if not self.store.compare_exchange(self._key(installation),rev,updated): continue
                 continue
-            if c['token_sha256'] != token_hash or self.now() >= c['session_expires_at']:
-                raise IdentityRejected('saved sign-in differs or expired')
+            if c['token_sha256'] != token_hash:
+                raise IdentityRejected('saved sign-in differs')
+            if self.now() >= c['session_expires_at']:
+                raise SignInExpired('saved sign-in expired')
+            if internal_account_sha256 is not None and not self.matches_account(c['account'],internal_account_sha256):
+                raise IdentityRejected('not eligible for this internal service')
             if self.lifecycle is not None: self.lifecycle.require_active(c['account']['identity_sha256'])
             if self.grants is not None:
                 self.grants.capture(installation, operation, c['nonce'], signed, authorization_code)
             a=c['account'];proof=digest(['apple-device-binding/1',self.namespace,installation,a])
-            registration=self.registry.store.load(self.registry.key(installation))
-            if registration is not None:
-                existing=self.registry.registration(installation)
+            if existing is not None:
                 if existing['subject']!=a['subject'] or existing['token']!=a['token']:
                     raise IdentityRejected('installation belongs to another account; no implicit switch')
                 proof=existing['proof']
@@ -315,7 +448,8 @@ class AccountIdentityBridge:
                 app_account_token=a['token'],identity_token_sha256=token_hash,registration_proof=proof,
                 session_expires_at=c['session_expires_at'])
             self.immutable(self.audit,key('human-verified',digest([self.namespace,installation,operation])),evidence)
-            self.registry.provision(installation,a['subject'],a['token'],None,proof)
+            if not provisioned:
+                self.registry.provision(installation,a['subject'],a['token'],None,proof)
             # Logout/new challenge may race with provisioning. The immutable
             # mapping may remain, but it cannot authorize an ended session.
             if c['phase']=='verified':
@@ -399,7 +533,7 @@ class AccountIdentityBridge:
         raise StateUnavailable('logout unconfirmed')
 
 
-def blueprint(bridge):
+def blueprint(bridge, *, internal_account_sha256=None, owner_review_until=None):
     if not isinstance(bridge,AccountIdentityBridge): raise ValueError('trusted identity bridge required')
     bp=Blueprint('lite_account_identity',__name__)
     def action(kind):
@@ -412,12 +546,23 @@ def blueprint(bridge):
             if kind == 'renew': fields |= {'renewal_operation','expected_generation'}
             if request.mimetype!='application/json' or set(body)!=fields: raise IdentityRejected('exact account fields required')
             if body['anon_id']!=admission.installation:return jsonify(error='lite_owner_mismatch'),403
-            if kind=='confirm':result=bridge.confirm(admission.installation,body['operation'],body['identity_token'],body['state'],body.get('authorization_code'))
+            if kind=='confirm':
+                pin=getattr(g,'lite_previous_account_sha256',internal_account_sha256)
+                if owner_review_until is not None and pin is None:
+                    result=bridge.owner_review(admission.installation,body['operation'],
+                        body['identity_token'],body['state'],until=owner_review_until)
+                    return jsonify(result),202
+                result=bridge.confirm(admission.installation,body['operation'],body['identity_token'],body['state'],
+                                      body.get('authorization_code'),internal_account_sha256=pin)
             elif kind=='renew':result=bridge.renew(admission.installation,body['operation'],body['renewal_operation'],body['expected_generation'])
             elif kind=='status':result=bridge.status(admission.installation)
+            elif kind=='challenge':result=bridge.challenge(admission.installation,body['operation'],owner_review_until=owner_review_until)
             else:result=getattr(bridge,kind)(admission.installation,body['operation'])
             return jsonify(result)
         except IdentityRejected as exc:
+            if isinstance(exc,OwnerReviewRestart) or (bridge.grants is not None and isinstance(exc,SignInExpired)):
+                return jsonify(error='lite_apple_grant_recovery_required',keep_local=True,
+                    explicit_sign_in_required=True,retry_saved_code=False),409
             if bridge.grants is not None:
                 from lite_apple_oauth import GrantRejected
                 if isinstance(exc, GrantRejected):

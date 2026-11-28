@@ -10,7 +10,7 @@ import copy
 import hashlib
 from lite_attest_state import CAS_ATTEMPTS, StateUnavailable, _encode
 from lite_usage_ledger import UsageConflict, digest, _hex, _integer, _subject
-from lite_usage_cutover import validate, seal_cutover, CutoverPolicy
+from lite_usage_cutover import validate, seal_cutover, CutoverPolicy, FIRST_INSTALL
 
 
 class ObservationUnavailable(StateUnavailable): pass
@@ -18,7 +18,7 @@ class ObservationContradiction(StateUnavailable): pass
 
 
 def validate_baselines(rows, manifest):
-    if type(rows) is not list or not 1<=len(rows)<=1000:
+    if type(rows) is not list or len(rows)>1000 or (not rows)!=(manifest.get('schema')==FIRST_INSTALL):
         raise UsageConflict('bounded verified baselines required')
     subjects=set()
     for r in rows:
@@ -108,10 +108,23 @@ class UsageRollout:
         except Exception as exc:raise ObservationUnavailable('provider observation unavailable') from exc
         expected={'namespace','writer_fence_sha256','baseline_sha256','account_map_sha256',
                   'legacy_disabled','inflight_legacy','new_enabled'}
+        first_install=self.manifest['schema']==FIRST_INSTALL
+        if first_install: expected.update(('fresh_inventory_sha256','prior_quota_accounts','prior_account_mappings'))
         if (type(v) is not dict or set(v)!=expected or type(v['legacy_disabled']) is not bool
                 or type(v['inflight_legacy']) is not int or v['inflight_legacy']<0 or type(v['new_enabled']) is not bool
                 or any(type(v[k]) is not str for k in ('namespace','writer_fence_sha256','baseline_sha256','account_map_sha256'))):
             raise ObservationUnavailable('provider observation incomplete or malformed')
+        if first_install:
+            try:
+                _hex(v['fresh_inventory_sha256'])
+                for k in ('prior_quota_accounts','prior_account_mappings'): _integer(v[k])
+            except UsageConflict as exc:
+                raise ObservationUnavailable('malformed first-install inventory') from exc
+            if (v['fresh_inventory_sha256']!=self.manifest['fresh_inventory_sha256']
+                    or v['prior_quota_accounts'] or v['prior_account_mappings']):
+                error=ObservationContradiction('first-install inventory contradicts the frozen plan')
+                error.observation=copy.deepcopy(v)
+                raise error
         if (any(v[k]!=self.manifest[k] for k in ('namespace','writer_fence_sha256','baseline_sha256','account_map_sha256'))
                 or not v['legacy_disabled'] or v['inflight_legacy']!=0
                 or (enabled is not None and v['new_enabled'] is not enabled)):
@@ -172,13 +185,15 @@ class UsageRollout:
             self.confirmed_active()
             if self.service_release is not None:
                 return bool(self.service_release.usage(self))
+            if manifest['schema']==FIRST_INSTALL:return False
             if self.store.load(marker_key('usage',self.manifest['namespace'])) is not None:return False
             return self._observe(enabled=True)['new_enabled'] is True
         except Exception:return False
 
     def policy(self):
         return CutoverPolicy(self.control,namespace=self.manifest['namespace'],
-            expected_sha256=self.plan_sha256,verify_writer_fence=self.admission_allowed)
+            expected_sha256=self.plan_sha256,verify_writer_fence=self.admission_allowed,
+            first_install=self.manifest['schema']==FIRST_INSTALL)
 
     def rollback(self):
         # Try both closure mechanisms even if audit/provider is unavailable.

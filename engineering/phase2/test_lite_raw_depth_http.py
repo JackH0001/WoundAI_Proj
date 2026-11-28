@@ -80,8 +80,10 @@ class RawDepthHTTPTests(unittest.TestCase):
     def test_write_or_readback_failure_never_returns_success_and_orphan_is_withdrawn(self):
         store=self.h.f.store;original=store.get_blob
         def fail_raw(key):return None if key.startswith('lite_raw/') else original(key)
-        with patch.object(store,'get_blob',side_effect=fail_raw):
+        with self.assertLogs('api_lite', level='ERROR') as logged, \
+                patch.object(store,'get_blob',side_effect=fail_raw):
             response=self.upload();self.assertEqual(response.status_code,503,response.json)
+        self.assertIn('raw capture readback mismatch', '\n'.join(logged.output))
         self.assertTrue(list(store.list_keys('lite_raw/')))
         self.assertEqual(list(store.list_keys('lite/'+self.h.owner+'/')),[])
         response=self.delete();self.assertEqual(response.status_code,200,response.json)

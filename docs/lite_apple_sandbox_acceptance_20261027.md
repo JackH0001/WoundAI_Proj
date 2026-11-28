@@ -4,9 +4,33 @@
 購買、續訂、寬限期及帳號關聯驗證。這不是部署指令，也不表示可公開上市。
 本輪沒有建立商品、登入測試帳號、購買、修改 Apple 設定或更新 TestFlight。
 
+## 外測的登入與恢復購買入口（2026-11-22）
+
+Apple 已交付的本人內測 54 版，在「設定 → 服務登入、訂閱與刪帳 → Plus 方案與價格」顯示「登入並繼續訂閱 Plus」。後續原始碼在同一位置改用 Apple 系統登入按鈕，供新訂閱與既有訂閱者共用。英文路徑是 Settings → Sign-in, subscriptions and account deletion → Plus plan and price → Sign in with Apple。
+
+1. 全新安裝先查看月費。保持原研究選擇，點選登入，完成裝置登記與 Apple 身分核對。若登記尚待服務確認，請從同頁續接原登記。
+2. 已有訂閱的測試者登入原服務帳號，選「恢復購買」／Restore purchases。核對原交易、當日已用額度及原研究選擇。首次訂閱的測試者另按顯示月費的按鈕，進行 S2。
+3. 填 Apple 審查備註前，先以待送審組建與獨立測試身分在實機走通上述入口。如果後端仍限制本人安裝，先完成外部測試身分的服務驗收。記下組建、服務修訂及交易核對結果。模擬器的操作結果與真實 Sandbox 結果分別記載。[Apple 登入按鈕設計](https://developer.apple.com/design/human-interface-guidelines/sign-in-with-apple)
+
 ## 2026-11-01 候選版入口
 
 內部組態現在可從 App 的設定開啟原生服務流程。初次使用須先明確核對裝置登記，再進入 Apple 登入。一般組態維持原本的量測與紀錄流程。模擬器驗證到登記前，S0–S9 仍須使用正確簽署的實機及獨立候選服務。[建置與驗收邊界](lite_native_candidate_entry_20261101.md)
+
+### 先驗證商品目錄
+
+含方案預覽的候選版可在服務裝置尚未登記時，從「設定 → 服務登入、訂閱與刪帳 → Plus 方案與價格」讀取 Apple 對目前商店提供的商品名稱與每月價格。預覽只查商品目錄。測試者可保持原本的研究同意選擇。
+
+### 在購買或恢復途中切換服務帳號
+
+購買及恢復購買的帳號切換驗收應記錄點按時的服務帳號。先在本機驗證等待報價、讀取既有訂閱、即將開啟付款畫面時切換或登出，付款啟動次數應為零。若 StoreKit 已接受交易才切換帳號，回到原帳號核對未完成交易，確認服務回執一筆、完成交易一次。真實 Sandbox 的 S2／S4 另須確認原帳號取得權益、另一帳號的已用額度如前，並保存兩方的讀回結果。
+
+### 延後核准後回到首頁
+
+第 50 版在進入 Plus 頁時才開始核對未完成交易。後續修正版從首頁讀取本機既有的裝置登記與有效服務帳號，監聽 StoreKit 的交易更新，並核對該帳號未完成的交易。登出後停止監聽。另一個服務帳號的交易保留給原帳號處理。[Apple 交易更新說明](https://developer.apple.com/documentation/storekit/transaction/updates)
+
+在 S8 使用允許延後核准的測試環境。送出一筆待核准的訂閱，關閉 App，核准後重開並停在量測首頁。再測一次 App 已停在首頁時收到核准。兩次各核對該筆交易只關聯一次、Apple 原交易已完成、今日已用次數及研究同意如前。另以登出及其他服務帳號重開，確認原交易仍待原帳號處理。記錄測試組建、測試環境及服務端回執。Xcode StoreKit 與 TestFlight Sandbox 的結果分別保存。
+
+真實 TestFlight 驗收時，記錄 App 組建號、Apple 商店地區、顯示名稱、幣別與月費。若商品查詢沒有結果，先核對商品 ID、當地價格、在地化文字和付費協議，再檢查測試機的商店環境。產品可查到、購買成功以及恢復到原服務帳號，是三項分開的驗收。Apple 說明 Sandbox 商品查詢可在商品送審前進行。[Apple TN3186](https://developer.apple.com/documentation/technotes/tn3186-troubleshooting-in-app-purchases-availability-in-the-sandbox) · [Apple Sandbox 測試](https://developer.apple.com/documentation/storekit/testing-in-app-purchases-with-sandbox)
 
 進行 S2 前，確認購買頁已顯示 StoreKit 的當地商品名稱、每月價格、續訂方式與每日總額。先開頁並返回，核對沒有交易、扣額度或同意變更。若價格或商店在按下訂閱時已改變，顯示的新方案須經第二次明確點選。商品不可用時仍可恢復原有購買。S3/S4 另須以同筆未結交易重試，以及同一裝置換到不同服務帳號後查看既有回執，核對付款次數、服務帳號與交易完成次數。[修正及測試案例](lite_subscription_offer_20261101.md)
 
@@ -105,6 +129,18 @@ S9 若涉及商品改變，須先確認 Apple 的實際商品轉換及有效交�
 遷移不會替使用者購買、升級或換商品。沒有已驗證的新商品交易即停止遷移。
 
 ## 保存與停止條件
+
+### S4、S6 的憑證查詢中斷驗收（2026-11-22）
+
+購買或恢復流程收到 `503 lite_purchase_unconfirmed`、`keep_local=true`、
+`retryable=true` 時，保留原交易與操作編號，依回應的 `retry_after` 等待，
+再核對同一筆交易。測試時記下第一次回應、恢復後的回執與重送結果。
+驗收預期為一張購買回執、辨識額度與研究同意維持原值。帳號或簽章確定不符仍應拒絕。
+
+本機以合成憑證重現 App Store Server Library 3.1.2 查詢 OCSP 暫時失敗，
+再用有效的簽章回應驗證恢復。另測試 Apple 訂閱狀態中的交易與寬限期續訂證明遇到
+同一錯誤時保留既有證據。真實 Sandbox 的購買及跨裝置恢復仍須以 S3、S4 獨立驗收。
+[Apple 驗證函式庫固定版本原始碼](https://github.com/apple/app-store-server-library-python/blob/v3.1.2/appstoreserverlibrary/signed_data_verifier.py)
 
 每項記錄組建／來源／映像／UTC時間、匿名帳號雜湊、operation/result雜湊、
 used/pending前後值、模型呼叫數、Apple查詢數、簽章驗證結果及稽核回執。
