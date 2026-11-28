@@ -168,6 +168,53 @@ private actor BalanceTransport: LiteAuthenticatedTransport {
         }
     }
 
+    func testPendingShortcutRequiresOccupiedSlotsRatherThanCompletedOrAttemptLimit() throws {
+        for (overrides, expected): ([String: Any], Bool) in [
+            ([:], true), (["used": 0, "pending": 2], true), (["limit": 10, "used": 9], true),
+            (["attempt_limit_reached": true], false), (["used": 2], false),
+            (["remaining": 1, "used": 0], false), (["used": 2, "pending": 0], false)
+        ] {
+            let value = try JSONDecoder().decode(LitePersonalBalance.self, from: data(overrides))
+            try value.validate(account: account, at: date)
+            XCTAssertEqual(value.waitingForReservedUses, expected)
+        }
+    }
+
+    func testPendingShortcutRequiresAdmittedLocalOperationOnSameAccountInstallationOriginAndDay() throws {
+        let balance = try JSONDecoder().decode(LitePersonalBalance.self, from: data())
+        let scope = LitePendingCaptureScope(balance: balance, account: .init(generation: 1, token: "test"), context: context)
+        let op = String(repeating: "a", count: 32)
+        let digest = String(repeating: "b", count: 64)
+        func make(owner: String? = nil, installation: String? = nil, origin: String? = nil,
+                  offset: Int = 0, state: String = "ready", action: String = "run",
+                  outcome: String = "reserved") throws -> LiteServiceRecord {
+            let utc = day / 86400 + offset
+            let receipt = LiteServiceReceipt(day: utc, operation: op, request_digest: digest, outcome: outcome,
+                                             result_sha256: nil, grant_sha256: digest, admitted_limit: 2)
+            var record = LiteServiceRecord(captureID: op, operation: op, origin: origin ?? context.origin,
+                installation: installation ?? context.installation, imageSHA256: digest, width: 10, height: 20)
+            record.accountSHA256 = owner
+            record.day = utc
+            record.requestDigest = digest
+            record.next = action
+            record.reply = .init(state: state, operation: op, day: utc, retry_action: action, research_stored: false,
+                receipt: receipt, result: nil, result_json: nil, service_result_stored: false, result_expires: (utc + 1) * 86400)
+            try record.validate()
+            return record
+        }
+        XCTAssertTrue(scope.contains(try make(owner: account)))
+        XCTAssertTrue(scope.contains(try make(owner: account, state: "pending", action: "status", outcome: "running")))
+        XCTAssertFalse(scope.contains(try make()))
+        XCTAssertFalse(scope.contains(try make(owner: String(repeating: "f", count: 64))))
+        XCTAssertFalse(scope.contains(try make(owner: account, installation: String(repeating: "e", count: 32))))
+        XCTAssertFalse(scope.contains(try make(owner: account, origin: "https://other.example.com")))
+        XCTAssertFalse(scope.contains(try make(owner: account, offset: -1)))
+        XCTAssertFalse(scope.contains(try make(owner: account, state: "cancelled", action: "none", outcome: "cancelled")))
+        var unsent = try make(owner: account)
+        unsent.reply = nil
+        XCTAssertFalse(scope.contains(unsent))
+    }
+
     func testOnlyCurrentDaySnapshotIsFreshAtUTCReset() throws {
         let end=(day/86400+1)*86400, stamp=end-3
         let v = try JSONDecoder().decode(LitePersonalBalance.self,from:data(["as_of":stamp,"attempt_limit_reached":true]))

@@ -290,6 +290,30 @@ private actor ServiceMemory: LiteServiceJournal {
     func corrupt(_ id:String,_ data:Data) { entries[id]=data }
 }
 
+private actor VerifiedServiceWire: LiteAccountBoundServiceTransport {
+    let wire: ServiceWire
+    let account = String(repeating: "a", count: 64)
+    private(set) var actions: [String] = []
+    private(set) var expectations: [String?] = []
+    init(_ wire: ServiceWire) { self.wire = wire }
+    func installation() async throws -> String { await wire.installation() }
+    func verifyRecognitionAccount(_ expected: String, installation: String) async throws {
+        guard expected == account, await wire.installation() == installation else { throw LiteServiceFailure.conflict }
+    }
+    func send(_ request: URLRequest, installation: String) async throws -> (Data, HTTPURLResponse) {
+        XCTFail("Account-aware transport must verify every recognition request")
+        throw LiteServiceFailure.conflict
+    }
+    func sendRecognition(_ request: URLRequest, installation: String, expectedAccount: String?) async throws
+        -> (data: Data, http: HTTPURLResponse, accountSHA256: String) {
+        actions.append(request.url!.lastPathComponent)
+        expectations.append(expectedAccount)
+        if let expectedAccount { try await verifyRecognitionAccount(expectedAccount, installation: installation) }
+        let reply = try await wire.send(request, installation: installation)
+        return (reply.0, reply.1, account)
+    }
+}
+
 private struct ServiceStep: Sendable {
     let action: String, data: Data
     var code=200
@@ -323,7 +347,7 @@ private actor ServiceWire: LiteAuthenticatedTransport {
 @MainActor
 final class LiteServiceOperationTests: XCTestCase {
     private let origin=URL(string:"https://lite.invalid")!
-    private func client(_ wire:ServiceWire,_ store:any LiteServiceJournal,_ time:Double=1000) throws -> LiteServiceClient {
+    private func client(_ wire:any LiteAuthenticatedTransport,_ store:any LiteServiceJournal,_ time:Double=1000) throws -> LiteServiceClient {
         try LiteServiceClient(origin:origin,transport:wire,journal:store,now:{ Date(timeIntervalSince1970:time) })
     }
     private func setup() async throws -> (ServiceFixture,ServiceWire,ServiceMemory,LiteServiceClient) {
@@ -335,6 +359,57 @@ final class LiteServiceOperationTests: XCTestCase {
         [ServiceStep(action:"prepare",data:try f.bytes(f.prepare)),ServiceStep(action:"run",data:try f.bytes(f.completed))]
     }
     private func error(_ name:String) -> Data { try! JSONSerialization.data(withJSONObject:["error":name]) }
+
+    func testVerifiedAccountSurvivesResubmissionAndSuccessorPrepare() async throws {
+        let f = try ServiceResubmitFixture.load(), wire = ServiceWire(owner: f.installation)
+        let checked = VerifiedServiceWire(wire), memory = ServiceMemory()
+        let service = try client(checked, memory), image = f.image
+        _ = try await service.enqueue(captureID: f.capture_id, jpeg: image)
+        await wire.plan([ServiceStep(action: "prepare", data: try f.bytes(f.cancelled))])
+        let expired = try await service.resume(f.capture_id) { _ in XCTFail(); return nil }
+        let account = String(repeating: "a", count: 64)
+        XCTAssertEqual(expired.accountSHA256, account)
+        _ = try await service.requestResubmission(f.capture_id)
+        try await wire.plan(resubmitSteps(f))
+        let done = try await client(checked, memory).resume(f.capture_id) { _ in image }
+        XCTAssertEqual(done.note, "confirmed")
+        XCTAssertEqual(done.accountSHA256, account)
+        let actions = await checked.actions, expected = await checked.expectations
+        XCTAssertEqual(actions, ["prepare", "resubmit", "prepare", "run"])
+        XCTAssertEqual(expected, [nil, account, account, account])
+    }
+
+    func testBoundReceiptRefusesLegacyTransportWithoutDispatch() async throws {
+        let (f, wire, memory, _) = try await setup(), checked = VerifiedServiceWire(wire)
+        await wire.plan([ServiceStep(action: "prepare", data: try f.bytes(f.prepare)),
+                         ServiceStep(action: "run", data: Data(), networkError: .timedOut)])
+        let image = f.image
+        let interrupted = try await client(checked, memory).resume(f.capture_id) { _ in image }
+        XCTAssertEqual(interrupted.accountSHA256, String(repeating: "a", count: 64))
+        let blocked = try await client(wire, memory, 1010).resume(f.capture_id) { _ in XCTFail(); return nil }
+        XCTAssertEqual(blocked.accountSHA256, interrupted.accountSHA256)
+        XCTAssertEqual(blocked.note, "unavailable")
+        let requests = await wire.requests()
+        XCTAssertEqual(requests.map { $0.url!.lastPathComponent }, ["prepare", "run"])
+    }
+
+    func testUnauthenticatedOrInvalidPrepareReceiptDoesNotBind() async throws {
+        let (f, wire, memory, service) = try await setup(), image = f.image
+        let original = try await service.stored(f.capture_id)
+        let raw = try XCTUnwrap(try JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+        XCTAssertNil(raw["accountSHA256"])
+        try await wire.plan(doneSteps(f))
+        let legacy = try await service.resume(f.capture_id) { _ in image }
+        XCTAssertNil(legacy.accountSHA256)
+        let restarted = try await client(VerifiedServiceWire(wire), memory).resume(f.capture_id) { _ in XCTFail(); return nil }
+        XCTAssertEqual(restarted, legacy)
+        let (other, badWire, badMemory, _) = try await setup()
+        let invalid = try other.changed { $0["operation"] = String(repeating: "f", count: 32) }
+        await badWire.plan([ServiceStep(action: "prepare", data: invalid)])
+        let rejected = try await client(VerifiedServiceWire(badWire), badMemory).resume(other.capture_id) { _ in XCTFail(); return nil }
+        XCTAssertEqual(rejected.note, "review")
+        XCTAssertNil(rejected.accountSHA256)
+    }
 
     func testPythonGoldenResponsePersistsResultAndExactImageOnce() async throws {
         let (f,w,m,c)=try await setup();try await w.plan(doneSteps(f));let image=f.image

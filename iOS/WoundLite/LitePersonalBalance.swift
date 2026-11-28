@@ -27,6 +27,10 @@ struct LitePersonalBalance: Decodable, Equatable {
         return LiteServiceCopy.text("今天的辨識額度已用完。", locale: locale)
     }
 
+    var waitingForReservedUses: Bool {
+        remaining == 0 && used < limit && pending > 0 && !attempt_limit_reached
+    }
+
     var canGainUsesWithPlus: Bool {
         limit == 2 && used >= limit && used < 10 && pending == 0 && remaining == 0 && !attempt_limit_reached
     }
@@ -59,6 +63,30 @@ struct LitePersonalBalance: Decodable, Equatable {
     }
 }
 
+/// An account-level balance cannot identify a photo. Only a locally accepted
+/// operation for the same session, installation and UTC day can appear here.
+struct LitePendingCaptureScope: Equatable {
+    let balance: LitePersonalBalance
+    let account: LiteNativeSession.PurchaseAccount
+    let context: LiteDeletionContext
+
+    @MainActor func isCurrent(in session: LiteNativeSession) -> Bool {
+        session.purchaseObservationAccount == account && context.origin == session.origin.absoluteString
+            && context.account == balance.account_sha256 && balance.waitingForReservedUses
+            && balance.isFresh(at: session.identity.now())
+    }
+
+    func contains(_ record: LiteServiceRecord) -> Bool {
+        guard record.accountSHA256 == context.account, record.origin == context.origin,
+              record.installation == context.installation, record.day == balance.as_of / 86400,
+              ["run", "status"].contains(record.next), let reply = record.reply,
+              let receipt = reply.receipt, receipt.operation == record.operation,
+              receipt.day == record.day else { return false }
+        return (reply.state == "ready" && receipt.outcome == "reserved")
+            || (reply.state == "pending" && receipt.outcome == "running")
+    }
+}
+
 /// The measurement tab reads the personal allowance only for its current signed-in session.
 struct LiteMeasureAllowanceView: View {
     @Environment(\.locale) private var locale
@@ -69,7 +97,13 @@ struct LiteMeasureAllowanceView: View {
     let operation: String?
     let operationRevision: Int?
 
-    init(session: LiteNativeSession, record: LiteServiceRecord?) {
+    @ObservedObject var measure: LiteMeasureVM
+    @ObservedObject var store: LiteStore
+
+    init(session: LiteNativeSession, measure: LiteMeasureVM, store: LiteStore) {
+        self.measure = measure
+        self.store = store
+        let record = measure.serviceResult
         self.session = session
         self.identity = session.identity
         self.purchases = session.purchases
@@ -85,6 +119,7 @@ struct LiteMeasureAllowanceView: View {
     @State private var refresh = 0
     @State private var checked: Query?
     @State private var balance: LitePersonalBalance?
+    @State private var captureChanged = false
     private var query: Query {
         Query(account: phase == .active ? session.purchaseObservationAccount : nil,
               operation: operation, revision: operationRevision, purchases: purchases.confirmedUpdates, refresh: refresh)
@@ -99,11 +134,18 @@ struct LiteMeasureAllowanceView: View {
                 NavigationLink(LiteCaptureCopy(locale: locale).text("個人服務登入")) { LiteNativeSessionView(session: session) }
             } else {
                 Text(copy.text("今日個人辨識額度")).font(.subheadline.weight(.semibold))
+                if captureChanged {
+                    Text(LiteServiceCopy.text("目前無法開啟這筆待確認的拍攝，請查看最新額度與本機拍攝清單。", locale: locale))
+                        .font(.footnote)
+                }
                 if checked != query {
                     ProgressView(copy.text("正在核對…"))
                 } else if let balance, balance.isFresh(at: Date()) {
                     Text(balance.availabilityMessage(locale: locale))
                         .accessibilityIdentifier("lite.measure.allowance")
+                    if balance.waitingForReservedUses, let account = query.account {
+                        pendingCaptures(balance: balance, account: account)
+                    }
                     if balance.canGainUsesWithPlus {
                         NavigationLink(LiteServiceCopy.text("Plus 方案與價格", locale: locale)) {
                             LiteNativePurchaseView(session: session)
@@ -120,6 +162,7 @@ struct LiteMeasureAllowanceView: View {
                 }
             }
         }
+        .onChange(of: query.account) { _, _ in captureChanged = false }
         .task(id: query) {
             let request = query
             balance = nil
@@ -137,8 +180,68 @@ struct LiteMeasureAllowanceView: View {
         }
     }
 
+    private struct CaptureQuery: Equatable {
+        let balance: LitePersonalBalance
+        let account: LiteNativeSession.PurchaseAccount
+        let drafts: [LiteCaptureDraftSummary]
+    }
+    private struct Match: Identifiable {
+        let draft: LiteCaptureDraftSummary
+        let operation: String
+        var id: String { draft.id }
+    }
+    @State private var matchedQuery: CaptureQuery?
+    @State private var matchedScope: LitePendingCaptureScope?
+    @State private var matches: [Match] = []
+
+    private func pendingCaptures(balance: LitePersonalBalance, account: LiteNativeSession.PurchaseAccount) -> some View {
+        let request = CaptureQuery(balance: balance, account: account,
+                                   drafts: measure.pendingCaptures.filter { $0.id != measure.draft?.id })
+        let title = LiteServiceCopy.text("查看本機待確認的拍攝", locale: locale)
+        return VStack(alignment: .leading) {
+            if matchedQuery == request, let scope = matchedScope, scope.isCurrent(in: session) {
+                if matches.count == 1, let item = matches.first {
+                    Button(title) { open(item, scope: scope) }
+                        .accessibilityIdentifier("lite.measure.resumePendingCapture")
+                } else if matches.count > 1 {
+                    Menu(title) {
+                        ForEach(matches) { item in
+                            Button(item.draft.createdAt.formatted(date: .numeric, time: .standard)) { open(item, scope: scope) }
+                        }
+                    }.accessibilityIdentifier("lite.measure.resumePendingCapture")
+                }
+            }
+        }
+        .disabled(measure.busy || store.needsReload || measure.hasUnstoredCapture)
+        .task(id: request) {
+            matchedQuery = nil
+            guard !request.drafts.isEmpty, let context = try? await identity.savedResearchContext() else { return }
+            let scope = LitePendingCaptureScope(balance: balance, account: account, context: context)
+            guard scope.isCurrent(in: session) else { return }
+            var found: [Match] = []
+            for draft in request.drafts {
+                guard !Task.isCancelled else { return }
+                guard let id = try? LiteNativeSession.captureID(recordID: draft.id),
+                      let record = try? await session.service.storedIfPresent(id), scope.contains(record) else { continue }
+                found.append(Match(draft: draft, operation: record.operation))
+            }
+            guard !Task.isCancelled, scope.isCurrent(in: session) else { return }
+            matches = found
+            matchedScope = scope
+            matchedQuery = request
+        }
+    }
+
+    private func open(_ item: Match, scope: LitePendingCaptureScope) {
+        Task {
+            let opened = await measure.restoreDraft(item.id, in: store, pending: scope, operation: item.operation)
+            captureChanged = !opened && query.account == scope.account
+            if captureChanged { refresh += 1 }
+        }
+    }
+
     private var refreshButton: some View {
-        Button(copy.text("核對今日額度")) { refresh += 1 }
+        Button(copy.text("核對今日額度")) { captureChanged = false; refresh += 1 }
             .accessibilityIdentifier("lite.measure.refreshAllowance")
     }
 }

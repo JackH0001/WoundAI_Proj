@@ -32,7 +32,7 @@ struct LiteSandboxPermit: Equatable, Sendable {
     }
 }
 
-private struct LiteSandboxScopeTransport: LiteAuthenticatedTransport {
+private struct LiteSandboxScopeTransport: LiteAccountBoundServiceTransport {
     let origin: URL
     let base: any LiteAuthenticatedTransport
     let paths: Set<String>
@@ -44,16 +44,38 @@ private struct LiteSandboxScopeTransport: LiteAuthenticatedTransport {
         try await base.installation()
     }
     func send(_ request: URLRequest, installation owner: String) async throws -> (Data, HTTPURLResponse) {
+        let (data, http, _) = try await sendScoped(request, installation: owner, expectedAccount: nil)
+        return (data, http)
+    }
+    func verifyRecognitionAccount(_ expected: String, installation owner: String) async throws {
+        guard ordinary, let permit = try await access.authorize(owner: owner, ordinary: true),
+              permit.session.account_sha256 == expected else { throw LiteServiceFailure.conflict }
+    }
+    func sendRecognition(_ request: URLRequest, installation owner: String, expectedAccount: String?) async throws
+        -> (data: Data, http: HTTPURLResponse, accountSHA256: String) {
+        guard ordinary else { throw LiteServiceFailure.conflict }
+        let (data, http, permit) = try await sendScoped(request, installation: owner, expectedAccount: expectedAccount)
+        guard let permit else { throw LiteServiceFailure.conflict }
+        return (data, http, permit.session.account_sha256)
+    }
+    private func sendScoped(_ request: URLRequest, installation owner: String, expectedAccount: String?) async throws
+        -> (Data, HTTPURLResponse, LiteSandboxPermit?) {
         guard let url = request.url, request.httpMethod == "POST", paths.contains(url.path),
               url == origin.appendingPathComponent(String(url.path.dropFirst())),
               try await installation() == owner else { throw LiteAccountFailure.conflict }
         let permit = try await access.authorize(owner: owner, ordinary: ordinary)
-        let reply = try await base.send(request, installation: owner)
+        if let expectedAccount, permit?.session.account_sha256 != expectedAccount { throw LiteServiceFailure.conflict }
+        let reply: (Data, HTTPURLResponse)
+        if let permit, let signed = base as? LiteSandboxSignedTransport {
+            reply = try await signed.send(request, installation: owner, permit: permit)
+        } else {
+            reply = try await base.send(request, installation: owner)
+        }
         guard reply.1.url == url, try await installation() == owner else { throw LiteAccountFailure.conflict }
         if ordinary {
             guard let permit, await access.matches(permit, owner: owner) else { throw LiteAccountFailure.conflict }
         }
-        return reply
+        return (reply.0, reply.1, permit)
     }
 }
 
@@ -78,6 +100,12 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     func installation() async throws -> String {
         guard let owner = try await client.existingInstallation() else { throw LiteAccountFailure.unavailable }
         return owner
+    }
+    /// Recheck the very same authorization inside the App Attest signing lane.
+    func send(_ request: URLRequest, installation: String, permit: LiteSandboxPermit) async throws -> (Data, HTTPURLResponse) {
+        try await client.send(request, installation: installation, requestID: UUID(), allowSending: {
+            await access.matches(permit, owner: installation)
+        })
     }
     func send(_ request: URLRequest, installation: String) async throws -> (Data, HTTPURLResponse) {
         let path = request.url?.path ?? ""

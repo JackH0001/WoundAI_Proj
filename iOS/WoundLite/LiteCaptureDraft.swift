@@ -28,7 +28,7 @@ struct LiteCaptureDraft: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
-struct LiteCaptureDraftSummary: Identifiable, Sendable {
+struct LiteCaptureDraftSummary: Identifiable, Equatable, Sendable {
     let id: String
     let createdAt: Date
 }

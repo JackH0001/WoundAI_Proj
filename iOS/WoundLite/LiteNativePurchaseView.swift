@@ -92,6 +92,8 @@ struct LiteNativePurchaseView: View {
     @Environment(\.scenePhase) private var phase
     @Environment(\.locale) private var locale
     @State private var plan = LiteOfferPlanStatus.checking
+    @State private var finishedInitialPriceCheck = false
+    @State private var ownerPreparationNotice: String?
     @State private var checked: PlanQuery?
     @State private var retry = 0
     private var query: PlanQuery {
@@ -109,10 +111,13 @@ struct LiteNativePurchaseView: View {
                     Text(LiteServiceCopy.format("%@／月", locale: locale, offer.displayPrice))
                         .font(.title2.weight(.semibold)).accessibilityIdentifier("lite.offer.price")
                     Text(copy("每月自動續訂，可在 Apple 訂閱設定取消。購買會綁定目前的服務帳號。")).font(.footnote)
-                } else if store.loadingOffer {
+                } else if store.loadingOffer || !finishedInitialPriceCheck {
                     ProgressView(copy("正在讀取 Apple 的商品與價格…"))
                 } else {
-                    Button(copy("重新讀取 Apple 商品")) { Task { await store.loadOffer() } }.disabled(busy)
+                    Text(copy("目前沒有可顯示的 Apple 月費。請重新讀取價格。"))
+                        .font(.footnote).accessibilityIdentifier("lite.offer.priceUnavailable")
+                    Button(copy("重新讀取 Apple 商品")) { Task { await store.loadOffer() } }
+                        .disabled(busy).accessibilityIdentifier("lite.offer.reloadPrice")
                 }
                 Text(copy(canCapture
                     ? "拍攝新的傷口紀錄需使用配備後置 LiDAR 的 iPhone 或 iPad。請先在量測頁確認這部裝置可拍攝，再決定是否訂閱。"
@@ -131,6 +136,24 @@ struct LiteNativePurchaseView: View {
                         Text(copy(store.message)).font(.footnote).accessibilityIdentifier("nativePurchaseStatus")
                     }
                 } else {
+                    if LiteNativeBuild.showsOwnerReview && session.registration == .required {
+                        Text(copy("本人內測首次登記：請將這部裝置的登記識別碼私下傳到自己的 Mac。收到登記時段通知後，再按 Apple 登入。"))
+                            .font(.footnote).accessibilityIdentifier("lite.offer.ownerSetup")
+                        if let keyID = session.preparedEnrollmentKeyID {
+                            ShareLink(item: keyID) { Text(copy("分享裝置登記識別碼")) }
+                                .accessibilityIdentifier("lite.offer.shareOwnerID")
+                        } else {
+                            Button(copy("準備本人裝置登記識別碼")) {
+                                Task {
+                                    await session.prepareOwnerEnrollment()
+                                    ownerPreparationNotice = session.preparedEnrollmentKeyID == nil ? session.message : nil
+                                }
+                            }.disabled(busy).accessibilityIdentifier("lite.offer.prepareOwnerID")
+                            if let ownerPreparationNotice {
+                                Text(copy(ownerPreparationNotice)).font(.footnote)
+                            }
+                        }
+                    }
                     if session.registration == .pending {
                         Text(copy("續接裝置登記並以 Apple 登入")).font(.subheadline)
                         LiteAppleSignInButton(identifier: "lite.offer.resumeRegistration") {
@@ -172,7 +195,10 @@ struct LiteNativePurchaseView: View {
             LiteNativeSponsorSection(session: session)
         }
         .navigationTitle(copy("Plus 方案與價格"))
-        .task { await store.loadOffer() }
+        .task {
+            await store.loadOffer()
+            if !Task.isCancelled { finishedInitialPriceCheck = true }
+        }
         .task(id: query) {
             let requested = query
             guard let account = requested.account else { checked = nil; plan = .checking; return }

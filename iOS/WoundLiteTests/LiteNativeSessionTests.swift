@@ -74,6 +74,8 @@ private actor SessionWire: LiteAuthenticatedTransport {
     var statusUnavailable = false, woundResponseCode = 200
     var lostPrepare = false, preparedOnStatus = false, renewable = false
     var challengeStatus = 200
+    var loginAccount = sessionHash
+    func setLoginAccount(_ hash: String) { loginAccount = hash }
     var afterContext: (@Sendable () async -> Void)?
     var beforeInstallation: (@Sendable () async -> Void)?
     var activeWounds = [String](), woundRevision = 0
@@ -135,7 +137,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
                 "expires_at": sessionTime + 300, "audience": "com.woundai.lite", "authorization_code_required": true]
         case "account/confirm":
             session = ["v": 1, "state": "signed_in", "installation": owner, "operation": operation,
-                "account_sha256": sessionHash, "app_account_token": sessionToken, "expires_at": sessionTime + 900]
+                "account_sha256": loginAccount, "app_account_token": sessionToken, "expires_at": sessionTime + 900]
             if renewable {
                 session?["renewal_generation"] = 0; session?["renewed_at"] = sessionTime
                 session?["family_expires_at"] = sessionTime + 30 * 86400
@@ -973,6 +975,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
         let id = await wire.capture(), image = await wire.image()
         _ = try await r.service.enqueue(captureID: id, jpeg: image)
         let done = try await r.service.resume(id) { _ in image }; XCTAssertEqual(done.note, "confirmed")
+        XCTAssertEqual(done.accountSHA256, sessionHash)
         await r.purchases.purchaseDisplayedTestOffer(); await r.purchases.restore()
         XCTAssertEqual(kit.buys, 1); XCTAssertEqual(kit.restores, 1); XCTAssertEqual(kit.finishes, 1)
         let restarted = try runtime(wire, journal, storeKit: kit)
@@ -1112,10 +1115,43 @@ private actor SessionWire: LiteAuthenticatedTransport {
         await r.identity.signIn(); await wire.loseRun()
         let waiting = try await r.recognizeSaved(recordID: id, jpeg: image)
         XCTAssertEqual(waiting.note, "unavailable")
+        XCTAssertEqual(waiting.accountSHA256, sessionHash)
         let restarted = try runtime(wire, journal, time: sessionTime + 10)
         let done = try await restarted.recognizeSaved(recordID: id, jpeg: image)
         XCTAssertEqual(done.note, "confirmed"); XCTAssertEqual(done.operation, waiting.operation)
         let counts = await wire.counts(); XCTAssertEqual(counts["service/run"], 1); XCTAssertEqual(counts["service/status"], 1)
+    }
+
+    func testOtherAccountCannotReplayPreparedRecognitionOnSameInstallation() async throws {
+        let wire = try SessionWire(), journal = SessionJournal()
+        let first = try runtime(wire, journal)
+        let id = await wire.capture(), image = await wire.image()
+        await first.identity.signIn()
+        await wire.loseRun()
+        _ = try await first.service.enqueue(captureID: id, jpeg: image)
+        let waiting = try await first.service.resume(id) { _ in image }
+        XCTAssertEqual(waiting.accountSHA256, sessionHash)
+        await first.identity.signOut()
+        let second = try runtime(wire, journal, time: sessionTime + 10)
+        await wire.setLoginAccount(String(repeating: "b", count: 64))
+        await second.identity.signIn()
+        let account = try await second.identity.savedResearchContext()
+        XCTAssertEqual(account.account, String(repeating: "b", count: 64))
+        let blocked = try await second.service.resume(id) { _ in XCTFail("Wrong account read the photo"); return nil }
+        XCTAssertEqual(blocked.accountSHA256, sessionHash)
+        let calls = await wire.counts()
+        XCTAssertNil(calls["service/status"])
+        await second.identity.signOut()
+        let original = try runtime(wire, journal, time: sessionTime + 20)
+        await wire.setLoginAccount(sessionHash)
+        await original.identity.signIn()
+        let done = try await original.service.resume(id) { _ in XCTFail("Status must not rerun"); return nil }
+        XCTAssertEqual(done.note, "confirmed")
+        XCTAssertEqual(done.accountSHA256, sessionHash)
+        let final = await wire.counts()
+        XCTAssertEqual(final["service/status"], 1)
+        XCTAssertEqual(final["service/prepare"], 1)
+        XCTAssertEqual(final["service/run"], 1)
     }
 
     func testSavedRecognitionCannotReuseRecordIDWithDifferentJPEG() async throws {
@@ -1653,6 +1689,7 @@ extension LiteNativeSessionTests {
         XCTAssertEqual(before, stillWaiting)
         await next.recognizeNative(fromButton: true)
         XCTAssertEqual(next.serviceResult?.note, "confirmed")
+        XCTAssertNil(next.serviceResult?.accountSHA256, "A status receipt cannot establish prepare ownership")
         XCTAssertEqual(vm.serviceResult?.operation, next.serviceResult?.operation)
         let done = await wire.counts()
         XCTAssertEqual(done["service/run"], 1)
@@ -2645,6 +2682,7 @@ extension LiteNativeSessionTests {
                 _ = try await session.service.enqueue(captureID:id,jpeg:image)
                 let done = try await session.service.resume(id) { _ in image }
                 XCTAssertEqual(done.note,"confirmed")
+                XCTAssertEqual(done.accountSHA256, sessionHash)
                 await session.identity.signOut()
                 var req = URLRequest(url:origin.appendingPathComponent("api/v1/lite/service/balance"))
                 req.httpMethod = "POST"; req.httpBody = Data("{}".utf8)

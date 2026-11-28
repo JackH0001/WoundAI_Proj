@@ -210,6 +210,38 @@ final class NativeEntryUITests: XCTestCase {
     }
     #endif
 
+    #if LITE_QA_EXTERNAL_FIXTURE || LITE_QA_OWNER_REVIEW
+    @MainActor func testPriceReadbackHasVisibleOutcomeBeforeSignIn() {
+        continueAfterFailure = false
+        let app = application(language: "en")
+        app.launch()
+        let settings = app.buttons["Settings and data withdrawal"]
+        (settings.waitForExistence(timeout: 2) ? settings : app.tabBars.buttons["Settings"]).tap()
+        let entry = app.buttons["lite.settings.plus"]
+        XCTAssertTrue(entry.waitForExistence(timeout: 8))
+        entry.tap()
+        let price = app.staticTexts["lite.offer.price"]
+        let unavailable = app.staticTexts["lite.offer.priceUnavailable"]
+        func awaitPriceOutcome() {
+            let finished = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                price.exists || unavailable.exists
+            }, object: app)
+            XCTAssertEqual(XCTWaiter.wait(for: [finished], timeout: 20), .completed)
+            XCTAssertNotEqual(price.exists, unavailable.exists)
+        }
+        awaitPriceOutcome()
+        if unavailable.exists {
+            XCTAssertEqual(unavailable.label, "The Apple monthly price is unavailable. Reload the price to try again.")
+            let retry = app.buttons["lite.offer.reloadPrice"]
+            XCTAssertTrue(retry.isHittable)
+            retry.tap()
+            awaitPriceOutcome()
+        }
+        XCTAssertTrue(app.buttons["lite.offer.signIn"].exists)
+        XCTAssertFalse(app.buttons["lite.offer.buy"].exists)
+    }
+    #endif
+
     @MainActor func testEnglishSubscriptionEntryExplainsQuotaAndDoesNotOpenAPurchase() throws {
         continueAfterFailure = false
         let app = application(language: "en")
@@ -607,6 +639,14 @@ final class NativeEntryUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Plus 方案與價格"].waitForExistence(timeout: 8))
         XCTAssertTrue(app.staticTexts["Plus 每天共 10 次辨識，可同時追蹤 5 處傷口。"].exists)
         XCTAssertTrue(app.staticTexts["lite.offer.captureRequirement"].exists)
+        #if LITE_QA_OWNER_REVIEW
+        XCTAssertTrue(app.staticTexts["lite.offer.ownerSetup"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.buttons["lite.offer.prepareOwnerID"].exists)
+        #else
+        XCTAssertFalse(app.staticTexts["lite.offer.ownerSetup"].exists)
+        XCTAssertFalse(app.buttons["lite.offer.prepareOwnerID"].exists)
+        #endif
+        XCTAssertFalse(app.buttons["lite.offer.shareOwnerID"].exists)
         XCTAssertFalse(app.buttons["lite.offer.buy"].exists)
         XCTAssertTrue(app.buttons["lite.offer.restore"].exists)
         XCTAssertFalse(app.buttons["核對未完成購買"].exists)

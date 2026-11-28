@@ -312,20 +312,30 @@ final class LiteMeasureVM: ObservableObject {
         } catch { note = "仍未完成本機保存，未送出照片。請保留此畫面。" }
     }
 
-    func restoreDraft(_ id: String, in store: LiteStore) async {
+    var hasUnstoredCapture: Bool { image != nil && draft == nil && savedId == nil }
+
+    @discardableResult
+    func restoreDraft(_ id: String, in store: LiteStore, pending scope: LitePendingCaptureScope? = nil,
+                      operation: String? = nil) async -> Bool {
         recordStore = store
-        guard let native, !busy, store.captureCanResume(id), !store.records.contains(where: { $0.id == id }) else { return }
+        guard let native, !busy, store.captureCanResume(id), !store.records.contains(where: { $0.id == id }),
+              scope == nil || !hasUnstoredCapture else { return false }
         captureBusy = true; busyHint = "正在讀回原拍攝…"; defer { captureBusy = false }
         do {
             let value = try await native.captures.load(id)
             guard value.savedRecordID == nil, let img = UIImage(data: value.jpeg) else { throw LiteServiceFailure.invalidState }
             let d = try value.depth()
+            if let scope, (try? await native.identity.savedResearchContext()) != scope.context { return false }
             var journal: LiteServiceRecord?, unreadable = false
             do {
                 journal = try await readRecognitionRecord(native, draft: value, width: d.rgbWidth, height: d.rgbHeight)
             }
             catch { unreadable = true }
-            guard store.captureCanResume(id), !store.records.contains(where: { $0.id == id }) else { return }
+            if let scope {
+                guard let journal, journal.operation == operation, scope.contains(journal),
+                      scope.isCurrent(in: native), !Task.isCancelled else { return false }
+            }
+            guard store.captureCanResume(id), !store.records.contains(where: { $0.id == id }) else { return false }
             gen += 1
             draftNeedsReload = false; resultApplicationPending = false
             image = img; captureJPEG = value.jpeg; depth = d
@@ -342,7 +352,11 @@ final class LiteMeasureVM: ObservableObject {
                 do { try await useNativeResult() }
                 catch { resultApplicationPending = true; note = Self.applySavedHint }
             }
-        } catch { note = "無法完整核對這筆拍攝，未取代目前畫面或送出資料。原檔保留。" }
+            return true
+        } catch {
+            note = "無法完整核對這筆拍攝，未取代目前畫面或送出資料。原檔保留。"
+            return false
+        }
     }
 
     private static let applySavedHint = "原拍攝已讀回；辨識圈選尚未完整保存，可再次套用已保存的結果，不需重新辨識。"
@@ -982,7 +996,7 @@ struct LiteMeasureView: View {
                         .accessibilityIdentifier("lite.capture.instructions")
 
                     if let nativeSession {
-                        LiteMeasureAllowanceView(session: nativeSession, record: vm.serviceResult)
+                        LiteMeasureAllowanceView(session: nativeSession, measure: vm, store: store)
                         if !vm.pendingCaptures.isEmpty {
                             Menu(copy.format("繼續尚未存入的拍攝（%@）", String(vm.pendingCaptures.count))) {
                                 ForEach(vm.pendingCaptures) { item in

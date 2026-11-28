@@ -7,6 +7,13 @@ import Darwin
 // account enrollment, automatic background task or public UI is changed here.
 enum LiteServiceFailure: Error { case invalidState, conflict, busy, missingImage, invalidResponse }
 
+/// Account-aware transports return the subject that authorized this exact response.
+protocol LiteAccountBoundServiceTransport: LiteAuthenticatedTransport {
+    func verifyRecognitionAccount(_ expected: String, installation: String) async throws
+    func sendRecognition(_ request: URLRequest, installation: String, expectedAccount: String?) async throws
+        -> (data: Data, http: HTTPURLResponse, accountSHA256: String)
+}
+
 enum LiteServiceBytes {
     static func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
     static func hex(_ text: String, _ count: Int = 64) -> Bool {
@@ -167,6 +174,8 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
     var retryAt: Double = 0
     var day: Int?
     var requestDigest: String?
+    /// Learned only from an admitted prepare response. Existing journals decode as nil.
+    var accountSHA256: String?
     var reply: LiteServiceReply?
     var recoveryHistory: [LiteServiceRecoveryCheckpoint]? = nil
     var resubmitRequested: Bool? = nil
@@ -174,6 +183,7 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
     func validate() throws {
         guard [1,2].contains(version), LiteServiceBytes.hex(captureID,32), LiteServiceBytes.hex(operation,32),
               LiteServiceBytes.hex(imageSHA256), revision > 0,
+              accountSHA256.map({ LiteServiceBytes.hex($0) }) ?? true,
               LiteAttestClient.matches(installation,"[A-Za-z0-9_-]{1,128}"),
               (1...8192).contains(width), (1...8192).contains(height), width*height <= 16_000_000,
               ["prepare","run","status","recover","resubmit","none"].contains(next),
@@ -181,6 +191,9 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
               retryAt.isFinite, retryAt >= 0, day == nil || day! >= 0,
               requestDigest == nil || LiteServiceBytes.hex(requestDigest!) else { throw LiteServiceFailure.invalidState }
         let history=recoveryHistory ?? []
+        if accountSHA256 != nil, reply?.receipt == nil, !history.contains(where: { $0.priorReply?.receipt != nil }) {
+            throw LiteServiceFailure.invalidState
+        }
         if version == 1 {
             guard history.isEmpty, operation == captureID else { throw LiteServiceFailure.invalidState }
         } else {
@@ -364,6 +377,10 @@ actor LiteServiceClient {
         guard !busy else { throw LiteServiceFailure.busy }; busy=true; defer { busy=false }
         var (previous,r)=try await read(id)
         guard r.canResubmit, try await transport.installation() == r.installation else { throw LiteServiceFailure.invalidState }
+        if let expected = r.accountSHA256 {
+            guard let verified = transport as? any LiteAccountBoundServiceTransport else { throw LiteServiceFailure.conflict }
+            try await verified.verifyRecognitionAccount(expected, installation: r.installation)
+        }
         r.resubmitRequested=true;r.next="resubmit";r.note="resubmitting";r.retryAt=0
         try await save(&r,previous:&previous);return r
     }
@@ -418,14 +435,24 @@ actor LiteServiceClient {
             // Durable uncertainty marker BEFORE any media/security network work.
             r.lastRequestWasOffline = nil
             r.next="status";r.note="checking";try await save(&r,previous:&previous)
-            let response: (Data,HTTPURLResponse)
-            do { response=try await transport.send(request,installation:r.installation) }
+            let data: Data, http: HTTPURLResponse, account: String?
+            do {
+                if let verified = transport as? any LiteAccountBoundServiceTransport {
+                    let reply = try await verified.sendRecognition(request, installation: r.installation, expectedAccount: r.accountSHA256)
+                    guard LiteServiceBytes.hex(reply.accountSHA256),
+                          r.accountSHA256 == nil || r.accountSHA256 == reply.accountSHA256 else { throw LiteServiceFailure.conflict }
+                    (data, http, account) = (reply.data, reply.http, reply.accountSHA256)
+                } else {
+                    guard r.accountSHA256 == nil else { throw LiteServiceFailure.conflict }
+                    (data, http) = try await transport.send(request, installation: r.installation)
+                    account = nil
+                }
+            }
             catch {
                 if (error as? URLError)?.code == .notConnectedToInternet { r.lastRequestWasOffline = true }
                 r.note="unavailable";r.retryAt=now().timeIntervalSince1970+5
                 try await save(&r,previous:&previous); return r
             }
-            let (data,http)=response
             guard http.url == request.url, data.count <= 32_768 else {
                 r.note="review";r.next="none";try await save(&r,previous:&previous);return r
             }
@@ -434,6 +461,7 @@ actor LiteServiceClient {
                     let reply=try JSONDecoder().decode(LiteServiceReply.self,from:data)
                     try reply.validate(for:r)
                     guard (http.statusCode == 202) == (reply.state == "pending") else { throw LiteServiceFailure.invalidResponse }
+                    if action == "prepare", reply.receipt != nil, r.accountSHA256 == nil { r.accountSHA256 = account }
                     if reply.state == "new_operation_required" {
                         guard let auth=reply.recovery, (r.recoveryHistory?.count ?? 0) < 8 else { throw LiteServiceFailure.invalidResponse }
                         let checkpoint=LiteServiceRecoveryCheckpoint(authorization:auth,priorRevision:r.revision,
