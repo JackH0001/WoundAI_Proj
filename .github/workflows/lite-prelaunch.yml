@@ -327,6 +327,7 @@ jobs:
           python -m unittest -v test_lite_grant_key_custody test_lite_rotating_grant_keys test_lite_shared_proposal_erasure > evidence/grant-key-custody-tests.log 2>&1
           python -m unittest -v test_inspect_lite_secret_mounts > evidence/secret-mount-metadata-tests.log 2>&1
           python -m unittest -v test_check_lite_native_revision > evidence/native-revision-mount-tests.log 2>&1
+          python -m unittest -v test_check_lite_owner_enrollment_revision > evidence/owner-enrollment-revision-tests.log 2>&1
           python tools/lite_grant_key_custody_probe.py --output evidence/grant-key-custody-probe.json
           python tools/lite_rotating_grant_keys_probe.py --output evidence/rotating-grant-keys-probe.json
       - name: Opt-in shared key startup, signed service and private disposition

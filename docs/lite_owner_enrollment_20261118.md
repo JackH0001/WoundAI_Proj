@@ -77,3 +77,36 @@ python tools/lite_owner_enrollment_iam.py recover --scope "$SCOPE" --scope-sha25
 `grant` 產生供覆核的政策與異動收據。條件對桶中繼資料與兩個指定物件各自核對資源類型與完整名稱，並套用左閉右開的時間窗。角色必須已存在且僅含上述四項權限。請保留原始草稿及輸出的雜湊。計畫結束後，回復仍使用同一份原始清冊。
 
 若日後取得套用授權，應先核對桶已啟用統一存取控制、角色定義與繼承的有效權限，再以草稿的 etag 進行條件寫入。回應遺失或 etag 衝突時，先重新讀取完整政策。使用新讀回與原異動收據進行回復，保留其他人新增的綁定。回復摘要的 `removed` 為 0 時可略過寫入。若同名綁定已改變，工具會停止以供人工核對。演練完成後，實際有效權限與收回結果仍須在獲授權的雲端驗收中驗證。桶權限草稿含裝置物件名稱與成員資訊，應與私人清冊一併保管。
+
+## 本人登記修訂的啟動與時段核對
+
+首次部署要把桶的限時權限、服務啟動與本人按鈕排在同一時段。登記工廠在啟動時會先確認服務身分，再以該身分讀桶的中繼資料及 metageneration。現有 IAM 條件從 `starts` 開始才允許該讀取。提前啟動的容器可能無法就緒，請將部署時間與操作員、本人約好。從這個窗口開啟到核對完成的時間都算入原 900 秒，勿承諾核對後還有完整 15 分鐘。
+
+1. 在窗口前準備固定映像、本人 IPA、裝置範圍清冊、設定版本與復原清冊。使用兩個不同的設定 Secret，各自以數字版本掛載。這個登記修訂只需要 native 設定與本人登記計畫。所選檔名、掛載路徑、版本、scope 雜湊及預定修訂全名一併納入固定發布清單。
+2. 在已授權時段配置限定的桶權限，於生效後啟動修訂。從 Cloud Run v2 取回**新鮮的** Service 與 Revision，確認修訂 Ready、預期與實際流量都到該修訂。用下列工具核對已覆核的兩份掛載、服務身分、映像及時段。該工具只讀檔案，輸出剩餘秒數。IAM 有效權限與 App 實際可達性需另以已授權的雲端讀回及無照片 HTTP 探針驗證，並核對掛載中繼資料。三項都通過且剩餘時間足以讓本人操作時，再提示手機按「核對裝置登記」。
+3. 已完成登記但手機沒收到回應時，保留安裝與原證明。在有效時段重送可取得同一個安裝。到期後停止受理；若安排另一個已核准時段，沿用原金鑰、狀態儲存及原證明核對。依原清冊收回暫時權限並保留稽核。
+
+核對工具的 `release.json` 包含以下欄位。`files` 中的路徑必須和該次部署的實際掛載一致。
+
+~~~json
+{
+  "schema": "lite-owner-enrollment-revision/1",
+  "scope_sha256": "<部署前已固定的私人 scope 檔案 SHA-256>",
+  "revision": "projects/<project>/locations/asia-east1/services/woundai-lite-native-sandbox/revisions/<revision>",
+  "files": {
+    "native": {"path": "/etc/lite/native/value", "version": "projects/<project>/secrets/<native-config>/versions/1"},
+    "enrollment": {"path": "/etc/lite/enrollment/value", "version": "projects/<project>/secrets/<enrollment-plan>/versions/1"}
+  }
+}
+~~~
+
+~~~sh
+python tools/check_lite_owner_enrollment_revision.py release.json scope.json revision.json service.json \
+  --release-sha256 "$REVIEWED_RELEASE_SHA256"
+~~~
+
+取得本次 HTTP 驗收授權後，從 App 使用的無標籤網址以 POST 對 `/api/v1/lite/attest/challenge` 送一筆 `purpose=register` 的合成請求。其 `key_id` 為不同於本人金鑰的 32 bytes 經標準 Base64 編碼。預期是 App 回傳 HTTP 403、JSON `{"error":"lite_owner_enrollment_closed"}` 且帶 `Cache-Control: no-store`。這條路徑在讀寫儲存與扣防濫用預算前就回應。Cloud Run 的一般 403、404 或已過期的 503 都無法通過這項核對。
+
+在原命令附上 `--probe probe.json` 可一併核對實際回覆。觀測檔含 `method`、`url`、`observed_at`（UTC epoch 秒）、`scope_sha256`、`service_generation`、`status`、`content_type`、`cache_control` 和解析後的 `body`。請在同一服務世代與時段保存回覆，並重新讀取 Service。只有提供且通過 HTTP 證據時，輸出才有 `observed_enrollment_http`。這項檢查與本人手機的正向登記分別記錄。
+
+輸入採 Cloud Run v2 原始資源 JSON。記錄在地端核對的時間、剩餘秒數和此次實際可操作的時間。兩份輸入中的任何一份仍顯示舊流量、分流或具名標籤時，工具會要求重新核對。外部一般使用者的個人服務沿用原有獨立檢查器。[Cloud Run Revision 欄位](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services.revisions) · [Cloud Run 使用 Secret](https://docs.cloud.google.com/run/docs/configuring/services/secrets)
