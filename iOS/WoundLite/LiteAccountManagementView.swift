@@ -62,7 +62,7 @@ struct LiteAccountManagementView:View {
     private func copy(_ source: String) -> String { LiteServiceCopy.text(source, locale: locale) }
     var body:some View {
         Form {
-            if deletion.record==nil && !deletion.needsReview {
+            if !deletion.showsProgressAction {
                 Section(copy("服務帳號")) {
                     LiteAppleSignInButton(identifier: "lite.account.signIn") {
                         Task { await identity.signIn() }
@@ -104,7 +104,7 @@ struct LiteAccountManagementView:View {
                     }
                     LabeledContent(copy("帳號刪除"),value:copy("尚未完成"))
                 }
-                if deletion.record != nil || deletion.needsReview {
+                if deletion.showsProgressAction {
                     Button(copy("核對原刪帳進度")) {Task{await deletion.retry()}}
                         .disabled(deletion.busy).accessibilityIdentifier("accountDeletionRetry")
                 }

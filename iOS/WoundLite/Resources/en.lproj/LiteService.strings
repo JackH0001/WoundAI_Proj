@@ -203,3 +203,7 @@
 "目前無法連上個人服務。請稍後再試。" = "Personal services are unavailable. Try again later.";
 "正在登入個人服務…" = "Signing in to personal services…";
 "登入即可使用個人服務，研究上傳可另外選擇。" = "Sign in to use personal services. You can choose research uploads separately.";
+"手機上沒有已保存的刪帳要求。若要繼續，請點「刪除帳號…」。" = "There is no saved deletion request on this device. To continue, tap “Delete account…”.";
+"無法確認手機是否已保存刪帳要求。請按「核對原刪帳進度」。" = "The app could not check whether the request was saved. Tap “Check original deletion progress”.";
+"刪帳要求尚未送出。請確認連線，必要時先登入原 Apple 帳號，再點「刪除帳號…」。" = "Your deletion request has not been sent. Check your connection, sign in with your original Apple Account if needed, then tap “Delete account…”.";
+"刪帳要求尚未送出。請稍後再點「刪除帳號…」。" = "Your deletion request has not been sent. Try “Delete account…” again later.";

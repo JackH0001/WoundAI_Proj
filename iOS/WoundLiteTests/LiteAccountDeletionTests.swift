@@ -7,22 +7,35 @@ private let deletionAccount=String(repeating:"a",count:64)
 
 private actor DeletionJournal:LiteServiceJournal {
     var values:[String:Data]=[:],fail=false
-    func load(_ id:String)throws->Data? {values[id]}
+    private var unreadable = false
+    private var loseNextWriteReply = false
+    func load(_ id:String)throws->Data? {
+        if unreadable { throw LiteDeletionFailure.unavailable }
+        return values[id]
+    }
     func replace(_ id:String,expected:Data?,with data:Data)throws {
         guard !fail,values[id]==expected else{throw LiteDeletionFailure.conflict};values[id]=data
+        if loseNextWriteReply {
+            loseNextWriteReply = false
+            throw LiteDeletionFailure.unavailable
+        }
     }
     func failWrites(){fail=true}
+    func allowWrites(){fail=false}
+    func failNextWriteAfterSaving(){loseNextWriteReply=true}
+    func setUnreadable(_ value: Bool){unreadable=value}
     func rows()->[String:Data]{values}
 }
 @MainActor private final class DeletionIdentity:LiteDeletionIdentity {
     var contexts=0,suspensions=0,refuse=false,authCalls=0,cancel=false
+    var contextError: Error?
     var beforeAuth:(()async throws->Void)?
     var onSuspend:(()async throws->Void)?
     func authenticateDeletion(_ challenge:LiteDeletionChallenge,context:LiteDeletionContext)async throws->String {
         authCalls+=1;try await beforeAuth?();if cancel{throw LiteAccountFailure.cancelled};return "synthetic-id-token"
     }
     func deletionContext()async throws->LiteDeletionContext {
-        contexts+=1;if refuse{throw LiteDeletionFailure.identity}
+        contexts+=1;if let contextError { throw contextError };if refuse{throw LiteDeletionFailure.identity}
         return LiteDeletionContext(origin:deletionOrigin.absoluteString,installation:deletionOwner,account:deletionAccount)
     }
     func suspendForDeletion(_ context:LiteDeletionContext,operation:String)async throws {
@@ -226,6 +239,81 @@ private actor DeletionJournal:LiteServiceJournal {
         try await j.replace(k,expected:nil,with:Data("corrupt".utf8));await m.reload();await m.requestConfirmed()
         XCTAssertTrue(m.needsReview);XCTAssertTrue(s.requests.isEmpty);XCTAssertEqual(i.contexts,0)
     }
+    func testNoSessionBeforeFirstDeletionOffersSignInAndConfirmedRetryInBothLanguages() async {
+        let (service, identity, journal, _) = fixture()
+        var pauses = 0
+        let model = LiteAccountDeletionStore(service: service, identity: identity, journal: journal,
+                                             pauseResearch: { pauses += 1 }, now: { Date(timeIntervalSince1970: 1000) })
+        identity.contextError = LiteAccountFailure.unavailable
+        await model.requestConfirmed()
+        XCTAssertFalse(model.showsProgressAction)
+        XCTAssertFalse(model.identityRequired)
+        XCTAssertNil(model.record)
+        XCTAssertTrue(model.presentationMessage(locale: Locale(identifier: "zh_Hant_TW")).contains("再點「刪除帳號…」"))
+        XCTAssertTrue(model.presentationMessage(locale: Locale(identifier: "en_US")).contains("original Apple Account"))
+        let rows = await journal.rows()
+        XCTAssertTrue(rows.isEmpty)
+        XCTAssertEqual(pauses, 0)
+        XCTAssertEqual(identity.suspensions, 0)
+        XCTAssertTrue(service.requests.isEmpty)
+        XCTAssertTrue(service.statuses.isEmpty)
+        identity.contextError = nil
+        await model.reload()
+        XCTAssertTrue(service.requests.isEmpty)
+        await model.requestConfirmed()
+        XCTAssertEqual(service.requests.count, 1)
+        XCTAssertEqual(pauses, 1)
+    }
+
+    func testFirstWriteFailureWithEmptyJournalRequiresAnotherExplicitConfirmation() async {
+        let (service, identity, journal, model) = fixture()
+        await journal.failWrites()
+        await model.requestConfirmed()
+        XCTAssertTrue(model.showsProgressAction)
+        XCTAssertTrue(model.message.contains("是否已保存"))
+        XCTAssertTrue(model.presentationMessage(locale: Locale(identifier: "en_US")).contains("Check original deletion progress"))
+        await journal.allowWrites()
+        await model.retry()
+        XCTAssertFalse(model.showsProgressAction)
+        XCTAssertTrue(model.message.contains("沒有已保存的刪帳要求"))
+        XCTAssertTrue(model.presentationMessage(locale: Locale(identifier: "en_US")).contains("Delete account…"))
+        XCTAssertTrue(service.requests.isEmpty)
+        XCTAssertEqual(identity.contexts, 1)
+        await model.requestConfirmed()
+        XCTAssertEqual(service.requests.count, 1)
+    }
+
+    func testLostAcknowledgmentOfFirstWriteUsesTheStoredOperationAfterReadRecovers() async throws {
+        let (service, identity, journal, model) = fixture()
+        await journal.failNextWriteAfterSaving()
+        await model.requestConfirmed()
+        let rows = await journal.rows()
+        let checkpoint = try JSONDecoder().decode(LiteAccountDeletionCheckpoint.self, from: XCTUnwrap(rows.values.first))
+        XCTAssertTrue(model.showsProgressAction)
+        XCTAssertTrue(service.requests.isEmpty)
+        await journal.setUnreadable(true)
+        await model.retry()
+        XCTAssertTrue(model.showsProgressAction)
+        XCTAssertTrue(service.requests.isEmpty)
+        await journal.setUnreadable(false)
+        await model.retry()
+        XCTAssertEqual(service.requests, [checkpoint.operation])
+        XCTAssertEqual(model.record?.receipt?.operation, checkpoint.operation)
+        XCTAssertEqual(identity.contexts, 1)
+    }
+
+    func testUnknownJournalWithNoPriorRequestCannotStartByCheckingProgress() async {
+        let (service, identity, journal, model) = fixture()
+        await journal.setUnreadable(true)
+        await model.reload()
+        XCTAssertTrue(model.showsProgressAction)
+        await journal.setUnreadable(false)
+        await model.requestConfirmed()
+        XCTAssertFalse(model.showsProgressAction)
+        XCTAssertEqual(identity.contexts, 0)
+        XCTAssertTrue(service.requests.isEmpty)
+    }
+
     func testReceiptCannotClaimDeletionOrCancelledSubscription()throws {
         let s=DeletionService(),op=String(repeating:"e",count:32),r=s.reply(String(repeating:"e",count:32))
         for change in [["account_deleted":true],["subscription_cancelled":true],["local_records_preserved":false],

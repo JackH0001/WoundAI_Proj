@@ -234,6 +234,7 @@ struct LiteAccountDeletionCheckpoint: Codable, Equatable {
     }
     @Published private(set) var needsReview=false
     @Published private(set) var identityRequired=false
+    var showsProgressAction: Bool { record != nil || needsReview }
     let service:any LiteAccountDeletionService,identity:any LiteDeletionIdentity,journal:any LiteServiceJournal
     let now:()->Date
     let pauseResearch:() throws -> Void
@@ -253,27 +254,88 @@ struct LiteAccountDeletionCheckpoint: Codable, Equatable {
         try await journal.replace(LiteAccountDeletionCheckpoint.key(origin:service.origin.absoluteString,owner:owner),expected:old,with:data)
         record=r;return data
     }
-    func reload()async {
-        guard !busy else{return};busy=true;defer{busy=false}
-        do {let owner=try await service.installation();record=try await read(owner).1;needsReview=false;describe()}
-        catch {needsReview=true;message="無法核對原刪帳要求；已停止新增要求。請保留紀錄，稍後再核對。"}
+    private static let noSavedRequest = "手機上沒有已保存的刪帳要求。若要繼續，請點「刪除帳號…」。"
+    private static let checkLocalRequest = "無法確認手機是否已保存刪帳要求。請按「核對原刪帳進度」。"
+
+    func reload() async {
+        guard !busy else { return }
+        busy = true
+        defer { busy = false }
+        do {
+            let owner = try await service.installation()
+            record = try await read(owner).1
+            if needsReview && record == nil { message = Self.noSavedRequest }
+            needsReview = false
+            if record == nil { identityRequired = false }
+            describe()
+        } catch {
+            needsReview = true
+            message = Self.checkLocalRequest
+        }
     }
+
+    /// The caller has checked that this installation has no saved request.
+    private func firstRequest(owner: String) async -> (Data, LiteAccountDeletionCheckpoint)? {
+        let context: LiteDeletionContext
+        do {
+            context = try await identity.deletionContext()
+            try context.validate()
+            guard context.installation == owner, context.origin == service.origin.absoluteString
+            else { throw LiteDeletionFailure.conflict }
+        } catch {
+            message = "刪帳要求尚未送出。請確認連線，必要時先登入原 Apple 帳號，再點「刪除帳號…」。"
+            return nil
+        }
+        do {
+            try pauseResearch()
+        } catch {
+            message = "刪帳要求尚未送出。請稍後再點「刪除帳號…」。"
+            return nil
+        }
+        let next = LiteAccountDeletionCheckpoint(
+            version: 1, context: context, operation: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
+            createdAt: Int(now().timeIntervalSince1970), researchWithdrawalConfirmed: true)
+        do {
+            let data = try await save(owner, nil, next)
+            return (data, next)
+        } catch {
+            // A failed replace may already have persisted this operation or lost a race.
+            // Read the installation journal before offering another destructive confirmation.
+            needsReview = true
+            message = Self.checkLocalRequest
+            return nil
+        }
+    }
+
     /// Called only by the destructive confirmation button; no onAppear intake.
     func requestConfirmed()async {await advance(create:true)}
     func retry()async {await advance(create:false)}
     private func advance(create:Bool)async {
         guard !busy else{return};busy=true;defer{busy=false}
+        let owner: String
+        var raw: Data?
+        var r: LiteAccountDeletionCheckpoint?
         do {
-            let owner=try await service.installation();var(raw,r)=try await read(owner)
-            if r==nil {
-                guard create else{return}
-                let c=try await identity.deletionContext();try c.validate()
-                guard c.installation==owner,c.origin==service.origin.absoluteString else{throw LiteDeletionFailure.conflict}
-                let next=LiteAccountDeletionCheckpoint(version:1,context:c,operation:UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased(),createdAt:Int(now().timeIntervalSince1970),researchWithdrawalConfirmed:true)
-                try pauseResearch()
-                raw=try await save(owner,nil,next);r=next // Persist before closing local admission or transmitting.
-            }
-            else if create || r?.researchWithdrawalConfirmed == true {
+            owner = try await service.installation()
+            (raw, r) = try await read(owner)
+        } catch {
+            needsReview = true
+            message = Self.checkLocalRequest
+            return
+        }
+        let reconciling = needsReview
+        needsReview = false
+        record = r
+        do {
+            if r == nil {
+                identityRequired = false
+                guard create && !reconciling else {
+                    message = Self.noSavedRequest
+                    return
+                }
+                guard let first = await firstRequest(owner: owner) else { return }
+                (raw, r) = first
+            } else if create || r?.researchWithdrawalConfirmed == true {
                 try pauseResearch()
             }
             guard var current=r,var old=raw else{throw LiteDeletionFailure.invalid}
