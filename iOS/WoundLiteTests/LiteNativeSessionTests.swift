@@ -74,6 +74,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
     var statusUnavailable = false, woundResponseCode = 200
     var challengeStatus = 200
     var afterContext: (@Sendable () async -> Void)?
+    var beforeInstallation: (@Sendable () async -> Void)?
     var activeWounds = [String](), woundRevision = 0
     var afterWoundSnapshot: (@Sendable () async -> Void)?
     let golden: [String: Any]
@@ -81,7 +82,13 @@ private actor SessionWire: LiteAuthenticatedTransport {
         let file = try XCTUnwrap(Bundle(for: LiteNativeSessionTests.self).url(forResource: "lite_service_operation", withExtension: "json"))
         golden = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
     }
-    func installation() -> String { owner }
+    func installation() async -> String {
+        let callback = beforeInstallation
+        beforeInstallation = nil
+        await callback?()
+        return owner
+    }
+    func onNextInstallation(_ callback: @escaping @Sendable () async -> Void) { beforeInstallation = callback }
     func register() -> String { registrations += 1; return owner }
     func counts() -> [String: Int] {
         var r = Dictionary(paths.map { ($0, 1) }, uniquingKeysWith: +); r["registration"] = registrations; return r
@@ -1235,9 +1242,15 @@ extension LiteNativeSessionTests {
         XCTAssertEqual(vm.draft, draft)
         let afterTap = await wire.counts()
         XCTAssertEqual(afterTap, before)
-        vm.showRecognitionAccount = false
         await session.identity.signIn()
         let afterSignIn = await wire.counts()
+        vm.showRecognitionAccount = false
+        await vm.recognitionAccountDismissed()
+        await vm.resumePendingRecognition()
+        XCTAssertEqual(vm.note, "可用這張照片繼續雲端辨識，也可以直接在手機圈選。")
+        XCTAssertEqual(vm.draft, draft)
+        let afterReturn = await wire.counts()
+        XCTAssertEqual(afterReturn, afterSignIn)
         XCTAssertNil(afterSignIn["service/prepare"])
         XCTAssertNil(afterSignIn["service/run"])
         await vm.recognizeNative(fromButton: true)
@@ -1248,6 +1261,70 @@ extension LiteNativeSessionTests {
         let done = await wire.counts()
         XCTAssertEqual(done["service/prepare"], 1)
         XCTAssertEqual(done["service/run"], 1)
+    }
+
+    func testDismissWithoutSigningInThenOutlineTheSameDraftOffline() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        let vm = LiteMeasureVM(native: try runtime(wire, SessionJournal(), captures: files))
+        await vm.restoreDraft(draft.id, in: store)
+        await vm.recognizeNative(fromButton: true)
+        let before = await wire.counts()
+        vm.showRecognitionAccount = false
+        await vm.recognitionAccountDismissed()
+        XCTAssertEqual(vm.note, "照片已保存在手機。可自行圈選，或登入後使用雲端辨識。")
+        let outline = [[[1, 1], [2, 1], [1, 2]]]
+        await vm.applyManual(outline)
+        let saved = try await files.load(draft.id)
+        XCTAssertTrue(saved.manuallyEdited)
+        XCTAssertEqual(saved.polygons, outline)
+        XCTAssertEqual(saved.jpeg, draft.jpeg)
+        let after = await wire.counts()
+        XCTAssertEqual(after, before)
+    }
+
+    func testDismissPreservesUnrelatedNoticeAndRestoredDraft() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        let vm = LiteMeasureVM(native: try runtime(wire, SessionJournal(), captures: files))
+        await vm.restoreDraft(draft.id, in: store)
+        await vm.recognizeNative(fromButton: true)
+        let prompt = vm.note
+        vm.showRecognitionAccount = false
+        vm.note = "unrelated storage error"
+        await vm.recognitionAccountDismissed()
+        XCTAssertEqual(vm.note, "unrelated storage error")
+        let other = try await files.create(jpeg: draft.jpeg, depth: captureDepth(), id: UUID(), now: Date())
+        await vm.restoreDraft(other.id, in: store)
+        vm.note = prompt
+        await vm.recognitionAccountDismissed()
+        XCTAssertEqual(vm.note, prompt)
+        XCTAssertEqual(vm.draft, other)
+    }
+
+    func testAccountChangingDuringReturnDoesNotPublishThePreviousAccess() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let session = try runtime(wire, SessionJournal(), captures: files)
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        let vm = LiteMeasureVM(native: session)
+        await vm.restoreDraft(draft.id, in: store)
+        await vm.recognizeNative(fromButton: true)
+        await session.identity.signIn()
+        vm.showRecognitionAccount = false
+        let prompt = vm.note
+        await wire.onNextInstallation { await session.identity.signOut() }
+        await vm.recognitionAccountDismissed()
+        XCTAssertEqual(vm.note, prompt)
+        XCTAssertEqual(vm.draft, draft)
+        let calls = await wire.counts()
+        XCTAssertNil(calls["service/prepare"])
+        XCTAssertNil(calls["service/run"])
     }
 
     func testRecognitionWithUnreachableAccountStatusKeepsSameDraftAndShowsServiceMessage() async throws {

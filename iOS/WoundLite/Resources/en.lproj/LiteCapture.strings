@@ -137,3 +137,5 @@
 "正在確認個人服務帳號，請稍候再點一次辨識。" = "Checking your service account. Tap Analyze again in a moment.";
 "個人服務暫時無法確認結果。照片已保存，可稍後查詢同一筆，或在手機圈選傷口。" = "Personal Service could not confirm the result. Your photo is saved. Check this capture later or outline the wound on your phone.";
 "返回這次拍攝" = "Return to this capture";
+"可用這張照片繼續雲端辨識，也可以直接在手機圈選。" = "Continue analyzing this photo in the cloud, or outline it on your phone.";
+"照片已保存在手機。可自行圈選，或登入後使用雲端辨識。" = "Your photo is saved on your phone. Outline it now, or sign in for cloud analysis.";

@@ -27,6 +27,8 @@ final class LiteMeasureVM: ObservableObject {
     @Published private(set) var draft: LiteCaptureDraft?
     @Published private(set) var pendingCaptures: [LiteCaptureDraftSummary] = []
     @Published var showRecognitionAccount = false
+    private var recognitionAwaitingTap: Int?
+    private static let recognitionSignInPrompt = "請先開啟個人服務完成登入。回到量測後，可用同一張照片繼續辨識。"
     @Published private(set) var serviceResult: LiteServiceRecord?
     @Published private(set) var draftNotice: String?
     @Published private(set) var serviceUnreadable = false
@@ -324,13 +326,14 @@ final class LiteMeasureVM: ObservableObject {
                       recordStore?.captureCanResume(draft.id) != false else { return }
                 switch access {
                 case .unavailable:
-                    note = "請先開啟個人服務完成登入。回到量測後，可用同一張照片繼續辨識。"
+                    recognitionAwaitingTap = generation
+                    note = Self.recognitionSignInPrompt
                     showRecognitionAccount = true
                     return
                 case .checking:
                     note = "正在確認個人服務帳號，請稍候再點一次辨識。"
                     return
-                case .available: break
+                case .available: recognitionAwaitingTap = nil
                 }
             }
             if resubmit {
@@ -351,10 +354,27 @@ final class LiteMeasureVM: ObservableObject {
         }
     }
 
+    /// Both ways of closing the sheet return to the same draft without dispatching a photo.
+    func recognitionAccountDismissed() async {
+        guard !showRecognitionAccount, recognitionAwaitingTap == gen, !busy,
+              note == Self.recognitionSignInPrompt, let draft, let native else { return }
+        let captureGeneration = gen
+        let accountGeneration = native.identity.generation
+        let access = await native.identity.readPurchaseAccess()
+        guard gen == captureGeneration, native.identity.generation == accountGeneration,
+              !showRecognitionAccount, !busy, self.draft?.id == draft.id, self.draft?.revision == draft.revision,
+              recordStore?.captureCanResume(draft.id) != false, note == Self.recognitionSignInPrompt else { return }
+        switch access {
+        case .available: note = "可用這張照片繼續雲端辨識，也可以直接在手機圈選。"
+        case .unavailable: note = "照片已保存在手機。可自行圈選，或登入後使用雲端辨識。"
+        case .checking: note = "正在確認個人服務帳號，請稍候再點一次辨識。"
+        }
+    }
+
     /// Foreground continuation of an already requested operation only. Never
     /// creates a first job or a successor, and honors the durable retry deadline.
     func resumePendingRecognition() async {
-        guard let native, !busy, let result = serviceResult, !serviceUnreadable,
+        guard let native, !busy, recognitionAwaitingTap != gen, let result = serviceResult, !serviceUnreadable,
               result.next != "none", result.note != "local",
               result.retryAt <= native.identity.now().timeIntervalSince1970 else { return }
         await recognizeNative()
@@ -782,6 +802,10 @@ struct LiteMeasureView: View {
                         LiteResultCard(e: e, verdict: liteVerdict(e))
                         saveRow(e: e)
                     }
+                    if let draft = vm.draft {
+                        Button(copy.text("捨棄這次拍攝"), role: .destructive) { discardCaptureID = draft.id }
+                            .disabled(vm.busy)
+                    }
                 }
                 .padding()
             }
@@ -798,7 +822,9 @@ struct LiteMeasureView: View {
                 vm.attachNativeSession(nativeSession)
                 await vm.reloadDrafts(in: store)
             }
-            .sheet(isPresented: $vm.showRecognitionAccount) {
+            .sheet(isPresented: $vm.showRecognitionAccount, onDismiss: {
+                Task { await vm.recognitionAccountDismissed() }
+            }) {
                 if let nativeSession {
                     NavigationStack {
                         LiteNativeSessionView(session: nativeSession)
@@ -897,7 +923,6 @@ struct LiteMeasureView: View {
             Button(copy.text("重試保存這次拍攝")) { Task { await vm.retryDraftSave(); await vm.reloadDrafts(in: store) } }
                 .disabled(vm.busy)
         } else if vm.draft != nil {
-            Button(copy.text("捨棄這次拍攝"), role: .destructive) { discardCaptureID = vm.draft?.id }.disabled(vm.busy)
             Text(copy.text("請只送出紙上標靶或人造模型的照片。個人雲端辨識會傳送這張照片並核對您的額度。您也可以在手機上自行圈選。研究上傳須另行同意。"))
                 .font(.footnote).foregroundStyle(.secondary)
             if vm.serviceUnreadable {
