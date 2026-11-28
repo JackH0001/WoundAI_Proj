@@ -120,6 +120,8 @@ struct LiteNativePurchaseView: View {
             Section(copy("每月自動續訂")) {
                 Text(copy("Plus 每天共 10 次辨識，可同時追蹤 5 處傷口。"))
                 if let offer = store.offer {
+                    Text(verbatim: offer.name)
+                        .font(.headline).accessibilityIdentifier("lite.offer.productTitle")
                     Text(LiteServiceCopy.format("%@／月", locale: locale, offer.displayPrice))
                         .font(.title2.weight(.semibold)).accessibilityIdentifier("lite.offer.price")
                     Text(copy("每月自動續訂，可在 Apple 訂閱設定取消。購買會綁定目前的服務帳號。")).font(.footnote)
