@@ -160,12 +160,12 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
     enum Activity {
         case purchasing, restoring, checkingTransactions, observingTransactions
 
-        var progress: String? {
+        var progress: String {
             switch self {
             case .purchasing: return "正在處理訂閱…"
             case .restoring: return "正在恢復既有訂閱…"
             case .checkingTransactions: return "正在查詢未完成的交易…"
-            case .observingTransactions: return nil
+            case .observingTransactions: return "正在查看既有訂閱，完成後即可操作。"
             }
         }
     }
@@ -280,7 +280,8 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
         await reconcile(reportEmpty: false, accountToken: accountToken)
     }
     func loadOffer() async {
-        guard !busy, !loadingOffer else { return }
+        // A background transaction lookup does not use the catalog or start a purchase.
+        guard !loadingOffer, activity == nil || activity == .observingTransactions else { return }
         loadingOffer = true
         defer { loadingOffer = false }
         offer = try? await provider.monthlyOffer()

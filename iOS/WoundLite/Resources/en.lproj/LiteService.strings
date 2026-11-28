@@ -214,4 +214,5 @@
 "正在確認裝置登記…" = "Checking device registration…";
 "請完成 Apple 登入，以確認服務帳號。" = "Complete Sign in with Apple to confirm your service account.";
 "正在處理訂閱…" = "Processing your subscription…";
+"正在查看既有訂閱，完成後即可操作。" = "Checking your existing subscription. You can continue when this finishes.";
 "正在查詢未完成的交易…" = "Checking unfinished transactions…";

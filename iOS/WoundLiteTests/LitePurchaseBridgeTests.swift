@@ -67,7 +67,7 @@ private actor PurchaseJournal:LiteServiceJournal {
     var beforeKnown: (() -> Void)?
     var afterPayment: (() -> Void)?
     var duringRestore: (() -> Void)?
-    var duringUnfinished: (() -> Void)?
+    var duringUnfinished: (() async -> Void)?
     func knownPurchases() async throws -> [LitePurchaseEvent] {
         beforeKnown?()
         return pending + restored
@@ -87,7 +87,7 @@ private actor PurchaseJournal:LiteServiceJournal {
         return outcome
     }
     func restore() async throws ->[LitePurchaseEvent]{restoreCalls+=1;duringRestore?();return restored}
-    func unfinished() async throws ->[LitePurchaseEvent]{unfinishedReads += 1; duringUnfinished?(); return pending}
+    func unfinished() async throws ->[LitePurchaseEvent]{unfinishedReads += 1; await duringUnfinished?(); return pending}
     func updates()->AsyncStream<LitePurchaseUpdate>{AsyncStream{continuation=$0}}
     func finish(_ e:LitePurchaseEvent)async throws {
         try await beforeFinish?()
@@ -115,11 +115,33 @@ private actor PurchaseJournal:LiteServiceJournal {
         await store.restore()
         await store.reconcile()
         await store.reconcile(reportEmpty: false)
-        XCTAssertEqual(seen, ["正在處理訂閱…", "正在恢復既有訂閱…", "正在查詢未完成的交易…", nil])
+        XCTAssertEqual(seen, ["正在處理訂閱…", "正在恢復既有訂閱…", "正在查詢未完成的交易…", "正在查看既有訂閱，完成後即可操作。"])
         XCTAssertFalse(store.busy)
         XCTAssertNil(store.activity)
         XCTAssertEqual(provider.purchases, 1)
         XCTAssertEqual(provider.restoreCalls, 1)
+    }
+
+    func testOfferCanLoadWhileBackgroundCheckKeepsPaymentAndRestoreLocked() async {
+        let (service, provider, journal, store) = setup()
+        provider.duringUnfinished = {
+            XCTAssertEqual(store.activity, .observingTransactions)
+            await store.loadOffer()
+            XCTAssertEqual(store.offer, nativeTestOffer)
+            await store.purchase(accepting: nativeTestOffer)
+            await store.restore()
+            XCTAssertEqual(store.activity, .observingTransactions)
+        }
+
+        await store.observePurchases(accountToken: purchaseToken)
+        store.stopObserving()
+        XCTAssertNil(store.activity)
+        XCTAssertEqual(provider.lookups, 1)
+        XCTAssertEqual(provider.purchases, 0)
+        XCTAssertEqual(provider.restoreCalls, 0)
+        XCTAssertEqual(service.contexts, 0)
+        let rows = await journal.values()
+        XCTAssertTrue(rows.isEmpty)
     }
 
     func testKnownTransactionFoundDuringPurchaseSwitchesToCheckingWithoutNewPayment() async {
