@@ -47,6 +47,81 @@ class ServiceHTTPTests(SignedServiceClient, unittest.TestCase):
     def quota(self):
         return self.ledger.snapshot(self.subject,self.e.now//86400,free_grant(self.subject,self.e.now))
 
+    def use_complex_raster(self):
+        import numpy as np
+        def model(rgb):
+            self.model_calls+=1
+            mask=np.zeros(rgb.shape[:2],np.uint8)
+            for y in range(1,52,10):
+                for x in range(1,52,10):
+                    mask[y:y+9,x:x+9]=1
+            return mask
+        self.inference.model=model
+
+    def test_valid_raster_over_component_bound_replays_terminal_without_charge(self):
+        from PIL import Image
+        photo=io.BytesIO()
+        Image.new('RGB',(2048,1536),'white').save(photo,format='JPEG')
+        self.f.jpeg=photo.getvalue();self.image_hash=hashlib.sha256(self.f.jpeg).hexdigest()
+        self.use_complex_raster()
+        self.assertEqual(self.json_request('prepare').json['state'],'ready')
+        expected=dict(error='lite_result_too_complex',retry_action='none',keep_local=True)
+        for response in (self.run_request(),self.json_request('status'),self.run_request(),self.json_request('prepare')):
+            self.assertEqual((response.status_code,response.json),(422,expected))
+        row=self.ops.load(self.subject,f'{1:032x}')[1]
+        self.assertNotIn('wound_polygons',row['result'])
+        self.assertEqual(self.ledger.receipt(self.ops.ticket(self.subject,row))['outcome'],'failed')
+        quota=self.quota()
+        self.assertEqual((self.model_calls,quota['used'],quota['pending'],quota['attempts']),(1,0,0,1))
+
+    def test_lost_complexity_marker_ack_then_concurrent_status_settles_original_failure(self):
+        from lite_service_operations import ResultTooComplex
+        self.use_complex_raster();self.json_request('prepare')
+        write=self.ops.store.compare_exchange
+        def lost(*args):
+            self.assertTrue(write(*args))
+            raise StateUnavailable('failure marker ack lost')
+        with patch.object(self.ops.store,'compare_exchange',side_effect=lost):
+            self.assertEqual(self.run_request().status_code,503)
+        self.assertEqual(self.quota()['pending'],1)
+        barrier=threading.Barrier(4)
+        def replay(_):
+            barrier.wait(5)
+            with self.assertRaises(ResultTooComplex):
+                self.ops.status(self.owner,f'{1:032x}')
+        with ThreadPoolExecutor(max_workers=4) as pool:list(pool.map(replay,range(4)))
+        self.assertEqual((self.model_calls,self.quota()['used'],self.quota()['pending']),(1,0,0))
+        self.assertEqual(self.run_request().status_code,422)
+
+    def test_lost_failed_ledger_ack_replays_same_receipt(self):
+        self.use_complex_raster();self.json_request('prepare')
+        settle=self.ledger.settle
+        def lost(*args):
+            self.assertEqual(settle(*args)['outcome'],'failed')
+            raise StateUnavailable('settlement ack lost')
+        with patch.object(self.ledger,'settle',side_effect=lost):
+            self.assertEqual(self.run_request().status_code,503)
+        self.assertEqual(self.json_request('status').status_code,422)
+        self.assertEqual((self.model_calls,self.quota()['used'],self.quota()['pending']),(1,0,0))
+
+    def test_new_raster_distinguishes_valid_excess_from_invalid_or_untrusted_geometry(self):
+        from lite_result_contract import RasterResultTooComplex, validate_result
+        base=dict(image_w=2048,image_h=1536,route='student',confidence=.01)
+        triangle=[[0,0],[2,0],[0,2]]
+        many_points=[[n,n] for n in range(513)]
+        verbose_points=[[i+.123456789012345,i+.987654321098765] for i in range(400)]
+        for polygons in ([triangle]*33,[many_points],[many_points[:260]]*2,[verbose_points]):
+            with self.assertRaises(RasterResultTooComplex):
+                validate_result(dict(base,wound_polygons=polygons),fresh_raster=True)
+            with self.assertRaises(StateUnavailable) as stored:
+                validate_result(dict(base,wound_polygons=polygons))
+            self.assertNotIsInstance(stored.exception,RasterResultTooComplex)
+        for bad in ([triangle]*33+[[[0,0],[1,1],[-1,0]]], [triangle]*33+[[]]):
+            with self.assertRaises(StateUnavailable) as malformed:
+                validate_result(dict(base,wound_polygons=bad),fresh_raster=True)
+            self.assertNotIsInstance(malformed.exception,RasterResultTooComplex)
+        self.assertEqual(validate_result(dict(base,wound_polygons=[triangle]*32),fresh_raster=True)['wound_polygons'],[triangle]*32)
+
     def test_signed_prepare_execute_and_receipt_without_research_media(self):
         prepared=self.json_request('prepare');self.assertEqual(prepared.json['state'],'ready')
         result=self.run_request();self.assertEqual(result.json['state'],'completed');self.assertEqual(self.model_calls,1)

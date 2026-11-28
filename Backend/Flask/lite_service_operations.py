@@ -23,6 +23,18 @@ RESULT_TTL=86400
 class OperationExpired(UsageConflict): pass
 class OperationUnknown(UsageConflict): pass
 class ImageRejected(UsageConflict): pass
+class ResultTooComplex(UsageConflict): pass
+
+
+def complexity_marker(v):
+    """Small durable evidence for a known post-claim failure; contains no geometry."""
+    return dict(failure='lite_result_too_complex', operation=v['operation'],
+                request_digest=v['digest'], worker=v['worker'])
+
+
+def saved_outcome(v):
+    if v['result'] == complexity_marker(v): return 'failed'
+    return 'succeeded' if v['result']['wound_polygons'] else 'empty'
 
 
 def validate_retained_receipt(v,now):
@@ -39,7 +51,7 @@ def validate_retained_receipt(v,now):
     _hex(t['plan_sha256']);r=t['receipt']
     if (type(r) is not dict or set(r)!={'day','operation','request_digest','outcome','result_sha256','grant_sha256','admitted_limit'}
             or type(r['day']) is not int or r['day']!=v['day'] or r['operation']!=v['operation']
-            or r['request_digest']!=v['digest'] or r['outcome'] not in ('succeeded','empty','cancelled')
+            or r['request_digest']!=v['digest'] or r['outcome'] not in ('succeeded','empty','cancelled','failed')
             or type(r['admitted_limit']) is not int or r['admitted_limit'] not in (2,10)):
         raise ValueError('invalid terminal receipt')
     _hex(r['result_sha256']);_hex(r['grant_sha256'])
@@ -47,6 +59,8 @@ def validate_retained_receipt(v,now):
         if v['result_sha256'] is not None:raise ValueError('cancelled operation has inference result')
     elif _hex(v['result_sha256'])!=r['result_sha256']:
         raise ValueError('result hash differs from terminal receipt')
+    if r['outcome']=='failed' and r['result_sha256']!=digest(complexity_marker(v)):
+        raise ValueError('unverified failure receipt')
 
 
 class ServiceAccounts:
@@ -146,7 +160,7 @@ class ServiceAccounts:
         return self.authority.grant(ServiceBinding(account['subject'],account['token'],account['original_transaction']))
 
 
-from lite_result_contract import validate_result
+from lite_result_contract import RasterResultTooComplex, validate_result
 
 
 class RasterInference:
@@ -187,7 +201,7 @@ class RasterInference:
                       route=info.get('route') or 'student')
         if info.get('student_output_contract') is not None:
             result['student_output_contract'] = info['student_output_contract']
-        return validate_result(result)
+        return validate_result(result, fresh_raster=True)
 
 
 class ServiceOperations:
@@ -242,6 +256,8 @@ class ServiceOperations:
                 validate_retained_receipt(v,self.now())
             elif v['result'] is None:
                 if v['result_sha256'] is not None:raise ValueError()
+            elif v['result']==complexity_marker(v):
+                if digest(v['result'])!=_hex(v['result_sha256']):raise ValueError()
             elif digest(validate_result(v['result']))!=_hex(v['result_sha256']):raise ValueError()
             _encode(v)
         except (ValueError,TypeError,KeyError) as e:raise StateUnavailable('operation state invalid; never reset') from e
@@ -342,6 +358,7 @@ class ServiceOperations:
         ticket=self.ticket(subject,v)
         try:self.ledger.receipt(ticket)
         except UsageConflict:
+            if v['result'] is not None:raise StateUnavailable('saved outcome without its reservation')
             if self.recovery is not None and v['day'] < self.now()//86400:
                 return self.status(installation,operation)
             # Reuse only this request's still-valid verified snapshot. A slow
@@ -358,6 +375,7 @@ class ServiceOperations:
         ticket=self.ticket(subject,v)
         try:receipt=self.ledger.active_receipt(ticket)
         except UsageConflict:
+            if v['result'] is not None:raise StateUnavailable('saved outcome without its reservation')
             if self.recovery is not None and v['day'] < self.now()//86400:
                 return self.recovery.offer(subject,v)
             return dict(state='awaiting_reservation',operation=operation,day=v['day'],retry_action='prepare',research_stored=False)
@@ -369,8 +387,11 @@ class ServiceOperations:
                 raise StateUnavailable('result receipt mismatch')
             v=latest
         if v['result'] is not None:
-            outcome='succeeded' if v['result']['wound_polygons'] else 'empty'
+            outcome=saved_outcome(v)
             receipt=self.ledger.settle(ticket,v['worker'],outcome,v['result_sha256'])
+            if outcome=='failed':
+                self.accounts.require_active(account)
+                raise ResultTooComplex('confirmed result exceeds transport limits')
         state={'reserved':'ready','running':'pending','succeeded':'completed','empty':'completed','cancelled':'cancelled'}[receipt['outcome']]
         reply = dict(state=state,operation=operation,day=v['day'],receipt=receipt,result=v['result'],
                     result_json=None if v['result'] is None else json.dumps(v['result'],sort_keys=True,separators=(',', ':'),allow_nan=False),
@@ -405,9 +426,12 @@ class ServiceOperations:
                 self.ledger.cancel_unstarted(ticket,digest(['preflight_rejected',v['image_sha256']]))
                 raise
             if not self.ledger.claim(ticket,v['worker']):return self.status(installation,operation)
-            # A model failure after the claim leaves this operation pending.
+            # Unknown execution after a claim stays pending. A validated
+            # result over the wire limit follows the same durable write-before-
+            # settlement path as a mask, without retaining any partial outline.
             self.accounts.require_active(account)
-            result=self.inference.infer(rgb)
+            try:result=self.inference.infer(rgb)
+            except RasterResultTooComplex:result=complexity_marker(v)
         finally:
             self._model_slot.release()
         result_hash=digest(result)

@@ -121,6 +121,7 @@
 "服務忙碌，稍後核對原工作；不需重新拍攝。" = "The service is busy. Check the original task later; there is no need to retake the photo.";
 "連線或裝置驗證尚未完成；下次先查原工作，不會直接重傳照片。" = "Connection or device verification is not complete. The next attempt will check the original task before sending the photo again.";
 "雲端結果查詢期限已過；本機資料保留，需核對後再處理。" = "The cloud result lookup period has expired. Local data is retained; check the status before proceeding.";
+"雲端無法傳回完整輪廓，這次未計入成功辨識次數。可在這張照片上圈選，或重新拍攝。" = "The cloud service could not return the full outline. This attempt did not count as a successful recognition. Outline this photo manually or take another photo.";
 "本次影像未通過檢查；未執行辨識，原資料保留。" = "This image did not pass validation. Recognition was not run; the original data is retained.";
 "預留已逾時，尚未執行辨識。原照片保留；按「重新送出」後將重新檢查額度。" = "The reservation expired before recognition ran. The original photo is retained. Tapping “Submit again” will check the allowance again.";
 "原工作已取消，但原因尚未確認；資料保留，請先核對，不會自動重送。" = "The original task was cancelled, but the reason is unconfirmed. Data is retained. Check the status first; it will not be resubmitted automatically.";

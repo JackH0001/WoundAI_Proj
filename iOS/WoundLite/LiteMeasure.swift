@@ -345,8 +345,13 @@ final class LiteMeasureVM: ObservableObject {
             serviceUnreadable = unreadable; draftIdentity = (UUID(uuidString: value.id)!, value.createdAt)
             savedId = nil; cloudImageId = nil; cloudBinding = nil; cloudHadPolys = false
             estimate = nil; uploadMessage = nil
-            note = unreadable ? "照片、深度與圈選已讀回；辨識回執無法核對，已停止雲端續傳。可繼續自行圈選並存入手機，原回執保留。"
-                : "已讀回尚未存入紀錄的拍攝；照片、深度與圈選保留，未重新送出辨識。"
+            if unreadable {
+                note = "照片、深度與圈選已讀回；辨識回執無法核對，已停止雲端續傳。可繼續自行圈選並存入手機，原回執保留。"
+            } else if let journal, journal.note == "resultTooComplex" {
+                note = journal.message
+            } else {
+                note = "已讀回尚未存入紀錄的拍攝；照片、深度與圈選保留，未重新送出辨識。"
+            }
             if !polys.isEmpty { await runEstimate() }
             if !unreadable, journal?.note == "confirmed", !userEdited {
                 do { try await useNativeResult() }

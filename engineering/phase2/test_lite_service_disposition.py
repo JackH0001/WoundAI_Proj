@@ -94,6 +94,23 @@ class ServiceDispositionTests(unittest.TestCase):
         self.assertEqual(self.row()[1]['v'],3);self.assertEqual(self.calls,1)
         self.assertFalse(self.advance()['account_deleted'])
 
+    def test_close_at_failure_marker_write_fences_late_evidence_and_no_charge(self):
+        from lite_result_contract import RasterResultTooComplex
+        self.prepare()
+        original=self.ops.store.compare_exchange
+        def close_before_write(k,rev,value):
+            if (value.get('result') or {}).get('failure')=='lite_result_too_complex':
+                self.close();self.advance()
+            return original(k,rev,value)
+        with patch.object(self.ops.inference,'infer',side_effect=RasterResultTooComplex()), \
+                patch.object(self.ops.store,'compare_exchange',side_effect=close_before_write), \
+                self.assertRaises(OperationExpired):
+            self.ops.run('device-one',self.op,self.raw)
+        self.assertEqual(self.row()[1]['v'],3)
+        state=self.ledger._load(self.subject,self.f.f.now()//86400)[1]
+        self.assertEqual(self.ledger._counts(state),(0,1,1))
+        with self.assertRaises(AccountClosing):self.ops.status('device-one',self.op)
+
     def test_close_during_model_does_not_persist_returned_mask(self):
         self.prepare();real=self.ops.inference.infer
         def infer(rgb):

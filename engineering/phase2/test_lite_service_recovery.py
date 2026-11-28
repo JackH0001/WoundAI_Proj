@@ -32,6 +32,17 @@ class CrossDayTests(unittest.TestCase):
 
     def new_id(self,response):return int(response.json['recovery']['successor_operation'],16)
 
+    def test_known_complexity_after_midnight_returns_original_failure_no_new_work(self):
+        h=self.h;h.use_complex_raster()
+        self.assertEqual(h.json_request('prepare').json['state'],'ready')
+        self.assertEqual(h.run_request().status_code,422)
+        h.e.now+=6
+        for response in (self.recover(),h.json_request('prepare'),h.json_request('status')):
+            self.assertEqual((response.status_code,response.json.get('error')),(422,'lite_result_too_complex'))
+        self.assertEqual(h.json_request('resubmit',image_sha256=h.image_hash).status_code,409)
+        self.assertIsNone(self.recovery_store.load(h.ops.recovery.key(h.subject,self.op)))
+        self.assertEqual((h.model_calls,h.quota()['used'],h.quota()['attempts']),(1,0,0))
+
     def test_cross_day_recovery_then_one_execution_and_charge(self):
         self.stranded();h=self.h
         self.assertEqual(h.json_request('status').json['state'],'recovery_available')

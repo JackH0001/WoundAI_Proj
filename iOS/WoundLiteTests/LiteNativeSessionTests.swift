@@ -71,6 +71,8 @@ private actor SessionWire: LiteAuthenticatedTransport {
     var owner = "synthetic-native-service", registrations = 0
     var paths = [String](), session: [String: Any]?, ended = false, closed = false
     var production = false, lostConfirmation = false, lostRun = false
+    var complexResultOnStatus = false
+    func reportComplexResultOnStatus() { complexResultOnStatus = true }
     var statusUnavailable = false, woundResponseCode = 200
     var lostPrepare = false, preparedOnStatus = false, renewable = false
     var challengeStatus = 200
@@ -195,7 +197,12 @@ private actor SessionWire: LiteAuthenticatedTransport {
             let callback = beforeServiceStatus
             beforeServiceStatus = nil
             await callback?()
-            result = golden[preparedOnStatus ? "prepare" : "completed"] as! [String: Any]
+            if complexResultOnStatus {
+                code = 422
+                result = ["error": "lite_result_too_complex", "retry_action": "none", "keep_local": true]
+            } else {
+                result = golden[preparedOnStatus ? "prepare" : "completed"] as! [String: Any]
+            }
         case "account/deletion/request", "account/deletion/status":
             if path == "account/deletion/request" {
                 XCTAssertEqual(body["confirmation"] as? String, LiteAccountDeletionCheckpoint.confirmation)
@@ -1996,6 +2003,43 @@ extension LiteNativeSessionTests {
         XCTAssertFalse(counts.keys.contains { $0.contains("research") || $0 == "segment" })
         XCTAssertEqual(try XCTUnwrap(vm2.depth).map.map(\.bitPattern), captureDepth().map.map(\.bitPattern))
     }
+    func testComplexResultKeepsOriginalPhotoAndDepthForManualOutlineAfterRestart() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), journal = SessionJournal(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files), store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        let session = try runtime(wire, journal, captures: files)
+        await session.identity.signIn()
+        let initial = LiteMeasureVM(native: session)
+        await initial.restoreDraft(draft.id, in: store)
+        await wire.loseRun(); await initial.recognizeNative()
+        let resumed = try runtime(wire, journal, time: sessionTime + 6, captures: files)
+        let vm = LiteMeasureVM(native: resumed)
+        await vm.restoreDraft(draft.id, in: store)
+        await wire.reportComplexResultOnStatus()
+        await vm.resumePendingRecognition()
+        let message = try XCTUnwrap(vm.note)
+        XCTAssertTrue(LiteCaptureCopy(locale: Locale(identifier: "zh-Hant")).message(message).contains("未計入成功辨識次數"))
+        XCTAssertTrue(LiteCaptureCopy(locale: Locale(identifier: "en")).message(message).contains("did not count as a successful recognition"))
+        XCTAssertEqual(vm.serviceResult?.note, "resultTooComplex")
+        XCTAssertEqual(vm.serviceResult?.next, "none"); XCTAssertNil(vm.serviceResult?.reply?.result)
+        let restarted = LiteMeasureVM(native: try runtime(wire, journal, time: sessionTime + 100, captures: files))
+        await restarted.restoreDraft(draft.id, in: store)
+        XCTAssertEqual(restarted.note, message)
+        await restarted.resumePendingRecognition()
+        restarted.beginManualEditing()
+        let editor = try XCTUnwrap(restarted.manualEditor)
+        let drawing = [[[5,5],[5,55],[55,55],[55,5]]]
+        let saved = await restarted.applyManual(drawing, correctionIoU: nil, editor: editor)
+        XCTAssertTrue(saved)
+        let local = try await files.load(draft.id)
+        XCTAssertEqual(local.jpeg, draft.jpeg); XCTAssertEqual(local.encodedDepth, draft.encodedDepth)
+        XCTAssertEqual(local.polygons, drawing); XCTAssertTrue(local.manuallyEdited)
+        XCTAssertTrue(store.records.isEmpty)
+        let counts = await wire.counts()
+        XCTAssertEqual(counts["service/prepare"], 1); XCTAssertEqual(counts["service/run"], 1)
+        XCTAssertEqual(counts["service/status"], 1)
+    }
+
     func testLostRunReplyResumesFromSameDraftWithStatusOnly() async throws {
         let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
         let wire = try SessionWire(), journal = SessionJournal(), files = LiteCaptureDraftStore(directory: path)

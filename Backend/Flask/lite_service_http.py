@@ -1,7 +1,7 @@
 """Opt-in signed service endpoints; register ONLY through install_lite_attest."""
 from flask import Blueprint,g,jsonify,request
 from audit_chain_contract import loads_json_object_strict
-from lite_service_operations import ServiceOperations,MAX_IMAGE,OperationExpired,OperationUnknown,ImageRejected
+from lite_service_operations import ServiceOperations,MAX_IMAGE,OperationExpired,OperationUnknown,ImageRejected,ResultTooComplex
 from lite_usage_ledger import UsageConflict,UsageLimit
 from lite_attest_state import StateUnavailable
 
@@ -66,6 +66,7 @@ def blueprint(operations, *, balance_enabled=False):
         except OperationExpired:return jsonify(error='lite_operation_expired',retry_action='none',keep_local=True),410
         except OperationUnknown:return jsonify(error='lite_operation_unknown',retry_action='prepare',keep_local=True),404
         except ImageRejected:return jsonify(error='lite_image_rejected',retry_action='none',keep_local=True),422
+        except ResultTooComplex:return jsonify(error='lite_result_too_complex',retry_action='none',keep_local=True),422
         except UsageLimit as exc:
             payload = dict(error='lite_usage_limit', reason=exc.reason, retry_after=exc.retry_after, keep_local=True)
             if exc.success_quota_state is not None:

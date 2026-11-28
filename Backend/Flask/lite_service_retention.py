@@ -9,7 +9,7 @@ import copy
 import hashlib
 from lite_attest_state import StateUnavailable, _encode, _revision
 from lite_usage_ledger import UsageConflict, digest, _subject, _hex, _integer
-from lite_service_operations import ServiceOperations
+from lite_service_operations import ServiceOperations, saved_outcome
 
 
 class RetentionBlocked(UsageConflict): pass
@@ -33,7 +33,7 @@ class ServiceResultRetention:
         if v['v']==2:raise RetentionBlocked('already compacted; keep terminal identity')
         if self.ops.now()<v['expires']:raise RetentionBlocked('read window has not expired')
         if v['result'] is not None:
-            outcome='succeeded' if v['result']['wound_polygons'] else 'empty'
+            outcome=saved_outcome(v)
             if receipt['outcome']=='running':return 'settle_and_compact'
             if receipt['outcome']==outcome and receipt['result_sha256']==v['result_sha256']:return 'compact'
             raise RetentionBlocked('saved result and ledger disagree')
@@ -65,7 +65,7 @@ class ServiceResultRetention:
         r=p['receipt']
         if (type(r) is not dict or set(r)!={'day','operation','request_digest','outcome','result_sha256','grant_sha256','admitted_limit'}
                 or type(r['day']) is not int or r['day']<0 or r['operation']!=p['operation']
-                or r['outcome'] not in ('reserved','running','succeeded','empty','cancelled')
+                or r['outcome'] not in ('reserved','running','succeeded','empty','cancelled','failed')
                 or type(r['admitted_limit']) is not int or r['admitted_limit'] not in (2,10)):
             raise RetentionBlocked('invalid planned receipt')
         _hex(r['request_digest']);_hex(r['grant_sha256'])
@@ -115,7 +115,7 @@ class ServiceResultRetention:
         # A prior invocation may have settled/cancelled but lost its reply.
         recovered=(p['action']=='cancel_unstarted' and r['outcome']=='cancelled' and r['result_sha256']==cancellation)
         recovered |= (p['action']=='settle_and_compact' and v['result'] is not None
-                      and r['outcome']==('succeeded' if v['result']['wound_polygons'] else 'empty')
+                      and r['outcome']==saved_outcome(v)
                       and r['result_sha256']==v['result_sha256'])
         if recovered:
             if any(r[k]!=p['receipt'].get(k) for k in ('day','operation','request_digest','grant_sha256','admitted_limit')):
@@ -127,10 +127,10 @@ class ServiceResultRetention:
         if p['action']=='cancel_unstarted':
             r=self.ops.ledger.cancel_unstarted(ticket,cancellation)
         elif p['action']=='settle_and_compact':
-            r=self.ops.ledger.settle(ticket,v['worker'],'succeeded' if v['result']['wound_polygons'] else 'empty',v['result_sha256'])
+            r=self.ops.ledger.settle(ticket,v['worker'],saved_outcome(v),v['result_sha256'])
         # Terminal state cannot later be claimed; a losing cancel/claim race
         # raises above and leaves the original result mapping untouched.
-        if r['outcome'] not in ('succeeded','empty','cancelled'):raise RetentionBlocked('nonterminal work')
+        if r['outcome'] not in ('succeeded','empty','cancelled','failed'):raise RetentionBlocked('nonterminal work')
         if self.ops.now()>=p['deadline']:raise RetentionBlocked('deadline after ledger')
         terminal=copy.deepcopy(v);terminal.update(v=2,result=None,
             retention=dict(plan_sha256=digest(p),compacted_at=self.ops.now(),receipt=r))

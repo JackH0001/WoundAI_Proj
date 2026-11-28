@@ -187,7 +187,7 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
               LiteAttestClient.matches(installation,"[A-Za-z0-9_-]{1,128}"),
               (1...8192).contains(width), (1...8192).contains(height), width*height <= 16_000_000,
               ["prepare","run","status","recover","resubmit","none"].contains(next),
-              ["local","checking","ready","pending","confirmed","quota","capacity","unavailable","review","expired","rejected","missingImage","recovering","reservationExpired","cancelled","resubmitting"].contains(note),
+              ["local","checking","ready","pending","confirmed","quota","capacity","unavailable","review","expired","rejected","missingImage","recovering","reservationExpired","cancelled","resubmitting","resultTooComplex"].contains(note),
               retryAt.isFinite, retryAt >= 0, day == nil || day! >= 0,
               requestDigest == nil || LiteServiceBytes.hex(requestDigest!) else { throw LiteServiceFailure.invalidState }
         let history=recoveryHistory ?? []
@@ -228,6 +228,9 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
                 throw LiteServiceFailure.invalidState
             }
         }
+        if note == "resultTooComplex" {
+            guard next == "none", reply?.state != "completed" else { throw LiteServiceFailure.invalidState }
+        }
         if note == "confirmed" { guard next == "none", reply?.state == "completed" else { throw LiteServiceFailure.invalidState } }
     }
 
@@ -250,6 +253,7 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
             }
             return "個人服務暫時無法確認結果。照片已保存，可稍後查詢同一筆，或在手機圈選傷口。"
         case "expired": return "雲端結果查詢期限已過；本機資料保留，需核對後再處理。"
+        case "resultTooComplex": return "雲端無法傳回完整輪廓，這次未計入成功辨識次數。可在這張照片上圈選，或重新拍攝。"
         case "rejected": return "本次影像未通過檢查；未執行辨識，原資料保留。"
         case "reservationExpired": return "預留已逾時，尚未執行辨識。原照片保留；按「重新送出」後將重新檢查額度。"
         case "resubmitting": return "已記錄重新送出的選擇，正在核對原工作與可用額度。"
@@ -385,6 +389,11 @@ actor LiteServiceClient {
         try await save(&r,previous:&previous);return r
     }
 
+    private struct FailureDisposition: Decodable {
+        let retry_action: String
+        let keep_local: Bool
+    }
+
     /// Only an intermediary's response is ambiguous. An application error or malformed
     /// receipt stays on the existing review path, even if its HTTP status is the same.
     private static func isGatewayFailure(_ response: HTTPURLResponse, body: Data) -> Bool {
@@ -503,6 +512,12 @@ actor LiteServiceClient {
                 }
                 // A rejected initial prepare can be retried with the same id/hash.
                 if http.statusCode == 429, action == "prepare", r.requestDigest == nil { r.next="prepare" }
+            } else if http.statusCode == 422, error?["error"] as? String == "lite_result_too_complex",
+                      ["prepare", "run", "status"].contains(action) {
+                let disposition = try? JSONDecoder().decode(FailureDisposition.self, from: data)
+                r.next = "none"
+                r.retryAt = 0
+                r.note = disposition?.retry_action == "none" && disposition?.keep_local == true ? "resultTooComplex" : "review"
             } else {
                 r.next="none";r.note=http.statusCode == 410 ? "expired" : http.statusCode == 422 ? "rejected" : "review"
             }

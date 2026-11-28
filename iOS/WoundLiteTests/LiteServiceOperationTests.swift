@@ -860,6 +860,56 @@ extension LiteServiceOperationTests {
         }
     }
 
+    func testComplexResultAtPrepareRunOrStatusStopsAcrossRestart() async throws {
+        let body = Data(#"{"error":"lite_result_too_complex","retry_action":"none","keep_local":true}"#.utf8)
+        for action in ["prepare", "run", "status"] {
+            let (fixture, wire, journal, service) = try await setup()
+            let rejection = ServiceStep(action: action, data: body, code: 422)
+            let id = fixture.capture_id, jpeg = fixture.image
+            let prepared = ServiceStep(action: "prepare", data: try fixture.bytes(fixture.prepare))
+            let terminal: LiteServiceRecord
+            let expected: [String]
+            if action == "status" {
+                await wire.plan([prepared, ServiceStep(action: "run", data: Data(), networkError: .timedOut)])
+                _ = try await service.resume(id) { _ in jpeg }
+                await wire.plan([rejection])
+                terminal = try await client(wire, journal, 1006).resume(id, statusOnly: true) { _ in XCTFail(); return nil }
+                expected = ["prepare", "run", "status"]
+            } else {
+                await wire.plan(action == "run" ? [prepared, rejection] : [rejection])
+                terminal = try await service.resume(id) { _ in jpeg }
+                expected = action == "run" ? ["prepare", "run"] : ["prepare"]
+            }
+            XCTAssertEqual(terminal.note, "resultTooComplex", action)
+            XCTAssertEqual(terminal.next, "none"); XCTAssertEqual(terminal.retryAt, 0)
+            XCTAssertEqual(terminal.reply, action == "prepare" ? nil : fixture.prepare)
+            XCTAssertEqual(terminal.imageSHA256, fixture.image_sha256)
+            XCTAssertFalse(terminal.canResubmit)
+            let resumed = try client(wire, journal, 2000)
+            let saved = try await resumed.resume(id) { _ in XCTFail(); return nil }
+            XCTAssertEqual(saved, terminal)
+            let queries = await wire.requests()
+            XCTAssertEqual(queries.compactMap { $0.url?.lastPathComponent }, expected, action)
+        }
+    }
+
+    func testComplexResultRequiresMatchingHTTPCodeAndTerminalDirectives() async throws {
+        for (status, fields, note) in [
+            (422, #"{"error":"another","retry_action":"none","keep_local":true}"#, "rejected"),
+            (422, #"{"error":"lite_result_too_complex","retry_action":"status","keep_local":true}"#, "review"),
+            (422, #"{"error":"lite_result_too_complex","retry_action":"none","keep_local":false}"#, "review"),
+            (422, #"{"error":"lite_result_too_complex","retry_action":"none","keep_local":1}"#, "review"),
+            (422, #"{"error":"lite_result_too_complex"}"#, "review"),
+            (409, #"{"error":"lite_result_too_complex","retry_action":"none","keep_local":true}"#, "review")
+        ] {
+            let (fixture, wire, _, service) = try await setup()
+            await wire.plan([ServiceStep(action: "prepare", data: Data(fields.utf8), code: status)])
+            let saved = try await service.resume(fixture.capture_id) { _ in XCTFail(); return nil }
+            XCTAssertEqual(saved.note, note, fields)
+            XCTAssertEqual(saved.next, "none")
+        }
+    }
+
     func testApplicationErrorsAndInvalidReceiptsStillRequireReview() async throws {
         let rejected = Data("<html>unavailable</html>".utf8)
         for (code, data, note) in [(404, error("other_business_error"), "review"),
