@@ -81,7 +81,7 @@ def main():
             security='synthetic App Attest signatures; loopback QA forwarding'), indent=2) + '\n')
         if result.returncode: raise SystemExit(result.returncode)
         summary = json.loads((out / 'summary.json').read_text())
-        expected = 10
+        expected = 11
         if summary.get('passedTests') != expected or summary.get('failedTests') != 0 or summary.get('skippedTests') != 0:
             raise RuntimeError(f'expected exactly {expected} tests without skips')
         if len(fixture.completed) != expected or len({s['name'] for s in fixture.completed}) != expected:

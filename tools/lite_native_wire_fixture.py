@@ -59,8 +59,19 @@ class WireFixture:
         self.completed = []
         self.clients = {}
         self.revoke_before_service = False
-        self.server = make_server('127.0.0.1', 0, self, request_handler=QuietHandler)
+        self.server = make_server('127.0.0.1', 0, self.serve, request_handler=QuietHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def serve(self, env, start_response):
+        # Optional loopback gateway failure after the real Flask handler has returned.
+        if (env.get('PATH_INFO') != '/api/v1/lite/service/run'
+                or env.get('HTTP_X_SYNTHETIC_RUN_TIMEOUT') != '1'):
+            return self(env, start_response)
+        upstream = Response.from_app(self, env, buffered=True)
+        if upstream.status_code != 200:
+            return upstream(env, start_response)
+        upstream.close()
+        return Response('Gateway Timeout', status=504, mimetype='text/plain')(env, start_response)
 
     def start(self):
         self.thread.start()

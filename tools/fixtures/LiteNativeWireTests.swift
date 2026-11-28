@@ -64,6 +64,8 @@ private actor NativeWire: LiteAuthenticatedTransport {
     let research: Bool
     private var dropPurchaseConfirmation = false
     var dropRun = false
+    private var timeoutNextRun = false
+    private(set) var gatewayResponse: Int?
     var dropCapture = false
     var dropRevision = false
     var dropRejoin = false
@@ -75,6 +77,7 @@ private actor NativeWire: LiteAuthenticatedTransport {
     func installation() -> String { owner }
     func losePurchaseConfirmation() { dropPurchaseConfirmation = true }
     func loseRunResponse() { dropRun = true }
+    func timeoutAfterNextRun() { timeoutNextRun = true }
     func loseCaptureResponse() { dropCapture = true }
     func loseRevisionResponse() { dropRevision = true }
     func loseRejoinResponse() { dropRejoin = true }
@@ -97,8 +100,14 @@ private actor NativeWire: LiteAuthenticatedTransport {
         request.setValue(config.token, forHTTPHeaderField: "X-Synthetic-Wire")
         request.setValue(owner, forHTTPHeaderField: "X-Synthetic-Installation")
         request.setValue(research ? "research" : "native", forHTTPHeaderField: "X-Synthetic-Service")
+        let throughGateway = timeoutNextRun && original.url?.path == "/api/v1/lite/service/run"
+        if throughGateway {
+            timeoutNextRun = false
+            request.setValue("1", forHTTPHeaderField: "X-Synthetic-Run-Timeout")
+        }
         let (data, response) = try await URLSession.shared.data(for: request)
         let http = try XCTUnwrap(response as? HTTPURLResponse)
+        if throughGateway { gatewayResponse = http.statusCode }
         if original.url?.lastPathComponent == "wounds",
            let raw = original.httpBody, let body = try? JSONSerialization.jsonObject(with: raw) as? [String:Any],
            body["action"] as? String == "status", let barrier = woundStatusBarrier {
@@ -893,15 +902,28 @@ private struct PrivacyReadback: Decodable, Equatable {
     }
 
     func testRealHTTPLostRunReplySurvivesBothRestartsAndSessionRenewal() async throws {
+        try await verifyInterruptedRun(gatewayTimeout: false)
+    }
+
+    func testGatewayTimeoutAfterBackendSettlementSurvivesBothRestartsAndSessionRenewal() async throws {
+        try await verifyInterruptedRun(gatewayTimeout: true)
+    }
+
+    private func verifyInterruptedRun(gatewayTimeout: Bool) async throws {
         let cfg = try config()
         let seed = try JSONDecoder().decode(WireSeed.self, from: await NativeWire.control(cfg, "reset"))
         let image = try XCTUnwrap(Data(base64Encoded: seed.jpeg))
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let wire = NativeWire(cfg, owner: seed.owner), apple = WireApple(cfg), kit = WireStoreKit(cfg)
         let r = try session(wire, apple, kit, directory, seed.now)
-        await r.identity.signIn(); await wire.loseRunResponse()
+        await r.identity.signIn()
+        if gatewayTimeout { await wire.timeoutAfterNextRun() }
+        else { await wire.loseRunResponse() }
         let waiting = try await r.recognizeSaved(recordID: String(format: "00000000-0000-0000-0000-%012x", 1), jpeg: image)
         XCTAssertEqual(waiting.note, "unavailable")
+        XCTAssertEqual(waiting.next, "status")
+        let gatewayResponse = await wire.gatewayResponse
+        XCTAssertEqual(gatewayResponse, gatewayTimeout ? 504 : nil)
         _ = try await NativeWire.control(cfg, "advance", JSONEncoder().encode(["seconds":1201]))
         _ = try await NativeWire.control(cfg, "restart")
         let reopened = try session(wire, apple, kit, directory, seed.now + 1201)
@@ -910,7 +932,7 @@ private struct PrivacyReadback: Decodable, Equatable {
         let again = try await reopened.recognizeSaved(recordID: String(format: "00000000-0000-0000-0000-%012x", 1), jpeg: image)
         XCTAssertEqual(again, result); XCTAssertEqual(apple.signIns, 1)
         let balance = try await reopened.personalBalance(); XCTAssertEqual(balance.used, 1)
-        let final = try await finish(cfg, "lost-response-renewal")
+        let final = try await finish(cfg, gatewayTimeout ? "gateway-timeout-after-settlement" : "lost-response-renewal")
         XCTAssertEqual(final.model_calls, 1); XCTAssertEqual(final.used, 1); XCTAssertEqual(final.attempts, 1)
         XCTAssertEqual(final.routes.filter { $0.path.hasSuffix("service/run") }.count, 1)
         XCTAssertEqual(final.routes.filter { $0.path.hasSuffix("service/status") }.count, 1)

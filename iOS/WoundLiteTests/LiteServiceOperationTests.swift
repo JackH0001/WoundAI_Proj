@@ -296,6 +296,7 @@ private struct ServiceStep: Sendable {
     var fail=false
     var wait: String?
     var delay=false
+    var contentType: String?
 }
 private actor ServiceWire: LiteAuthenticatedTransport {
     var owner: String
@@ -312,8 +313,10 @@ private actor ServiceWire: LiteAuthenticatedTransport {
         guard request.url?.lastPathComponent == s.action else { throw LiteServiceFailure.invalidState }
         if s.delay { try await Task.sleep(nanoseconds:100_000_000) }
         if s.fail { throw URLError(.timedOut) }
-        return (s.data,HTTPURLResponse(url:request.url!,statusCode:s.code,httpVersion:nil,
-            headerFields:s.wait.map { ["Retry-After":$0] })!)
+        var headers = [String: String]()
+        headers["Retry-After"] = s.wait
+        headers["Content-Type"] = s.contentType
+        return (s.data,HTTPURLResponse(url:request.url!,statusCode:s.code,httpVersion:nil,headerFields:headers)!)
     }
 }
 
@@ -667,5 +670,108 @@ final class LiteServiceOperationTests: XCTestCase {
         let after=await http.snapshot();XCTAssertEqual(after.1.count,1)
         request.url=origin.appendingPathComponent("api/v1/lite/segment")
         do { _=try await transport.send(request,installation:owner);XCTFail() } catch { }
+    }
+}
+
+extension LiteServiceOperationTests {
+    func testGatewayLossKeepsTheOriginalOperationAndWaitsForStatus() async throws {
+        for action in ["prepare", "run"] {
+            for code in [404, 502, 503, 504] {
+                let (fixture, wire, journal, service) = try await setup()
+                let id = fixture.capture_id
+                let jpeg = fixture.image
+                let html = Data("<html>gateway unavailable</html>".utf8)
+                let failure = ServiceStep(action: action, data: html, code: code, wait: "7")
+                let ready = ServiceStep(action: "prepare", data: try fixture.bytes(fixture.prepare))
+                await wire.plan(action == "run" ? [ready, failure] : [failure])
+                let interrupted = try await service.resume(id) { _ in jpeg }
+                let label = "\(action) HTTP \(code)"
+                XCTAssertEqual(interrupted.next, "status", label)
+                guard interrupted.next == "status" else { continue }
+                XCTAssertEqual(interrupted.note, "unavailable", label)
+                XCTAssertEqual(interrupted.retryAt, 1007, label)
+                XCTAssertEqual(interrupted.operation, id, label)
+                XCTAssertEqual(interrupted.imageSHA256, fixture.image_sha256, label)
+                XCTAssertEqual(interrupted.requestDigest, action == "run" ? fixture.prepare.receipt?.request_digest : nil, label)
+                let stored = try await client(wire, journal).stored(id)
+                XCTAssertEqual(stored, interrupted, label)
+
+                let before = await wire.requests()
+                _ = try await client(wire, journal, 1006).resume(id) { _ in XCTFail(label); return nil }
+                let beforeDeadline = await wire.requests()
+                XCTAssertEqual(beforeDeadline.count, before.count, label)
+                // A second outage during the status query only extends the wait.
+                await wire.plan([ServiceStep(action: "status", data: html, code: code)])
+                let waiting = try await client(wire, journal, 1007).resume(id) { _ in XCTFail(label); return nil }
+                XCTAssertEqual(waiting.next, "status", label)
+                XCTAssertEqual(waiting.retryAt, 1012, label)
+                let done = ServiceStep(action: "status", data: try fixture.bytes(fixture.completed))
+                let recovered: LiteServiceRecord
+                if action == "prepare" {
+                    // No photo was sent earlier. Only an authoritative ready reply authorizes the first run.
+                    await wire.plan([ServiceStep(action: "status", data: ready.data),
+                                     ServiceStep(action: "run", data: done.data)])
+                    recovered = try await client(wire, journal, 1012).resume(id) { _ in jpeg }
+                } else {
+                    // The original run reached the server and completed despite the gateway failure.
+                    await wire.plan([done])
+                    recovered = try await client(wire, journal, 1012).resume(id) { _ in XCTFail(label); return nil }
+                }
+                XCTAssertEqual(recovered.note, "confirmed", label)
+                XCTAssertEqual(recovered.reply, fixture.completed, label)
+                XCTAssertEqual(recovered.operation, id, label)
+                XCTAssertNil(recovered.recoveryHistory, label)
+                let requests = await wire.requests()
+                let actions = requests.compactMap { $0.url?.lastPathComponent }
+                XCTAssertEqual(actions, action == "prepare" ? ["prepare", "status", "status", "run"] :
+                                                          ["prepare", "run", "status", "status"], label)
+                for request in requests {
+                    let body = try XCTUnwrap(request.httpBody)
+                    if request.url?.lastPathComponent == "run" {
+                        XCTAssertNotNil(body.range(of: jpeg), label)
+                        XCTAssertNotNil(body.range(of: Data("\r\n\r\n\(id)\r\n".utf8)), label)
+                    } else {
+                        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
+                        XCTAssertEqual(payload["operation"], id, label)
+                        XCTAssertNil(body.range(of: jpeg), label)
+                    }
+                }
+            }
+        }
+    }
+
+    func testGatewayFormatsPreserveStructuredOrUnrecognizableFailuresForReview() async throws {
+        for (body, type, expected) in [("", nil, "unavailable"), ("Not Found", nil, "unavailable"),
+                                       ("Bad Gateway", nil, "unavailable"), ("Gateway Timeout", nil, "unavailable"),
+                                       ("<!DOCTYPE HTML><html>Error</html>", "text/html", "unavailable"),
+                                       ("upstream connection timeout", "text/plain", "unavailable"),
+                                       ("{broken", "text/plain", "review"), ("{}", "text/html", "review"),
+                                       ("<html>error</html>", "application/json", "review"),
+                                       ("unrecognized response", nil, "review")] as [(String, String?, String)] {
+            let (fixture, wire, _, service) = try await setup()
+            await wire.plan([ServiceStep(action: "prepare", data: Data(body.utf8), code: 404, contentType: type)])
+            let saved = try await service.resume(fixture.capture_id) { _ in XCTFail(); return nil }
+            XCTAssertEqual(saved.note, expected, body)
+            XCTAssertEqual(saved.next, expected == "review" ? "none" : "status", body)
+        }
+    }
+
+    func testApplicationErrorsAndInvalidReceiptsStillRequireReview() async throws {
+        let rejected = Data("<html>unavailable</html>".utf8)
+        for (code, data, note) in [(404, error("other_business_error"), "review"),
+                                   (502, error("other_business_error"), "review"),
+                                   (504, Data("{broken receipt".utf8), "review"),
+                                   (410, rejected, "expired"), (422, rejected, "rejected"),
+                                   (200, rejected, "review")] {
+            let (fixture, wire, journal, service) = try await setup()
+            await wire.plan([ServiceStep(action: "prepare", data: data, code: code)])
+            let saved = try await service.resume(fixture.capture_id) { _ in XCTFail(); return nil }
+            XCTAssertEqual(saved.note, note)
+            XCTAssertEqual(saved.next, "none")
+            let after = try await client(wire, journal, 9000).resume(fixture.capture_id) { _ in XCTFail(); return nil }
+            XCTAssertEqual(after, saved)
+            let requests = await wire.requests()
+            XCTAssertEqual(requests.count, 1)
+        }
     }
 }

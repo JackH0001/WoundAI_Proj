@@ -363,6 +363,20 @@ actor LiteServiceClient {
         try await save(&r,previous:&previous);return r
     }
 
+    /// Only an intermediary's response is ambiguous. An application error or malformed
+    /// receipt stays on the existing review path, even if its HTTP status is the same.
+    private static func isGatewayFailure(_ response: HTTPURLResponse, body: Data) -> Bool {
+        guard [404, 502, 504].contains(response.statusCode),
+              let text = String(data: body, encoding: .utf8) else { return false }
+        let mime = response.mimeType?.lowercased()
+        guard mime == nil || mime == "text/html" || mime == "text/plain" else { return false }
+        let message = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if message.isEmpty || message.hasPrefix("<html") || message.hasPrefix("<!doctype html") { return true }
+        if mime == "text/plain", message.first?.isLetter == true,
+           (try? JSONSerialization.jsonObject(with: body, options: .fragmentsAllowed)) == nil { return true }
+        return ["not found", "bad gateway", "gateway timeout"].contains(message)
+    }
+
     func resume(_ id: String, loadJPEG: @Sendable (String) async throws -> Data?) async throws -> LiteServiceRecord {
         guard !busy else { throw LiteServiceFailure.busy }; busy=true; defer { busy=false }
         var (previous,r)=try await read(id)
@@ -439,7 +453,7 @@ actor LiteServiceClient {
             if http.statusCode == 404, error?["error"] as? String == "lite_operation_unknown", r.requestDigest == nil {
                 r.next="prepare";r.note="local";try await save(&r,previous:&previous);continue
             }
-            if http.statusCode == 429 || http.statusCode == 503 || http.statusCode == 401 || http.statusCode == 403 {
+            if [401, 403, 429, 503].contains(http.statusCode) || Self.isGatewayFailure(http, body: data) {
                 let wait=Double(http.value(forHTTPHeaderField:"Retry-After") ?? "") ?? 5
                 r.retryAt=now().timeIntervalSince1970+min(3600,max(1,wait.isFinite ? wait : 5))
                 r.note=http.statusCode == 429 ? (error?["error"] as? String == "lite_usage_limit" ? "quota":"capacity") : "unavailable"
