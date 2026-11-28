@@ -160,5 +160,6 @@
 "中央" = "center";
 "輪廓 %@（%@、%@）" = "Outline %@ (%@, %@)";
 "確認量測所選輪廓" = "Measure this outline";
-"選擇量測目標" = "Choose a measurement target";
+"選擇量測目標" = "Choose an outline";
 "原草稿目前無法讀取。請解鎖手機後再按「完成圈選」。" = "The original draft could not be read. Unlock the device and tap “Done outlining” again.";
+"上次連線時裝置離線。照片已保存，連網後可查詢同一筆，或先在手機圈選。" = "Your device was offline on the last attempt. Your photo is saved. Check this capture when you reconnect, or outline it on your phone now.";

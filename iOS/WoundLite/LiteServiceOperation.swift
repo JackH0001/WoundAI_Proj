@@ -160,6 +160,7 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
     var revision = 1
     var next = "prepare"
     var note = "local"
+    var lastRequestWasOffline: Bool?
     var attemptLimitReached: Bool?
     enum SuccessQuotaState: String, Codable { case pending, used }
     var successQuotaState: SuccessQuotaState?
@@ -230,7 +231,11 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
         case "capacity": return "服務忙碌，稍後核對原工作；不需重新拍攝。"
         case "pending", "checking": return "正在核對原辨識工作；尚未確認完成，不會另建一筆重複辨識。"
         case "recovering": return "原工作已核對並保留；正在恢復跨日辨識，不需重新拍攝。"
-        case "unavailable": return "連線或裝置驗證尚未完成；下次先查原工作，不會直接重傳照片。"
+        case "unavailable":
+            if lastRequestWasOffline == true {
+                return "上次連線時裝置離線。照片已保存，連網後可查詢同一筆，或先在手機圈選。"
+            }
+            return "個人服務暫時無法確認結果。照片已保存，可稍後查詢同一筆，或在手機圈選傷口。"
         case "expired": return "雲端結果查詢期限已過；本機資料保留，需核對後再處理。"
         case "rejected": return "本次影像未通過檢查；未執行辨識，原資料保留。"
         case "reservationExpired": return "預留已逾時，尚未執行辨識。原照片保留；按「重新送出」後將重新檢查額度。"
@@ -411,10 +416,12 @@ actor LiteServiceClient {
                 request.setValue("application/json",forHTTPHeaderField:"Content-Type")
             }
             // Durable uncertainty marker BEFORE any media/security network work.
+            r.lastRequestWasOffline = nil
             r.next="status";r.note="checking";try await save(&r,previous:&previous)
             let response: (Data,HTTPURLResponse)
             do { response=try await transport.send(request,installation:r.installation) }
             catch {
+                if (error as? URLError)?.code == .notConnectedToInternet { r.lastRequestWasOffline = true }
                 r.note="unavailable";r.retryAt=now().timeIntervalSince1970+5
                 try await save(&r,previous:&previous); return r
             }

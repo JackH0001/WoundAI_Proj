@@ -449,7 +449,7 @@ final class LiteMeasureVM: ObservableObject {
             }
         }
         guard let result = serviceResult else { return }
-        note = result.note == "unavailable" ? "個人服務暫時無法確認結果。照片已保存，可稍後查詢同一筆，或在手機圈選傷口。" : result.message
+        note = result.message
         if result.note == "confirmed", !userEdited {
             do { try await useNativeResult() }
             catch { if sameCapture() { resultApplicationPending = true; note = Self.applySavedHint } }

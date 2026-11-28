@@ -48,7 +48,7 @@ extension LiteServiceOperationTests {
     }
     func testLostRecoveryResponseAfterRestartReadsAuthorizationInsteadOfNewPhoto() async throws {
         let (f,w,m,c)=try await recoverySetup(),image=f.image
-        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.available)),ServiceStep(action:"recover",data:Data(),fail:true)])
+        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.available)),ServiceStep(action:"recover",data:Data(),networkError:.timedOut)])
         let waiting=try await c.resume(f.capture_id) { _ in XCTFail();return nil }
         XCTAssertEqual(waiting.operation,f.capture_id);XCTAssertNil(waiting.recoveryHistory)
         try await w.plan([ServiceStep(action:"status",data:f.bytes(f.authorization))]+recoveryFinish(f))
@@ -95,7 +95,7 @@ extension LiteServiceOperationTests {
     }
     func testExistingPinnedReceiptCannotBecomeSuccessor() async throws {
         let (f,w,m,c)=try await setup(),image=f.image
-        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.prepare)),ServiceStep(action:"run",data:Data(),fail:true)])
+        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.prepare)),ServiceStep(action:"run",data:Data(),networkError:.timedOut)])
         _=try await c.resume(f.capture_id) { _ in image }
         let recovery=try ServiceRecoveryFixture.load()
         await w.plan([ServiceStep(action:"status",data:try recovery.bytes(recovery.authorization))])
@@ -193,7 +193,7 @@ extension LiteServiceOperationTests {
     func testLostResubmitReplyRestartsWithSameExplicitIntent() async throws {
         let (f,w,m,c)=try await expiredSetup(),image=f.image
         _=try await c.requestResubmission(f.capture_id)
-        await w.plan([ServiceStep(action:"resubmit",data:Data(),fail:true)])
+        await w.plan([ServiceStep(action:"resubmit",data:Data(),networkError:.timedOut)])
         let waiting=try await c.resume(f.capture_id) { _ in XCTFail();return nil }
         XCTAssertEqual(waiting.operation,f.capture_id);XCTAssertTrue(waiting.resubmitRequested == true)
         try await w.plan([ServiceStep(action:"status",data:f.bytes(f.cancelled))]+resubmitSteps(f))
@@ -293,7 +293,7 @@ private actor ServiceMemory: LiteServiceJournal {
 private struct ServiceStep: Sendable {
     let action: String, data: Data
     var code=200
-    var fail=false
+    var networkError: URLError.Code?
     var wait: String?
     var delay=false
     var contentType: String?
@@ -312,7 +312,7 @@ private actor ServiceWire: LiteAuthenticatedTransport {
         let s=steps.removeFirst()
         guard request.url?.lastPathComponent == s.action else { throw LiteServiceFailure.invalidState }
         if s.delay { try await Task.sleep(nanoseconds:100_000_000) }
-        if s.fail { throw URLError(.timedOut) }
+        if let networkError = s.networkError { throw URLError(networkError) }
         var headers = [String: String]()
         headers["Retry-After"] = s.wait
         headers["Content-Type"] = s.contentType
@@ -390,7 +390,7 @@ final class LiteServiceOperationTests: XCTestCase {
     }
     func testLostRunResponseAfterRestartUsesStatusWithoutImage() async throws {
         let (f,w,m,c)=try await setup();let image=f.image
-        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.prepare)),ServiceStep(action:"run",data:Data(),fail:true)])
+        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.prepare)),ServiceStep(action:"run",data:Data(),networkError:.timedOut)])
         let waiting=try await c.resume(f.capture_id) { _ in image };XCTAssertEqual(waiting.next,"status")
         await w.plan([ServiceStep(action:"status",data:try f.bytes(f.completed))])
         let result=try await client(w,m,1006).resume(f.capture_id) { _ in throw LiteServiceFailure.missingImage }
@@ -400,7 +400,7 @@ final class LiteServiceOperationTests: XCTestCase {
     }
     func testLostPrepareAndUnknownStatusReuseSameOperation() async throws {
         let (f,w,m,c)=try await setup();let image=f.image
-        await w.plan([ServiceStep(action:"prepare",data:Data(),fail:true)])
+        await w.plan([ServiceStep(action:"prepare",data:Data(),networkError:.timedOut)])
         _=try await c.resume(f.capture_id) { _ in image }
         await w.plan([ServiceStep(action:"status",data:error("lite_operation_unknown"),code:404)]+(try doneSteps(f)))
         let result=try await client(w,m,1006).resume(f.capture_id) { _ in image }
@@ -410,7 +410,7 @@ final class LiteServiceOperationTests: XCTestCase {
     }
     func testPreparedStatusAllowsSendingOnlyWhenServerSaysReady() async throws {
         let (f,w,m,c)=try await setup();let image=f.image
-        await w.plan([ServiceStep(action:"prepare",data:Data(),fail:true)])
+        await w.plan([ServiceStep(action:"prepare",data:Data(),networkError:.timedOut)])
         _=try await c.resume(f.capture_id) { _ in image }
         await w.plan([ServiceStep(action:"status",data:try f.bytes(f.prepare)),ServiceStep(action:"run",data:try f.bytes(f.completed))])
         let result=try await client(w,m,1006).resume(f.capture_id) { _ in image };XCTAssertEqual(result.note,"confirmed")
@@ -558,7 +558,7 @@ final class LiteServiceOperationTests: XCTestCase {
     }
     func testUnknownAfterPinnedReceiptCannotReprepare() async throws {
         let (f,w,m,c)=try await setup();let image=f.image
-        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.prepare)),ServiceStep(action:"run",data:Data(),fail:true)])
+        await w.plan([ServiceStep(action:"prepare",data:try f.bytes(f.prepare)),ServiceStep(action:"run",data:Data(),networkError:.timedOut)])
         _=try await c.resume(f.capture_id) { _ in image }
         await w.plan([ServiceStep(action:"status",data:error("lite_operation_unknown"),code:404)])
         let r=try await client(w,m,1006).resume(f.capture_id) { _ in nil }
@@ -674,6 +674,35 @@ final class LiteServiceOperationTests: XCTestCase {
 }
 
 extension LiteServiceOperationTests {
+    func testOfflineRunSurvivesRestartAndOnlyQueriesTheOriginalResult() async throws {
+        let (fixture, wire, journal, service) = try await setup()
+        let id = fixture.capture_id
+        let jpeg = fixture.image
+        await wire.plan([
+            ServiceStep(action: "prepare", data: try fixture.bytes(fixture.prepare)),
+            ServiceStep(action: "run", data: Data(), networkError: .notConnectedToInternet)
+        ])
+        let interruption = try await service.resume(id) { _ in jpeg }
+        XCTAssertEqual(interruption.note, "unavailable")
+        XCTAssertTrue(interruption.message.contains("裝置離線"))
+        XCTAssertEqual(interruption.next, "status")
+        let reopened = try await client(wire, journal, 1005).storedIfPresent(id)
+        XCTAssertEqual(reopened, interruption)
+        await wire.plan([ServiceStep(action: "status", data: Data(), networkError: .timedOut)])
+        let timedOut = try await client(wire, journal, 1005).resume(id, statusOnly: true) { _ in
+            XCTFail("A status check must not load the photo"); return nil
+        }
+        XCTAssertFalse(timedOut.message.contains("離線"))
+        XCTAssertEqual(timedOut.operation, id)
+        await wire.plan([ServiceStep(action: "status", data: try fixture.bytes(fixture.completed))])
+        let recovered = try await client(wire, journal, 1010).resume(id, statusOnly: true) { _ in
+            XCTFail("A status check must not load the photo"); return nil
+        }
+        XCTAssertEqual(recovered.reply, fixture.completed)
+        let requests = await wire.requests()
+        XCTAssertEqual(requests.compactMap { $0.url?.lastPathComponent }, ["prepare", "run", "status", "status"])
+    }
+
     func testGatewayLossKeepsTheOriginalOperationAndWaitsForStatus() async throws {
         for action in ["prepare", "run"] {
             for code in [404, 502, 503, 504] {
@@ -779,7 +808,7 @@ extension LiteServiceOperationTests {
 extension LiteServiceOperationTests {
     func testReadOnlyUnknownReturnsPrepareForExplicitSameOperation() async throws {
         let (f, wire, journal, service) = try await setup()
-        await wire.plan([ServiceStep(action: "prepare", data: Data(), fail: true)])
+        await wire.plan([ServiceStep(action: "prepare", data: Data(), networkError: .timedOut)])
         _ = try await service.resume(f.capture_id) { _ in XCTFail(); return nil }
         await wire.plan([ServiceStep(action: "status", data: error("lite_operation_unknown"), code: 404)])
         let resumed = try client(wire, journal, 1006)
@@ -797,7 +826,7 @@ extension LiteServiceOperationTests {
 
     func testReadOnlyCrossDayOfferLeavesRecoveryForExplicitContinuation() async throws {
         let (f, wire, journal, service) = try await recoverySetup()
-        await wire.plan([ServiceStep(action: "prepare", data: Data(), fail: true)])
+        await wire.plan([ServiceStep(action: "prepare", data: Data(), networkError: .timedOut)])
         _ = try await service.resume(f.capture_id) { _ in XCTFail(); return nil }
         await wire.plan([ServiceStep(action: "status", data: try f.bytes(f.available))])
         let restarted = try client(wire, journal, 1006)
