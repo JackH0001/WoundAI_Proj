@@ -11,10 +11,12 @@ import StoreKit
     @Published private(set) var busy = false
     private var updates: Task<Void, Never>?
     private var refreshGeneration = 0
+    private let currentExpiration: @MainActor () async -> Date?
 
     var plan: LiteLabPlan { (expires ?? .distantPast) > Date() ? .plus : .free }
 
-    init() {
+    init(currentExpiration: (@MainActor () async -> Date?)? = nil) {
+        self.currentExpiration = currentExpiration ?? Self.verifiedEntitlementExpiration
         updates = Task { [weak self] in
             for await result in Transaction.updates {
                 guard !Task.isCancelled else { return }
@@ -34,15 +36,48 @@ import StoreKit
         } catch { message = "本機商品載入失敗，未建立訂閱。" }
     }
 
-    func refresh() async {
-        refreshGeneration += 1
-        let generation = refreshGeneration
+    private static func verifiedEntitlementExpiration() async -> Date? {
         var end: Date?
         for await result in Transaction.currentEntitlements {
-            guard case .verified(let t) = result, Self.eligible(t) else { continue }
+            guard case .verified(let t) = result, eligible(t) else { continue }
             end = max(end ?? .distantPast, t.expirationDate ?? .distantPast)
         }
+        return end
+    }
+
+    // An explicit sync can briefly yield no current entitlements. Confirm the latest
+    // verified transaction against the subscription group's independently signed status.
+    private static func subscribedExpiration() async throws -> Date? {
+        guard case .verified(let latest)? = await Transaction.latest(for: productID),
+              eligible(latest), let group = latest.subscriptionGroupID else { return nil }
+        for status in try await Product.SubscriptionInfo.status(for: group) where status.state == .subscribed {
+            guard case .verified(let transaction) = status.transaction,
+                  case .verified(let renewal) = status.renewalInfo,
+                  eligible(transaction), transaction.id == latest.id,
+                  transaction.originalID == renewal.originalTransactionID,
+                  renewal.currentProductID == productID, renewal.environment == .xcode else { continue }
+            return transaction.expirationDate
+        }
+        return nil
+    }
+
+    private func refresh(whenEmpty confirm: () async throws -> Date?) async rethrows {
+        refreshGeneration += 1
+        let generation = refreshGeneration
+        var end = await currentExpiration()
+        guard generation == refreshGeneration else { return }
+        if end == nil {
+            do { end = try await confirm() }
+            catch {
+                if generation == refreshGeneration { expires = nil }
+                throw error
+            }
+        }
         if generation == refreshGeneration { expires = end }
+    }
+
+    func refresh() async {
+        await refresh(whenEmpty: { nil })
     }
 
     private static func eligible(_ t: Transaction) -> Bool {
@@ -89,7 +124,7 @@ import StoreKit
         do {
             // Explicit button action only; never call sync on launch.
             try await AppStore.sync()
-            await refresh()
+            try await refresh(whenEmpty: Self.subscribedExpiration)
             message = plan == .plus ? "已恢復本機測試權益。" : "沒有有效的本機測試訂閱。"
         } catch { message = "恢復購買未完成，請稍後再試。" }
     }
