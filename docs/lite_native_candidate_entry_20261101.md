@@ -8,6 +8,8 @@
 
 使用者可從「設定 → Plus 方案與價格」直接查看 Apple 在當地商店提供的月費。首次登入會接續裝置登記；若有中斷的原登記，畫面提供續接按鈕。免費帳號取得目前方案後，可選擇按含月費的按鈕並在 Apple 確認。已有訂閱者可在同一頁按「恢復購買」，需要時登入原服務帳號。Plus 帳號可查看剩餘額度並前往 Apple 管理訂閱。服務無法確認目前方案時，頁面提供重新查詢和恢復購買。
 
+外測候選的「個人服務」頁直接提供 Apple 登入，第一次點選登入才會嘗試登記裝置。頁首也能前往 Plus 查看價格或恢復購買。原登記仍待確認時須先續接，讀不到原登記時可重新讀取。本人內測設定保留裝置識別碼及手動登記入口。
+
 研究與個人辨識各有自己的服務網址、裝置登記及本機工作紀錄。設定頁也提供「管理 Apple 訂閱」，可直接查看 Apple 的續訂狀態。
 
 從紀錄檢視先前的辨識結果只會讀本機。使用者另選個人雲端辨識時，僅送選取的 JPEG。原傷口標註、深度、面積及研究同意保留在原流程。內部版的隱私資訊另列服務所用的使用者識別碼與購買紀錄。
@@ -15,7 +17,7 @@
 ## 可重做的本機核對
 
 1. 在一般版及指定網址的內部版各執行一次 Release 的 `WoundLiteTests`。其中的服務往返使用合成回覆，記錄模型執行、購買、恢復及研究路徑的呼叫次數。
-2. 在全新模擬器狀態執行 `WoundLiteNativeEntry` scheme，確認進入設定後顯示裝置登記。原本會把尚未登記誤當成需要查核刪帳，現在可先完成登記。模擬器無法證明實機 App Attest 登記成功。
+2. 在全新模擬器執行 `WoundLiteNativeEntry` scheme。外測設定以 `WOUNDLITE_OWNER_REVIEW=NO`、`WOUNDLITE_UI_EXPECTATION=LITE_QA_EXTERNAL_FIXTURE` 核對個人服務頁的 Apple 登入、恢復購買及登記失敗提示。本人設定以 `WOUNDLITE_OWNER_REVIEW=YES`、`WOUNDLITE_UI_EXPECTATION=LITE_QA_OWNER_REVIEW` 核對限定的手動登記入口。實機 App Attest 另行驗收。
 3. 清空測試組態的網址並設定 `WOUNDLITE_UI_EXPECTATION=LITE_QA_MISSING_BINDING`，確認設定頁顯示缺少設定。本機量測紀錄仍可查看。一般組態可將同一 UI 測試目標加入獨立測試專案，測試執行器設定 `LITE_QA_ORDINARY`，確認提供候選網址也不顯示入口。
 4. 如專用模擬器已有歷史驗收的三筆合成紀錄，可用 `WOUNDLITE_UI_EXPECTATION=LITE_QA_EXTERNAL_FIXTURE` 核對預設畫面能分享 PDF，且看不到內部驗收入口。內部人員的候選建置另行設定 `WOUNDLITE_SAVED_RECORD_TEST=YES`，並以 `WOUNDLITE_UI_EXPECTATION=LITE_QA_SAVED_FIXTURE` 測試進入後仍需明確送出。一般版一律隱藏此入口。
 

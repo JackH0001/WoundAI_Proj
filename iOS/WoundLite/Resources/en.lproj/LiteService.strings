@@ -198,3 +198,8 @@
 "方案內容" = "Plan details";
 "剩餘名額正由處理中的辨識使用，完成後可再查看。" = "Analyses in progress are holding the remaining uses. Check again when they finish.";
 "今天的辨識額度已用完。" = "You have used today’s analysis allowance.";
+"已登入個人服務。" = "You’re signed in to personal services.";
+"帳號已變更，請再登入一次。" = "Your account changed. Sign in again.";
+"目前無法連上個人服務。請稍後再試。" = "Personal services are unavailable. Try again later.";
+"正在登入個人服務…" = "Signing in to personal services…";
+"登入即可使用個人服務，研究上傳可另外選擇。" = "Sign in to use personal services. You can choose research uploads separately.";

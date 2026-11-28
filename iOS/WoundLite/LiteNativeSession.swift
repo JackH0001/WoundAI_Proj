@@ -116,7 +116,7 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     @Published private(set) var preparedEnrollmentKeyID: String?
     @Published private(set) var registration: Registration = .checking
     @Published private(set) var registering = false
-    @Published private(set) var preparingPurchase = false
+    @Published private(set) var preparingAccount = false
     struct PurchaseAccount: Equatable {
         let generation: Int
         let token: String
@@ -327,54 +327,82 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
         }
     }
 
-    /// Only an explicit tap on the offer page may start this sequence. It never
-    /// invokes a payment. An explicit restore may continue after authentication. An unreadable
-    /// installation is not permission to replace it with a fresh registration.
-    func prepareForPurchase(restoring: Bool = false) async {
-        guard !preparingPurchase, !registering, !identity.busy, !purchases.busy else { return }
-        preparingPurchase = true; defer { preparingPurchase = false }
-        preparationCopy = nil
+    private enum SignInPreparation {
+        case ready(PurchaseAccount)
+        case changed, unreadable, pending, unavailable, unconfirmed
+    }
+
+    // Both entry points use the same installation and identity checks. A pending
+    // registration is resumed only through its dedicated, user-initiated action.
+    private func authenticateForTap(willSignIn: () -> Void) async -> SignInPreparation {
         let started = identity.generation
-        purchasePreparationMessage = "正在核對裝置登記…尚未付款。"
         await checkExistingRegistration()
-        guard started == identity.generation, !identity.busy else {
-            purchasePreparationMessage = "帳號狀態已變更，請重新核對後再繼續；尚未付款。"; return
-        }
-        guard registration != .unreadable else {
-            preparationCopy = .init(pieces: [.init(message), .init(" 尚未付款。")])
-            purchasePreparationMessage = preparationCopy!.source; return
-        }
+        guard started == identity.generation, !identity.busy else { return .changed }
+        guard registration != .unreadable else { return .unreadable }
         if registration == .required { await registerDevice() }
-        if registration == .pending {
-            purchasePreparationMessage = "上次的裝置登記尚待確認。點選「續接裝置登記」，服務會先核對原登記。"
-            return
-        }
-        guard registration == .confirmed else {
-            purchasePreparationMessage = "目前無法連上訂閱服務。請稍後再試。"; return
-        }
-        guard started == identity.generation, !identity.busy else {
-            purchasePreparationMessage = "帳號狀態已變更，請重新核對後再繼續；尚未付款。"; return
-        }
+        if registration == .pending { return .pending }
+        guard registration == .confirmed else { return .unavailable }
+        guard started == identity.generation, !identity.busy else { return .changed }
         var expectedGeneration = started
         if await identity.purchaseAccessDeadline() == nil {
-            guard started == identity.generation, !identity.busy else {
-                purchasePreparationMessage = "帳號狀態已變更，請重新核對後再繼續；尚未付款。"; return
-            }
-            purchasePreparationMessage = "正在登入服務帳號…請完成 Apple 登入，尚未付款。"
+            guard started == identity.generation, !identity.busy else { return .changed }
+            willSignIn()
             expectedGeneration = started + 1
             await identity.signIn()
         }
-        guard let access = await identity.localPurchaseAccess(), identity.generation == expectedGeneration else {
+        let access = await identity.localPurchaseAccess()
+        guard identity.generation == expectedGeneration else { return .changed }
+        guard let access else { return .unconfirmed }
+        return .ready(PurchaseAccount(generation: expectedGeneration, token: access.token))
+    }
+
+    private var canPrepareAccount: Bool { !preparingAccount && !registering && !identity.busy && !purchases.busy }
+
+    func signInFromSettings() async -> String? {
+        guard !LiteNativeBuild.showsOwnerReview, canPrepareAccount else { return nil }
+        preparingAccount = true
+        defer { preparingAccount = false }
+        switch await authenticateForTap(willSignIn: {}) {
+        case .ready: return "已登入個人服務。"
+        case .changed: return "帳號已變更，請再登入一次。"
+        case .unreadable, .pending: return message
+        case .unavailable: return "目前無法連上個人服務。請稍後再試。"
+        case .unconfirmed:
+            return identity.message == "目前無法連上訂閱服務。請稍後再試。" ? "目前無法連上個人服務。請稍後再試。" : identity.message
+        }
+    }
+
+    func prepareForPurchase(restoring: Bool = false) async {
+        guard canPrepareAccount else { return }
+        preparingAccount = true
+        defer { preparingAccount = false }
+        preparationCopy = nil
+        purchasePreparationMessage = "正在核對裝置登記…尚未付款。"
+        let result = await authenticateForTap {
+            purchasePreparationMessage = "正在登入服務帳號…請完成 Apple 登入，尚未付款。"
+        }
+        switch result {
+        case .ready(let account):
+            purchasePreparationMessage = "服務帳號已確認。請核對月費，再按訂閱並在 Apple 確認；已有訂閱請使用恢復購買。"
+            if restoring { await purchases.restore(for: account) }
+        case .changed:
+            purchasePreparationMessage = "帳號狀態已變更，請重新核對後再繼續；尚未付款。"
+        case .unreadable:
+            let detail = LiteServiceCopy.Message(pieces: [.init(message), .init(" 尚未付款。")])
+            preparationCopy = detail
+            purchasePreparationMessage = detail.source
+        case .pending:
+            purchasePreparationMessage = "上次的裝置登記尚待確認。點選「續接裝置登記」，服務會先核對原登記。"
+        case .unavailable:
+            purchasePreparationMessage = "目前無法連上訂閱服務。請稍後再試。"
+        case .unconfirmed:
             if identity.message == "目前無法連上訂閱服務。請稍後再試。" {
                 purchasePreparationMessage = identity.message
-                return
+            } else {
+                let detail = LiteServiceCopy.Message(pieces: [.init(identity.message), .init(" 尚未付款，也未開啟 Apple 購買。")])
+                preparationCopy = detail
+                purchasePreparationMessage = detail.source
             }
-            preparationCopy = .init(pieces: [.init(identity.message), .init(" 尚未付款，也未開啟 Apple 購買。")])
-            purchasePreparationMessage = preparationCopy!.source; return
-        }
-        purchasePreparationMessage = "服務帳號已確認。請核對月費，再按訂閱並在 Apple 確認；已有訂閱請使用恢復購買。"
-        if restoring {
-            await purchases.restore(for: PurchaseAccount(generation: expectedGeneration, token: access.token))
         }
     }
 
@@ -437,43 +465,70 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
 
 struct LiteNativeSessionView: View {
     @ObservedObject var session: LiteNativeSession
+    @State private var signInStatus: String?
     @Environment(\.locale) private var locale
     private func copy(_ source: String) -> String { LiteServiceCopy.text(source, locale: locale) }
     var body: some View {
         Form {
+            if !LiteNativeBuild.showsOwnerReview {
+                NavigationLink(copy("Plus 方案與價格")) { LiteNativePurchaseView(session: session) }
+            }
             Section(copy("服務連線")) {
-                Text(copy("先核對裝置，再登入同一服務帳號。此入口不會自動開啟研究上傳或清除手機紀錄。"))
-                Text(copy(session.message)).font(.footnote)
-                if session.registration == .required {
-                    if LiteNativeBuild.showsOwnerReview {
-                        Button(copy("準備本人裝置登記識別碼")) { Task { await session.prepareOwnerEnrollment() } }
-                            .disabled(session.registering)
-                        if let digest = session.preparedEnrollmentKeyID {
-                            Text(copy("請將這個登記識別碼私下交給自己的 Mac，待登記時段確認後再核對裝置登記。"))
-                            Text(verbatim: digest).font(.footnote.monospaced()).textSelection(.enabled)
-                            ShareLink(item: digest) { Text(copy("分享裝置登記識別碼")) }
-                        }
+                if LiteNativeBuild.showsOwnerReview {
+                    Text(copy("先核對裝置，再登入同一服務帳號。此入口不會自動開啟研究上傳或清除手機紀錄。"))
+                    Text(copy(session.message)).font(.footnote)
+                } else if session.preparingAccount {
+                    ProgressView(copy("正在登入個人服務…"))
+                } else if session.purchaseObservationAccount != nil {
+                    Text(copy("已登入個人服務。"))
+                } else if let signInStatus, signInStatus != "已登入個人服務。" {
+                    Text(copy(signInStatus)).accessibilityIdentifier("lite.settings.signInStatus")
+                } else if session.registration == .pending || session.registration == .unreadable {
+                    Text(copy(session.message)).font(.footnote)
+                } else if session.registration == .checking {
+                    ProgressView()
+                } else if session.registration == .required {
+                    Text(copy("登入即可使用個人服務，研究上傳可另外選擇。"))
+                }
+                if LiteNativeBuild.showsOwnerReview && session.registration == .required {
+                    Button(copy("準備本人裝置登記識別碼")) { Task { await session.prepareOwnerEnrollment() } }
+                        .disabled(session.registering)
+                    if let digest = session.preparedEnrollmentKeyID {
+                        Text(copy("請將這個登記識別碼私下交給自己的 Mac，待登記時段確認後再核對裝置登記。"))
+                        Text(verbatim: digest).font(.footnote.monospaced()).textSelection(.enabled)
+                        ShareLink(item: digest) { Text(copy("分享裝置登記識別碼")) }
                     }
                     Button(copy("核對裝置登記（不傳照片）")) { Task { await session.registerDevice() } }
                         .disabled(session.registering)
+                } else if !LiteNativeBuild.showsOwnerReview, !session.preparingAccount,
+                          session.registration == .required || session.registration == .confirmed,
+                          session.purchaseObservationAccount == nil {
+                    LiteAppleSignInButton(identifier: "lite.settings.signIn") {
+                        Task { signInStatus = await session.signInFromSettings() }
+                    }.disabled(session.registering)
                 } else if session.registration == .pending {
-                    Button(copy("續接裝置登記")) { Task { await session.registerDevice(resumePending: true) } }
+                    Button(copy("續接裝置登記")) { Task { signInStatus = nil; await session.registerDevice(resumePending: true) } }
                         .disabled(session.registering)
                 } else if session.registration == .unreadable {
-                    Button(copy("重讀原裝置登記")) { Task { await session.checkExistingRegistration() } }
+                    Button(copy("重讀原裝置登記")) { Task { signInStatus = nil; await session.checkExistingRegistration() } }
                         .disabled(session.registering)
                 }
+                if session.registration == .confirmed, !session.preparingAccount, let account = try? session.accountView() {
+                    NavigationLink(copy("服務帳號與刪除")) { account }
+                } else if LiteNativeBuild.showsOwnerReview {
+                    Text(copy("可先查看方案。完成裝置登記後，可登入服務帳號使用訂閱或恢復購買。"))
+                }
             }
-            if session.registration == .confirmed, let account = try? session.accountView() {
-                NavigationLink(copy("服務帳號與刪除")) { account }
-            } else {
-                Text(copy("可先查看方案。完成裝置登記後，可登入服務帳號使用訂閱或恢復購買。"))
+            if LiteNativeBuild.showsOwnerReview {
+                NavigationLink(copy("Plus 方案與價格")) { LiteNativePurchaseView(session: session) }
             }
-            NavigationLink(copy("Plus 方案與價格")) { LiteNativePurchaseView(session: session) }
             Text(copy("拍攝後可自行選擇個人雲端辨識。使用個人服務或恢復購買不會開啟研究上傳。"))
                 .font(.footnote).foregroundStyle(.secondary)
         }.navigationTitle(copy("個人服務"))
-        .task { await session.checkExistingRegistration() }
+        .task {
+            signInStatus = nil
+            await session.checkExistingRegistration()
+        }
     }
 }
 

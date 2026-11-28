@@ -555,8 +555,77 @@ private actor SessionWire: LiteAuthenticatedTransport {
         XCTAssertEqual(kit.buys, 0); XCTAssertEqual(kit.restores, 0)
         XCTAssertNil(counts["purchase/context"])
         XCTAssertEqual(Set(counts.keys), ["registration", "account/challenge", "account/confirm"])
-        XCTAssertFalse(r.preparingPurchase)
+        XCTAssertFalse(r.preparingAccount)
         XCTAssertTrue(r.purchasePreparationMessage.contains("再按訂閱"))
+    }
+
+    func testSettingsSignInRegistersOnceAndSharesThePurchasePreparationLock() async throws {
+        let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit()
+        let session = try LiteNativeSession(origin: origin, transport: wire, identityProvider: apple,
+            purchaseProvider: kit, journal: SessionJournal(), register: { await wire.register() }, existing: { nil },
+            now: { Date(timeIntervalSince1970: Double(sessionTime)) })
+        apple.onSignIn = {
+            let duplicate = await session.signInFromSettings()
+            XCTAssertNil(duplicate)
+            await session.prepareForPurchase(restoring: true)
+        }
+        await session.checkExistingRegistration()
+        let before = await wire.counts()
+        XCTAssertEqual(before, ["registration": 0])
+        let result = await session.signInFromSettings()
+        if LiteNativeBuild.showsOwnerReview {
+            XCTAssertNil(result)
+            let ownerCounts = await wire.counts()
+            XCTAssertEqual(ownerCounts, before)
+            XCTAssertEqual(apple.calls, 0)
+            XCTAssertEqual(kit.buys + kit.restores, 0)
+            return
+        }
+        XCTAssertEqual(result, "已登入個人服務。")
+        let after = await wire.counts()
+        XCTAssertEqual(after, ["registration": 1, "account/challenge": 1, "account/confirm": 1])
+        XCTAssertEqual(apple.calls, 1)
+        XCTAssertEqual(kit.restores, 0)
+        XCTAssertEqual(kit.buys, 0)
+    }
+
+    func testSettingsSignInKeepsUnavailableAndCancelledAppleSeparate() async throws {
+        let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit()
+        let session = try runtime(wire, SessionJournal(), apple: apple, storeKit: kit)
+        await wire.setChallengeStatus(404)
+        let unavailable = await session.signInFromSettings()
+        if LiteNativeBuild.showsOwnerReview {
+            XCTAssertNil(unavailable)
+            let counts = await wire.counts()
+            XCTAssertEqual(counts, ["registration": 0])
+            XCTAssertEqual(apple.calls + kit.buys + kit.restores, 0)
+            return
+        }
+        XCTAssertEqual(unavailable, "目前無法連上個人服務。請稍後再試。")
+        XCTAssertEqual(apple.calls, 0)
+        await wire.setChallengeStatus(200)
+        apple.cancelled = true
+        let cancelled = await session.signInFromSettings()
+        XCTAssertEqual(cancelled, "已取消登入；原紀錄與研究同意不變。")
+        XCTAssertEqual(apple.calls, 1)
+        XCTAssertEqual(kit.buys, 0)
+        XCTAssertEqual(kit.restores, 0)
+    }
+
+    func testSettingsSignInPreservesUnreadableRegistrationAndNeverStartsApple() async throws {
+        let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit()
+        let session = try LiteNativeSession(origin: origin, transport: wire, identityProvider: apple,
+            purchaseProvider: kit, journal: SessionJournal(), register: { await wire.register() },
+            existing: { throw LiteAttestFailure.unavailable })
+        for _ in 0..<2 {
+            let result = await session.signInFromSettings()
+            XCTAssertEqual(result, LiteNativeBuild.showsOwnerReview ? nil : "暫時無法讀取原裝置登記。請解鎖後重新核對。")
+        }
+        let counts = await wire.counts()
+        XCTAssertEqual(counts, ["registration": 0])
+        XCTAssertEqual(apple.calls, 0)
+        XCTAssertEqual(kit.buys, 0)
+        XCTAssertEqual(kit.restores, 0)
     }
 
     func testExplicitRestoreFromSignedOutChecksOriginalAccountAndNeverBuys() async throws {
@@ -627,7 +696,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
         let counts = await wire.counts()
         XCTAssertEqual(r.registration, .unreadable); XCTAssertEqual(counts, ["registration": 0])
         XCTAssertEqual(apple.calls, 0); XCTAssertEqual(kit.buys, 0)
-        XCTAssertFalse(r.preparingPurchase)
+        XCTAssertFalse(r.preparingAccount)
         XCTAssertEqual(r.purchasePreparationMessage, "目前無法連上訂閱服務。請稍後再試。")
     }
 
@@ -653,7 +722,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
         await r.prepareForPurchase()
         let counts = await wire.counts()
         XCTAssertEqual(apple.calls, 1); XCTAssertEqual(counts["account/confirm"], 1)
-        XCTAssertEqual(kit.buys, 0); XCTAssertFalse(r.preparingPurchase)
+        XCTAssertEqual(kit.buys, 0); XCTAssertFalse(r.preparingAccount)
     }
 
     func testPurchasePreparationLogoutDuringAppleResponseDoesNotGrantAccess() async throws {
@@ -663,7 +732,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
         await r.prepareForPurchase()
         let access = await r.identity.purchaseAccessDeadline(), counts = await wire.counts()
         XCTAssertNil(access); XCTAssertNil(counts["account/confirm"])
-        XCTAssertEqual(kit.buys, 0); XCTAssertFalse(r.preparingPurchase)
+        XCTAssertEqual(kit.buys, 0); XCTAssertFalse(r.preparingAccount)
         XCTAssertTrue(r.purchasePreparationMessage.contains("尚未付款"))
     }
 

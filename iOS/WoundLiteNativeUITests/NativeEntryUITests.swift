@@ -588,9 +588,15 @@ final class NativeEntryUITests: XCTestCase {
         XCTAssertTrue(appleManagement.isHittable, "Apple billing management must be reachable before device registration")
         XCTAssertTrue(entry.waitForExistence(timeout: 8))
         entry.tap()
-        // App Attest cannot enroll a simulator. A clean install must stop at
-        // the explicit registration step and must not imply a deletion error.
-        XCTAssertTrue(app.buttons["核對裝置登記（不傳照片）"].waitForExistence(timeout: 8))
+        #if LITE_QA_OWNER_REVIEW
+        XCTAssertTrue(app.buttons["準備本人裝置登記識別碼"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.buttons["核對裝置登記（不傳照片）"].exists)
+        XCTAssertFalse(app.buttons["lite.settings.signIn"].exists)
+        #else
+        XCTAssertTrue(app.buttons["lite.settings.signIn"].waitForExistence(timeout: 8))
+        XCTAssertFalse(app.buttons["核對裝置登記（不傳照片）"].exists)
+        XCTAssertFalse(app.buttons["準備本人裝置登記識別碼"].exists)
+        #endif
         XCTAssertFalse(app.buttons["服務帳號與刪除"].exists)
         XCTAssertFalse(app.buttons["訂閱與恢復購買"].exists)
         XCTAssertFalse(app.buttons["核對原刪帳進度"].exists)
@@ -627,6 +633,34 @@ final class NativeEntryUITests: XCTestCase {
         attach(app, "read-only-offer-before-registration")
         #endif
     }
+
+    #if LITE_QA_EXTERNAL_FIXTURE
+    @MainActor func testExternalPersonalSignInExplainsFailureAndAllowsLocalReadback() {
+        continueAfterFailure = false
+        let app = application(language: "en")
+        app.launch()
+        let settings = app.buttons["Settings and data withdrawal"]
+        (settings.waitForExistence(timeout: 2) ? settings : app.tabBars.buttons["Settings"]).tap()
+        let entry = app.buttons["Sign-in, subscriptions and account deletion"]
+        for _ in 0..<5 where !entry.isHittable { app.swipeUp() }
+        entry.tap()
+        let signIn = app.buttons["lite.settings.signIn"]
+        XCTAssertTrue(signIn.waitForExistence(timeout: 8))
+        XCTAssertFalse(app.buttons["Verify device registration (no photo sent)"].exists)
+        XCTAssertFalse(app.buttons["lite.offer.buy"].exists)
+        signIn.tap()
+        let status = app.staticTexts["lite.settings.signInStatus"]
+        XCTAssertTrue(status.waitForExistence(timeout: 15))
+        XCTAssertEqual(status.label, "Personal services are unavailable. Try again later.")
+        let reread = app.buttons["Read original device registration again"]
+        XCTAssertTrue(reread.isHittable)
+        reread.tap()
+        XCTAssertTrue(signIn.waitForExistence(timeout: 8))
+        XCTAssertFalse(status.exists)
+        XCTAssertFalse(app.buttons["lite.offer.buy"].exists)
+        attach(app, "external-services-retry")
+    }
+    #endif
 
     @MainActor func testPersonalQuotaHasItsOwnEntryWithoutResearchOrDeviceRegistration() throws {
         continueAfterFailure = false

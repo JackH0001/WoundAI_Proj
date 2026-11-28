@@ -36,8 +36,8 @@ struct LitePurchaseObservation: View {
                                    active: scene != .background, generation: identity.generation)) {
                 await session.trackPurchaseAccess(foreground: scene != .background)
             }
-            .task(id: session.preparingPurchase ? nil : session.purchaseObservationAccount) {
-                let account = session.preparingPurchase ? nil : session.purchaseObservationAccount
+            .task(id: session.preparingAccount ? nil : session.purchaseObservationAccount) {
+                let account = session.preparingAccount ? nil : session.purchaseObservationAccount
                 await session.purchases.observePurchases(accountToken: account?.token)
             }
             .onDisappear { session.purchases.stopObserving() }
@@ -95,10 +95,10 @@ struct LiteNativePurchaseView: View {
     @State private var checked: PlanQuery?
     @State private var retry = 0
     private var query: PlanQuery {
-        PlanQuery(account: phase == .active && !session.preparingPurchase ? session.purchaseObservationAccount : nil,
+        PlanQuery(account: phase == .active && !session.preparingAccount ? session.purchaseObservationAccount : nil,
                   confirmedUpdates: store.confirmedUpdates, retry: retry)
     }
-    private var busy: Bool { identity.busy || session.preparingPurchase || session.registering || store.busy }
+    private var busy: Bool { identity.busy || session.preparingAccount || session.registering || store.busy }
     private func copy(_ source: String) -> String { LiteServiceCopy.text(source, locale: locale) }
 
     var body: some View {
