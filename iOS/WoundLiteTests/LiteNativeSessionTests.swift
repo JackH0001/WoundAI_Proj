@@ -1220,6 +1220,54 @@ extension LiteNativeSessionTests {
         let counts = await wire.counts(); XCTAssertEqual(counts, ["registration": 0])
         XCTAssertNil(vm.draft); XCTAssertNotNil(vm.captureJPEG)
     }
+    func testRecognitionTapOpensAccountAndReturnsToOriginalDraftForExplicitSubmission() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let session = try runtime(wire, SessionJournal(), captures: files)
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        let vm = LiteMeasureVM(native: session)
+        await vm.restoreDraft(draft.id, in: store)
+        let before = await wire.counts()
+        await vm.recognizeNative(fromButton: true)
+        XCTAssertTrue(vm.showRecognitionAccount)
+        XCTAssertNil(vm.serviceResult)
+        XCTAssertEqual(vm.draft, draft)
+        let afterTap = await wire.counts()
+        XCTAssertEqual(afterTap, before)
+        vm.showRecognitionAccount = false
+        await session.identity.signIn()
+        let afterSignIn = await wire.counts()
+        XCTAssertNil(afterSignIn["service/prepare"])
+        XCTAssertNil(afterSignIn["service/run"])
+        await vm.recognizeNative(fromButton: true)
+        await vm.recognizeNative(fromButton: true)
+        XCTAssertFalse(vm.showRecognitionAccount)
+        XCTAssertEqual(vm.serviceResult?.note, "confirmed")
+        XCTAssertEqual(vm.draft?.id, draft.id)
+        let done = await wire.counts()
+        XCTAssertEqual(done["service/prepare"], 1)
+        XCTAssertEqual(done["service/run"], 1)
+    }
+
+    func testRecognitionWithUnreachableAccountStatusKeepsSameDraftAndShowsServiceMessage() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let session = try runtime(wire, SessionJournal(), captures: files)
+        await session.identity.signIn()
+        let vm = LiteMeasureVM(native: session)
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        await vm.restoreDraft(draft.id, in: store)
+        await wire.failStatus()
+        await vm.recognizeNative(fromButton: true)
+        XCTAssertEqual(vm.serviceResult?.note, "unavailable")
+        XCTAssertEqual(vm.note, "個人服務暫時無法確認結果。照片已保存，可稍後查詢同一筆，或在手機圈選傷口。")
+        XCTAssertEqual(vm.draft, draft)
+        let counts = await wire.counts()
+        XCTAssertNil(counts["service/run"])
+    }
+
     func testNativeCaptureRecoversAndReusesCompletedResultWithNoSecondRun() async throws {
         let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
         let wire = try SessionWire(), journal = SessionJournal(), files = LiteCaptureDraftStore(directory: path)

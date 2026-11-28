@@ -133,3 +133,7 @@
 "今天的辨識額度已用完。額度可用時，可繼續辨識這張照片。" = "You’ve used today’s analysis allowance. Continue with this photo when you have more uses.";
 "%@ 後可再試" = "Try again at %@";
 "繼續辨識這張照片" = "Continue with this photo";
+"請先開啟個人服務完成登入。回到量測後，可用同一張照片繼續辨識。" = "Sign in to Personal Service. Return to this capture to analyze the same photo.";
+"正在確認個人服務帳號，請稍候再點一次辨識。" = "Checking your service account. Tap Analyze again in a moment.";
+"個人服務暫時無法確認結果。照片已保存，可稍後查詢同一筆，或在手機圈選傷口。" = "Personal Service could not confirm the result. Your photo is saved. Check this capture later or outline the wound on your phone.";
+"返回這次拍攝" = "Return to this capture";
