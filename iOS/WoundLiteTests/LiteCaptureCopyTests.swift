@@ -29,7 +29,10 @@ import SwiftUI
             return try XCTUnwrap(PropertyListSerialization.propertyList(from: Data(contentsOf: url), format: nil) as? [String:String])
         }
         let a = try table("en"), b = try table("zh-Hant")
-        XCTAssertEqual(a.count, 169); XCTAssertEqual(Set(a.keys), Set(b.keys))
+        let complexOutlineNotice = "雲端無法傳回完整輪廓，這次未計入成功辨識次數。可在這張照片上圈選，或重新拍攝。"
+        XCTAssertNotNil(a[complexOutlineNotice])
+        XCTAssertNotNil(b[complexOutlineNotice])
+        XCTAssertEqual(a.count, 170); XCTAssertEqual(Set(a.keys), Set(b.keys))
         for (key, value) in a {
             XCTAssertEqual(b[key],key); XCTAssertFalse(value.isEmpty)
             XCTAssertEqual(key.components(separatedBy: "%@").count,value.components(separatedBy: "%@").count)
