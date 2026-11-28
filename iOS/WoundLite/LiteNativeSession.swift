@@ -111,7 +111,7 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
     private let access: LiteSandboxAccess
     private let register: @Sendable () async throws -> String
     private let existing: @Sendable () async throws -> String?
-    private var resumableEnrollment: LiteAttestClient?
+    private let resumableEnrollment: LiteAttestClient?
     private var enrollmentKeyID: (@Sendable () async throws -> String)?
     @Published private(set) var preparedEnrollmentKeyID: String?
     @Published private(set) var registration: Registration = .checking
@@ -170,20 +170,26 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
                      captures: LiteCaptureDraftStore? = nil,
                      register: @escaping @Sendable () async throws -> String,
                      existing: (@Sendable () async throws -> String?)? = nil,
+                     resumableEnrollment: LiteAttestClient? = nil,
                      now: @escaping @Sendable () -> Date = { Date() }) throws {
         try self.init(origin: origin, transport: transport, identityProvider: identityProvider,
                       purchaseProvider: purchaseProvider, journal: journal, register: register,
-                      existing: existing ?? { try await transport.installation() }, captures: captures, access: LiteSandboxAccess(), now: now)
+                      existing: existing ?? { try await transport.installation() }, resumableEnrollment: resumableEnrollment,
+                      captures: captures, access: LiteSandboxAccess(), now: now)
     }
 
     private init(origin: URL, transport: any LiteAuthenticatedTransport,
                  identityProvider: any LiteAppleIdentityProvider, purchaseProvider: any LitePurchaseProvider,
                  journal: any LiteServiceJournal, register: @escaping @Sendable () async throws -> String,
                  existing: @escaping @Sendable () async throws -> String?,
+                 resumableEnrollment: LiteAttestClient?,
                  captures: LiteCaptureDraftStore? = nil, access: LiteSandboxAccess, now: @escaping @Sendable () -> Date) throws {
         guard origin.scheme == "https", origin.host != nil, origin.port == nil, origin.path.isEmpty,
               origin.user == nil, origin.password == nil, origin.query == nil, origin.fragment == nil,
-              !origin.absoluteString.contains("%") else { throw LiteAccountFailure.invalid }
+              !origin.absoluteString.contains("%"),
+              resumableEnrollment == nil || resumableEnrollment?.origin == origin else { throw LiteAccountFailure.invalid }
+        // The owner-only enrollment window is pinned to a pre-approved key.
+        self.resumableEnrollment = LiteNativeBuild.showsOwnerReview ? nil : resumableEnrollment
         self.captures = captures ?? LiteCaptureDraftStore(directory:
             FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("lite-capture-drafts")
@@ -224,10 +230,8 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
             transport: LiteSandboxSignedTransport(client: client, access: access),
             identityProvider: LiteAppleSignInProvider(window: window), purchaseProvider: LiteStoreKitPurchaseProvider(),
             journal: LiteServiceFileJournal(directory: directory), register: { try await client.registeredInstallation() },
-            existing: { try await client.existingInstallation() },
+            existing: { try await client.existingInstallation() }, resumableEnrollment: client,
             captures: LiteCaptureDraftStore(directory: directory.appendingPathComponent("capture-drafts")), access: access, now: { Date() })
-        // The owner-only enrollment window is pinned to a pre-approved key.
-        if !LiteNativeBuild.showsOwnerReview { session.resumableEnrollment = client }
         session.enrollmentKeyID = { try await client.prepareEnrollmentKeyID() }
         // Create the transport lazily. Viewing account settings never registers
         // an installation, re-enables research or sends an association request.
@@ -334,12 +338,20 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
 
     // Both entry points use the same installation and identity checks. A pending
     // registration is resumed only through its dedicated, user-initiated action.
-    private func authenticateForTap(willSignIn: () -> Void) async -> SignInPreparation {
+    private func authenticateForTap(resumePending: Bool = false, willSignIn: () -> Void) async -> SignInPreparation {
         let started = identity.generation
         await checkExistingRegistration()
         guard started == identity.generation, !identity.busy else { return .changed }
         guard registration != .unreadable else { return .unreadable }
-        if registration == .required { await registerDevice() }
+        if resumePending {
+            // The combined action must never fall back to a fresh enrollment.
+            guard registration == .pending else { return .unavailable }
+            await registerDevice(resumePending: true)
+            guard started == identity.generation, !identity.busy else { return .changed }
+            if registration == .unreadable { return .unreadable }
+        } else if registration == .required {
+            await registerDevice()
+        }
         if registration == .pending { return .pending }
         guard registration == .confirmed else { return .unavailable }
         guard started == identity.generation, !identity.busy else { return .changed }
@@ -372,19 +384,27 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
         }
     }
 
-    func prepareForPurchase(restoring: Bool = false) async {
+    enum OfferAction { case subscribe, restore, resumeRegistrationAndRestore }
+
+    func prepareForPurchase(_ action: OfferAction = .subscribe) async {
         guard canPrepareAccount else { return }
         preparingAccount = true
         defer { preparingAccount = false }
         preparationCopy = nil
         purchasePreparationMessage = "正在核對裝置登記…尚未付款。"
-        let result = await authenticateForTap {
+        let restoring = action != .subscribe
+        let result = await authenticateForTap(resumePending: action == .resumeRegistrationAndRestore) {
             purchasePreparationMessage = "正在登入服務帳號…請完成 Apple 登入，尚未付款。"
         }
         switch result {
         case .ready(let account):
-            purchasePreparationMessage = "服務帳號已確認。請核對月費，再按訂閱並在 Apple 確認；已有訂閱請使用恢復購買。"
-            if restoring { await purchases.restore(for: account) }
+            if restoring {
+                purchasePreparationMessage = "正在恢復既有訂閱…"
+                await purchases.restore(for: account)
+                purchasePreparationMessage = purchases.message
+            } else {
+                purchasePreparationMessage = "服務帳號已確認。請核對月費，再按訂閱並在 Apple 確認；已有訂閱請使用恢復購買。"
+            }
         case .changed:
             purchasePreparationMessage = "帳號狀態已變更，請重新核對後再繼續；尚未付款。"
         case .unreadable:

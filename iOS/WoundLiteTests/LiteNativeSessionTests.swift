@@ -79,7 +79,8 @@ private actor SessionWire: LiteAuthenticatedTransport {
     var activeWounds = [String](), woundRevision = 0
     var afterWoundSnapshot: (@Sendable () async -> Void)?
     let golden: [String: Any]
-    init() throws {
+    init(owner: String = "synthetic-native-service") throws {
+        self.owner = owner
         let file = try XCTUnwrap(Bundle(for: LiteNativeSessionTests.self).url(forResource: "lite_service_operation", withExtension: "json"))
         golden = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
     }
@@ -583,7 +584,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
         apple.onSignIn = {
             let duplicate = await session.signInFromSettings()
             XCTAssertNil(duplicate)
-            await session.prepareForPurchase(restoring: true)
+            await session.prepareForPurchase(.restore)
         }
         await session.checkExistingRegistration()
         let before = await wire.counts()
@@ -647,7 +648,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
     func testExplicitRestoreFromSignedOutChecksOriginalAccountAndNeverBuys() async throws {
         let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit()
         let session = try runtime(wire, SessionJournal(), apple: apple, storeKit: kit)
-        await session.prepareForPurchase(restoring: true)
+        await session.prepareForPurchase(.restore)
         let counts = await wire.counts()
         XCTAssertEqual(apple.calls, 1)
         XCTAssertEqual(kit.restores, 1)
@@ -656,11 +657,95 @@ private actor SessionWire: LiteAuthenticatedTransport {
         XCTAssertEqual(counts["purchase/confirm"], 1)
     }
 
+    private struct PendingRestore {
+        let session: LiteNativeSession
+        let registration: AttestHTTPDouble
+        let wire: SessionWire
+        let apple: SessionApple
+        let kit: SessionStoreKit
+    }
+
+    private func interruptedRegistration() async throws -> PendingRestore {
+        let http = AttestHTTPDouble()
+        let attest = try LiteAttestClient(origin: origin, audience: "lite-test", device: AttestDeviceDouble(),
+            persistence: AttestMemory(), transport: http, now: { Date(timeIntervalSince1970: 1000) })
+        let wire = try SessionWire(owner: http.owner), apple = SessionApple(), kit = SessionStoreKit()
+        let session = try LiteNativeSession(origin: origin, transport: wire, identityProvider: apple,
+            purchaseProvider: kit, journal: SessionJournal(), register: { try await attest.registeredInstallation() },
+            existing: { try await attest.existingInstallation() }, resumableEnrollment: attest,
+            now: { Date(timeIntervalSince1970: Double(sessionTime)) })
+        await http.options(failRegistration: true)
+        await session.registerDevice()
+        await session.checkExistingRegistration()
+        return PendingRestore(session: session, registration: http, wire: wire, apple: apple, kit: kit)
+    }
+
+    func testExplicitPendingRestoreUsesTheSavedProofAndConfirmsOnlyOnce() async throws {
+        let f = try await interruptedRegistration()
+        let before = await f.registration.snapshot().0
+        XCTAssertEqual(before.count, 1)
+        if LiteNativeBuild.showsOwnerReview {
+            XCTAssertEqual(f.session.registration, .required)
+            await f.session.prepareForPurchase(.resumeRegistrationAndRestore)
+            let after = await f.registration.snapshot().0
+            XCTAssertEqual(after, before)
+            XCTAssertEqual(f.apple.calls + f.kit.restores + f.kit.buys, 0)
+            return
+        }
+        XCTAssertEqual(f.session.registration, .pending)
+        await f.session.prepareForPurchase(.restore)
+        await f.session.prepareForPurchase()
+        let untouched = await f.registration.snapshot().0
+        XCTAssertEqual(untouched, before)
+        XCTAssertEqual(f.apple.calls + f.kit.restores, 0)
+        f.apple.onSignIn = { await f.session.prepareForPurchase(.resumeRegistrationAndRestore) }
+        await f.session.prepareForPurchase(.resumeRegistrationAndRestore)
+        let sent = await f.registration.snapshot().0, counts = await f.wire.counts()
+        XCTAssertEqual(sent, before + before)
+        XCTAssertEqual(f.session.registration, .confirmed)
+        XCTAssertEqual(f.apple.calls, 1)
+        XCTAssertEqual(f.kit.restores, 1)
+        XCTAssertEqual(f.kit.finishes, 1)
+        XCTAssertEqual(f.kit.buys, 0)
+        XCTAssertEqual(counts["purchase/confirm"], 1)
+        XCTAssertFalse(counts.keys.contains { $0.hasPrefix("service/") || $0.hasPrefix("research/") })
+        await f.session.prepareForPurchase(.resumeRegistrationAndRestore)
+        XCTAssertEqual(f.kit.restores, 1, "A stale combined action cannot start a second restore")
+    }
+
+    func testFailedEnrollmentWaitsForAnotherExplicitRestoreTap() async throws {
+        let f = try await interruptedRegistration()
+        await f.registration.options(failRegistration: true)
+        await f.session.prepareForPurchase(.resumeRegistrationAndRestore)
+        let counts = await f.wire.counts()
+        XCTAssertNil(counts["account/challenge"])
+        XCTAssertNil(counts["purchase/context"])
+        XCTAssertEqual(f.apple.calls + f.kit.restores + f.kit.buys, 0)
+        if !LiteNativeBuild.showsOwnerReview {
+            XCTAssertEqual(f.session.registration, .pending)
+            await f.session.checkExistingRegistration()
+            XCTAssertEqual(f.kit.restores, 0)
+            await f.session.prepareForPurchase(.resumeRegistrationAndRestore)
+            XCTAssertEqual(f.kit.restores, 1)
+            XCTAssertEqual(f.kit.finishes, 1)
+        }
+    }
+
+    func testInterruptedRestoreStopsAtCancelledAppleSignIn() async throws {
+        let f = try await interruptedRegistration()
+        f.apple.cancelled = true
+        await f.session.prepareForPurchase(.resumeRegistrationAndRestore)
+        XCTAssertEqual(f.apple.calls, LiteNativeBuild.showsOwnerReview ? 0 : 1)
+        XCTAssertEqual(f.kit.restores + f.kit.buys + f.kit.finishes, 0)
+        let counts = await f.wire.counts()
+        XCTAssertNil(counts["purchase/context"])
+    }
+
     func testMissingLoginEndpointLeavesActionableStatusAfterRegistrationReadback() async throws {
         let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit()
         let session = try runtime(wire, SessionJournal(), apple: apple, storeKit: kit)
         await wire.setChallengeStatus(404)
-        await session.prepareForPurchase(restoring: true)
+        await session.prepareForPurchase(.restore)
         await session.checkExistingRegistration()
         XCTAssertEqual(session.purchasePreparationMessage, "目前無法連上訂閱服務。請稍後再試。")
         XCTAssertEqual(apple.calls, 0)
@@ -672,7 +757,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
         let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit()
         apple.cancelled = true
         let session = try runtime(wire, SessionJournal(), apple: apple, storeKit: kit)
-        await session.prepareForPurchase(restoring: true)
+        await session.prepareForPurchase(.restore)
         XCTAssertTrue(session.purchasePreparationMessage.contains("已取消登入"))
         XCTAssertEqual(kit.restores, 0)
         XCTAssertEqual(kit.buys, 0)

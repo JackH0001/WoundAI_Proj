@@ -146,13 +146,14 @@ struct LiteNativePurchaseView: View {
                 }
             }
             Section(copy("既有訂閱")) {
-                Button(copy("恢復購買")) {
-                    let account = session.purchaseObservationAccount
+                let resumePending = session.registration == .pending
+                let account = session.purchaseObservationAccount
+                Button(copy(resumePending ? "續接裝置登記並恢復購買" : "恢復購買")) {
                     Task {
                         if let account { await store.restore(for: account) }
-                        else { await session.prepareForPurchase(restoring: true) }
+                        else { await session.prepareForPurchase(resumePending ? .resumeRegistrationAndRestore : .restore) }
                     }
-                }.disabled(busy || session.registration == .pending).accessibilityIdentifier("lite.offer.restore")
+                }.disabled(busy).accessibilityIdentifier("lite.offer.restore")
                 if session.purchaseObservationAccount != nil {
                     Button(copy("核對未完成購買")) { Task { await store.reconcile() } }.disabled(busy)
                 }
