@@ -67,7 +67,10 @@ def blueprint(operations, *, balance_enabled=False):
         except OperationUnknown:return jsonify(error='lite_operation_unknown',retry_action='prepare',keep_local=True),404
         except ImageRejected:return jsonify(error='lite_image_rejected',retry_action='none',keep_local=True),422
         except UsageLimit as exc:
-            response=jsonify(error='lite_usage_limit',reason=exc.reason,retry_after=exc.retry_after,keep_local=True)
+            payload = dict(error='lite_usage_limit', reason=exc.reason, retry_after=exc.retry_after, keep_local=True)
+            if exc.success_quota_state is not None:
+                payload['success_quota_state'] = exc.success_quota_state
+            response = jsonify(payload)
             response.headers['Retry-After']=str(exc.retry_after);return response,429
         except (UsageConflict,ValueError,TypeError,KeyError):
             return jsonify(error='lite_operation_conflict',retry_action='status',keep_local=True),409

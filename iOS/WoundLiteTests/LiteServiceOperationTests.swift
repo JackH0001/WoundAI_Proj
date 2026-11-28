@@ -493,6 +493,32 @@ final class LiteServiceOperationTests: XCTestCase {
         let r=try await c.resume(f.capture_id) { _ in nil }
         XCTAssertEqual(r.note,"capacity");XCTAssertEqual(r.retryAt,1005)
     }
+
+    func testQuotaReasonSurvivesRelaunchAndSamePhotoResumesOnce() async throws {
+        for state in ["pending", "used", "unknown"] {
+            let (f, wire, journal, service) = try await setup()
+            let body = try JSONSerialization.data(withJSONObject: [
+                "error": "lite_usage_limit", "reason": "success_quota", "success_quota_state": state
+            ])
+            await wire.plan([ServiceStep(action: "prepare", data: body, code: 429, wait: "30")])
+            let blocked = try await service.resume(f.capture_id) { _ in XCTFail("Read image before admission"); return nil }
+            let early = try client(wire, journal, 1029)
+            let saved = try await early.resume(f.capture_id) { _ in XCTFail(); return nil }
+            XCTAssertEqual(saved, blocked)
+            XCTAssertEqual(saved.successQuotaState?.rawValue, state == "unknown" ? nil : state)
+            let expected = ["pending": "暫時占用", "used": "已用完", "unknown": "等候可用額度"]
+            XCTAssertTrue(saved.message.contains(try XCTUnwrap(expected[state])))
+            let ready = try client(wire, journal, 1030)
+            let jpeg = f.image
+            await wire.plan([ServiceStep(action: "prepare", data: try f.bytes(f.prepare)),
+                             ServiceStep(action: "run", data: try f.bytes(f.completed))])
+            let done = try await ready.resume(f.capture_id) { _ in jpeg }
+            XCTAssertEqual(done.operation, blocked.operation)
+            XCTAssertEqual(done.note, "confirmed")
+            let sent = await wire.requests()
+            XCTAssertEqual(sent.map { $0.url?.lastPathComponent }, ["prepare", "prepare", "run"])
+        }
+    }
     func testBusyRunKeepsOriginalWorkAndQueriesStatusBeforeResendingPhoto() async throws {
         let (fixture, wire, journal, service) = try await setup()
         let jpeg = fixture.image

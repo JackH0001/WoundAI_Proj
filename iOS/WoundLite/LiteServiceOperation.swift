@@ -161,6 +161,8 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
     var next = "prepare"
     var note = "local"
     var attemptLimitReached: Bool?
+    enum SuccessQuotaState: String, Codable { case pending, used }
+    var successQuotaState: SuccessQuotaState?
     var retryAt: Double = 0
     var day: Int?
     var requestDigest: String?
@@ -219,9 +221,12 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
         switch note {
         case "confirmed": return "辨識結果與回執已核對；尚未存入量測紀錄或研究庫。"
         case "quota":
-            return attemptLimitReached == true
-                ? "今日辨識嘗試已達上限，請在額度重置後繼續使用這張照片。"
-                : "這次辨識正在等候可用額度，原照片已保留。"
+            if attemptLimitReached == true { return "今日辨識嘗試已達上限，請在額度重置後繼續使用這張照片。" }
+            switch successQuotaState {
+            case .pending: return "其他辨識暫時占用名額。名額釋出後，可繼續辨識這張照片。"
+            case .used: return "今天的辨識額度已用完。額度可用時，可繼續辨識這張照片。"
+            case nil: return "這次辨識正在等候可用額度，原照片已保留。"
+            }
         case "capacity": return "服務忙碌，稍後核對原工作；不需重新拍攝。"
         case "pending", "checking": return "正在核對原辨識工作；尚未確認完成，不會另建一筆重複辨識。"
         case "recovering": return "原工作已核對並保留；正在恢復跨日辨識，不需重新拍攝。"
@@ -439,6 +444,12 @@ actor LiteServiceClient {
                 r.retryAt=now().timeIntervalSince1970+min(3600,max(1,wait.isFinite ? wait : 5))
                 r.note=http.statusCode == 429 ? (error?["error"] as? String == "lite_usage_limit" ? "quota":"capacity") : "unavailable"
                 r.attemptLimitReached = r.note == "quota" && error?["reason"] as? String == "attempt_quota" ? true : nil
+                if r.note == "quota", error?["reason"] as? String == "success_quota",
+                   let state = error?["success_quota_state"] as? String {
+                    r.successQuotaState = LiteServiceRecord.SuccessQuotaState(rawValue: state)
+                } else {
+                    r.successQuotaState = nil
+                }
                 // A rejected initial prepare can be retried with the same id/hash.
                 if http.statusCode == 429, action == "prepare", r.requestDigest == nil { r.next="prepare" }
             } else {

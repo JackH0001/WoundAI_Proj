@@ -67,19 +67,19 @@ struct LiteMeasureAllowanceView: View {
     @ObservedObject private var identity: LiteAccountIdentityStore
     @ObservedObject private var purchases: LiteNativePurchaseStore
     let operation: String?
-    let operationNote: String?
+    let operationRevision: Int?
 
     init(session: LiteNativeSession, record: LiteServiceRecord?) {
         self.session = session
         self.identity = session.identity
         self.purchases = session.purchases
         operation = record?.operation
-        operationNote = record?.note
+        operationRevision = record?.revision
     }
 
     private struct Query: Equatable {
         let account: LiteNativeSession.PurchaseAccount?
-        let operation: String?, note: String?
+        let operation: String?, revision: Int?
         let purchases: Int, refresh: Int
     }
     @State private var refresh = 0
@@ -87,7 +87,7 @@ struct LiteMeasureAllowanceView: View {
     @State private var balance: LitePersonalBalance?
     private var query: Query {
         Query(account: phase == .active ? session.purchaseObservationAccount : nil,
-              operation: operation, note: operationNote, purchases: purchases.confirmedUpdates, refresh: refresh)
+              operation: operation, revision: operationRevision, purchases: purchases.confirmedUpdates, refresh: refresh)
     }
     private var copy: LiteResearchCopy { LiteResearchCopy(locale: locale) }
 

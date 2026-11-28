@@ -24,8 +24,9 @@ class UsageConflict(ValueError): pass
 
 
 class UsageLimit(ValueError):
-    def __init__(self, reason, retry_after):
+    def __init__(self, reason, retry_after, *, success_quota_state=None):
         self.reason, self.retry_after = reason, retry_after
+        self.success_quota_state = success_quota_state
         super().__init__(reason)
 
 
@@ -337,6 +338,17 @@ class UsageLedger:
         return dict(day=day, used=used, pending=pending, attempts=attempts, limit=grant.limit,
                     remaining=max(0, grant.limit-used-pending), attempt_limit=self.ATTEMPT_LIMIT)
 
+    def require_available(self, used, pending, attempts, limit, now):
+        until_reset = 86400 - now % 86400
+        if attempts >= self.ATTEMPT_LIMIT:
+            raise UsageLimit('attempt_quota', until_reset)
+        if used + pending >= limit:
+            state = 'pending' if used < limit else 'used'
+            # A reservation can close or a free account can upgrade during the day.
+            can_change_today = state == 'pending' or (limit == 2 and used < 10)
+            retry = min(30, until_reset) if can_change_today else until_reset
+            raise UsageLimit('success_quota', retry, success_quota_state=state)
+
     def reserve(self, subject, day, operation, request_digest, grant):
         _hex(operation, 32); _hex(request_digest)
         ticket = Ticket(_subject(subject), _integer(day), operation, request_digest)
@@ -360,11 +372,7 @@ class UsageLedger:
                 raise UsageConflict('day/clock changed during admission')
             grant.validate(subject, now)
             used, pending, attempts = self._counts(state)
-            retry = max(1, (day+1)*86400-now)
-            if attempts >= self.ATTEMPT_LIMIT:
-                raise UsageLimit('attempt_quota', retry)
-            if used + pending >= grant.limit:
-                raise UsageLimit('success_quota', retry)
+            self.require_available(used, pending, attempts, grant.limit, now)
             state['entries'][operation] = dict(digest=request_digest, proof=grant.proof,
                 limit=grant.limit, worker=None, history=[[now, 'reserved']])
             state['updated'] = now

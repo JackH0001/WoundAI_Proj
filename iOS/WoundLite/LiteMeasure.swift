@@ -677,6 +677,7 @@ struct LiteMeasureView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var confirmServiceReplacement = false
     @State private var discardCaptureID: String?
+    @State private var elapsedQuotaRetryAt: TimeInterval?
     @State private var showCamera = false
     @State private var showTrace = false
     @State private var woundID = ""
@@ -864,6 +865,21 @@ struct LiteMeasureView: View {
             } else if vm.serviceResult?.canResubmit == true {
                 Button(copy.text("預留已逾時：重新送出")) { Task { await vm.recognizeNative(resubmit: true) } }
                     .disabled(vm.busy)
+            } else if let record = vm.serviceResult, record.note == "quota", record.next != "none" {
+                let retryDate = Date(timeIntervalSince1970: record.retryAt)
+                let wait = retryDate.timeIntervalSinceNow
+                let waiting = wait > 0 && wait <= 3600 && elapsedQuotaRetryAt != record.retryAt
+                Button(waiting
+                       ? copy.format("%@ 後可再試", retryDate.formatted(Date.FormatStyle(date: .omitted, time: .standard).locale(locale)))
+                       : copy.text("繼續辨識這張照片")) {
+                    Task { await vm.recognizeNative() }
+                }.buttonStyle(.borderedProminent).disabled(vm.busy || waiting)
+                    .accessibilityIdentifier("lite.capture.personalRecognition")
+                    .task(id: record.retryAt) {
+                        guard waiting else { return }
+                        do { try await Task.sleep(for: .seconds(wait)) } catch { return }
+                        elapsedQuotaRetryAt = record.retryAt
+                    }
             } else if vm.serviceResult?.next != "none" {
                 Button(copy.text(vm.serviceResult == nil ? "使用個人雲端辨識" : "續接這次辨識（不重建工作）")) {
                     Task { await vm.recognizeNative() }

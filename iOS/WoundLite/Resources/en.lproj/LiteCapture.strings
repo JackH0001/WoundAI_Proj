@@ -129,3 +129,7 @@
 "服務回覆或資料不一致，已停止傳送；請保留原紀錄待核對。" = "The service response or data is inconsistent, so sending has stopped. Keep the original record for review.";
 "今日辨識嘗試已達上限，請在額度重置後繼續使用這張照片。" = "Today’s analysis attempt limit has been reached. Continue with this photo after the allowance resets.";
 "這次辨識正在等候可用額度，原照片已保留。" = "This analysis is waiting for an available use. Your photo is saved.";
+"其他辨識暫時占用名額。名額釋出後，可繼續辨識這張照片。" = "Other analyses are using the available slots. Continue with this photo when a slot opens.";
+"今天的辨識額度已用完。額度可用時，可繼續辨識這張照片。" = "You’ve used today’s analysis allowance. Continue with this photo when you have more uses.";
+"%@ 後可再試" = "Try again at %@";
+"繼續辨識這張照片" = "Continue with this photo";

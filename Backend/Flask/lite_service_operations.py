@@ -12,7 +12,7 @@ import re
 import secrets
 import threading
 import time
-from lite_usage_ledger import UsageLedger, UsageConflict, UsageLimit, Ticket, free_grant, digest, _subject, _hex
+from lite_usage_ledger import UsageLedger, UsageConflict, Ticket, free_grant, digest, _subject, _hex
 from lite_subscription_authority import ServiceBinding
 from lite_attest_state import StateUnavailable, CAS_ATTEMPTS, _encode
 
@@ -326,8 +326,7 @@ class ServiceOperations:
         if row is None:
             now=self.now();grant=self.accounts.grant(account,now)
             quota=self.ledger.snapshot(subject,now//86400,grant)
-            if quota['attempts']>=quota['attempt_limit']:raise UsageLimit('attempt_quota',(now//86400+1)*86400-now)
-            if quota['remaining']==0:raise UsageLimit('success_quota',(now//86400+1)*86400-now)
+            self.ledger.require_available(quota['used'], quota['pending'], quota['attempts'], grant.limit, now)
             self.admit_operation(subject,operation)
             value=dict(v=1,subject_hash=digest(subject),operation=operation,day=now//86400,created=now,
                 expires=now+RESULT_TTL,image_sha256=image_sha256,model=self.model_version,

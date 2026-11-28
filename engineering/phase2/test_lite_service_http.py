@@ -13,7 +13,7 @@ from lite_attest_http import install_lite_attest
 from lite_attest_budget import RequestBudget,BudgetExceeded
 from lite_privacy_state import PrivacyState
 from lite_attest_state import SQLiteStateStore,StateUnavailable
-from lite_usage_ledger import UsageLedger,free_grant,digest,UsageConflict,UsageLimit
+from lite_usage_ledger import DailyGrant,UsageLedger,free_grant,digest,UsageConflict,UsageLimit
 from lite_service_operations import ServiceOperations,ServiceAccounts,RasterInference,RESULT_TTL
 from lite_service_http import PREFIX
 from test_lite_signed_client import SignedServiceClient
@@ -126,10 +126,44 @@ class ServiceHTTPTests(SignedServiceClient, unittest.TestCase):
         def prepare(n):
             start.wait(5)
             try:return self.ops.prepare(self.owner,f'{n:032x}',self.image_hash)['state']
-            except UsageLimit:return 'quota'
+            except UsageLimit as exc:
+                self.assertEqual((exc.reason, exc.success_quota_state, exc.retry_after),
+                                 ('success_quota', 'pending', 30))
+                return 'quota'
         with ThreadPoolExecutor(max_workers=8) as pool:states=list(pool.map(prepare,range(1,9)))
         self.assertEqual(states.count('ready'),2);self.assertEqual(states.count('quota'),6)
         self.assertEqual(self.quota()['pending'],2);self.assertEqual(self.model_calls,0)
+
+    def test_pending_allowance_reopens_for_the_original_photo_after_release(self):
+        self.complete(1)
+        self.assertEqual(self.json_request('prepare', 2).status_code, 200)
+        blocked = self.json_request('prepare', 3)
+        self.assertEqual(blocked.status_code, 429)
+        self.assertEqual(blocked.json.get('success_quota_state'), 'pending')
+        self.assertEqual(blocked.headers['Retry-After'], '30')
+        self.assertEqual(self.quota()['attempts'], 2)
+        ticket = self.ops.ticket(self.subject, self.ops.load(self.subject, f'{2:032x}')[1])
+        self.ledger.cancel_unstarted(ticket, digest('synthetic-cancellation'))
+        self.e.now += 30
+        receipt = self.complete(3)
+        self.assertEqual(self.run_request(3).json, receipt.json)
+        self.assertEqual((self.model_calls, self.quota()['used']), (2, 2))
+
+    def test_spent_free_allowance_rechecks_after_upgrade_without_changing_operation(self):
+        self.complete(1)
+        self.complete(2)
+        blocked = self.json_request('prepare', 3)
+        self.assertEqual(blocked.status_code, 429)
+        self.assertEqual(blocked.json.get('success_quota_state'), 'used')
+        self.assertEqual(blocked.json['retry_after'], 30)
+        self.assertEqual(self.quota()['attempts'], 2)
+        self.e.now += 30
+        plus = DailyGrant(self.subject, 10, digest('synthetic-plus'), self.e.now, self.e.now + 30)
+        with patch.object(self.accounts, 'grant', return_value=plus):
+            receipt = self.complete(3)
+            self.assertEqual(self.run_request(3).json, receipt.json)
+        self.assertEqual(self.ledger.snapshot(self.subject, self.e.now // 86400, plus)['remaining'], 7)
+        self.assertEqual(self.model_calls, 3)
 
     def test_concurrent_same_prepare_preserves_one_ticket(self):
         start=threading.Barrier(8)
