@@ -775,3 +775,39 @@ extension LiteServiceOperationTests {
         }
     }
 }
+
+extension LiteServiceOperationTests {
+    func testReadOnlyUnknownReturnsPrepareForExplicitSameOperation() async throws {
+        let (f, wire, journal, service) = try await setup()
+        await wire.plan([ServiceStep(action: "prepare", data: Data(), fail: true)])
+        _ = try await service.resume(f.capture_id) { _ in XCTFail(); return nil }
+        await wire.plan([ServiceStep(action: "status", data: error("lite_operation_unknown"), code: 404)])
+        let resumed = try client(wire, journal, 1006)
+        let waiting = try await resumed.resume(f.capture_id, statusOnly: true) { _ in XCTFail(); return nil }
+        XCTAssertEqual(waiting.next, "prepare")
+        _ = try await resumed.resume(f.capture_id, statusOnly: true) { _ in XCTFail(); return nil }
+        let queried = await wire.requests()
+        XCTAssertEqual(queried.compactMap { $0.url?.lastPathComponent }, ["prepare", "status"])
+        try await wire.plan(doneSteps(f))
+        let done = try await resumed.resume(f.capture_id) { _ in f.image }
+        XCTAssertEqual(done.note, "confirmed"); XCTAssertEqual(done.operation, f.capture_id)
+        let all = await wire.requests()
+        XCTAssertEqual(all.filter { $0.url?.lastPathComponent == "run" }.count, 1)
+    }
+
+    func testReadOnlyCrossDayOfferLeavesRecoveryForExplicitContinuation() async throws {
+        let (f, wire, journal, service) = try await recoverySetup()
+        await wire.plan([ServiceStep(action: "prepare", data: Data(), fail: true)])
+        _ = try await service.resume(f.capture_id) { _ in XCTFail(); return nil }
+        await wire.plan([ServiceStep(action: "status", data: try f.bytes(f.available))])
+        let restarted = try client(wire, journal, 1006)
+        let offered = try await restarted.resume(f.capture_id, statusOnly: true) { _ in XCTFail(); return nil }
+        XCTAssertEqual(offered.next, "recover"); XCTAssertNil(offered.recoveryHistory)
+        XCTAssertEqual(offered.operation, f.capture_id)
+        await wire.plan([ServiceStep(action: "recover", data: try f.bytes(f.authorization))] + (try recoveryFinish(f)))
+        let done = try await restarted.resume(f.capture_id) { _ in f.image }
+        XCTAssertEqual(done.note, "confirmed"); XCTAssertEqual(done.recoveryHistory?.count, 1)
+        let requests = await wire.requests()
+        XCTAssertEqual(requests.compactMap { $0.url?.lastPathComponent }, ["prepare","status","recover","prepare","run"])
+    }
+}

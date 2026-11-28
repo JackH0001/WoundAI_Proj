@@ -32,6 +32,8 @@ final class LiteMeasureVM: ObservableObject {
     @Published private(set) var serviceResult: LiteServiceRecord?
     @Published private(set) var draftNotice: String?
     @Published private(set) var serviceUnreadable = false
+    @Published private(set) var draftNeedsReload = false
+    @Published private(set) var resultApplicationPending = false
     private var draftIdentity: (UUID, Date)?
     private var draftResearchPin: LiteResearchCapturePin?
     private weak var recordStore: LiteStore?
@@ -78,6 +80,7 @@ final class LiteMeasureVM: ObservableObject {
 
     private func clearCapture() {
         gen += 1
+        draftNeedsReload = false; resultApplicationPending = false
         image = nil; captureJPEG = nil; depth = nil; polys = []
         imageW = 0; imageH = 0; estimate = nil
         busyHint = ""; note = nil; uploadMessage = nil; savedId = nil
@@ -112,6 +115,7 @@ final class LiteMeasureVM: ObservableObject {
         let native = self.native
         let researchScope = captureParticipation()
         gen += 1
+        draftNeedsReload = false; resultApplicationPending = false
         busy = true
         busyHint = "影像處理中…"
         defer { busy = false }
@@ -289,10 +293,13 @@ final class LiteMeasureVM: ObservableObject {
             guard value.savedRecordID == nil, let img = UIImage(data: value.jpeg) else { throw LiteServiceFailure.invalidState }
             let d = try value.depth()
             var journal: LiteServiceRecord?, unreadable = false
-            do { journal = try await native.service.storedIfPresent(LiteNativeSession.captureID(recordID: id)) }
+            do {
+                journal = try await readRecognitionRecord(native, draft: value, width: d.rgbWidth, height: d.rgbHeight)
+            }
             catch { unreadable = true }
             guard store.captureCanResume(id), !store.records.contains(where: { $0.id == id }) else { return }
             gen += 1
+            draftNeedsReload = false; resultApplicationPending = false
             image = img; captureJPEG = value.jpeg; depth = d
             imageW = d.rgbWidth; imageH = d.rgbHeight
             polys = value.polygons; source = value.source; contourOrigin = value.origin
@@ -305,52 +312,115 @@ final class LiteMeasureVM: ObservableObject {
             if !polys.isEmpty { await runEstimate() }
             if !unreadable, journal?.note == "confirmed", !userEdited {
                 do { try await useNativeResult() }
-                catch { note = "原拍攝已讀回；辨識圈選尚未完整保存，可再次套用已保存的結果，不需重新辨識。" }
+                catch { resultApplicationPending = true; note = Self.applySavedHint }
             }
         } catch { note = "無法完整核對這筆拍攝，未取代目前畫面或送出資料。原檔保留。" }
     }
 
-    /// Always uses the persisted JPEG and stable capture ID. Explicit expiry
-    /// resubmission is the only path allowed to request a successor operation.
+    private static let applySavedHint = "原拍攝已讀回；辨識圈選尚未完整保存，可再次套用已保存的結果，不需重新辨識。"
+    private static let serviceUnavailableHint = "個人服務暫時無法使用。可稍後再試，或在手機圈選。"
+    private func recognitionAccess(_ session: LiteNativeSession) async -> LiteAccountIdentityStore.RecognitionAccess {
+        await session.checkExistingRegistration()
+        switch session.registration {
+        case .required: return .signedOut
+        case .confirmed: return await session.identity.readRecognitionAccess()
+        case .checking: return .checking
+        case .pending, .unreadable: return .unavailable
+        }
+    }
+
+    private func readRecognitionRecord(_ session: LiteNativeSession, draft: LiteCaptureDraft,
+                                       width: Int, height: Int) async throws -> LiteServiceRecord? {
+        let id = try LiteNativeSession.captureID(recordID: draft.id)
+        let saved = try await session.service.storedIfPresent(id)
+        if let saved {
+            guard saved.imageSHA256 == LiteServiceBytes.hash(draft.jpeg),
+                  saved.width == width, saved.height == height else { throw LiteServiceFailure.conflict }
+        }
+        return saved
+    }
+
+    var recognitionButtonTitle: String {
+        switch serviceResult?.next {
+        case "status": return "查詢這次辨識結果"
+        case "run": return "送出原照片繼續辨識"
+        case nil: return "使用個人雲端辨識"
+        default: return "繼續辨識這張照片"
+        }
+    }
+
+    /// Only the user's explicit resubmission can request a replacement operation.
     func recognizeNative(resubmit: Bool = false, fromButton: Bool = false) async {
-        guard let native, let draft, !busy, !serviceUnreadable else { return }
+        guard let native, let draft, !busy, !serviceUnreadable, !draftNeedsReload else { return }
         guard recordStore?.captureCanResume(draft.id) != false else { note = "這次拍攝已捨棄或紀錄尚待核對，未再送出辨識。"; return }
         busy = true; busyHint = "正在核對個人雲端辨識…"; defer { busy = false }
         let generation = gen
+        let queryRequested = serviceResult?.next == "status"
+        func sameCapture() -> Bool {
+            generation == gen && self.draft?.id == draft.id && recordStore?.captureCanResume(draft.id) != false
+        }
+        guard (try? await native.captures.load(draft.id)) == draft else {
+            if sameCapture() {
+                draftNeedsReload = true
+                note = "本機拍攝資料暫時無法核對。請重新讀取這次拍攝。"
+            }
+            return
+        }
         do {
-            guard try await native.captures.load(draft.id) == draft else { throw LiteServiceFailure.conflict }
-            if fromButton && (serviceResult == nil || serviceResult?.note == "unavailable") {
-                // This reads the local account journal. Opening the account sheet never submits a capture.
-                let access = await native.identity.readPurchaseAccess()
-                guard generation == gen, self.draft?.id == draft.id,
-                      recordStore?.captureCanResume(draft.id) != false else { return }
-                switch access {
-                case .unavailable:
-                    recognitionAwaitingTap = generation
-                    note = Self.recognitionSignInPrompt
-                    showRecognitionAccount = true
-                    return
-                case .checking:
-                    note = "正在確認個人服務帳號，請稍候再點一次辨識。"
-                    return
-                case .available: recognitionAwaitingTap = nil
-                }
-            }
-            if resubmit {
-                _ = try await native.service.requestResubmission(LiteNativeSession.captureID(recordID: draft.id))
-            }
-            let result = try await native.recognizeSaved(recordID: draft.id, jpeg: draft.jpeg)
-            guard generation == gen, self.draft?.id == draft.id,
-                  recordStore?.captureCanResume(draft.id) != false else { return }
-            serviceResult = result
-            note = result.note == "unavailable"
-                ? "個人服務暫時無法確認結果。照片已保存，可稍後查詢同一筆，或在手機圈選傷口。"
-                : result.message
-            if result.note == "confirmed", !userEdited { try await useNativeResult() }
+            let saved = try await readRecognitionRecord(native, draft: draft, width: imageW, height: imageH)
+            guard sameCapture() else { return }
+            guard saved != nil || serviceResult == nil else { throw LiteServiceFailure.conflict }
+            serviceResult = saved
         } catch {
-            guard generation == gen, self.draft?.id == draft.id,
-                  recordStore?.captureCanResume(draft.id) != false else { return }
-            note = "尚未確認辨識結果；照片與深度已保存在手機。請核對服務登入，再續接同一筆。"
+            if sameCapture() { serviceUnreadable = true; note = "辨識回執無法核對，暫停雲端處理；仍可保存本機圈選。" }
+            return
+        }
+        if fromButton {
+            let accountGeneration = native.identity.generation
+            let access = await recognitionAccess(native)
+            guard sameCapture(), accountGeneration == native.identity.generation else { return }
+            switch access {
+            case .signedOut:
+                recognitionAwaitingTap = generation
+                note = Self.recognitionSignInPrompt; showRecognitionAccount = true
+                return
+            case .checking: note = "正在確認個人服務帳號，請稍候再點一次辨識。"; return
+            case .unavailable: note = Self.serviceUnavailableHint; return
+            case .available: recognitionAwaitingTap = nil
+            }
+        }
+        do {
+            let id = try LiteNativeSession.captureID(recordID: draft.id)
+            let result: LiteServiceRecord
+            if (queryRequested || serviceResult?.next == "status") && !resubmit {
+                result = try await native.service.resume(id, statusOnly: true) { _ in throw LiteServiceFailure.invalidState }
+            } else {
+                if resubmit { _ = try await native.service.requestResubmission(id) }
+                result = try await native.recognizeSaved(recordID: draft.id, jpeg: draft.jpeg)
+            }
+            guard sameCapture() else { return }
+            serviceResult = result
+        } catch {
+            do {
+                let saved = try await readRecognitionRecord(native, draft: draft, width: imageW, height: imageH)
+                guard sameCapture() else { return }
+                guard saved != nil || serviceResult == nil else { throw LiteServiceFailure.conflict }
+                serviceResult = saved
+                if saved?.note != "confirmed" {
+                    if let saved, saved.next == "none" { note = saved.message }
+                    else { note = Self.serviceUnavailableHint }
+                    return
+                }
+            } catch {
+                if sameCapture() { serviceUnreadable = true; note = "辨識回執無法核對，暫停雲端處理；仍可保存本機圈選。" }
+                return
+            }
+        }
+        guard let result = serviceResult else { return }
+        note = result.note == "unavailable" ? "個人服務暫時無法確認結果。照片已保存，可稍後查詢同一筆，或在手機圈選傷口。" : result.message
+        if result.note == "confirmed", !userEdited {
+            do { try await useNativeResult() }
+            catch { if sameCapture() { resultApplicationPending = true; note = Self.applySavedHint } }
         }
     }
 
@@ -360,13 +430,14 @@ final class LiteMeasureVM: ObservableObject {
               note == Self.recognitionSignInPrompt, let draft, let native else { return }
         let captureGeneration = gen
         let accountGeneration = native.identity.generation
-        let access = await native.identity.readPurchaseAccess()
+        let access = await recognitionAccess(native)
         guard gen == captureGeneration, native.identity.generation == accountGeneration,
               !showRecognitionAccount, !busy, self.draft?.id == draft.id, self.draft?.revision == draft.revision,
               recordStore?.captureCanResume(draft.id) != false, note == Self.recognitionSignInPrompt else { return }
         switch access {
         case .available: note = "可用這張照片繼續雲端辨識，也可以直接在手機圈選。"
-        case .unavailable: note = "照片已保存在手機。可自行圈選，或登入後使用雲端辨識。"
+        case .signedOut: note = "照片已保存在手機。可自行圈選，或登入後使用雲端辨識。"
+        case .unavailable: note = Self.serviceUnavailableHint
         case .checking: note = "正在確認個人服務帳號，請稍候再點一次辨識。"
         }
     }
@@ -375,7 +446,7 @@ final class LiteMeasureVM: ObservableObject {
     /// creates a first job or a successor, and honors the durable retry deadline.
     func resumePendingRecognition() async {
         guard let native, !busy, recognitionAwaitingTap != gen, let result = serviceResult, !serviceUnreadable,
-              result.next != "none", result.note != "local",
+              result.next == "status",
               result.retryAt <= native.identity.now().timeIntervalSince1970 else { return }
         await recognizeNative()
     }
@@ -395,6 +466,7 @@ final class LiteMeasureVM: ObservableObject {
         next.polygons = chosen; next.source = "cloud"; next.manuallyEdited = false
         next.origin = .cloud(route: answer.route, contract: answer.student_output_contract)
         if next != draft { self.draft = try await native.captures.update(next, previous: draft) }
+        resultApplicationPending = false
         polys = chosen; source = next.source; contourOrigin = next.origin; userEdited = false
         note = chosen.isEmpty ? "未找到可用圈選；照片與深度已保留，可自行圈選。"
             : "已套用個人服務圈選。請確認邊界後存入紀錄；這次辨識不代表同意研究或已上傳研究資料。"
@@ -925,24 +997,25 @@ struct LiteMeasureView: View {
         } else if vm.draft != nil {
             Text(copy.text("請只送出紙上標靶或人造模型的照片。個人雲端辨識會傳送這張照片並核對您的額度。您也可以在手機上自行圈選。研究上傳須另行同意。"))
                 .font(.footnote).foregroundStyle(.secondary)
-            if vm.serviceUnreadable {
-                Text(copy.text("辨識回執無法核對，暫停雲端處理；仍可保存本機圈選。"))
-                    .font(.footnote).foregroundStyle(.orange)
+            if vm.draftNeedsReload || vm.serviceUnreadable {
+                Button(copy.text("重新讀取這次拍攝")) {
+                    if let id = vm.draft?.id { Task { await vm.restoreDraft(id, in: store) } }
+                }.disabled(vm.busy)
             } else if vm.serviceResult?.note == "confirmed" {
-                if vm.hasManualContour || vm.polys.isEmpty {
+                if vm.resultApplicationPending || vm.hasManualContour || vm.polys.isEmpty {
                     Button(copy.text("套用已保存的辨識圈選")) { confirmServiceReplacement = true }
                         .disabled(vm.busy)
                 }
             } else if vm.serviceResult?.canResubmit == true {
                 Button(copy.text("預留已逾時：重新送出")) { Task { await vm.recognizeNative(resubmit: true, fromButton: true) } }
                     .disabled(vm.busy)
-            } else if let record = vm.serviceResult, ["quota", "unavailable"].contains(record.note), record.next != "none" {
+            } else if let record = vm.serviceResult, record.next == "status" || record.note == "quota" {
                 let retryDate = Date(timeIntervalSince1970: record.retryAt)
                 let wait = retryDate.timeIntervalSinceNow
                 let waiting = wait > 0 && wait <= 3600 && elapsedQuotaRetryAt != record.retryAt
                 Button(waiting
                        ? copy.format("%@ 後可再試", retryDate.formatted(Date.FormatStyle(date: .omitted, time: .standard).locale(locale)))
-                       : copy.text("繼續辨識這張照片")) {
+                       : copy.text(vm.recognitionButtonTitle)) {
                     Task { await vm.recognizeNative(fromButton: true) }
                 }.buttonStyle(.borderedProminent).disabled(vm.busy || waiting)
                     .accessibilityIdentifier("lite.capture.personalRecognition")
@@ -952,7 +1025,7 @@ struct LiteMeasureView: View {
                         elapsedQuotaRetryAt = record.retryAt
                     }
             } else if vm.serviceResult?.next != "none" {
-                Button(copy.text(vm.serviceResult == nil ? "使用個人雲端辨識" : "續接這次辨識（不重建工作）")) {
+                Button(copy.text(vm.recognitionButtonTitle)) {
                     Task { await vm.recognizeNative(fromButton: true) }
                 }.buttonStyle(.borderedProminent).disabled(vm.busy)
                     .accessibilityIdentifier("lite.capture.personalRecognition")

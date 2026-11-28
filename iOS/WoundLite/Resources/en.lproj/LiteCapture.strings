@@ -29,7 +29,6 @@
 "無法完整核對這筆拍攝，未取代目前畫面或送出資料。原檔保留。" = "This capture could not be fully verified. The current screen was not replaced and no data was sent. Original files are retained.";
 "這次拍攝已捨棄或紀錄尚待核對，未再送出辨識。" = "This capture was discarded or its record still needs checking. Analysis was not sent again.";
 "正在核對個人雲端辨識…" = "Checking personal cloud analysis…";
-"尚未確認辨識結果；照片與深度已保存在手機。請核對服務登入，再續接同一筆。" = "Analysis is not yet confirmed. The photo and depth are saved on this device. Check service sign-in, then resume this same capture.";
 "未找到可用圈選；照片與深度已保留，可自行圈選。" = "No usable outline was found. The photo and depth are retained; you can draw an outline yourself.";
 "已套用個人服務圈選。請確認邊界後存入紀錄；這次辨識不代表同意研究或已上傳研究資料。" = "The personal-service outline has been applied. Check the boundary before saving. This analysis does not imply research consent or a research upload.";
 "正在套用已保存的辨識結果…" = "Applying the saved analysis result…";
@@ -79,7 +78,6 @@
 "套用已保存的辨識圈選" = "Apply saved analysis outline";
 "預留已逾時：重新送出" = "Reservation expired: submit again";
 "使用個人雲端辨識" = "Use personal cloud analysis";
-"續接這次辨識（不重建工作）" = "Resume this analysis (same operation)";
 "選擇已紀錄傷口" = "Select an existing wound";
 "新增紀錄傷口＋" = "Add a wound +";
 "沿用此傷口的位置，不需重填。" = "This wound's saved location will be used. No need to enter it again.";
@@ -139,3 +137,8 @@
 "返回這次拍攝" = "Return to this capture";
 "可用這張照片繼續雲端辨識，也可以直接在手機圈選。" = "Continue analyzing this photo in the cloud, or outline it on your phone.";
 "照片已保存在手機。可自行圈選，或登入後使用雲端辨識。" = "Your photo is saved on your phone. Outline it now, or sign in for cloud analysis.";
+"個人服務暫時無法使用。可稍後再試，或在手機圈選。" = "Personal Service is temporarily unavailable. Try again later or outline the wound on your phone.";
+"查詢這次辨識結果" = "Check the result for this photo";
+"送出原照片繼續辨識" = "Send the original photo for analysis";
+"本機拍攝資料暫時無法核對。請重新讀取這次拍攝。" = "The saved capture could not be verified. Reload this capture.";
+"重新讀取這次拍攝" = "Reload this capture";

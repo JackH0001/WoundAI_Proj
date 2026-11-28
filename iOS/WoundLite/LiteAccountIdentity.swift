@@ -273,6 +273,31 @@ struct LiteOwnerReviewReference: Encodable, Equatable {
         guard !blocked, let record, ["active", "renew"].contains(record.phase) else { throw LiteAccountFailure.unavailable }
         return true
     }
+    enum RecognitionAccess { case available, signedOut, checking, unavailable }
+
+    /// A local read can establish expiry or absence. A locked journal or a
+    /// deletion in progress does not establish that a fresh login is appropriate.
+    func readRecognitionAccess() async -> RecognitionAccess {
+        let start = generation
+        guard !busy else { return .checking }
+        do {
+            let owner = try await service.installation()
+            let record = try await read(owner).1
+            guard try await !hasDeletionIntent(owner), try await service.installation() == owner,
+                  start == generation else { return .unavailable }
+            guard !busy else { return .checking }
+            guard let record else { return .signedOut }
+            switch record.phase {
+            case "ended", "reauthenticate", "apple": return .signedOut
+            case "active", "renew":
+                guard !blocked, let session = record.session else { return .unavailable }
+                let expires = session.family_expires_at ?? session.expires_at
+                return Double(expires) > now().timeIntervalSince1970 ? .available : .signedOut
+            default: return .unavailable
+            }
+        } catch { return .unavailable }
+    }
+
     enum PurchaseAccessRead: Equatable {
         case available(token: String, deadline: Date), checking, unavailable
     }

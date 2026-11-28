@@ -377,16 +377,18 @@ actor LiteServiceClient {
         return ["not found", "bad gateway", "gateway timeout"].contains(message)
     }
 
-    func resume(_ id: String, loadJPEG: @Sendable (String) async throws -> Data?) async throws -> LiteServiceRecord {
+    func resume(_ id: String, statusOnly: Bool = false,
+                loadJPEG: @Sendable (String) async throws -> Data?) async throws -> LiteServiceRecord {
         guard !busy else { throw LiteServiceFailure.busy }; busy=true; defer { busy=false }
         var (previous,r)=try await read(id)
         guard try await transport.installation() == r.installation else { throw LiteAttestFailure.identityMismatch }
+        guard !statusOnly || r.next == "status" else { return r }
         if r.retryAt > now().timeIntervalSince1970+3600 {
             r.retryAt=now().timeIntervalSince1970+3600;try await save(&r,previous:&previous)
         }
         guard r.next != "none", r.retryAt <= now().timeIntervalSince1970 else { return r }
         // One explicit resume has a bounded prepare/run or status/prepare/run chain.
-        for _ in 0..<3 {
+        for _ in 0..<(statusOnly ? 1 : 3) {
             let action=r.next
             var request=URLRequest(url:origin.appendingPathComponent("api/v1/lite/service/"+action))
             request.httpMethod="POST"

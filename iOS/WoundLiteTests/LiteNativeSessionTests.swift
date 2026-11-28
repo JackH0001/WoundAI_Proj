@@ -72,6 +72,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
     var paths = [String](), session: [String: Any]?, ended = false, closed = false
     var production = false, lostConfirmation = false, lostRun = false
     var statusUnavailable = false, woundResponseCode = 200
+    var lostPrepare = false, preparedOnStatus = false, renewable = false
     var challengeStatus = 200
     var afterContext: (@Sendable () async -> Void)?
     var beforeInstallation: (@Sendable () async -> Void)?
@@ -96,6 +97,8 @@ private actor SessionWire: LiteAuthenticatedTransport {
     func setProduction() { production = true }
     func loseConfirmation() { lostConfirmation = true }
     func loseRun() { lostRun = true }
+    func losePrepareBeforeReady() { lostPrepare = true; preparedOnStatus = true }
+    func useRenewableSession() { renewable = true }
     func onContext(_ closure: @escaping @Sendable () async -> Void) { afterContext = closure }
     func onWoundRead(_ closure: @escaping @Sendable () async -> Void) { afterWoundSnapshot = closure }
     func changeOwner() { owner = "other-installation" }
@@ -119,6 +122,10 @@ private actor SessionWire: LiteAuthenticatedTransport {
         case "account/confirm":
             session = ["v": 1, "state": "signed_in", "installation": owner, "operation": operation,
                 "account_sha256": sessionHash, "app_account_token": sessionToken, "expires_at": sessionTime + 900]
+            if renewable {
+                session?["renewal_generation"] = 0; session?["renewed_at"] = sessionTime
+                session?["family_expires_at"] = sessionTime + 30 * 86400
+            }
             result = session!
         case "account/status":
             guard !ended, !closed, !statusUnavailable, let current = session else { throw LiteAccountFailure.unavailable }
@@ -154,11 +161,13 @@ private actor SessionWire: LiteAuthenticatedTransport {
             result = ["v": 1, "state": "associated", "account_sha256": sessionHash, "app_account_token": sessionToken,
                 "transaction_id": "123", "original_transaction_id": "100", "product_id": "com.woundai.lite.plus.monthly",
                 "environment": "Sandbox", "association_sha256": sessionHash]
-        case "service/prepare": result = golden["prepare"] as! [String: Any]
+        case "service/prepare":
+            if lostPrepare { lostPrepare = false; throw URLError(.timedOut) }
+            result = golden["prepare"] as! [String: Any]
         case "service/run":
             if lostRun { lostRun = false; throw LiteServiceFailure.invalidResponse }
             result = golden["completed"] as! [String: Any]
-        case "service/status": result = golden["completed"] as! [String: Any]
+        case "service/status": result = golden[preparedOnStatus ? "prepare" : "completed"] as! [String: Any]
         case "account/deletion/request", "account/deletion/status":
             if path == "account/deletion/request" {
                 XCTAssertEqual(body["confirmation"] as? String, LiteAccountDeletionCheckpoint.confirmation)
@@ -1325,6 +1334,144 @@ extension LiteNativeSessionTests {
         let calls = await wire.counts()
         XCTAssertNil(calls["service/prepare"])
         XCTAssertNil(calls["service/run"])
+    }
+
+    func testStatusCheckReadsReadyWithoutUploadingUntilAnExplicitCaptureTap() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), journal = SessionJournal(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let session = try runtime(wire, journal, captures: files)
+        await session.identity.signIn()
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        let vm = LiteMeasureVM(native: session)
+        await vm.restoreDraft(draft.id, in: store)
+        await wire.losePrepareBeforeReady()
+        await vm.recognizeNative(fromButton: true)
+        XCTAssertEqual(vm.recognitionButtonTitle, "查詢這次辨識結果")
+        let restarted = try runtime(wire, journal, time: sessionTime + 6, captures: files)
+        let next = LiteMeasureVM(native: restarted)
+        await next.restoreDraft(draft.id, in: store)
+        await next.recognizeNative(fromButton: true)
+        XCTAssertEqual(next.recognitionButtonTitle, "送出原照片繼續辨識")
+        let before = await wire.counts()
+        XCTAssertEqual(before["service/status"], 1)
+        XCTAssertNil(before["service/run"])
+        await next.resumePendingRecognition()
+        await next.restoreDraft(draft.id, in: store)
+        await next.resumePendingRecognition()
+        let stillWaiting = await wire.counts()
+        XCTAssertEqual(before, stillWaiting)
+        await next.recognizeNative(fromButton: true)
+        XCTAssertEqual(next.serviceResult?.note, "confirmed")
+        XCTAssertEqual(vm.serviceResult?.operation, next.serviceResult?.operation)
+        let done = await wire.counts()
+        XCTAssertEqual(done["service/run"], 1)
+        XCTAssertEqual(done["service/prepare"], 1)
+    }
+
+    func testStaleDraftStopsRecognitionAndReloadsTheSavedRevision() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let vm = LiteMeasureVM(native: try runtime(wire, SessionJournal(), captures: files))
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        await vm.restoreDraft(draft.id, in: store)
+        var changed = draft
+        changed.manuallyEdited = true
+        let saved = try await files.update(changed, previous: draft)
+        await vm.recognizeNative(fromButton: true)
+        XCTAssertTrue(vm.draftNeedsReload); XCTAssertFalse(vm.showRecognitionAccount)
+        XCTAssertEqual(vm.note, "本機拍攝資料暫時無法核對。請重新讀取這次拍攝。")
+        await vm.restoreDraft(draft.id, in: store)
+        XCTAssertFalse(vm.draftNeedsReload); XCTAssertEqual(vm.draft, saved)
+        let counts = await wire.counts()
+        XCTAssertNil(counts["service/prepare"])
+    }
+
+    func testStorageErrorBeforeEnqueueDoesNotAskSignedInUserToLogIn() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), files = LiteCaptureDraftStore(directory: path), journal = SessionJournal()
+        let draft = try await captureFixture(wire, in: files)
+        let session = try runtime(wire, journal, captures: files)
+        await session.identity.signIn()
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json")), vm = LiteMeasureVM(native: session)
+        await vm.restoreDraft(draft.id, in: store)
+        await journal.fail(true)
+        await vm.recognizeNative(fromButton: true)
+        XCTAssertNil(vm.serviceResult); XCTAssertFalse(vm.showRecognitionAccount)
+        XCTAssertEqual(vm.note, "個人服務暫時無法使用。可稍後再試，或在手機圈選。")
+        await journal.fail(false)
+        await vm.recognizeNative(fromButton: true)
+        let counts = await wire.counts()
+        XCTAssertEqual(counts["service/prepare"], 1); XCTAssertEqual(counts["service/run"], 1)
+        XCTAssertEqual(vm.serviceResult?.note, "confirmed")
+    }
+
+    func testApplyingConfirmedResultAfterInterruptedWriteNeverStartsAnotherAnalysis() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), journal = SessionJournal(), healthy = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: healthy)
+        let failing = LiteCaptureDraftStore(directory: path, write: { _, _ in throw LiteServiceFailure.invalidState })
+        let session = try runtime(wire, journal, captures: failing)
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        await session.identity.signIn()
+        let vm = LiteMeasureVM(native: session)
+        await vm.restoreDraft(draft.id, in: store)
+        await vm.recognizeNative(fromButton: true)
+        XCTAssertEqual(vm.serviceResult?.note, "confirmed"); XCTAssertTrue(vm.resultApplicationPending)
+        XCTAssertEqual(vm.note, "原拍攝已讀回；辨識圈選尚未完整保存，可再次套用已保存的結果，不需重新辨識。")
+        let before = await wire.counts()
+        let reopened = LiteMeasureVM(native: try runtime(wire, journal, captures: healthy))
+        await reopened.restoreDraft(draft.id, in: store)
+        XCTAssertFalse(reopened.resultApplicationPending); XCTAssertFalse(reopened.polys.isEmpty)
+        let after = await wire.counts()
+        XCTAssertEqual(before, after); XCTAssertEqual(after["service/run"], 1)
+    }
+
+    func testUnreadableAccountJournalKeepsOriginalBytesWithoutSuggestingLogin() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), journal = SessionJournal(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let session = try runtime(wire, journal, captures: files)
+        await session.identity.signIn()
+        let saved = await journal.snapshot()
+        let row = try XCTUnwrap(saved.first { (try? JSONDecoder().decode(LiteAccountCheckpoint.self, from: $0.value)) != nil })
+        let broken = Data("invalid-account-record".utf8)
+        try await journal.replace(row.key, expected: row.value, with: broken)
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json")), vm = LiteMeasureVM(native: session)
+        await vm.restoreDraft(draft.id, in: store)
+        let before = await wire.counts()
+        await vm.recognizeNative(fromButton: true)
+        XCTAssertFalse(vm.showRecognitionAccount); XCTAssertEqual(vm.draft, draft)
+        XCTAssertEqual(vm.note, "個人服務暫時無法使用。可稍後再試，或在手機圈選。")
+        let kept = await journal.snapshot()
+        let after = await wire.counts()
+        XCTAssertEqual(kept[row.key], broken); XCTAssertEqual(after, before)
+    }
+
+    func testFamilyExpiryOpensSignInButDeletionKeepsAccessClosed() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), journal = SessionJournal(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        await wire.useRenewableSession()
+        let original = try runtime(wire, journal, captures: files)
+        await original.identity.signIn()
+        let deadline = sessionTime + 30 * 86400
+        let live = try runtime(wire, journal, time: deadline - 1, captures: files)
+        let active = await live.identity.readRecognitionAccess()
+        XCTAssertEqual(active, .available)
+        let expired = try runtime(wire, journal, time: deadline, captures: files)
+        let vm = LiteMeasureVM(native: expired)
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        await vm.restoreDraft(draft.id, in: store)
+        await vm.recognizeNative(fromButton: true)
+        XCTAssertTrue(vm.showRecognitionAccount); XCTAssertNil(vm.serviceResult)
+        let deletion = original.deletion(pauseResearch: {})
+        await deletion.requestConfirmed()
+        let closed = await original.identity.readRecognitionAccess()
+        XCTAssertEqual(closed, .unavailable)
+        let calls = await wire.counts()
+        XCTAssertNil(calls["service/prepare"]); XCTAssertNil(calls["service/run"])
     }
 
     func testRecognitionWithUnreachableAccountStatusKeepsSameDraftAndShowsServiceMessage() async throws {

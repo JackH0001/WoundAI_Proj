@@ -927,7 +927,15 @@ private struct PrivacyReadback: Decodable, Equatable {
         _ = try await NativeWire.control(cfg, "advance", JSONEncoder().encode(["seconds":1201]))
         _ = try await NativeWire.control(cfg, "restart")
         let reopened = try session(wire, apple, kit, directory, seed.now + 1201)
-        let result = try await reopened.recognizeSaved(recordID: String(format: "00000000-0000-0000-0000-%012x", 1), jpeg: image)
+        let result: LiteServiceRecord
+        if gatewayTimeout {
+            result = try await reopened.service.resume(waiting.captureID, statusOnly: true) { _ in
+                XCTFail("Checking a settled job must not request the saved photo")
+                return nil
+            }
+        } else {
+            result = try await reopened.recognizeSaved(recordID: String(format: "00000000-0000-0000-0000-%012x", 1), jpeg: image)
+        }
         XCTAssertEqual(result.note, "confirmed", result.message); XCTAssertEqual(result.operation, waiting.operation)
         let again = try await reopened.recognizeSaved(recordID: String(format: "00000000-0000-0000-0000-%012x", 1), jpeg: image)
         XCTAssertEqual(again, result); XCTAssertEqual(apple.signIns, 1)
