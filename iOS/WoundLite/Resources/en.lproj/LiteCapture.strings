@@ -127,3 +127,5 @@
 "預留已逾時，尚未執行辨識。原照片保留；按「重新送出」後將重新檢查額度。" = "The reservation expired before recognition ran. The original photo is retained. Tapping “Submit again” will check the allowance again.";
 "原工作已取消，但原因尚未確認；資料保留，請先核對，不會自動重送。" = "The original task was cancelled, but the reason is unconfirmed. Data is retained. Check the status first; it will not be resubmitted automatically.";
 "服務回覆或資料不一致，已停止傳送；請保留原紀錄待核對。" = "The service response or data is inconsistent, so sending has stopped. Keep the original record for review.";
+"今日辨識嘗試已達上限，請在額度重置後繼續使用這張照片。" = "Today’s analysis attempt limit has been reached. Continue with this photo after the allowance resets.";
+"這次辨識正在等候可用額度，原照片已保留。" = "This analysis is waiting for an available use. Your photo is saved.";

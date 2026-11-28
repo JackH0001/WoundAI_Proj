@@ -471,6 +471,22 @@ final class LiteServiceOperationTests: XCTestCase {
         XCTAssertEqual(r.note,"quota");XCTAssertEqual(r.retryAt,4600);XCTAssertEqual(r.next,"prepare")
         XCTAssertTrue(r.message.contains("額度"));let sent=await w.requests();XCTAssertEqual(sent.count,1)
     }
+    func testAttemptLimitAndReservedOrUsedQuotaKeepThePhotoAndOriginalOperation() async throws {
+        for reason in ["attempt_quota", "success_quota"] {
+            let (fixture, wire, _, service) = try await setup()
+            let body = try JSONSerialization.data(withJSONObject: ["error": "lite_usage_limit", "reason": reason])
+            await wire.plan([ServiceStep(action: "prepare", data: body, code: 429, wait: "30")])
+            let result = try await service.resume(fixture.capture_id) { _ in XCTFail("Asked for photo"); return nil }
+            let saved = try await service.stored(fixture.capture_id)
+            XCTAssertEqual(saved.operation, result.operation)
+            XCTAssertEqual(saved.note, "quota")
+            XCTAssertEqual(saved.attemptLimitReached == true, reason == "attempt_quota")
+            XCTAssertEqual(saved.message.contains("嘗試已達上限"), reason == "attempt_quota")
+            let requests = await wire.requests()
+            XCTAssertEqual(requests.count, 1)
+        }
+    }
+
     func testCapacityWaitIsDistinctAndMalformedWaitDoesNotLockForever() async throws {
         let (f,w,_,c)=try await setup()
         await w.plan([ServiceStep(action:"prepare",data:error("lite_service_budget"),code:429,wait:"inf")])

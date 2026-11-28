@@ -160,6 +160,7 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
     var revision = 1
     var next = "prepare"
     var note = "local"
+    var attemptLimitReached: Bool?
     var retryAt: Double = 0
     var day: Int?
     var requestDigest: String?
@@ -217,7 +218,10 @@ struct LiteServiceRecord: Codable, Equatable, Sendable {
     var message: String {
         switch note {
         case "confirmed": return "辨識結果與回執已核對；尚未存入量測紀錄或研究庫。"
-        case "quota": return "今日辨識額度已用完或已有工作待確認；保留原照片，待額度可用後核對。"
+        case "quota":
+            return attemptLimitReached == true
+                ? "今日辨識嘗試已達上限，請在額度重置後繼續使用這張照片。"
+                : "這次辨識正在等候可用額度，原照片已保留。"
         case "capacity": return "服務忙碌，稍後核對原工作；不需重新拍攝。"
         case "pending", "checking": return "正在核對原辨識工作；尚未確認完成，不會另建一筆重複辨識。"
         case "recovering": return "原工作已核對並保留；正在恢復跨日辨識，不需重新拍攝。"
@@ -434,6 +438,7 @@ actor LiteServiceClient {
                 let wait=Double(http.value(forHTTPHeaderField:"Retry-After") ?? "") ?? 5
                 r.retryAt=now().timeIntervalSince1970+min(3600,max(1,wait.isFinite ? wait : 5))
                 r.note=http.statusCode == 429 ? (error?["error"] as? String == "lite_usage_limit" ? "quota":"capacity") : "unavailable"
+                r.attemptLimitReached = r.note == "quota" && error?["reason"] as? String == "attempt_quota" ? true : nil
                 // A rejected initial prepare can be retried with the same id/hash.
                 if http.statusCode == 429, action == "prepare", r.requestDigest == nil { r.next="prepare" }
             } else {

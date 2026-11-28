@@ -715,7 +715,7 @@ struct LiteMeasureView: View {
                         .accessibilityIdentifier("lite.capture.instructions")
 
                     if let nativeSession {
-                        NavigationLink(copy.text("個人服務登入")) { LiteNativeSessionView(session: nativeSession) }
+                        LiteMeasureAllowanceView(session: nativeSession, record: vm.serviceResult)
                         if !vm.pendingCaptures.isEmpty {
                             Menu(copy.format("繼續尚未存入的拍攝（%@）", String(vm.pendingCaptures.count))) {
                                 ForEach(vm.pendingCaptures) { item in

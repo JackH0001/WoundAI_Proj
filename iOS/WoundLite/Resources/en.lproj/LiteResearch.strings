@@ -146,3 +146,5 @@
 "已確認重新加入研究" = "Research rejoining confirmed";
 "重新加入尚未完成" = "Research rejoining not yet confirmed";
 "確定" = "OK";
+"額度重置時間：%@" = "Allowance resets %@";
+"今日額度尚未確認。" = "Today’s allowance is unavailable.";

@@ -92,6 +92,23 @@ private actor BalanceTransport: LiteAuthenticatedTransport {
         }
     }
 
+    func testOnlyExhaustedFreeAccountWithAvailablePlusCapacityGetsUpgradeLink() throws {
+        let cases: [([String: Any], Bool)] = [
+            (["used": 2, "pending": 0], true),
+            (["used": 9, "pending": 0], true),
+            (["used": 10, "pending": 0], false),
+            (["used": 2, "pending": 0, "attempt_limit_reached": true], false),
+            (["used": 10, "pending": 0, "limit": 10], false),
+            (["used": 1, "pending": 0, "remaining": 1], false),
+            ([:], false)
+        ]
+        for (fields, expected) in cases {
+            let value = try JSONDecoder().decode(LitePersonalBalance.self, from: data(fields))
+            try value.validate(account: account, at: date)
+            XCTAssertEqual(value.canGainUsesWithPlus, expected)
+        }
+    }
+
     func testOnlyCurrentDaySnapshotIsFreshAtUTCReset() throws {
         let end=(day/86400+1)*86400, stamp=end-3
         let v = try JSONDecoder().decode(LitePersonalBalance.self,from:data(["as_of":stamp,"attempt_limit_reached":true]))

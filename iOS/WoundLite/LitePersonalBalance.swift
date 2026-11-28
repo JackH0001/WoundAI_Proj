@@ -27,9 +27,17 @@ struct LitePersonalBalance: Decodable, Equatable {
         return LiteServiceCopy.text("今天的辨識額度已用完。", locale: locale)
     }
 
+    var canGainUsesWithPlus: Bool {
+        limit == 2 && used >= limit && used < 10 && pending == 0 && remaining == 0 && !attempt_limit_reached
+    }
+
+    var expiresAt: Date {
+        Date(timeIntervalSince1970: min(Double(resets_at), Double(as_of) + 300))
+    }
+
     func isFresh(at date: Date) -> Bool {
         let now = date.timeIntervalSince1970
-        return now >= Double(as_of) - 60 && now < min(Double(resets_at), Double(as_of) + 300)
+        return now >= Double(as_of) - 60 && now < expiresAt.timeIntervalSince1970
     }
 
     static func fetch(context: LiteDeletionContext, transport: any LiteAuthenticatedTransport,
@@ -48,6 +56,90 @@ struct LitePersonalBalance: Decodable, Equatable {
         let value = try JSONDecoder().decode(Self.self, from: data)
         try value.validate(account: context.account, at: now())
         return value
+    }
+}
+
+/// The measurement tab reads the personal allowance only for its current signed-in session.
+struct LiteMeasureAllowanceView: View {
+    @Environment(\.locale) private var locale
+    @Environment(\.scenePhase) private var phase
+    @ObservedObject private var session: LiteNativeSession
+    @ObservedObject private var identity: LiteAccountIdentityStore
+    @ObservedObject private var purchases: LiteNativePurchaseStore
+    let operation: String?
+    let operationNote: String?
+
+    init(session: LiteNativeSession, record: LiteServiceRecord?) {
+        self.session = session
+        self.identity = session.identity
+        self.purchases = session.purchases
+        operation = record?.operation
+        operationNote = record?.note
+    }
+
+    private struct Query: Equatable {
+        let account: LiteNativeSession.PurchaseAccount?
+        let operation: String?, note: String?
+        let purchases: Int, refresh: Int
+    }
+    @State private var refresh = 0
+    @State private var checked: Query?
+    @State private var balance: LitePersonalBalance?
+    private var query: Query {
+        Query(account: phase == .active ? session.purchaseObservationAccount : nil,
+              operation: operation, note: operationNote, purchases: purchases.confirmedUpdates, refresh: refresh)
+    }
+    private var copy: LiteResearchCopy { LiteResearchCopy(locale: locale) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if phase != .active {
+                EmptyView()
+            } else if query.account == nil {
+                NavigationLink(LiteCaptureCopy(locale: locale).text("個人服務登入")) { LiteNativeSessionView(session: session) }
+            } else {
+                Text(copy.text("今日個人辨識額度")).font(.subheadline.weight(.semibold))
+                if checked != query {
+                    ProgressView(copy.text("正在核對…"))
+                } else if let balance, balance.isFresh(at: Date()) {
+                    Text(balance.availabilityMessage(locale: locale))
+                        .accessibilityIdentifier("lite.measure.allowance")
+                    if balance.canGainUsesWithPlus {
+                        NavigationLink(LiteServiceCopy.text("Plus 方案與價格", locale: locale)) {
+                            LiteNativePurchaseView(session: session)
+                        }.accessibilityIdentifier("lite.measure.plus")
+                    }
+                    if balance.pending > 0 || balance.attempt_limit_reached || balance.remaining == 0 {
+                        Text(copy.format("額度重置時間：%@", copy.date(Date(timeIntervalSince1970: Double(balance.resets_at)))))
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                    if balance.pending > 0 { refreshButton }
+                } else {
+                    Text(copy.text("今日額度尚未確認。")).font(.footnote)
+                    refreshButton
+                }
+            }
+        }
+        .task(id: query) {
+            let request = query
+            balance = nil
+            checked = nil
+            guard request.account != nil, request.account?.generation == identity.generation else { return }
+            let result = try? await session.personalBalance()
+            guard !Task.isCancelled, query == request else { return }
+            checked = request
+            balance = result
+            guard let result else { return }
+            // Expire on the UTC boundary or at the snapshot's freshness limit, without polling.
+            do { try await Task.sleep(for: .seconds(max(0, result.expiresAt.timeIntervalSinceNow))) }
+            catch { return }
+            if !Task.isCancelled, query == request { balance = nil }
+        }
+    }
+
+    private var refreshButton: some View {
+        Button(copy.text("核對今日額度")) { refresh += 1 }
+            .accessibilityIdentifier("lite.measure.refreshAllowance")
     }
 }
 
