@@ -38,6 +38,47 @@ class SharedNativeHTTPTests(native.StartupHTTPTests):
     def setUp(self):
         with patch.object(native,'Fixture',SharedNativeFixture):super().setUp()
 
+    def test_first_login_expired_challenge_requests_fresh_apple_sign_in(self):
+        challenge = self.post('account/challenge', operation='f' * 32).json
+        fields = dict(operation=challenge['operation'], state=challenge['state'],
+                      identity_token=self.h.identity.token(challenge), authorization_code='synthetic-expired')
+        self.h.release.n.a.now = challenge['expires_at']
+        self.e.now = self.h.clock()
+        before = self.h.snapshot()
+        wrong_state = dict(fields, state='0' * 64)
+        self.assertEqual(self.post('account/confirm', **wrong_state).status_code, 401)
+        for _ in range(2):
+            response = self.post('account/confirm', **fields)
+            self.assertEqual(response.status_code, 409, response.json)
+            self.assertEqual(response.json, dict(error='lite_apple_grant_recovery_required', keep_local=True,
+                                                explicit_sign_in_required=True, retry_saved_code=False))
+        self.assertEqual(self.h.snapshot(), before)
+        self.assertEqual(self.h.grant.calls, [])
+        self.assertIsNone(self.backend.identity.registry.registration(self.owner, required=False))
+        self.login()
+        self.assertEqual(len(self.h.grant.calls), 1)
+        self.assertEqual((self.quota()['used'], self.h.model_calls), (0, 0))
+
+    def test_lost_confirm_after_session_expiry_requires_fresh_sign_in_only_for_same_token(self):
+        self.login()
+        original = self.login_result
+        self.h.release.n.a.now = original['expires_at']
+        self.e.now = self.h.clock()
+        before = self.h.snapshot()
+        wrong_token = dict(self.confirm_fields, identity_token='different')
+        self.assertEqual(self.post('account/confirm', **wrong_token).status_code, 401)
+        response = self.post('account/confirm', **self.confirm_fields)
+        self.assertEqual(response.status_code, 409, response.json)
+        self.assertEqual(response.json, dict(error='lite_apple_grant_recovery_required', keep_local=True,
+                                            explicit_sign_in_required=True, retry_saved_code=False))
+        self.assertEqual(self.h.snapshot(), before)
+        self.assertEqual(len(self.h.grant.calls), 1)
+        self.login()
+        self.assertEqual(self.login_result['account_sha256'], original['account_sha256'])
+        self.assertEqual(self.login_result['app_account_token'], original['app_account_token'])
+        self.assertEqual(len(self.h.grant.calls), 2)
+        self.assertEqual((self.quota()['used'], self.h.model_calls), (0, 0))
+
     def test_explicit_shared_graph_and_readonly_deletion_progress(self):
         self.assertIs(type(self.backend.identity.grants.cipher),RotatingGrantCipher)
         self.assertEqual(self.backend.progress.catalog,SHARED_CATALOG)

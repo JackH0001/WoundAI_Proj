@@ -25,6 +25,7 @@ ACCOUNT_PATHS = {PREFIX + p for p in ('challenge', 'confirm', 'status', 'logout'
 
 class IdentityRejected(ValueError): pass
 class OwnerReviewRestart(IdentityRejected): pass
+class SignInExpired(IdentityRejected): pass
 
 
 def _session_key(namespace, installation):
@@ -400,7 +401,7 @@ class AccountIdentityBridge:
             existing, provisioned = self._sign_in_registration(installation)
             token_hash=digest(signed)
             if c['phase'] == 'challenge':
-                if self.now() >= c['expires_at']: raise IdentityRejected('sign-in expired')
+                if self.now() >= c['expires_at']: raise SignInExpired('sign-in expired')
                 claims=self.verifier.verify(signed,c['nonce'])
                 if claims['issued'] < c['created_at']-30: raise IdentityRejected('token predates challenge')
                 identity=hmac.new(self.secret, (self.namespace+'\0'+self.verifier.issuer+'\0'+claims['sub']).encode(),hashlib.sha256).hexdigest()
@@ -429,8 +430,10 @@ class AccountIdentityBridge:
                              session_expires_at=min(claims['expires'],self.now()+900))
                 if not self.store.compare_exchange(self._key(installation),rev,updated): continue
                 continue
-            if c['token_sha256'] != token_hash or self.now() >= c['session_expires_at']:
-                raise IdentityRejected('saved sign-in differs or expired')
+            if c['token_sha256'] != token_hash:
+                raise IdentityRejected('saved sign-in differs')
+            if self.now() >= c['session_expires_at']:
+                raise SignInExpired('saved sign-in expired')
             if internal_account_sha256 is not None and not self.matches_account(c['account'],internal_account_sha256):
                 raise IdentityRejected('not eligible for this internal service')
             if self.lifecycle is not None: self.lifecycle.require_active(c['account']['identity_sha256'])
@@ -557,7 +560,7 @@ def blueprint(bridge, *, internal_account_sha256=None, owner_review_until=None):
             else:result=getattr(bridge,kind)(admission.installation,body['operation'])
             return jsonify(result)
         except IdentityRejected as exc:
-            if isinstance(exc,OwnerReviewRestart):
+            if isinstance(exc,OwnerReviewRestart) or (bridge.grants is not None and isinstance(exc,SignInExpired)):
                 return jsonify(error='lite_apple_grant_recovery_required',keep_local=True,
                     explicit_sign_in_required=True,retry_saved_code=False),409
             if bridge.grants is not None:
