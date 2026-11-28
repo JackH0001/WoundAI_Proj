@@ -157,7 +157,21 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
 /// Server acknowledgment is persisted before StoreKit finish. No local paid flag.
 @MainActor final class LiteNativePurchaseStore: ObservableObject {
     @Published private(set) var message = ""
-    @Published private(set) var busy=false
+    enum Activity {
+        case purchasing, restoring, checkingTransactions, observingTransactions
+
+        var progress: String? {
+            switch self {
+            case .purchasing: return "正在處理訂閱…"
+            case .restoring: return "正在恢復既有訂閱…"
+            case .checkingTransactions: return "正在查詢未完成的交易…"
+            case .observingTransactions: return nil
+            }
+        }
+    }
+
+    @Published private(set) var activity: Activity?
+    var busy: Bool { activity != nil }
     @Published private(set) var offer: LiteMonthlyOffer?
     @Published private(set) var loadingOffer = false
     @Published private(set) var confirmedUpdates = 0
@@ -275,8 +289,8 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
     func purchase(accepting displayed: LiteMonthlyOffer, for account: LiteNativeSession.PurchaseAccount? = nil) async {
         guard !busy, !loadingOffer, offer == displayed else { return }
         let generation = account?.generation ?? accountGeneration()
-        busy = true
-        defer { busy = false }
+        activity = .purchasing
+        defer { activity = nil }
         do {
             try checkAccount(generation)
             let current = try await provider.monthlyOffer()
@@ -309,6 +323,7 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
         }
         do {
             if !known.isEmpty {
+                activity = .checkingTransactions
                 try await reconcileKnown(known, using: c, generation: generation)
                 return
             }
@@ -330,7 +345,9 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
         } catch { failed(error) }
     }
     func restore(for account: LiteNativeSession.PurchaseAccount? = nil) async {
-        guard !busy else{return};busy=true;defer{busy=false}
+        guard !busy else { return }
+        activity = .restoring
+        defer { activity = nil }
         let generation = account?.generation ?? accountGeneration()
         let c: LitePurchaseContext
         do { c = try await context(for: account, generation: generation) }
@@ -355,7 +372,9 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
         } catch { failed(error) }
     }
     func reconcile(reportEmpty: Bool = true, accountToken: String? = nil) async {
-        guard !busy else{return};busy=true;defer{busy=false}
+        guard !busy else { return }
+        activity = reportEmpty ? .checkingTransactions : .observingTransactions
+        defer { activity = nil }
         let generation = accountGeneration()
         do {
             let events = try await provider.unfinished()

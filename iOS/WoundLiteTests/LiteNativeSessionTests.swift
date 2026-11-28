@@ -724,6 +724,43 @@ private actor SessionWire: LiteAuthenticatedTransport {
         XCTAssertEqual(f.kit.restores, 1, "A stale combined action cannot start a second restore")
     }
 
+    func testPendingRegistrationOpensPlanWithOneSignInAndNoStoreKitAction() async throws {
+        let f = try await interruptedRegistration()
+        let originalProof = await f.registration.snapshot().0
+        f.apple.onSignIn = { await f.session.prepareForPurchase(.resumeRegistrationAndSignIn) }
+        await f.session.prepareForPurchase(.resumeRegistrationAndSignIn)
+        let submitted = await f.registration.snapshot().0
+        let ownerOnly = LiteNativeBuild.showsOwnerReview
+        XCTAssertEqual(submitted, ownerOnly ? originalProof : originalProof + originalProof)
+        XCTAssertEqual(f.apple.calls, ownerOnly ? 0 : 1)
+        XCTAssertEqual(f.session.registration, ownerOnly ? .required : .confirmed)
+        if !ownerOnly {
+            XCTAssertTrue(f.session.purchasePreparationMessage.contains("再按訂閱"))
+            await f.session.prepareForPurchase(.resumeRegistrationAndSignIn)
+            XCTAssertEqual(f.apple.calls, 1)
+        }
+        let counts = await f.wire.counts()
+        XCTAssertFalse(counts.keys.contains { $0.hasPrefix("purchase/") || $0.hasPrefix("research/") })
+        XCTAssertEqual(f.kit.buys + f.kit.restores + f.kit.finishes, 0)
+    }
+
+    func testPendingSignInStopsAtFailedEnrollmentOrCancelledApplePrompt() async throws {
+        let f = try await interruptedRegistration()
+        await f.registration.options(failRegistration: true)
+        await f.session.prepareForPurchase(.resumeRegistrationAndSignIn)
+        XCTAssertEqual(f.apple.calls, 0)
+        if !LiteNativeBuild.showsOwnerReview {
+            XCTAssertEqual(f.session.registration, .pending)
+            f.apple.cancelled = true
+            await f.session.prepareForPurchase(.resumeRegistrationAndSignIn)
+            XCTAssertEqual(f.apple.calls, 1)
+            XCTAssertTrue(f.session.purchasePreparationMessage.contains("已取消登入"))
+        }
+        let counts = await f.wire.counts()
+        XCTAssertNil(counts["purchase/context"])
+        XCTAssertEqual(f.kit.buys + f.kit.restores + f.kit.finishes, 0)
+    }
+
     func testFailedEnrollmentWaitsForAnotherExplicitRestoreTap() async throws {
         let f = try await interruptedRegistration()
         await f.registration.options(failRegistration: true)

@@ -67,6 +67,7 @@ private actor PurchaseJournal:LiteServiceJournal {
     var beforeKnown: (() -> Void)?
     var afterPayment: (() -> Void)?
     var duringRestore: (() -> Void)?
+    var duringUnfinished: (() -> Void)?
     func knownPurchases() async throws -> [LitePurchaseEvent] {
         beforeKnown?()
         return pending + restored
@@ -86,7 +87,7 @@ private actor PurchaseJournal:LiteServiceJournal {
         return outcome
     }
     func restore() async throws ->[LitePurchaseEvent]{restoreCalls+=1;duringRestore?();return restored}
-    func unfinished() async throws ->[LitePurchaseEvent]{unfinishedReads += 1; return pending}
+    func unfinished() async throws ->[LitePurchaseEvent]{unfinishedReads += 1; duringUnfinished?(); return pending}
     func updates()->AsyncStream<LitePurchaseUpdate>{AsyncStream{continuation=$0}}
     func finish(_ e:LitePurchaseEvent)async throws {
         try await beforeFinish?()
@@ -99,6 +100,36 @@ private actor PurchaseJournal:LiteServiceJournal {
     private func setup()->(PurchaseService,PurchaseProvider,PurchaseJournal,LiteNativePurchaseStore){
         let s=PurchaseService(),p=PurchaseProvider(),j=PurchaseJournal()
         return(s,p,j,LiteNativePurchaseStore(service:s,provider:p,journal:j,accountGeneration:{s.generation},now:{Date(timeIntervalSince1970:Double(purchaseNow))}))
+    }
+
+    func testProgressSeparatesPurchaseRestoreExplicitCheckAndBackgroundObservation() async {
+        let (_, provider, _, store) = setup()
+        var seen: [String?] = []
+        provider.beforePurchase = { seen.append(store.activity?.progress) }
+        provider.duringRestore = { seen.append(store.activity?.progress) }
+        provider.duringUnfinished = {
+            XCTAssertTrue(store.busy)
+            seen.append(store.activity?.progress)
+        }
+        await store.purchaseDisplayedTestOffer()
+        await store.restore()
+        await store.reconcile()
+        await store.reconcile(reportEmpty: false)
+        XCTAssertEqual(seen, ["正在處理訂閱…", "正在恢復既有訂閱…", "正在查詢未完成的交易…", nil])
+        XCTAssertFalse(store.busy)
+        XCTAssertNil(store.activity)
+        XCTAssertEqual(provider.purchases, 1)
+        XCTAssertEqual(provider.restoreCalls, 1)
+    }
+
+    func testKnownTransactionFoundDuringPurchaseSwitchesToCheckingWithoutNewPayment() async {
+        let (_, provider, _, store) = setup()
+        provider.pending = [event()]
+        provider.beforeFinish = { XCTAssertEqual(store.activity?.progress, "正在查詢未完成的交易…") }
+        await store.purchaseDisplayedTestOffer()
+        XCTAssertEqual(provider.purchases, 0)
+        XCTAssertEqual(provider.finishes, 1)
+        XCTAssertNil(store.activity)
     }
 
     func testSecondTapWithUnfinishedTransactionReconcilesWithoutBuyingAgain() async {

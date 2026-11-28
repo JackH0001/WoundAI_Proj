@@ -125,20 +125,23 @@ struct LiteNativePurchaseView: View {
                             currentPlan(for: account, at: clock.date)
                         }
                     }
-                    if store.busy { ProgressView(copy("正在核對，請勿重複購買…")) }
-                    if !store.message.isEmpty {
+                    if let progress = store.activity?.progress {
+                        ProgressView(copy(progress)).accessibilityIdentifier("lite.offer.transactionProgress")
+                    } else if !session.preparingAccount && !store.message.isEmpty {
                         Text(copy(store.message)).font(.footnote).accessibilityIdentifier("nativePurchaseStatus")
                     }
                 } else {
                     if session.registration == .pending {
-                        Button(copy("續接裝置登記")) { Task { await session.registerDevice(resumePending: true) } }
-                            .disabled(busy).accessibilityIdentifier("lite.offer.resumeRegistration")
+                        Text(copy("續接裝置登記並以 Apple 登入")).font(.subheadline)
+                        LiteAppleSignInButton(identifier: "lite.offer.resumeRegistration") {
+                            Task { await session.prepareForPurchase(.resumeRegistrationAndSignIn) }
+                        }.disabled(busy)
                     } else {
                         LiteAppleSignInButton(identifier: "lite.offer.signIn") {
                             Task { await session.prepareForPurchase() }
                         }.disabled(busy)
                     }
-                    Text(session.registration == .pending ? copy(session.message) : session.presentationPurchasePreparation(locale: locale))
+                    Text(session.registration == .pending && !session.preparingAccount ? copy(session.message) : session.presentationPurchasePreparation(locale: locale))
                         .accessibilityIdentifier("lite.offer.preparationStatus")
                     if session.registration == .confirmed, let account = try? session.accountView() {
                         NavigationLink(copy("核對未完成登入或帳號狀態")) { account }

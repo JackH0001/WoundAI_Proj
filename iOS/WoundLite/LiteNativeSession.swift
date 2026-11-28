@@ -295,7 +295,7 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
 
     private func showPendingRegistration() {
         registration = .pending
-        message = "上次的裝置登記尚待確認。點選「續接裝置登記」，服務會先核對原登記。"
+        message = "原裝置登記正等待確認。"
     }
 
     func registerDevice(resumePending: Bool = false) async {
@@ -384,17 +384,18 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
         }
     }
 
-    enum OfferAction { case subscribe, restore, resumeRegistrationAndRestore }
+    enum OfferAction { case subscribe, resumeRegistrationAndSignIn, restore, resumeRegistrationAndRestore }
 
     func prepareForPurchase(_ action: OfferAction = .subscribe) async {
         guard canPrepareAccount else { return }
         preparingAccount = true
         defer { preparingAccount = false }
         preparationCopy = nil
-        purchasePreparationMessage = "正在核對裝置登記…尚未付款。"
-        let restoring = action != .subscribe
-        let result = await authenticateForTap(resumePending: action == .resumeRegistrationAndRestore) {
-            purchasePreparationMessage = "正在登入服務帳號…請完成 Apple 登入，尚未付款。"
+        let restoring = action == .restore || action == .resumeRegistrationAndRestore
+        let resuming = action == .resumeRegistrationAndSignIn || action == .resumeRegistrationAndRestore
+        purchasePreparationMessage = "正在確認裝置登記…"
+        let result = await authenticateForTap(resumePending: resuming) {
+            purchasePreparationMessage = "請完成 Apple 登入，以確認服務帳號。"
         }
         switch result {
         case .ready(let account):
@@ -412,7 +413,7 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
             preparationCopy = detail
             purchasePreparationMessage = detail.source
         case .pending:
-            purchasePreparationMessage = "上次的裝置登記尚待確認。點選「續接裝置登記」，服務會先核對原登記。"
+            purchasePreparationMessage = message
         case .unavailable:
             purchasePreparationMessage = "目前無法連上訂閱服務。請稍後再試。"
         case .unconfirmed:
