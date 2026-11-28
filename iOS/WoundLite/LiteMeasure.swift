@@ -27,9 +27,31 @@ final class LiteMeasureVM: ObservableObject {
     @Published private(set) var draft: LiteCaptureDraft?
     @Published private(set) var pendingCaptures: [LiteCaptureDraftSummary] = []
     @Published var showRecognitionAccount = false
+    struct ManualEditor: Identifiable {
+        let id = UUID()
+        let image: UIImage
+        let polygons: [[[Int]]]
+        fileprivate let generation: Int
+        fileprivate let draftID: String?
+        fileprivate let revision: Int?
+    }
+    @Published var manualEditor: ManualEditor?
+    @Published private(set) var manualSaveProblem: String?
     private var recognitionAwaitingTap: Int?
     private static let recognitionSignInPrompt = "請先開啟個人服務完成登入。回到量測後，可用同一張照片繼續辨識。"
+    private static let pendingRegistrationPrompt = "請在個人服務點「續接裝置登記」，再回到這張照片。"
+    private static let unreadableRegistrationPrompt = "暫時無法讀取這部裝置的登記。請解鎖後再點辨識，或先在手機圈選。"
     @Published private(set) var serviceResult: LiteServiceRecord?
+    @Published private var verifiedTargets: LiteContourTargets?
+    @Published var presentedTargets: LiteContourTargets?
+    var availableTargets: LiteContourTargets? {
+        guard let targets = verifiedTargets, let draft, savedId == nil,
+              !draftNeedsReload, !serviceUnreadable, manualEditor == nil,
+              targets.captureID == draft.id, targets.revision == draft.revision,
+              targets.operation == serviceResult?.operation,
+              targets.resultHash == serviceResult?.reply?.receipt?.result_sha256 else { return nil }
+        return targets
+    }
     @Published private(set) var draftNotice: String?
     @Published private(set) var serviceUnreadable = false
     @Published private(set) var draftNeedsReload = false
@@ -319,13 +341,20 @@ final class LiteMeasureVM: ObservableObject {
 
     private static let applySavedHint = "原拍攝已讀回；辨識圈選尚未完整保存，可再次套用已保存的結果，不需重新辨識。"
     private static let serviceUnavailableHint = "個人服務暫時無法使用。可稍後再試，或在手機圈選。"
-    private func recognitionAccess(_ session: LiteNativeSession) async -> LiteAccountIdentityStore.RecognitionAccess {
+    private enum CaptureAccess {
+        case account(LiteAccountIdentityStore.RecognitionAccess)
+        case pendingRegistration, unreadableRegistration
+    }
+
+    private func recognitionAccess(_ session: LiteNativeSession) async -> CaptureAccess {
+        guard !session.registering else { return .account(.checking) }
         await session.checkExistingRegistration()
         switch session.registration {
-        case .required: return .signedOut
-        case .confirmed: return await session.identity.readRecognitionAccess()
-        case .checking: return .checking
-        case .pending, .unreadable: return .unavailable
+        case .required: return .account(.signedOut)
+        case .confirmed: return .account(await session.identity.readRecognitionAccess())
+        case .checking: return .account(.checking)
+        case .pending: return .pendingRegistration
+        case .unreadable: return .unreadableRegistration
         }
     }
 
@@ -351,7 +380,7 @@ final class LiteMeasureVM: ObservableObject {
 
     /// Only the user's explicit resubmission can request a replacement operation.
     func recognizeNative(resubmit: Bool = false, fromButton: Bool = false) async {
-        guard let native, let draft, !busy, !serviceUnreadable, !draftNeedsReload else { return }
+        guard let native, let draft, !busy, manualEditor == nil, !serviceUnreadable, !draftNeedsReload else { return }
         guard recordStore?.captureCanResume(draft.id) != false else { note = "這次拍攝已捨棄或紀錄尚待核對，未再送出辨識。"; return }
         busy = true; busyHint = "正在核對個人雲端辨識…"; defer { busy = false }
         let generation = gen
@@ -380,13 +409,16 @@ final class LiteMeasureVM: ObservableObject {
             let access = await recognitionAccess(native)
             guard sameCapture(), accountGeneration == native.identity.generation else { return }
             switch access {
-            case .signedOut:
+            case .account(.signedOut), .pendingRegistration:
                 recognitionAwaitingTap = generation
-                note = Self.recognitionSignInPrompt; showRecognitionAccount = true
+                if case .pendingRegistration = access { note = Self.pendingRegistrationPrompt }
+                else { note = Self.recognitionSignInPrompt }
+                showRecognitionAccount = true
                 return
-            case .checking: note = "正在確認個人服務帳號，請稍候再點一次辨識。"; return
-            case .unavailable: note = Self.serviceUnavailableHint; return
-            case .available: recognitionAwaitingTap = nil
+            case .unreadableRegistration: note = Self.unreadableRegistrationPrompt; return
+            case .account(.checking): note = "正在確認個人服務帳號，請稍候再點一次辨識。"; return
+            case .account(.unavailable): note = Self.serviceUnavailableHint; return
+            case .account(.available): recognitionAwaitingTap = nil
             }
         }
         do {
@@ -426,26 +458,29 @@ final class LiteMeasureVM: ObservableObject {
 
     /// Both ways of closing the sheet return to the same draft without dispatching a photo.
     func recognitionAccountDismissed() async {
-        guard !showRecognitionAccount, recognitionAwaitingTap == gen, !busy,
-              note == Self.recognitionSignInPrompt, let draft, let native else { return }
+        guard !showRecognitionAccount, recognitionAwaitingTap == gen, !busy, let initialNote = note,
+              initialNote == Self.recognitionSignInPrompt || initialNote == Self.pendingRegistrationPrompt,
+              let draft, let native else { return }
         let captureGeneration = gen
         let accountGeneration = native.identity.generation
         let access = await recognitionAccess(native)
         guard gen == captureGeneration, native.identity.generation == accountGeneration,
               !showRecognitionAccount, !busy, self.draft?.id == draft.id, self.draft?.revision == draft.revision,
-              recordStore?.captureCanResume(draft.id) != false, note == Self.recognitionSignInPrompt else { return }
+              recordStore?.captureCanResume(draft.id) != false, note == initialNote else { return }
         switch access {
-        case .available: note = "可用這張照片繼續雲端辨識，也可以直接在手機圈選。"
-        case .signedOut: note = "照片已保存在手機。可自行圈選，或登入後使用雲端辨識。"
-        case .unavailable: note = Self.serviceUnavailableHint
-        case .checking: note = "正在確認個人服務帳號，請稍候再點一次辨識。"
+        case .account(.available): note = "可用這張照片繼續雲端辨識，也可以直接在手機圈選。"
+        case .account(.signedOut): note = "照片已保存在手機。可自行圈選，或登入後使用雲端辨識。"
+        case .pendingRegistration: note = "裝置登記仍待續接。照片已存在手機，可先圈選，或點辨識返回個人服務。"
+        case .unreadableRegistration: note = Self.unreadableRegistrationPrompt
+        case .account(.unavailable): note = Self.serviceUnavailableHint
+        case .account(.checking): note = "正在確認個人服務帳號，請稍候再點一次辨識。"
         }
     }
 
     /// Foreground continuation of an already requested operation only. Never
     /// creates a first job or a successor, and honors the durable retry deadline.
     func resumePendingRecognition() async {
-        guard let native, !busy, recognitionAwaitingTap != gen, let result = serviceResult, !serviceUnreadable,
+        guard let native, !busy, manualEditor == nil, recognitionAwaitingTap != gen, let result = serviceResult, !serviceUnreadable,
               result.next == "status",
               result.retryAt <= native.identity.now().timeIntervalSince1970 else { return }
         await recognizeNative()
@@ -453,19 +488,51 @@ final class LiteMeasureVM: ObservableObject {
 
     /// Explicit replacement is required after a manual edit. Service result hashes
     /// and geometry are checked before changing the draft or estimating an area.
-    func useNativeResult() async throws {
+    func useNativeResult(selecting index: Int? = nil) async throws {
         guard let native, let draft, let r = serviceResult, r.note == "confirmed",
               recordStore?.captureCanResume(draft.id) != false,
               r.captureID == (try LiteNativeSession.captureID(recordID: draft.id)),
               r.origin == native.origin.absoluteString, r.imageSHA256 == LiteServiceBytes.hash(draft.jpeg),
               r.width == imageW, r.height == imageH, let answer = r.reply?.result else { throw LiteServiceFailure.conflict }
         try r.validate()
-        let chosen = Self.centerWound(answer.wound_polygons.map { $0.map { $0.map { Int($0.rounded(.down)) } } },
-                                      w: imageW, h: imageH)
+        let candidates = answer.wound_polygons.map { $0.map { $0.map { Int($0.rounded(.down)) } } }
+            .filter { DepthCapture.polygonsFit([$0], width: imageW, height: imageH) }
+        var targets: LiteContourTargets?
+        var chosen = candidates
+        if candidates.count > 1 {
+            guard let hash = r.reply?.receipt?.result_sha256 else { throw LiteServiceFailure.conflict }
+            targets = LiteContourTargets(captureID: draft.id, revision: draft.revision, operation: r.operation,
+                                         resultHash: hash, polygons: candidates, width: imageW, height: imageH)
+            let saved = draft.source == "cloud" && !draft.manuallyEdited && draft.polygons.count == 1
+                ? candidates.firstIndex(of: draft.polygons[0]) : nil
+            guard let selected = index ?? saved else {
+                verifiedTargets = targets
+                resultApplicationPending = false
+                note = "辨識到多個輪廓。請在照片中選擇這次要量測的一處。"
+                return
+            }
+            guard candidates.indices.contains(selected) else { throw LiteServiceFailure.conflict }
+            chosen = [candidates[selected]]
+        }
         var next = draft
         next.polygons = chosen; next.source = "cloud"; next.manuallyEdited = false
         next.origin = .cloud(route: answer.route, contract: answer.student_output_contract)
-        if next != draft { self.draft = try await native.captures.update(next, previous: draft) }
+        if next != draft {
+            do { self.draft = try await native.captures.update(next, previous: draft) }
+            catch {
+                guard index != nil else { throw error }
+                // A failed acknowledgement can still leave the exact chosen outline on disk.
+                next.revision += 1
+                guard let readback = try? await native.captures.load(draft.id), readback == next else {
+                    draftNeedsReload = true
+                    estimate = nil
+                    throw error
+                }
+                self.draft = readback
+            }
+        }
+        if let revision = self.draft?.revision { targets?.revision = revision }
+        verifiedTargets = targets
         resultApplicationPending = false
         polys = chosen; source = next.source; contourOrigin = next.origin; userEdited = false
         note = chosen.isEmpty ? "未找到可用圈選；照片與深度已保留，可自行圈選。"
@@ -476,8 +543,23 @@ final class LiteMeasureVM: ObservableObject {
     func replaceWithNativeResult() async {
         guard !busy else { return }
         busy = true; busyHint = "正在套用已保存的辨識結果…"; defer { busy = false }
-        do { try await useNativeResult() }
+        do {
+            try await useNativeResult()
+            if let targets = availableTargets { presentedTargets = targets }
+        }
         catch { note = "辨識結果與原拍攝無法核對，未取代圈選。" }
+    }
+
+    func confirmNativeTarget(_ index: Int, from offered: LiteContourTargets) async {
+        guard !busy, offered == availableTargets, offered.polygons.indices.contains(index) else { return }
+        busy = true; busyHint = "正在套用已保存的辨識結果…"; defer { busy = false }
+        do {
+            try await useNativeResult(selecting: index)
+            presentedTargets = nil
+        } catch {
+            presentedTargets = nil
+            note = "輪廓尚未套用。請重新讀取這次拍攝後再選擇。"
+        }
     }
 
     func markDraftSaved(_ value: LiteCaptureDraft, in store: LiteStore) async {
@@ -579,19 +661,57 @@ final class LiteMeasureVM: ObservableObject {
         }
     }
 
-    /// 手動圈選完成。
-    func applyManual(_ traced: [[[Int]]], correctionIoU: Double? = nil) async {
-        // Merely opening the editor is not a manual label. Preserve the exact
-        // original polygons and estimate instead of retracing an unchanged mask.
-        guard correctionIoU != 1 || polys.isEmpty else { return }
-        guard !busy else { return }
+    func beginManualEditing() {
+        guard manualEditor == nil, !busy, let image, !usesServiceDraft || draft != nil else { return }
+        manualSaveProblem = nil
+        manualEditor = ManualEditor(image: image, polygons: polys, generation: gen, draftID: draft?.id, revision: draft?.revision)
+    }
+
+    private func matchesManualEditor(_ editor: ManualEditor) -> Bool {
+        manualEditor?.id == editor.id && gen == editor.generation && image === editor.image
+            && draft?.id == editor.draftID && draft?.revision == editor.revision
+            && (editor.draftID.map { recordStore?.captureCanResume($0) != false } ?? true)
+    }
+
+    /// Finish only after the edit has been committed to the same capture.
+    @discardableResult
+    func applyManual(_ traced: [[[Int]]], correctionIoU: Double? = nil, editor: ManualEditor? = nil) async -> Bool {
+        func failed(_ text: String) -> Bool {
+            if let editor {
+                if manualEditor?.id == editor.id { manualSaveProblem = text }
+            } else { note = text }
+            return false
+        }
+        let changedCapture = "原草稿已變更。請取消圈選，再從原拍攝開啟。"
+        if let editor, !matchesManualEditor(editor) { return failed(changedCapture) }
+        guard !busy else { return failed("正在處理這次拍攝。請稍候再按「完成圈選」。") }
+        manualSaveProblem = nil
         busy = true; busyHint = "正在保存圈選…"; defer { busy = false }
+        if correctionIoU == 1, !polys.isEmpty {
+            if let editor, let native, let draft {
+                guard let original = try? await native.captures.load(draft.id) else {
+                    return failed("原草稿目前無法讀取。請解鎖手機後再按「完成圈選」。")
+                }
+                guard original == draft, matchesManualEditor(editor) else { return failed(changedCapture) }
+            }
+            return true
+        }
         let picked = Self.centerWound(traced, w: imageW, h: imageH)
         if usesServiceDraft, let native {
-            guard let draft else { note = "請先完成照片與深度的本機保存，再修正圈選。"; return }
+            guard let draft else { return failed("請先完成照片與深度的本機保存，再修正圈選。") }
             var next = draft; next.polygons = picked; next.source = "manual"; next.manuallyEdited = true
-            do { self.draft = try await native.captures.update(next, previous: draft) }
-            catch { note = "修改尚未保存，已保留上次圈選；請核對儲存空間後再試。"; return }
+            let saved: LiteCaptureDraft
+            do { saved = try await native.captures.update(next, previous: draft) }
+            catch {
+                // A write may have committed even when its acknowledgement was lost.
+                next.revision += 1
+                let current = try? await native.captures.load(draft.id)
+                if let current, current == next { saved = current }
+                else if let current, current != draft { return failed(changedCapture) }
+                else { return failed("圈選尚未保存。請保留畫布，確認手機儲存空間後再按「完成圈選」。") }
+            }
+            if let editor, !matchesManualEditor(editor) { return failed(changedCapture) }
+            self.draft = saved
         }
         polys = picked
         source = "manual"
@@ -600,6 +720,7 @@ final class LiteMeasureVM: ObservableObject {
             note = "圈選含多個分離區塊，已取最靠近畫面中央的一塊。"
         }
         await runEstimate()
+        return true
     }
 
     /// 單一中心傷口：取質心最靠近畫面中央的輪廓（民眾版產品決策 2026-08-18）。
@@ -796,7 +917,7 @@ struct LiteMeasureView: View {
     @State private var discardCaptureID: String?
     @State private var elapsedQuotaRetryAt: TimeInterval?
     @State private var showCamera = false
-    @State private var showTrace = false
+    @State private var savingTrace = false
     @State private var woundID = ""
     @State private var woundSide = ""
     @State private var woundSite = ""
@@ -854,14 +975,14 @@ struct LiteMeasureView: View {
                     if vm.image == nil || !vm.usesServiceDraft { measurementFeedback }
 
                     if let img = vm.image {
-                        LitePreview(image: img, polys: vm.polys,
+                        LitePreview(image: img, polys: vm.polys.isEmpty ? vm.availableTargets?.polygons ?? [] : vm.polys,
                                     imageW: vm.imageW, imageH: vm.imageH)
                         if vm.usesServiceDraft {
                             measurementFeedback
                             nativeRecognition
                         }
                         if vm.depth != nil {
-                            Button(copy.text(vm.polys.isEmpty ? "圈選傷口" : "修正圈選")) { showTrace = true }
+                            Button(copy.text(vm.polys.isEmpty ? "圈選傷口" : "修正圈選")) { vm.beginManualEditing() }
                                 .buttonStyle(.bordered)
                                 .disabled(vm.busy || (vm.usesServiceDraft && vm.draft == nil))
                         }
@@ -890,6 +1011,15 @@ struct LiteMeasureView: View {
                 Text(copy.text("目前量測尚未存入紀錄。拍下新照片後會取代這個畫面；已存入的紀錄不受影響。取消相機可回到目前量測。"))
             }
             .onAppear { if vm.image == nil { selectLastWound() } }
+            .sheet(item: $vm.presentedTargets) { targets in
+                if let image = vm.image, targets == vm.availableTargets {
+                    LiteContourTargetPicker(image: image, targets: targets,
+                                            original: vm.hasManualContour ? [] : vm.polys,
+                                            busy: vm.busy) { index in
+                        await vm.confirmNativeTarget(index, from: targets)
+                    }
+                }
+            }
             .task(id: nativeSession.map(ObjectIdentifier.init)) {
                 vm.attachNativeSession(nativeSession)
                 await vm.reloadDrafts(in: store)
@@ -950,29 +1080,37 @@ struct LiteMeasureView: View {
                         Task {
                             vm.attachNativeSession(nativeSession)
                             let done = await vm.ingest(img, depth: dep)
-                            if !done { showTrace = true }
+                            if !done { vm.beginManualEditing() }
                             await vm.reloadDrafts(in: store)
                         }
                     },
                     onCancel: { showCamera = false })
             }
-            .fullScreenCover(isPresented: $showTrace) {
-                if let img = vm.image {
-                    // 借用醫療版修邊畫布的 boundaryOnly 模式（雙指縮放平移、筆刷、undo、
-                    // 亮青邊界線；隱藏組織/PUSH 等醫療概念）——兩個 App 畫布操作一致。
-                    // initialPolygons 預載目前輪廓：對雲端/上次結果做微調，而不是從零重畫。
-                    WoundEditView(image: img,
-                                  initialPolygons: vm.polys,
-                                  originalArea: nil, tissueFrac: [:], exudate: nil,
-                                  mmPerPx: nil, resume: nil, wbGains: nil,
-                                  boundaryOnly: true,
-                                  displayText: LiteCaptureControlsCopy(locale: locale).text,
-                                  onCancel: { showTrace = false },
-                                  onDone: { _, all, iou, _, _, _ in
-                                      showTrace = false
-                                      Task { await vm.applyManual(all, correctionIoU: iou) }
-                                  })
-                }
+            .fullScreenCover(item: $vm.manualEditor) { editor in
+                WoundEditView(image: editor.image, initialPolygons: editor.polygons,
+                              originalArea: nil, tissueFrac: [:], exudate: nil,
+                              mmPerPx: nil, resume: nil, wbGains: nil, boundaryOnly: true,
+                              displayText: LiteCaptureControlsCopy(locale: locale).text,
+                              onCancel: { if !savingTrace { vm.manualEditor = nil } },
+                              onDone: { _, all, iou, _, _, _ in
+                                  guard !savingTrace else { return }
+                                  savingTrace = true
+                                  Task { @MainActor in
+                                      defer { savingTrace = false }
+                                      let saved = await vm.applyManual(all, correctionIoU: iou, editor: editor)
+                                      if saved, vm.manualEditor?.id == editor.id { vm.manualEditor = nil }
+                                  }
+                              })
+                    .disabled(savingTrace)
+                    .interactiveDismissDisabled(savingTrace)
+                    .overlay(alignment: .top) {
+                        if let issue = vm.manualSaveProblem {
+                            Text(copy.message(issue)).font(.footnote)
+                                .padding(8).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                                .accessibilityIdentifier("lite.capture.manualSaveProblem")
+                                .allowsHitTesting(false)
+                        }
+                    }
             }
         }
     }
@@ -1002,7 +1140,12 @@ struct LiteMeasureView: View {
                     if let id = vm.draft?.id { Task { await vm.restoreDraft(id, in: store) } }
                 }.disabled(vm.busy)
             } else if vm.serviceResult?.note == "confirmed" {
-                if vm.resultApplicationPending || vm.hasManualContour || vm.polys.isEmpty {
+                if let targets = vm.availableTargets, !vm.hasManualContour {
+                    Button(copy.format("選擇本次量測的輪廓（%@ 處）", String(targets.polygons.count))) {
+                        vm.presentedTargets = targets
+                    }.buttonStyle(.borderedProminent).disabled(vm.busy)
+                        .accessibilityIdentifier("lite.capture.chooseTarget")
+                } else if vm.resultApplicationPending || vm.hasManualContour || vm.polys.isEmpty {
                     Button(copy.text("套用已保存的辨識圈選")) { confirmServiceReplacement = true }
                         .disabled(vm.busy)
                 }
@@ -1209,6 +1352,114 @@ struct LitePreview: View {
         let copy = LiteHistoryCopy(locale: locale)
         WoundImagePreview(image: image, polygons: polys, imageW: imageW, imageH: imageH, height: 280,
                           gestureHint: copy.text("雙指縮放與移動，檢查圈選邊界。"), resetTitle: copy.text("重設檢視"))
+    }
+}
+
+/// A local view of one verified service reply. Indices refer to that reply only.
+struct LiteContourTargets: Identifiable, Equatable {
+    let captureID: String
+    var revision: Int
+    let operation: String
+    let resultHash: String
+    let polygons: [[[Int]]]
+    let width: Int, height: Int
+    var id: String { captureID + "/" + operation + "/" + resultHash + "/" + String(revision) }
+
+    func relativeCenter(_ index: Int) -> CGPoint {
+        let points = polygons[index]
+        let count = CGFloat(points.count)
+        return CGPoint(x: CGFloat(points.reduce(0) { $0 + $1[0] }) / count / CGFloat(width),
+                       y: CGFloat(points.reduce(0) { $0 + $1[1] }) / count / CGFloat(height))
+    }
+}
+
+private struct LiteContourTargetPicker: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.locale) private var locale
+    private var copy: LiteCaptureCopy { LiteCaptureCopy(locale: locale) }
+    let image: UIImage
+    let targets: LiteContourTargets
+    let busy: Bool
+    let apply: (Int) async -> Void
+    @State private var selected: Int?
+    init(image: UIImage, targets: LiteContourTargets, original: [[[Int]]], busy: Bool,
+         apply: @escaping (Int) async -> Void) {
+        self.image = image; self.targets = targets; self.busy = busy; self.apply = apply
+        _selected = State(initialValue: original.count == 1 ? targets.polygons.firstIndex(of: original[0]) : nil)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(copy.text("點照片上的編號或下方選項，查看輪廓後再確認。切換目標不另計辨識次數。"))
+                    Image(uiImage: image).resizable().aspectRatio(contentMode: .fit)
+                        .overlay {
+                            GeometryReader { geometry in
+                                let size = geometry.size
+                                ZStack(alignment: .topLeading) {
+                                    Canvas { context, _ in
+                                        for i in targets.polygons.indices {
+                                            let points = targets.polygons[i].map {
+                                                CGPoint(x: CGFloat($0[0]) / CGFloat(targets.width) * size.width,
+                                                        y: CGFloat($0[1]) / CGFloat(targets.height) * size.height)
+                                            }
+                                            var path = Path()
+                                            path.addLines(points); path.closeSubpath()
+                                            let active = selected == i
+                                            let style = StrokeStyle(lineWidth: active ? 3 : 2,
+                                                                    dash: active ? [] : [5, 3])
+                                            context.stroke(path, with: .color(.black), lineWidth: active ? 5 : 3)
+                                            context.stroke(path, with: .color(active ? .cyan : .white), style: style)
+                                        }
+                                    }
+                                    ForEach(targets.polygons.indices, id: \.self) { i in
+                                        let point = targets.relativeCenter(i)
+                                        Button { selected = i } label: {
+                                            Text(String(i + 1)).font(.footnote.bold().monospacedDigit())
+                                                .foregroundStyle(selected == i ? .black : .white)
+                                                .frame(minWidth: 24, minHeight: 24)
+                                                .background(selected == i ? Color.cyan : .black, in: Circle())
+                                                .overlay(Circle().stroke(.white))
+                                                .padding(8)
+                                        }.buttonStyle(.plain)
+                                            .position(x: min(max(12, point.x * size.width), max(12, size.width - 12)),
+                                                      y: min(max(12, point.y * size.height), max(12, size.height - 12)))
+                                            .accessibilityHidden(true)
+                                    }
+                                }
+                            }
+                        }
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 130))], alignment: .leading) {
+                        ForEach(targets.polygons.indices, id: \.self) { i in
+                            let point = targets.relativeCenter(i)
+                            let vertical = point.y < 1/3 ? "上方" : point.y > 2/3 ? "下方" : "中間"
+                            let horizontal = point.x < 1/3 ? "左側" : point.x > 2/3 ? "右側" : "中央"
+                            Button {
+                                selected = i
+                            } label: {
+                                Label(copy.format("輪廓 %@（%@、%@）", String(i + 1), copy.text(vertical), copy.text(horizontal)),
+                                      systemImage: selected == i ? "checkmark.circle.fill" : "circle")
+                            }.buttonStyle(.bordered)
+                                .accessibilityAddTraits(selected == i ? .isSelected : [])
+                                .accessibilityIdentifier("lite.capture.target.\(i + 1)")
+                        }
+                    }
+                    Button(copy.text("確認量測所選輪廓")) {
+                        if let selected { Task { await apply(selected) } }
+                    }.buttonStyle(.borderedProminent).disabled(selected == nil || busy)
+                        .accessibilityIdentifier("lite.capture.confirmTarget")
+                }.padding()
+            }
+            .disabled(busy)
+            .navigationTitle(copy.text("選擇量測目標"))
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(copy.text("取消")) { dismiss() }.disabled(busy)
+                }
+            }
+            .interactiveDismissDisabled(busy)
+        }
     }
 }
 
