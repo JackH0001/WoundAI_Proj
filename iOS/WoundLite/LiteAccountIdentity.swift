@@ -299,7 +299,7 @@ struct LiteOwnerReviewReference: Encodable, Equatable {
     }
 
     enum PurchaseAccessRead: Equatable {
-        case available(token: String, deadline: Date), checking, unavailable
+        case available(token: String, deadline: Date), checking(token: String, deadline: Date), unavailable
     }
 
     /// A routine service check may become busy while the journal read is suspended.
@@ -312,7 +312,8 @@ struct LiteOwnerReviewReference: Encodable, Equatable {
                   !blocked, generation == start else { return .unavailable }
             let deadline = Date(timeIntervalSince1970: Double(session.family_expires_at ?? session.expires_at))
             guard deadline > now() else { return .unavailable }
-            return busy ? .checking : .available(token: session.app_account_token, deadline: deadline)
+            return busy ? .checking(token: session.app_account_token, deadline: deadline)
+                        : .available(token: session.app_account_token, deadline: deadline)
         } catch { return .unavailable }
     }
 

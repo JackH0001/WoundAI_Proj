@@ -954,8 +954,10 @@ private actor SessionWire: LiteAuthenticatedTransport {
         apple.onAuthorized = {
             let read = await r.identity.readPurchaseAccess()
             let payment = await r.identity.localPurchaseAccess()
-            XCTAssertEqual(read, .checking)
+            let feedbackAccount = await r.accountForRestoreFeedback()
+            XCTAssertEqual(read, .checking(token: original.token, deadline: Date(timeIntervalSince1970: Double(sessionTime + 900))))
             XCTAssertNil(payment)
+            XCTAssertEqual(feedbackAccount, original)
             XCTAssertEqual(r.purchaseObservationAccount, original)
             checked = true
         }
@@ -966,7 +968,9 @@ private actor SessionWire: LiteAuthenticatedTransport {
         await r.identity.signOut()
         XCTAssertNil(r.purchaseObservationAccount)
         let signedOut = await r.identity.readPurchaseAccess()
+        let signedOutFeedback = await r.accountForRestoreFeedback()
         XCTAssertEqual(signedOut, .unavailable)
+        XCTAssertNil(signedOutFeedback)
         XCTAssertEqual(kit.buys, 0)
         XCTAssertEqual(kit.restores, 0)
     }
@@ -983,7 +987,9 @@ private actor SessionWire: LiteAuthenticatedTransport {
         XCTAssertEqual(restoredDeadline, originalDeadline)
         let expired = try runtime(wire, journal, time: sessionTime + 900)
         let expiredDeadline = await expired.identity.purchaseAccessDeadline()
+        let expiredFeedback = await expired.accountForRestoreFeedback()
         XCTAssertNil(expiredDeadline)
+        XCTAssertNil(expiredFeedback)
         let after = await wire.counts(), rowsAfter = await journal.snapshot()
         XCTAssertEqual(before, after)
         XCTAssertEqual(rows, rowsAfter)

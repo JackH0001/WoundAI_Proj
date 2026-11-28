@@ -420,12 +420,24 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
 
     enum OfferAction { case subscribe, resumeRegistrationAndSignIn, restore, resumeRegistrationAndRestore }
 
+    /// Identify the recipient of completed restore feedback while an allowance check is in flight.
+    /// Starting another purchase still requires available access.
+    func accountForRestoreFeedback() async -> PurchaseAccount? {
+        let generation = identity.generation
+        let state = await identity.readPurchaseAccess()
+        guard !Task.isCancelled, generation == identity.generation else { return nil }
+        switch state {
+        case let .available(token, deadline), let .checking(token, deadline):
+            guard deadline > identity.now() else { return nil }
+            return PurchaseAccount(generation: generation, token: token)
+        case .unavailable:
+            return nil
+        }
+    }
+
     func restorePurchases(for account: PurchaseAccount) async {
         await purchases.restore(for: account) {
-            // Registration observers can lag behind an explicit sign-in, so read the
-            // local session directly before displaying a result from Apple.
-            guard let access = await self.identity.localPurchaseAccess() else { return nil }
-            return PurchaseAccount(generation: self.identity.generation, token: access.token)
+            await self.accountForRestoreFeedback()
         }
     }
 
