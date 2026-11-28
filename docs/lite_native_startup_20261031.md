@@ -213,6 +213,25 @@ and a signed request from a fresh installation at the app URL, followed by
 Apple Sandbox sign-in and purchase restoration before inviting external testers.
 [Cloud Run v2 Service fields and traffic allocation](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services)
 
+### 本人 TestFlight 的兩階段服務讀回
+
+`owner-review` 讓一個已登記的安裝先提交 Apple 身分。取得本人帳號的私有核對收據、完成額度與服務啟用後，`owner-only` 才接受該安裝與帳號的訂閱操作。裝置初次登記仍用獨立的 `check_lite_owner_enrollment_revision.py`。
+
+先依發行 IPA、受限執行身分、固定映像及實際 Secret 數字版本建立本頁的方案，包含 `serving_origin`。將 `owner` 加入私有方案，欄位由該階段決定。
+
+| mode | 其他必填欄位 |
+| --- | --- |
+| `owner-review` | `installation_sha256`、`starts`、`until`。後兩者是 epoch 秒，期間最長 3600 秒。工具在此時段內讀回修訂，核對執行環境上的截止時間。 |
+| `owner-only` | `installation_sha256`、`account_sha256`。帳號摘要取自已私下核對的本人收據。 |
+
+在採集雲端讀回前保存已覆核方案的檔案 SHA-256。以服務和修訂的同次部署快照執行：
+
+```sh
+python tools/check_lite_native_revision.py owner-plan.json revision.json settings.json --service service.json --owner-plan-sha256 "$OWNER_PLAN_SHA256"
+```
+
+比對涵蓋實際 Ready 的修訂、已收斂的服務、預期的單一目標與全量流量、掛載及模式專用欄位。帶有其他修訂標籤的路由會停止驗收。輸出列出模式與時間，個人安裝及帳號摘要只留在私有輸入。外測沿用原呼叫方式，遇到本人模式仍會拒絕。實際 IAM、生效端點、本人手機登入與 Sandbox 交易另以對應的現場讀回確認。
+
 ### Runtime metadata
 
 The native service and the separate key preparation worker check the attached service

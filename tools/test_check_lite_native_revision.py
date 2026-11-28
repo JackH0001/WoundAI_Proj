@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 
-from check_lite_native_revision import Mismatch, check, parse
+from check_lite_native_revision import Mismatch, check, check_owner, parse
 
 
 def example():
@@ -240,7 +240,7 @@ class RevisionTests(unittest.TestCase):
             self.assertNotIn(b"private diagnostic text",failed.stderr)
 
 
-class ServingTests(unittest.TestCase):
+class ServingFixture:
     def setUp(self):
         self.plan, self.rev, self.raw = example()
         self.revision = self.rev["name"]
@@ -253,6 +253,8 @@ class ServingTests(unittest.TestCase):
                         "uri": "https://synthetic-alias.a.run.app", "urls": [self.origin],
                         "traffic": [self.target.copy()], "trafficStatuses": [self.target.copy()]}
 
+
+class ServingTests(ServingFixture, unittest.TestCase):
     def verify(self):
         return check(self.plan, self.rev, self.raw, service=self.service)["serving"]
 
@@ -351,3 +353,116 @@ class ServingTests(unittest.TestCase):
             paths[0].write_text(json.dumps({k: v for k, v in self.plan.items() if k != "serving_origin"}))
             paths[-1].write_text("null")
             self.assertEqual(subprocess.run(cmd, capture_output=True).returncode, 1)
+
+
+class OwnerServingTests(ServingFixture, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.rev.update(generation="4", observedGeneration="4",
+                        conditions=[{"type": "Ready", "state": "CONDITION_SUCCEEDED"}])
+        self.owner = {"mode": "owner-review", "installation_sha256": "c" * 64, "starts": 100, "until": 3700}
+        self.plan["owner"] = self.owner
+        self.env = self.rev["containers"][0]["env"]
+        self.env.extend([{"name": "LITE_INTERNAL_OWNER_MODE", "value": "owner-review"},
+                         {"name": "LITE_INTERNAL_INSTALLATION_SHA256", "value": "c" * 64},
+                         {"name": "LITE_INTERNAL_REVIEW_UNTIL", "value": "3700"}])
+
+    def verify(self, *, clock=lambda: 101, pin=None):
+        raw = json.dumps(self.plan).encode()
+        return check_owner(raw, pin or hashlib.sha256(raw).hexdigest(), self.rev, self.raw, self.service, clock=clock)
+
+    def activate(self):
+        self.owner.clear()
+        self.owner.update(mode="owner-only", installation_sha256="c" * 64, account_sha256="d" * 64)
+        self.env[-3]["value"] = "owner-only"
+        self.env[-1] = {"name": "LITE_INTERNAL_ACCOUNT_SHA256", "value": "d" * 64}
+
+    def test_two_stages_report_observed_route_without_participant_pins(self):
+        result = self.verify()
+        self.assertEqual((result["owner_mode"], result["seconds_remaining"]), ("owner-review", 3599))
+        self.activate()
+        result = self.verify()
+        self.assertEqual(result["scope"], "owner-personal-service-serving-metadata")
+        self.assertEqual((result["owner_mode"], result["serving"]["percent"]), ("owner-only", 100))
+        self.assertNotIn("seconds_remaining", result)
+        for pin in (self.owner["installation_sha256"], self.owner["account_sha256"]):
+            self.assertNotIn(pin, json.dumps(result))
+
+    def test_window_edges(self):
+        for now, remaining in ((100, 3600), (3699, 1)):
+            self.assertEqual(self.verify(clock=lambda: now)["seconds_remaining"], remaining)
+        for times in ((99, 99), (3700, 3700), (101, 100), (3699, 3700)):
+            with self.subTest(times=times), self.assertRaises(Mismatch):
+                self.verify(clock=iter(times).__next__)
+        self.owner["until"] = 3701
+        with self.assertRaises(Mismatch):
+            self.verify()
+
+    def test_public_check_and_unpinned_plan_do_not_accept_owner(self):
+        with self.assertRaises(Mismatch):
+            check(self.plan, self.rev, self.raw, service=self.service)
+        with self.assertRaises(Mismatch):
+            self.verify(pin="1" * 64)
+        self.env.clear()
+        with self.assertRaises(Mismatch):
+            self.verify()
+
+    def test_final_plan_cannot_match_first_stage_or_a_different_account(self):
+        first = copy.deepcopy(self.env)
+        self.activate()
+        final = copy.deepcopy(self.env)
+        self.env[:] = first
+        with self.assertRaises(Mismatch):
+            self.verify()
+        self.env[:] = final
+        self.env[-1]["value"] = "e" * 64
+        with self.assertRaises(Mismatch):
+            self.verify()
+
+    def test_wrong_installation_deadline_and_extra_variables(self):
+        for offset, value in ((-1, "3701"), (-2, "e" * 64)):
+            before = self.env[offset]["value"]
+            self.env[offset]["value"] = value
+            with self.subTest(offset=offset), self.assertRaises(Mismatch):
+                self.verify()
+            self.env[offset]["value"] = before
+        for key in ("LITE_OWNER_ENROLLMENT_PLAN", "LITE_INTERNAL_ACCOUNT_SHA256", "GCE_METADATA_HOST"):
+            self.env.append({"name": key, "value": "unexpected"})
+            with self.subTest(key=key), self.assertRaises(Mismatch):
+                self.verify()
+            self.env.pop()
+
+    def test_revision_readiness_tags_and_service_required(self):
+        for key in ("conditions", "observedGeneration"):
+            original = self.rev.pop(key)
+            with self.subTest(key=key), self.assertRaises(Mismatch):
+                self.verify()
+            self.rev[key] = original
+        for key in ("traffic", "trafficStatuses"):
+            self.service[key].append({"tag": "old", "percent": 0})
+            with self.subTest(key=key), self.assertRaises(Mismatch):
+                self.verify()
+            self.service[key].pop()
+        self.service = None
+        with self.assertRaises(Mismatch):
+            self.verify()
+
+    def test_unexpected_runtime_mount(self):
+        self.rev["volumes"].append({"name": "scratch", "emptyDir": {}})
+        self.rev["containers"][0]["volumeMounts"].append({"name": "scratch", "mountPath": "/app"})
+        with self.assertRaises(Mismatch):
+            self.verify()
+
+    def test_cli_requires_separate_owner_plan_pin(self):
+        self.activate()
+        with tempfile.TemporaryDirectory() as folder:
+            paths = [Path(folder)/name for name in ("plan", "revision", "settings", "service")]
+            for path, data in zip(paths, (json.dumps(self.plan).encode(), json.dumps(self.rev).encode(),
+                                          self.raw, json.dumps(self.service).encode())):
+                path.write_bytes(data)
+            cmd = [sys.executable, "-B", str(Path(__file__).with_name("check_lite_native_revision.py")),
+                   *paths[:3], "--service", paths[3]]
+            self.assertNotEqual(subprocess.run(cmd, capture_output=True).returncode, 0)
+            proof = json.loads(subprocess.check_output([*cmd, "--owner-plan-sha256",
+                                                       hashlib.sha256(paths[0].read_bytes()).hexdigest()]))
+            self.assertEqual(proof["owner_mode"], "owner-only")
