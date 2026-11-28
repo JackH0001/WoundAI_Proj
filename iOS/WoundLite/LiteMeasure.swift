@@ -68,7 +68,13 @@ final class LiteMeasureVM: ObservableObject {
     @Published var imageH = 0
     @Published var depth: DepthCapture?
     @Published var estimate: DepthAreaResult?
-    @Published var busy = false
+    @Published private var captureBusy = false
+    @Published private var queryingRecognitionStatus = false
+    var busy: Bool { captureBusy || queryingRecognitionStatus }
+    var canEditOutline: Bool { !captureBusy && (!usesServiceDraft || draft != nil) }
+    var activityHint: String {
+        queryingRecognitionStatus && !captureBusy ? "正在核對個人雲端辨識…" : busyHint
+    }
     @Published var busyHint = ""
     @Published var note: String?
     @Published var savedId: String?
@@ -138,9 +144,9 @@ final class LiteMeasureVM: ObservableObject {
         let researchScope = captureParticipation()
         gen += 1
         draftNeedsReload = false; resultApplicationPending = false
-        busy = true
+        captureBusy = true
         busyHint = "影像處理中…"
-        defer { busy = false }
+        defer { captureBusy = false }
         savedId = nil
         draft = nil; serviceResult = nil; draftNotice = nil; serviceUnreadable = false
         draftIdentity = native == nil ? nil : (UUID(), Date())
@@ -299,7 +305,7 @@ final class LiteMeasureVM: ObservableObject {
     func retryDraftSave() async {
         guard let native, !busy, draft == nil, let jpeg = captureJPEG, let depth,
               let (id, date) = draftIdentity else { return }
-        busy = true; busyHint = "正在保存照片與深度…"; defer { busy = false }
+        captureBusy = true; busyHint = "正在保存照片與深度…"; defer { captureBusy = false }
         do {
             draft = try await native.captures.create(jpeg: jpeg, depth: depth, id: id, now: date, researchPin: draftResearchPin)
             note = "照片與原始深度已保存在手機，尚未傳送。"
@@ -309,7 +315,7 @@ final class LiteMeasureVM: ObservableObject {
     func restoreDraft(_ id: String, in store: LiteStore) async {
         recordStore = store
         guard let native, !busy, store.captureCanResume(id), !store.records.contains(where: { $0.id == id }) else { return }
-        busy = true; busyHint = "正在讀回原拍攝…"; defer { busy = false }
+        captureBusy = true; busyHint = "正在讀回原拍攝…"; defer { captureBusy = false }
         do {
             let value = try await native.captures.load(id)
             guard value.savedRecordID == nil, let img = UIImage(data: value.jpeg) else { throw LiteServiceFailure.invalidState }
@@ -382,11 +388,19 @@ final class LiteMeasureVM: ObservableObject {
     func recognizeNative(resubmit: Bool = false, fromButton: Bool = false) async {
         guard let native, let draft, !busy, manualEditor == nil, !serviceUnreadable, !draftNeedsReload else { return }
         guard recordStore?.captureCanResume(draft.id) != false else { note = "這次拍攝已捨棄或紀錄尚待核對，未再送出辨識。"; return }
-        busy = true; busyHint = "正在核對個人雲端辨識…"; defer { busy = false }
+        captureBusy = true; busyHint = "正在核對個人雲端辨識…"
+        var statusOnly = false
+        defer {
+            if statusOnly { queryingRecognitionStatus = false }
+            else { captureBusy = false }
+        }
         let generation = gen
+        let captureImage = image
         let queryRequested = serviceResult?.next == "status"
         func sameCapture() -> Bool {
-            generation == gen && self.draft?.id == draft.id && recordStore?.captureCanResume(draft.id) != false
+            // Local outline edits can increment gen while a read for the same JPEG is in flight.
+            self.draft?.id == draft.id && recordStore?.captureCanResume(draft.id) != false
+                && (statusOnly ? image === captureImage : generation == gen)
         }
         guard (try? await native.captures.load(draft.id)) == draft else {
             if sameCapture() {
@@ -425,6 +439,10 @@ final class LiteMeasureVM: ObservableObject {
             let id = try LiteNativeSession.captureID(recordID: draft.id)
             let result: LiteServiceRecord
             if (queryRequested || serviceResult?.next == "status") && !resubmit {
+                // Only this original-operation read can overlap hand drawing. Prepare/run stay exclusive.
+                statusOnly = true
+                queryingRecognitionStatus = true
+                captureBusy = false
                 result = try await native.service.resume(id, statusOnly: true) { _ in throw LiteServiceFailure.invalidState }
             } else {
                 if resubmit { _ = try await native.service.requestResubmission(id) }
@@ -451,6 +469,16 @@ final class LiteMeasureVM: ObservableObject {
         guard let result = serviceResult else { return }
         note = result.message
         if result.note == "confirmed", !userEdited {
+            // Keep the durable receipt. A canvas already open owns its geometry, including unsaved edits.
+            guard manualEditor == nil, !statusOnly || !captureBusy else {
+                resultApplicationPending = true
+                return
+            }
+            if statusOnly {
+                captureBusy = true
+                queryingRecognitionStatus = false
+                statusOnly = false
+            }
             do { try await useNativeResult() }
             catch { if sameCapture() { resultApplicationPending = true; note = Self.applySavedHint } }
         }
@@ -542,7 +570,7 @@ final class LiteMeasureVM: ObservableObject {
 
     func replaceWithNativeResult() async {
         guard !busy else { return }
-        busy = true; busyHint = "正在套用已保存的辨識結果…"; defer { busy = false }
+        captureBusy = true; busyHint = "正在套用已保存的辨識結果…"; defer { captureBusy = false }
         do {
             try await useNativeResult()
             if let targets = availableTargets { presentedTargets = targets }
@@ -552,7 +580,7 @@ final class LiteMeasureVM: ObservableObject {
 
     func confirmNativeTarget(_ index: Int, from offered: LiteContourTargets) async {
         guard !busy, offered == availableTargets, offered.polygons.indices.contains(index) else { return }
-        busy = true; busyHint = "正在套用已保存的辨識結果…"; defer { busy = false }
+        captureBusy = true; busyHint = "正在套用已保存的辨識結果…"; defer { captureBusy = false }
         do {
             try await useNativeResult(selecting: index)
             presentedTargets = nil
@@ -647,7 +675,7 @@ final class LiteMeasureVM: ObservableObject {
     func discardDraft(_ id: String, in store: LiteStore) async {
         guard let native, !busy, !store.needsReload,
               !store.records.contains(where: { $0.id == id }) else { return }
-        busy = true; busyHint = "正在捨棄本機拍攝…"; defer { busy = false }
+        captureBusy = true; busyHint = "正在捨棄本機拍攝…"; defer { captureBusy = false }
         guard store.retireCapture(id, requireSavedRecord: false) else {
             note = store.storageError; return
         }
@@ -662,7 +690,7 @@ final class LiteMeasureVM: ObservableObject {
     }
 
     func beginManualEditing() {
-        guard manualEditor == nil, !busy, let image, !usesServiceDraft || draft != nil else { return }
+        guard manualEditor == nil, canEditOutline, let image else { return }
         manualSaveProblem = nil
         manualEditor = ManualEditor(image: image, polygons: polys, generation: gen, draftID: draft?.id, revision: draft?.revision)
     }
@@ -684,9 +712,9 @@ final class LiteMeasureVM: ObservableObject {
         }
         let changedCapture = "原草稿已變更。請取消圈選，再從原拍攝開啟。"
         if let editor, !matchesManualEditor(editor) { return failed(changedCapture) }
-        guard !busy else { return failed("正在處理這次拍攝。請稍候再按「完成圈選」。") }
+        guard !captureBusy else { return failed("正在處理這次拍攝。請稍候再按「完成圈選」。") }
         manualSaveProblem = nil
-        busy = true; busyHint = "正在保存圈選…"; defer { busy = false }
+        captureBusy = true; busyHint = "正在保存圈選…"; defer { captureBusy = false }
         if correctionIoU == 1, !polys.isEmpty {
             if let editor, let native, let draft {
                 guard let original = try? await native.captures.load(draft.id) else {
@@ -743,10 +771,10 @@ final class LiteMeasureVM: ObservableObject {
         guard let d = depth, !polys.isEmpty, imageW > 0 else { estimate = nil; return }
         gen += 1
         let g = gen
-        let alreadyBusy = busy
-        busy = true
+        let alreadyBusy = captureBusy
+        captureBusy = true
         busyHint = "深度幾何計算中…"
-        defer { busy = alreadyBusy }
+        defer { captureBusy = alreadyBusy }
         let p = polys, iw = imageW, ih = imageH
         let est = await Task.detached(priority: .userInitiated) {
             DepthAreaEstimator.estimate(polygons: p, depth: d, imageW: iw, imageH: ih)
@@ -984,7 +1012,7 @@ struct LiteMeasureView: View {
                         if vm.depth != nil {
                             Button(copy.text(vm.polys.isEmpty ? "圈選傷口" : "修正圈選")) { vm.beginManualEditing() }
                                 .buttonStyle(.bordered)
-                                .disabled(vm.busy || (vm.usesServiceDraft && vm.draft == nil))
+                                .disabled(!vm.canEditOutline)
                         }
                     }
 
@@ -1118,7 +1146,7 @@ struct LiteMeasureView: View {
     @ViewBuilder
     private var measurementFeedback: some View {
         if vm.busy {
-            HStack(spacing: 8) { ProgressView(); Text(copy.message(vm.busyHint)).font(.footnote) }
+            HStack(spacing: 8) { ProgressView(); Text(copy.message(vm.activityHint)).font(.footnote) }
         }
         if let n = vm.note {
             Text(copy.message(n)).font(.footnote)

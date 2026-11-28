@@ -78,6 +78,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
     var beforeInstallation: (@Sendable () async -> Void)?
     var activeWounds = [String](), woundRevision = 0
     var afterWoundSnapshot: (@Sendable () async -> Void)?
+    var beforeServiceStatus: (@MainActor @Sendable () async -> Void)?
     let golden: [String: Any]
     init(owner: String = "synthetic-native-service", contours: [[[Int]]]? = nil) throws {
         self.owner = owner
@@ -112,6 +113,7 @@ private actor SessionWire: LiteAuthenticatedTransport {
     func losePrepareBeforeReady() { lostPrepare = true; preparedOnStatus = true }
     func useRenewableSession() { renewable = true }
     func onContext(_ closure: @escaping @Sendable () async -> Void) { afterContext = closure }
+    func onServiceStatus(_ callback: @escaping @MainActor @Sendable () async -> Void) { beforeServiceStatus = callback }
     func onWoundRead(_ closure: @escaping @Sendable () async -> Void) { afterWoundSnapshot = closure }
     func changeOwner() { owner = "other-installation" }
     func failStatus() { statusUnavailable = true }
@@ -179,7 +181,11 @@ private actor SessionWire: LiteAuthenticatedTransport {
         case "service/run":
             if lostRun { lostRun = false; throw LiteServiceFailure.invalidResponse }
             result = golden["completed"] as! [String: Any]
-        case "service/status": result = golden[preparedOnStatus ? "prepare" : "completed"] as! [String: Any]
+        case "service/status":
+            let callback = beforeServiceStatus
+            beforeServiceStatus = nil
+            await callback?()
+            result = golden[preparedOnStatus ? "prepare" : "completed"] as! [String: Any]
         case "account/deletion/request", "account/deletion/status":
             if path == "account/deletion/request" {
                 XCTAssertEqual(body["confirmation"] as? String, LiteAccountDeletionCheckpoint.confirmation)
@@ -2696,6 +2702,81 @@ extension LiteNativeSessionTests {
 }
 
 extension LiteNativeSessionTests {
+    func testInFlightCompletedStatusPreservesOpenCanvasAndManualSave() async throws {
+        for saveBeforeReply in [true, false] {
+            let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+            let wire = try SessionWire(), journal = SessionJournal(), files = LiteCaptureDraftStore(directory: path)
+            let draft = try await captureFixture(wire, in: files)
+            let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+            let first = try runtime(wire, journal, captures: files)
+            await first.identity.signIn(); await wire.loseRun()
+            _ = try await first.recognizeSaved(recordID: draft.id, jpeg: draft.jpeg)
+            let resumed = try runtime(wire, journal, time: sessionTime + 6, captures: files)
+            let vm = LiteMeasureVM(native: resumed)
+            await vm.restoreDraft(draft.id, in: store)
+            let originalOperation = try XCTUnwrap(vm.serviceResult?.operation)
+            let outline = [[[8,8],[8,56],[56,56],[56,8]]]
+            await wire.onServiceStatus {
+                XCTAssertTrue(vm.busy); XCTAssertTrue(vm.canEditOutline)
+                vm.beginManualEditing()
+                guard let editor = vm.manualEditor else { return XCTFail("The local canvas did not open") }
+                await vm.resumePendingRecognition()
+                if saveBeforeReply {
+                    let saved = await vm.applyManual(outline, correctionIoU: 0.5, editor: editor)
+                    XCTAssertTrue(saved)
+                    vm.manualEditor = nil
+                    XCTAssertTrue(vm.busy, "Saving a local outline cannot release the outstanding status call")
+                }
+            }
+            await vm.resumePendingRecognition()
+            XCTAssertFalse(vm.busy)
+            XCTAssertEqual(vm.serviceResult?.operation, originalOperation)
+            XCTAssertEqual(vm.serviceResult?.note, "confirmed")
+            if !saveBeforeReply {
+                let original = try await files.load(draft.id)
+                XCTAssertEqual(original, draft, "A late cloud result cannot write under the open canvas")
+                XCTAssertTrue(vm.resultApplicationPending)
+                let editor = try XCTUnwrap(vm.manualEditor)
+                let saved = await vm.applyManual(outline, correctionIoU: 0.5, editor: editor)
+                XCTAssertTrue(saved); vm.manualEditor = nil
+            }
+            let saved = try await files.load(draft.id), counts = await wire.counts()
+            XCTAssertEqual(saved.polygons, outline); XCTAssertEqual(saved.revision, draft.revision + 1)
+            XCTAssertTrue(saved.manuallyEdited); XCTAssertEqual(saved.jpeg, draft.jpeg)
+            XCTAssertEqual(counts["service/prepare"], 1); XCTAssertEqual(counts["service/run"], 1)
+            XCTAssertEqual(counts["service/status"], 1)
+        }
+    }
+
+    func testStatusForRetiredDraftCannotAttachToAnotherDraftWithSamePhoto() async throws {
+        let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
+        let wire = try SessionWire(), journal = SessionJournal(), files = LiteCaptureDraftStore(directory: path)
+        let draft = try await captureFixture(wire, in: files)
+        let other = try await files.create(jpeg: draft.jpeg, depth: draft.depth())
+        let store = LiteStore(fileURL: path.appendingPathComponent("index.json"))
+        let first = try runtime(wire, journal, captures: files)
+        await first.identity.signIn(); await wire.loseRun()
+        _ = try await first.recognizeSaved(recordID: draft.id, jpeg: draft.jpeg)
+        let resumed = try runtime(wire, journal, time: sessionTime + 6, captures: files)
+        let vm = LiteMeasureVM(native: resumed)
+        await vm.restoreDraft(draft.id, in: store)
+        await wire.onServiceStatus {
+            vm.beginManualEditing()
+            guard let editor = vm.manualEditor else { return XCTFail("Missing editor") }
+            XCTAssertTrue(store.retireCapture(draft.id, requireSavedRecord: false))
+            let saved = await vm.applyManual([[[8,8],[8,56],[56,56]]], correctionIoU: 0.5, editor: editor)
+            XCTAssertFalse(saved); vm.manualEditor = nil
+        }
+        await vm.resumePendingRecognition()
+        XCTAssertNotEqual(vm.serviceResult?.note, "confirmed")
+        await vm.restoreDraft(other.id, in: store)
+        XCTAssertNil(vm.serviceResult)
+        let retained = try await files.load(draft.id), separate = try await files.load(other.id)
+        XCTAssertEqual(retained, draft); XCTAssertEqual(separate, other)
+        let original = try await resumed.service.storedIfPresent(LiteNativeSession.captureID(recordID: draft.id))
+        XCTAssertEqual(original?.note, "confirmed", "The original receipt remains available for reconciliation")
+    }
+
     func testManualEditorPausesDueStatusUntilOutlineIsStored() async throws {
         let path = captureFiles(); defer { try? FileManager.default.removeItem(at: path) }
         let wire = try SessionWire(), journal = SessionJournal(), files = LiteCaptureDraftStore(directory: path)
