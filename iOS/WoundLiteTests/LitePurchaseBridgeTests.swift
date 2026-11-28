@@ -583,6 +583,8 @@ private actor PurchaseJournal:LiteServiceJournal {
 
     func testRestoreObservesDelayedEntitlementWithoutStartingAnotherAppleAction() async {
         let (service, provider, _, store) = setup()
+        await store.loadOffer()
+        XCTAssertEqual(store.offer, nativeTestOffer)
         provider.duringKnownRead = {
             XCTAssertEqual(store.activity, .recheckingEntitlements)
             await store.restore()
@@ -645,6 +647,56 @@ private actor PurchaseJournal:LiteServiceJournal {
         XCTAssertEqual(provider.knownReads, 1)
         XCTAssertEqual(provider.finishes + provider.purchases + service.calls, 0)
         XCTAssertTrue(store.message.contains("逾時"), store.message)
+    }
+
+    func testRestoreWhenLocalAccessExpiresReportsHowToRetryWithoutBuyingAgain() async {
+        let (service, provider, _, store) = setup()
+        let original = LiteNativeSession.PurchaseAccount(generation: service.generation, token: purchaseToken)
+        var visible: LiteNativeSession.PurchaseAccount? = original
+        provider.restored = [event()]
+        provider.duringRestore = { visible = nil }
+        await store.restore(for: original, currentAccount: { visible })
+        XCTAssertEqual(store.restoreSignInHint, "請重新登入原服務帳號，再按「恢復購買」。")
+        XCTAssertEqual(provider.restoreCalls, 1)
+        XCTAssertEqual(provider.purchases, 0)
+        XCTAssertEqual(service.calls, 1)
+        await store.reconcile(reportEmpty: false)
+        XCTAssertNotNil(store.restoreSignInHint)
+
+        visible = original
+        provider.duringRestore = nil
+        await store.restore(for: original, currentAccount: { visible })
+        XCTAssertNil(store.restoreSignInHint)
+        XCTAssertTrue(store.message(for: original)?.contains("關聯已確認") == true)
+        XCTAssertEqual(provider.restoreCalls, 2)
+        XCTAssertEqual(provider.finishes, 1)
+        XCTAssertEqual(service.calls, 1)
+    }
+
+    func testCompletedRestoreStatusIsVisibleOnlyToOriginalAccountAndGeneration() async {
+        let (service, provider, _, store) = setup()
+        let original = LiteNativeSession.PurchaseAccount(generation: service.generation, token: purchaseToken)
+        provider.restored = [event()]
+        await store.restore(for: original, currentAccount: { original })
+        XCTAssertTrue(store.message(for: original)?.contains("關聯已確認") == true)
+        XCTAssertNil(store.message(for: .init(generation: original.generation, token: "other-account")))
+        XCTAssertNil(store.message(for: .init(generation: original.generation + 1, token: original.token)))
+        XCTAssertNil(store.restoreSignInHint)
+    }
+
+    func testAccountChangeWhilePresentingRestoreNeverExposesPreviousSuccess() async {
+        let (service, provider, _, store) = setup()
+        let original = LiteNativeSession.PurchaseAccount(generation: service.generation, token: purchaseToken)
+        provider.restored = [event()]
+        await store.restore(for: original, currentAccount: {
+            service.generation += 1
+            return original
+        })
+        let next = LiteNativeSession.PurchaseAccount(generation: service.generation, token: "next-account")
+        XCTAssertEqual(store.message(for: next), "請重新登入原服務帳號，再按「恢復購買」。")
+        await store.reconcile()
+        XCTAssertNil(store.restoreSignInHint)
+        XCTAssertTrue(store.message(for: next)?.contains("沒有待完成的交易") == true)
     }
 
     func testCancellationAfterSyncDoesNotStartAnotherStoreKitRead() async {

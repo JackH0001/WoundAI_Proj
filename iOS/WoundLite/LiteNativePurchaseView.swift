@@ -148,8 +148,8 @@ struct LiteNativePurchaseView: View {
                     }
                     if let progress = store.activity?.progress {
                         ProgressView(copy(progress)).accessibilityIdentifier("lite.offer.transactionProgress")
-                    } else if !session.preparingAccount && !store.message.isEmpty {
-                        Text(copy(store.message)).font(.footnote).accessibilityIdentifier("nativePurchaseStatus")
+                    } else if !session.preparingAccount, let message = store.message(for: account) {
+                        Text(copy(message)).font(.footnote).accessibilityIdentifier("nativePurchaseStatus")
                     }
                 } else {
                     if LiteNativeBuild.showsOwnerReview && session.registration == .required {
@@ -182,6 +182,8 @@ struct LiteNativePurchaseView: View {
                     }
                     if let activity = store.activity, activity == .restoring || activity == .recheckingEntitlements {
                         ProgressView(copy(activity.progress)).accessibilityIdentifier("lite.offer.transactionProgress")
+                    } else if let hint = store.restoreSignInHint {
+                        Text(copy(hint)).accessibilityIdentifier("lite.offer.restoreSignInAgain")
                     } else {
                         Text(session.registration == .pending && !session.preparingAccount ? copy(session.message) : session.presentationPurchasePreparation(locale: locale))
                             .accessibilityIdentifier("lite.offer.preparationStatus")
@@ -196,7 +198,7 @@ struct LiteNativePurchaseView: View {
                 let account = session.purchaseObservationAccount
                 Button(copy(resumePending ? "續接裝置登記並恢復購買" : "恢復購買")) {
                     Task {
-                        if let account { await store.restore(for: account) }
+                        if let account { await session.restorePurchases(for: account) }
                         else { await session.prepareForPurchase(resumePending ? .resumeRegistrationAndRestore : .restore) }
                     }
                 }.disabled(busy).accessibilityIdentifier("lite.offer.restore")

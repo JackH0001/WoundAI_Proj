@@ -182,7 +182,8 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
         catch { return }
         if !Task.isCancelled, observedPurchaseAccess == access { observedPurchaseAccess = nil }
     }
-    @Published private(set) var purchasePreparationMessage = "先登入服務帳號，再確認月費並訂閱；登入不會付款或開啟研究上傳。"
+    private static let initialPurchasePrompt = "先登入服務帳號，再確認月費並訂閱；登入不會付款或開啟研究上傳。"
+    @Published private(set) var purchasePreparationMessage = LiteNativeSession.initialPurchasePrompt
     private var preparationCopy: LiteServiceCopy.Message?
     func presentationPurchasePreparation(locale: Locale) -> String {
         preparationCopy?.render(matching: purchasePreparationMessage, locale: locale)
@@ -419,8 +420,18 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
 
     enum OfferAction { case subscribe, resumeRegistrationAndSignIn, restore, resumeRegistrationAndRestore }
 
+    func restorePurchases(for account: PurchaseAccount) async {
+        await purchases.restore(for: account) {
+            // Registration observers can lag behind an explicit sign-in, so read the
+            // local session directly before displaying a result from Apple.
+            guard let access = await self.identity.localPurchaseAccess() else { return nil }
+            return PurchaseAccount(generation: self.identity.generation, token: access.token)
+        }
+    }
+
     func prepareForPurchase(_ action: OfferAction = .subscribe) async {
         guard canPrepareAccount else { return }
+        purchases.clearRestoreSignInHint()
         preparingAccount = true
         defer { preparingAccount = false }
         preparationCopy = nil
@@ -434,8 +445,8 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
         case .ready(let account):
             if restoring {
                 purchasePreparationMessage = "正在恢復既有訂閱…"
-                await purchases.restore(for: account)
-                purchasePreparationMessage = purchases.message
+                await restorePurchases(for: account)
+                purchasePreparationMessage = Self.initialPurchasePrompt
             } else {
                 purchasePreparationMessage = "服務帳號已確認。請核對月費，再按訂閱並在 Apple 確認；已有訂閱請使用恢復購買。"
             }

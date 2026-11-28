@@ -156,7 +156,32 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
 
 /// Server acknowledgment is persisted before StoreKit finish. No local paid flag.
 @MainActor final class LiteNativePurchaseStore: ObservableObject {
-    @Published private(set) var message = ""
+    private enum Feedback {
+        case general(String)
+        case account(LiteNativeSession.PurchaseAccount, String)
+        case restoreSignInAgain
+    }
+    @Published private var feedback = Feedback.general("")
+    private(set) var message: String {
+        get {
+            switch feedback {
+            case .general(let text), .account(_, let text): return text
+            case .restoreSignInAgain: return "請重新登入原服務帳號，再按「恢復購買」。"
+            }
+        }
+        set { feedback = .general(newValue) }
+    }
+    func message(for account: LiteNativeSession.PurchaseAccount) -> String? {
+        if case .account(let owner, _) = feedback, owner != account { return nil }
+        return message.isEmpty ? nil : message
+    }
+    var restoreSignInHint: String? {
+        if case .restoreSignInAgain = feedback { return message }
+        return nil
+    }
+    func clearRestoreSignInHint() {
+        if case .restoreSignInAgain = feedback { message = "" }
+    }
     enum Activity {
         case purchasing, restoring, recheckingEntitlements, checkingTransactions, observingTransactions
 
@@ -258,7 +283,8 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
         }
         try checkAccount(generation)
         confirmedUpdates += 1
-        message="購買與服務帳號關聯已確認；可用次數依伺服器核對，不會重設今日已用額度。"
+        feedback = .account(.init(generation: generation, token: record.context.app_account_token),
+                            "購買與服務帳號關聯已確認；可用次數依伺服器核對，不會重設今日已用額度。")
     }
     private func failed(_ e:Error) {
         if (e as? LitePurchaseFailure) == .accountChanged {
@@ -290,6 +316,7 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
 
     func purchase(accepting displayed: LiteMonthlyOffer, for account: LiteNativeSession.PurchaseAccount? = nil) async {
         guard !busy, !loadingOffer, offer == displayed else { return }
+        clearRestoreSignInHint()
         let generation = account?.generation ?? accountGeneration()
         activity = .purchasing
         defer { activity = nil }
@@ -346,10 +373,27 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
             message = "商店或商品資料已變更。請重新讀取價格後再決定是否訂閱。"
         } catch { failed(error) }
     }
-    func restore(for account: LiteNativeSession.PurchaseAccount? = nil) async {
+    func restore(for account: LiteNativeSession.PurchaseAccount? = nil,
+                 currentAccount: (() async -> LiteNativeSession.PurchaseAccount?)? = nil) async {
         guard !busy else { return }
+        message = ""
         activity = .restoring
         defer { activity = nil }
+        await restoreTransactions(for: account)
+        guard !Task.isCancelled, let account else { return }
+        let result = message
+        if let currentAccount {
+            let current = await currentAccount()
+            guard !Task.isCancelled else { return }
+            guard current == account, accountGeneration() == account.generation else {
+                feedback = .restoreSignInAgain
+                return
+            }
+        }
+        feedback = .account(account, result)
+    }
+
+    private func restoreTransactions(for account: LiteNativeSession.PurchaseAccount?) async {
         let generation = account?.generation ?? accountGeneration()
         let c: LitePurchaseContext
         do { c = try await context(for: account, generation: generation) }
@@ -404,6 +448,7 @@ enum LitePurchaseUpdate: Sendable { case event(LitePurchaseEvent), invalid }
     }
     func reconcile(reportEmpty: Bool = true, accountToken: String? = nil) async {
         guard !busy else { return }
+        if reportEmpty { clearRestoreSignInHint() }
         activity = reportEmpty ? .checkingTransactions : .observingTransactions
         defer { activity = nil }
         let generation = accountGeneration()
