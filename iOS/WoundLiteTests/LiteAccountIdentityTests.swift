@@ -86,6 +86,62 @@ private actor IdentityJournal:LiteServiceJournal {
         let s=IdentityService(),p=IdentityProvider(),j=IdentityJournal()
         return(s,p,j,LiteAccountIdentityStore(service:s,provider:p,journal:j,now:{Date(timeIntervalSince1970:Double(identityNow))}))
     }
+    func testCheckingWithoutSignInExplainsNextActionInBothLanguages() async throws {
+        let (service, apple, journal, identity) = setup()
+        await identity.retry()
+        let message = "目前沒有待確認的登入。若要登入，請點選「使用 Apple 登入」。"
+        XCTAssertEqual(identity.message, message)
+        XCTAssertEqual(LiteServiceCopy.text(message, locale: Locale(identifier: "zh-Hant")), message)
+        XCTAssertEqual(LiteServiceCopy.text(message, locale: Locale(identifier: "en")), "There is no pending sign-in. To sign in, tap Sign in with Apple.")
+        let records = try await journal.records()
+        XCTAssertTrue(records.isEmpty)
+        XCTAssertEqual(apple.calls, 0)
+        XCTAssertEqual(service.challenges, 0)
+        XCTAssertEqual(service.confirms, 0)
+    }
+    func testCheckingEndedAndActiveSignInGiveDifferentNextActions() async throws {
+        let (service, apple, journal, identity) = setup()
+        await identity.signIn()
+        await identity.retry()
+        XCTAssertEqual(identity.message, "目前沒有待確認的登入操作。")
+        await identity.signOut()
+        await identity.retry()
+        XCTAssertEqual(identity.message, "目前沒有待確認的登入。若要登入，請點選「使用 Apple 登入」。")
+        let records = try await journal.records()
+        XCTAssertEqual(records.map(\.phase), ["ended"])
+        XCTAssertEqual(service.challenges, 1)
+        XCTAssertEqual(apple.calls, 1)
+    }
+    func testUnreadableSignInRecordCannotShowEmptyState() async {
+        let (_, apple, journal, identity) = setup()
+        await identity.signIn()
+        await journal.corrupt()
+        await identity.retry()
+        XCTAssertEqual(identity.message, "帳號核對尚未完成，請稍後重試；本機紀錄仍保留。")
+        XCTAssertEqual(apple.calls, 1)
+    }
+    func testDeviceChangeWhileCheckingEmptyJournalCannotOfferSignInForOriginalDevice() async {
+        let (service, apple, _, identity) = setup()
+        var reads = 0
+        service.onInstallation = {
+            reads += 1
+            if reads == 2 { service.owner = "replacement-device" }
+        }
+        await identity.retry()
+        XCTAssertEqual(identity.message, "帳號核對尚未完成，請稍後重試；本機紀錄仍保留。")
+        XCTAssertEqual(apple.calls, 0)
+    }
+    func testSignOutDuringEmptyReadPreservesLatestMessage() async {
+        let (service, apple, _, identity) = setup()
+        let previous = identity.message
+        service.onInstallation = {
+            service.onInstallation = nil
+            await identity.signOut()
+        }
+        await identity.retry()
+        XCTAssertEqual(identity.message, previous)
+        XCTAssertEqual(apple.calls, 0)
+    }
     func testOwnerReferenceExportsOnlyPinThenPendingOperationAndMatchesAfterRestart() async throws {
         let (s,p,j,m) = setup()
         s.owner = String(repeating: "a", count: 32)

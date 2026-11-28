@@ -47,6 +47,17 @@ struct LitePurchaseObservation: View {
 enum LiteOfferPlanStatus: Equatable {
     case checking, available(LitePersonalBalance), unavailable, expired
 
+    /// The purchase tap may arrive just after the displayed plan expires. Refreshing
+    /// only changes what is displayed. A separate tap accepts the refreshed offer.
+    @MainActor func handlePurchaseTap(displayed: LitePersonalBalance, at date: Date,
+                                      refresh: () -> Void, purchase: () async -> Void) async {
+        guard self == .available(displayed), displayed.limit == 2, displayed.isFresh(at: date) else {
+            refresh()
+            return
+        }
+        await purchase()
+    }
+
     /// One automatic recheck per visit, account change, transaction update or explicit retry.
     @MainActor static func observe(
         fetch: () async throws -> LitePersonalBalance,
@@ -94,6 +105,7 @@ struct LiteNativePurchaseView: View {
     @State private var plan = LiteOfferPlanStatus.checking
     @State private var finishedInitialPriceCheck = false
     @State private var ownerPreparationNotice: String?
+    @State private var recheckForPurchase: LiteNativeSession.PurchaseAccount?
     @State private var checked: PlanQuery?
     @State private var retry = 0
     private var query: PlanQuery {
@@ -125,6 +137,10 @@ struct LiteNativePurchaseView: View {
                     .font(.footnote).accessibilityIdentifier("lite.offer.captureRequirement")
 
                 if let account = session.purchaseObservationAccount {
+                    if recheckForPurchase == account {
+                        Text(copy("請查看更新後的方案與月費，再決定是否訂閱。"))
+                            .font(.footnote).accessibilityIdentifier("lite.offer.recheckForPurchase")
+                    }
                     TimelineView(.periodic(from: .now, by: 15)) { clock in
                         if query.account == account {
                             currentPlan(for: account, at: clock.date)
@@ -199,6 +215,7 @@ struct LiteNativePurchaseView: View {
             await store.loadOffer()
             if !Task.isCancelled { finishedInitialPriceCheck = true }
         }
+        .onChange(of: query.account) { _, _ in recheckForPurchase = nil }
         .task(id: query) {
             let requested = query
             guard let account = requested.account else { checked = nil; plan = .checking; return }
@@ -223,9 +240,16 @@ struct LiteNativePurchaseView: View {
                 Button(LiteServiceCopy.format("以 %@／月訂閱", locale: locale, offer.displayPrice)) {
                     Task { @MainActor in
                         // A tap may arrive after the last screen update.
-                        guard checked == query, query.account == account, plan == .available(balance),
-                              balance.isFresh(at: Date()) else { return }
-                        await store.purchase(accepting: offer, for: account)
+                        guard query.account == account else { return }
+                        let current = checked == query ? plan : .checking
+                        await current.handlePurchaseTap(displayed: balance, at: Date(), refresh: {
+                            recheckForPurchase = account
+                            if checked == query { retry += 1 }
+                        }, purchase: {
+                            guard query.account == account else { return }
+                            recheckForPurchase = nil
+                            await store.purchase(accepting: offer, for: account)
+                        })
                     }
                 }
                 .buttonStyle(.borderedProminent).disabled(busy || store.loadingOffer)

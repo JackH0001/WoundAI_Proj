@@ -44,6 +44,32 @@ private actor BalanceTransport: LiteAuthenticatedTransport {
         XCTAssertEqual(received, [.checking, .available(free), .checking, .available(plus), .expired])
     }
 
+    func testExpiredPurchaseTapOnlyRefreshesAndRequiresANewTap() async throws {
+        let balance = try JSONDecoder().decode(LitePersonalBalance.self, from: data())
+        let renewed = try JSONDecoder().decode(LitePersonalBalance.self, from: data(["as_of": day + 300]))
+        var refreshes = 0, purchases = 0
+        let boundary = date.addingTimeInterval(300)
+        await LiteOfferPlanStatus.available(balance).handlePurchaseTap(displayed: balance, at: boundary,
+            refresh: { refreshes += 1 }, purchase: { purchases += 1 })
+        XCTAssertEqual(refreshes, 1)
+        XCTAssertEqual(purchases, 0)
+        await LiteOfferPlanStatus.available(renewed).handlePurchaseTap(displayed: renewed, at: boundary,
+            refresh: { refreshes += 1 }, purchase: { purchases += 1 })
+        XCTAssertEqual(refreshes, 1)
+        XCTAssertEqual(purchases, 1)
+    }
+
+    func testStaleFreeButtonCannotStartPaymentAfterPlanChanges() async throws {
+        let free = try JSONDecoder().decode(LitePersonalBalance.self, from: data())
+        let paid = try JSONDecoder().decode(LitePersonalBalance.self, from: data(["limit": 10, "remaining": 8]))
+        for state: LiteOfferPlanStatus in [.checking, .available(paid), .unavailable, .expired] {
+            var refreshed = false
+            await state.handlePurchaseTap(displayed: free, at: date, refresh: { refreshed = true },
+                                         purchase: { XCTFail("A replaced offer cannot start payment") })
+            XCTAssertTrue(refreshed)
+        }
+    }
+
     func testFailedFirstPlanReadWaitsForExplicitRetry() async {
         var received: [LiteOfferPlanStatus] = []
         await LiteOfferPlanStatus.observe(fetch: { throw LiteAccountFailure.unavailable },

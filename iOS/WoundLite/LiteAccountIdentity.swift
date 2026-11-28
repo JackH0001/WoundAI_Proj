@@ -470,17 +470,31 @@ struct LiteOwnerReviewReference: Encodable, Equatable {
     }
     func retry()async {
         guard !busy else{return};busy=true;defer{busy=false}
+        let started = generation
         do {
             let owner=try await service.installation();let(old,r)=try await read(owner)
-            guard try await !hasDeletionIntent(owner),r?.phase != "deleting" else{message="請至刪帳頁核對原進度；不會重送登入或續期。";return}
-            guard let old,let r else{return}
+            let deletionPending = try await hasDeletionIntent(owner)
+            guard generation == started else { return }
+            guard !deletionPending, r?.phase != "deleting" else{message="請至刪帳頁核對原進度；不會重送登入或續期。";return}
+            if r == nil || r?.phase == "ended" {
+                guard try await service.installation() == owner,
+                      try await journal.load(key(owner)) == old else { throw LiteAccountFailure.conflict }
+                let closing = try await hasDeletionIntent(owner)
+                guard generation == started else { return }
+                message = closing ? "請至刪帳頁核對原進度；不會重送登入或續期。" : "目前沒有待確認的登入。若要登入，請點選「使用 Apple 登入」。"
+                return
+            }
+            guard let old,let r else { throw LiteAccountFailure.invalid }
             if r.phase=="confirm"{try await confirm(owner,old,r)}
             else if r.phase=="logout"{try await finishLogout(owner,old,r)}
             else if r.phase=="renew"{try await renew(owner,old,r)}
             else if r.phase=="reauthenticate"{message="請按重新登入以取得新的 Apple 授權；不會重送舊授權碼。"}
             else if r.phase=="owner_review"{message="本人帳號仍待核對。收到核對完成通知後再按登入；不會重送舊授權碼。"}
             else{message="目前沒有待確認的登入操作。"}
-        } catch {message="帳號核對尚未完成，請稍後重試；本機紀錄仍保留。"}
+        } catch {
+            guard generation == started else { return }
+            message="帳號核對尚未完成，請稍後重試；本機紀錄仍保留。"
+        }
     }
     private func finishLogout(_ owner:String,_ old:Data,_ r:LiteAccountCheckpoint)async throws {
         try await service.logout(r.challenge);var ended=r;ended.phase="ended";ended.credential=nil;ended.session=nil

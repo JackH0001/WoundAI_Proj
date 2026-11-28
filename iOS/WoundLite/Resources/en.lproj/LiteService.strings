@@ -220,3 +220,5 @@
 "正在查詢未完成的交易…" = "Checking unfinished transactions…";
 "查看本機待確認的拍攝" = "View pending captures on this device";
 "目前無法開啟這筆待確認的拍攝，請查看最新額度與本機拍攝清單。" = "This pending capture could not be opened. Check the latest allowance and the captures saved on this device.";
+"目前沒有待確認的登入。若要登入，請點選「使用 Apple 登入」。" = "There is no pending sign-in. To sign in, tap Sign in with Apple.";
+"請查看更新後的方案與月費，再決定是否訂閱。" = "Review the updated plan and monthly price before deciding whether to subscribe.";
