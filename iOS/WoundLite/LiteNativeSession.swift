@@ -355,7 +355,7 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
                 if resumePending { message = "服務尚未確認這次登記。原登記資料已保留，請稍後再續接。" }
             } else {
                 registration = .unreadable
-                message = "裝置登記尚未確認。請先重讀原裝置登記，再決定是否續接。"
+                message = "請先檢查手機儲存的登記資料，再繼續登入。"
             }
         }
     }
@@ -597,8 +597,9 @@ struct LiteNativeSessionView: View {
                     Button(copy("續接裝置登記")) { Task { signInStatus = nil; await session.registerDevice(resumePending: true) } }
                         .disabled(session.registering)
                 } else if session.registration == .unreadable {
-                    Button(copy("重讀原裝置登記")) { Task { signInStatus = nil; await session.checkExistingRegistration() } }
+                    Button(copy("檢查手機上的登記資料")) { Task { signInStatus = nil; await session.checkExistingRegistration() } }
                         .disabled(session.registering)
+                        .accessibilityIdentifier("lite.settings.checkLocalRegistration")
                 }
                 if returnToCapture == nil, session.registration == .confirmed, !session.preparingAccount, let account = try? session.accountView() {
                     NavigationLink(copy("服務帳號與刪除")) { account }
