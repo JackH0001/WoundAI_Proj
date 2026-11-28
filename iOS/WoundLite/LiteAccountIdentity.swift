@@ -273,17 +273,27 @@ struct LiteOwnerReviewReference: Encodable, Equatable {
         guard !blocked, let record, ["active", "renew"].contains(record.phase) else { throw LiteAccountFailure.unavailable }
         return true
     }
-    /// Local presentation only. Signed transport checks the active account again before any request.
-    func localPurchaseAccess() async -> (token: String, deadline: Date)? {
+    enum PurchaseAccessRead: Equatable {
+        case available(token: String, deadline: Date), checking, unavailable
+    }
+
+    /// A routine service check may become busy while the journal read is suspended.
+    func readPurchaseAccess() async -> PurchaseAccessRead {
         let start = generation
         do {
             let owner = try await service.installation()
             guard let record = try await read(owner).1, ["active", "renew"].contains(record.phase),
                   let session = record.session, try await !hasDeletionIntent(owner),
-                  !blocked, !busy, generation == start else { return nil }
+                  !blocked, generation == start else { return .unavailable }
             let deadline = Date(timeIntervalSince1970: Double(session.family_expires_at ?? session.expires_at))
-            return deadline > now() ? (session.app_account_token, deadline) : nil
-        } catch { return nil }
+            guard deadline > now() else { return .unavailable }
+            return busy ? .checking : .available(token: session.app_account_token, deadline: deadline)
+        } catch { return .unavailable }
+    }
+
+    func localPurchaseAccess() async -> (token: String, deadline: Date)? {
+        guard case let .available(token, deadline) = await readPurchaseAccess() else { return nil }
+        return (token, deadline)
     }
     func purchaseAccessDeadline() async -> Date? {
         await localPurchaseAccess()?.deadline

@@ -192,6 +192,7 @@
 "今日辨識嘗試已達上限" = "You have reached today’s analysis attempt limit.";
 "今天還可辨識 %@ 次" = "Analyses left today: %@";
 "暫時無法確認目前方案。" = "Your current plan could not be verified.";
+"更新方案即可查看最新額度。" = "Refresh your plan to see your latest allowance.";
 "重新查詢方案" = "Check plan again";
 "正在讀取目前方案…" = "Checking your plan…";
 "方案內容" = "Plan details";

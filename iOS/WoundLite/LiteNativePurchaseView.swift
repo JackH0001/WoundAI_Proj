@@ -44,6 +44,34 @@ struct LitePurchaseObservation: View {
     }
 }
 
+enum LiteOfferPlanStatus: Equatable {
+    case checking, available(LitePersonalBalance), unavailable, expired
+
+    /// One automatic recheck per visit, account change, transaction update or explicit retry.
+    @MainActor static func observe(
+        fetch: () async throws -> LitePersonalBalance,
+        waitUntil: (Date) async throws -> Void = { deadline in
+            try await Task.sleep(for: .seconds(max(0, deadline.timeIntervalSinceNow)))
+        },
+        publish: (Self) -> Void
+    ) async {
+        for _ in 0..<2 {
+            guard !Task.isCancelled else { return }
+            publish(.checking)
+            do {
+                let balance = try await fetch()
+                try Task.checkCancellation()
+                publish(.available(balance))
+                try await waitUntil(balance.expiresAt)
+            } catch {
+                if !Task.isCancelled { publish(.unavailable) }
+                return
+            }
+        }
+        if !Task.isCancelled { publish(.expired) }
+    }
+}
+
 /// The candidate injects a trusted service bridge. Reading the disclosures needs no service access.
 struct LiteNativePurchaseView: View {
     @Environment(\.liteRearLiDARAvailable) private var canCapture
@@ -63,7 +91,7 @@ struct LiteNativePurchaseView: View {
     }
     @Environment(\.scenePhase) private var phase
     @Environment(\.locale) private var locale
-    @State private var balance: LitePersonalBalance?
+    @State private var plan = LiteOfferPlanStatus.checking
     @State private var checked: PlanQuery?
     @State private var retry = 0
     private var query: PlanQuery {
@@ -93,24 +121,8 @@ struct LiteNativePurchaseView: View {
 
                 if let account = session.purchaseObservationAccount {
                     TimelineView(.periodic(from: .now, by: 15)) { clock in
-                        if query.account == account, checked == query, let balance, balance.isFresh(at: clock.date) {
-                            Text(copy(balance.limit == 10 ? "目前方案：Plus" : "目前方案：免費"))
-                                .accessibilityIdentifier("lite.offer.currentPlan")
-                            Text(balance.availabilityMessage(locale: locale))
-                            if balance.limit == 2, let offer = store.offer {
-                                Button(LiteServiceCopy.format("以 %@／月訂閱", locale: locale, offer.displayPrice)) {
-                                    Task { await store.purchase(accepting: offer, for: account) }
-                                }
-                                .buttonStyle(.borderedProminent).disabled(busy || store.loadingOffer)
-                                .accessibilityIdentifier("lite.offer.buy")
-                            }
-                        } else if query.account == nil {
-                            EmptyView()
-                        } else if checked == query {
-                            Text(copy("暫時無法確認目前方案。"))
-                            Button(copy("重新查詢方案")) { retry += 1 }.disabled(busy)
-                        } else {
-                            ProgressView(copy("正在讀取目前方案…"))
+                        if query.account == account {
+                            currentPlan(for: account, at: clock.date)
                         }
                     }
                     if store.busy { ProgressView(copy("正在核對，請勿重複購買…")) }
@@ -159,11 +171,41 @@ struct LiteNativePurchaseView: View {
         .task { await store.loadOffer() }
         .task(id: query) {
             let requested = query
-            guard requested.account != nil else { balance = nil; checked = nil; return }
-            let result = try? await session.personalBalance()
-            guard !Task.isCancelled, query == requested else { return }
-            balance = result
-            checked = requested
+            guard let account = requested.account else { checked = nil; plan = .checking; return }
+            await LiteOfferPlanStatus.observe(fetch: {
+                guard query == requested, session.purchaseObservationAccount == account else { throw CancellationError() }
+                return try await session.personalBalance()
+            }, publish: { status in
+                guard query == requested, session.purchaseObservationAccount == account else { return }
+                checked = requested
+                plan = status
+            })
+        }
+    }
+
+    @ViewBuilder private func currentPlan(for account: LiteNativeSession.PurchaseAccount, at date: Date) -> some View {
+        switch checked == query ? plan : .checking {
+        case .available(let balance) where balance.isFresh(at: date):
+            Text(copy(balance.limit == 10 ? "目前方案：Plus" : "目前方案：免費"))
+                .accessibilityIdentifier("lite.offer.currentPlan")
+            Text(balance.availabilityMessage(locale: locale))
+            if balance.limit == 2, let offer = store.offer {
+                Button(LiteServiceCopy.format("以 %@／月訂閱", locale: locale, offer.displayPrice)) {
+                    Task { @MainActor in
+                        // A tap may arrive after the last screen update.
+                        guard checked == query, query.account == account, plan == .available(balance),
+                              balance.isFresh(at: Date()) else { return }
+                        await store.purchase(accepting: offer, for: account)
+                    }
+                }
+                .buttonStyle(.borderedProminent).disabled(busy || store.loadingOffer)
+                .accessibilityIdentifier("lite.offer.buy")
+            }
+        case .checking, .available:
+            ProgressView(copy("正在讀取目前方案…"))
+        case .unavailable, .expired:
+            Text(copy(plan == .expired ? "更新方案即可查看最新額度。" : "暫時無法確認目前方案。"))
+            Button(copy("重新查詢方案")) { retry += 1 }.disabled(busy)
         }
     }
 }

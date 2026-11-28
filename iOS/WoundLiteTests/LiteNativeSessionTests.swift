@@ -37,7 +37,11 @@ private actor SessionJournal: LiteServiceJournal {
         if cancelled { throw LiteAccountFailure.cancelled }
         return LiteAppleIdentity(identityToken: "synthetic-jwt", state: c.state, user: "synthetic-user", authorizationCode: "one-use-code")
     }
-    func authorized(user: String) async throws -> Bool { allowed }
+    var onAuthorized: (() async -> Void)?
+    func authorized(user: String) async throws -> Bool {
+        await onAuthorized?()
+        return allowed
+    }
 }
 
 @MainActor private final class SessionStoreKit: LitePurchaseProvider {
@@ -675,6 +679,37 @@ private actor SessionWire: LiteAuthenticatedTransport {
         XCTAssertEqual(before, after); XCTAssertEqual(saved, preserved); XCTAssertNil(access)
         XCTAssertEqual(apple.calls, 1); XCTAssertEqual(kit.buys, 0)
         XCTAssertTrue(r.purchasePreparationMessage.contains("刪帳"))
+    }
+
+    func testConcurrentIdentityCheckSeparatesDisplayFromPurchaseAccess() async throws {
+        let wire = try SessionWire(), apple = SessionApple(), kit = SessionStoreKit()
+        let r = try runtime(wire, SessionJournal(), apple: apple, storeKit: kit)
+        await r.prepareForPurchase()
+        let observer = Task { await r.trackPurchaseAccess(foreground: true) }
+        defer { observer.cancel() }
+        for _ in 0..<100 where r.purchaseObservationAccount == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let original = try XCTUnwrap(r.purchaseObservationAccount)
+        var checked = false
+        apple.onAuthorized = {
+            let read = await r.identity.readPurchaseAccess()
+            let payment = await r.identity.localPurchaseAccess()
+            XCTAssertEqual(read, .checking)
+            XCTAssertNil(payment)
+            XCTAssertEqual(r.purchaseObservationAccount, original)
+            checked = true
+        }
+        let allowed = await r.identity.canUseService()
+        XCTAssertTrue(allowed)
+        XCTAssertTrue(checked)
+        apple.onAuthorized = nil
+        await r.identity.signOut()
+        XCTAssertNil(r.purchaseObservationAccount)
+        let signedOut = await r.identity.readPurchaseAccess()
+        XCTAssertEqual(signedOut, .unavailable)
+        XCTAssertEqual(kit.buys, 0)
+        XCTAssertEqual(kit.restores, 0)
     }
 
     func testLocalPurchaseEligibilityAfterSignInRestartExpiryAndLogout() async throws {

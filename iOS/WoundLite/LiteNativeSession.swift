@@ -121,27 +121,38 @@ struct LiteSandboxSignedTransport: LiteAuthenticatedTransport {
         let generation: Int
         let token: String
     }
-    @Published private var authorizedPurchaseAccount: PurchaseAccount?
+    private struct ObservedPurchaseAccess: Equatable {
+        let account: PurchaseAccount
+        let deadline: Date
+    }
+    @Published private var observedPurchaseAccess: ObservedPurchaseAccess?
     var purchaseObservationAccount: PurchaseAccount? {
-        guard registration == .confirmed, authorizedPurchaseAccount?.generation == identity.generation else { return nil }
-        return authorizedPurchaseAccount
+        guard registration == .confirmed, let access = observedPurchaseAccess,
+              access.account.generation == identity.generation, access.deadline > identity.now() else { return nil }
+        return access.account
     }
 
-    /// Read only the local registration and session. Each transaction still
-    /// needs live account admission and server acknowledgment before finishing.
+    /// Only a completed, local account check can expose a new purchasing identity.
+    /// If a live service check overlaps that read, keep the existing display until its deadline.
     func trackPurchaseAccess(foreground: Bool) async {
-        guard foreground, registration == .confirmed else { authorizedPurchaseAccount = nil; return }
-        // Ordinary service requests briefly set busy while checking identity.
-        // Keep the listener for this same generation during those checks.
-        guard !identity.busy else { return }
+        guard foreground, registration == .confirmed else { observedPurchaseAccess = nil; return }
         let generation = identity.generation
-        let access = await identity.localPurchaseAccess()
+        let result = await identity.readPurchaseAccess()
         guard !Task.isCancelled, generation == identity.generation else { return }
-        guard let access else { authorizedPurchaseAccount = nil; return }
-        authorizedPurchaseAccount = PurchaseAccount(generation: generation, token: access.token)
+        switch result {
+        case let .available(token, deadline):
+            let access = ObservedPurchaseAccess(account: PurchaseAccount(generation: generation, token: token), deadline: deadline)
+            if observedPurchaseAccess != access { observedPurchaseAccess = access }
+        case .unavailable:
+            observedPurchaseAccess = nil
+            return
+        case .checking:
+            break
+        }
+        guard let access = observedPurchaseAccess, access.account.generation == generation else { return }
         do { try await Task.sleep(for: .seconds(max(0, access.deadline.timeIntervalSince(identity.now())))) }
         catch { return }
-        if !Task.isCancelled, generation == identity.generation { authorizedPurchaseAccount = nil }
+        if !Task.isCancelled, observedPurchaseAccess == access { observedPurchaseAccess = nil }
     }
     @Published private(set) var purchasePreparationMessage = "先登入服務帳號，再確認月費並訂閱；登入不會付款或開啟研究上傳。"
     private var preparationCopy: LiteServiceCopy.Message?

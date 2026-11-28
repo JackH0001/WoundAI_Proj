@@ -27,6 +27,65 @@ private actor BalanceTransport: LiteAuthenticatedTransport {
                                     "used":1,"pending":1,"limit":2,"remaining":0,"attempt_limit_reached":false]
         return try JSONSerialization.data(withJSONObject: values.merging(overrides){_,n in n})
     }
+    func testOfferRechecksAtUTCResetAndStopsAfterSecondSnapshotExpires() async throws {
+        let midnight = (day / 86400 + 1) * 86400
+        let free = try JSONDecoder().decode(LitePersonalBalance.self, from: data(["as_of": midnight - 2]))
+        let plus = try JSONDecoder().decode(LitePersonalBalance.self, from: data([
+            "as_of": midnight, "resets_at": midnight + 86400, "limit": 10, "remaining": 8
+        ]))
+        var received: [LiteOfferPlanStatus] = [], deadlines: [Date] = []
+        var reads = 0
+        await LiteOfferPlanStatus.observe(fetch: {
+            reads += 1
+            return reads == 1 ? free : plus
+        }, waitUntil: { deadlines.append($0) }, publish: { received.append($0) })
+        XCTAssertEqual(reads, 2)
+        XCTAssertEqual(deadlines, [midnight, midnight + 300].map { Date(timeIntervalSince1970: Double($0)) })
+        XCTAssertEqual(received, [.checking, .available(free), .checking, .available(plus), .expired])
+    }
+
+    func testFailedFirstPlanReadWaitsForExplicitRetry() async {
+        var received: [LiteOfferPlanStatus] = []
+        await LiteOfferPlanStatus.observe(fetch: { throw LiteAccountFailure.unavailable },
+                                          waitUntil: { _ in XCTFail("Failed requests have no freshness deadline") },
+                                          publish: { received.append($0) })
+        XCTAssertEqual(received, [.checking, .unavailable])
+    }
+
+    func testFailedRefreshDropsPreviousOfferAndStopsReading() async throws {
+        let balance = try JSONDecoder().decode(LitePersonalBalance.self, from: data())
+        var received: [LiteOfferPlanStatus] = []
+        await LiteOfferPlanStatus.observe(fetch: {
+            if received.contains(.available(balance)) { throw LiteAccountFailure.unavailable }
+            return balance
+        }, waitUntil: { _ in }, publish: { received.append($0) })
+        XCTAssertEqual(received, [.checking, .available(balance), .checking, .unavailable])
+    }
+
+    func testLeavingTheOfferDuringExpiryWaitPreventsSecondRead() async throws {
+        let balance = try JSONDecoder().decode(LitePersonalBalance.self, from: data())
+        var received: [LiteOfferPlanStatus] = []
+        await Task { @MainActor in
+            await LiteOfferPlanStatus.observe(fetch: { balance }, waitUntil: { _ in
+                withUnsafeCurrentTask { $0?.cancel() }
+            }, publish: { received.append($0) })
+        }.value
+        XCTAssertEqual(received, [.checking, .available(balance)])
+    }
+
+    func testCancelledPlanRequestCannotPublishLateAccountBalance() async throws {
+        let balance = try JSONDecoder().decode(LitePersonalBalance.self, from: data())
+        var received: [LiteOfferPlanStatus] = []
+        await Task { @MainActor in
+            await LiteOfferPlanStatus.observe(fetch: {
+                withUnsafeCurrentTask { $0?.cancel() }
+                return balance
+            }, waitUntil: { _ in XCTFail("Expired account must not start a timer") },
+               publish: { received.append($0) })
+        }.value
+        XCTAssertEqual(received, [.checking])
+    }
+
     func testQueryUsesOnlyOriginalOwnerAndAccountWithoutPhotoOrOperation() async throws {
         let transport = try BalanceTransport(data())
         let value = try await LitePersonalBalance.fetch(context: context, transport: transport, now: { self.date })

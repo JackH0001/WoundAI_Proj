@@ -22,3 +22,9 @@ Admission can return HTTP 429 with `reason=success_quota` and an optional `succe
 | `attempt_quota` | The independent attempt limit takes precedence and lasts until the UTC reset. |
 
 The retry time specifies when to ask again. A new request rechecks the current grant and ledger before sending the photo. The iOS journal preserves the operation ID, image digest and retry deadline across relaunch, with the existing one-hour cap on client backoff. Older servers and saved refusals without the additional state use the general allowance message.
+
+## Viewing Plus across a plan or UTC-day change
+
+While the Plus page is open for the same signed-in account, it reads the balance again when the first snapshot expires. The deadline is the earlier of the next UTC day and five minutes after the server timestamp. If this read fails, the page offers a manual retry. If a second successful snapshot expires, the page also waits for a user action. This bounds background work while someone leaves the offer open. Returning to the foreground, changing accounts, or confirming a transaction starts a fresh check.
+
+A routine account verification can overlap the local session read. The page may continue to display the previously verified account until its deadline. A busy read cannot establish a new purchasing identity. A change of account generation, expiry, or a confirmed unavailable session invalidates the display. Showing the purchase button requires a fresh free-plan balance, and the tap checks freshness again before the existing StoreKit purchase flow runs.
