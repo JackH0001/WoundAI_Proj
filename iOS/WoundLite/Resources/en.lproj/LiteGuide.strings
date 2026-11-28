@@ -18,9 +18,9 @@
 "紀錄 → 管理追蹤" = "Records → Manage tracking";
 "免費可同時追蹤 1 處，Plus 每帳戶最多 5 處。在另一台裝置調整後，可重新核對名額。結束追蹤可空出名額，原時間軸及 PDF 仍可查看。" = "Free accounts can track 1 wound at a time; Plus allows up to 5 per account. After changes on another device, verify the available slots again. Ending tracking frees a slot. The original timeline and PDF remain available.";
 "使用本機免費名額可追蹤 1 處。結束追蹤可空出名額，原時間軸及 PDF 仍可查看。" = "The local free allowance supports tracking 1 wound. Ending tracking frees a slot. The original timeline and PDF remain available.";
-"怎麼停止研究上傳或撤回？" = "How do I stop research uploads or withdraw?";
+"如何參加研究、停止上傳或撤回？" = "How do I join research, stop uploads or withdraw?";
 "設定 → 研究上傳／資料與撤回" = "Settings → Research uploads / Data and withdrawal";
-"關閉研究上傳可停止未來送件。若要撤回已送資料，請到「資料與撤回」閱讀範圍，確認後查看進度。手機上的紀錄仍保留。" = "Turning off research uploads stops future submissions. To withdraw data already submitted, open “Data and withdrawal”, read the scope, confirm and check progress. Records on your phone are retained.";
+"想參加時，在設定開啟「研究上傳」，閱讀說明後選擇是否同意。關閉開關可停止未來上傳。若要撤回已送資料，請到「資料與撤回」確認並查看進度。手機上的紀錄仍保留。" = "To participate, turn on Research uploads in Settings, read the information and choose whether to agree. Turning it off stops future submissions. To withdraw data already sent, open Data and withdrawal, confirm your request and check its progress. Records on your phone are retained.";
 "如何核對今天剩餘的辨識次數？" = "How do I check today’s remaining recognitions?";
 "設定 → 查看個人帳號今日額度" = "Settings → View today's personal account quota";
 "登入後查看服務回覆的餘額。每日成功辨識免費 2 次、Plus 共 10 次，由同帳戶所有傷口合計。在手機上保存或匯出 PDF 不會扣次。" = "After signing in, check the balance returned by the service. Free accounts have 2 successful recognitions per day; Plus has a total of 10, shared across all wounds in the account. Saving on your phone or exporting a PDF uses no recognitions.";

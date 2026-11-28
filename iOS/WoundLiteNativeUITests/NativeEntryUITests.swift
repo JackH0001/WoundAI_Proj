@@ -7,6 +7,95 @@ final class NativeEntryUITests: XCTestCase {
         return app
     }
 
+    @MainActor func testEnglishFirstUseCanOpenMeasureAndPlusBeforeResearch() {
+        verifyFirstUse(language: "en")
+    }
+
+    @MainActor func testChineseFirstUseCanOpenMeasureAndPlusBeforeResearch() {
+        verifyFirstUse(language: "zh-Hant")
+    }
+
+    @MainActor private func verifyFirstUse(language: String) {
+        continueAfterFailure = false
+        let app = application(language: language)
+        let english = language == "en"
+        app.launch()
+        let title = app.staticTexts["lite.research.consent.title"]
+        let measure = app.navigationBars[english ? "Measure" : "量測"]
+        XCTAssertTrue(measure.waitForExistence(timeout: 8))
+        XCTAssertFalse(title.exists, "First launch must not ask for research participation")
+        let capture = app.buttons["lite.capture"]
+        let settingsGate = app.buttons[english ? "Settings and data withdrawal" : "設定與資料撤回"]
+        XCTAssertTrue(capture.isHittable || settingsGate.isHittable)
+        if capture.isHittable {
+            XCTAssertTrue(app.staticTexts["lite.capture.instructions"].isHittable)
+        }
+        attach(app, language + "-first-use-measure")
+        let settings = settingsGate.isHittable ? settingsGate : app.tabBars.buttons[english ? "Settings" : "設定"]
+        settings.tap()
+        #if !LITE_QA_ORDINARY && !LITE_QA_MISSING_BINDING
+        let plus = app.buttons["lite.settings.plus"]
+        XCTAssertTrue(plus.waitForExistence(timeout: 8))
+        for _ in 0..<4 where !plus.isHittable { app.swipeUp() }
+        plus.tap()
+        let restore = app.buttons["lite.offer.restore"]
+        for _ in 0..<5 where !restore.isHittable { app.swipeUp() }
+        XCTAssertTrue(restore.isHittable)
+        XCTAssertFalse(title.exists)
+        XCTAssertFalse(app.buttons["lite.offer.buy"].exists, "A signed-out tester should not have a payment action")
+        attach(app, language + "-first-use-plus")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        #endif
+        let toggle = app.switches["lite.research.toggle"].firstMatch
+        for _ in 0..<8 where !toggle.isHittable { app.swipeUp() }
+        XCTAssertTrue(toggle.isHittable)
+        XCTAssertEqual(toggle.value as? String, "0", "Use an isolated installation with no previous research consent")
+        XCTAssertFalse(title.exists)
+    }
+
+    @MainActor func testOutdatedConsentKeepsUploadsOffAndExplainsHowToResumeInSettings() {
+        continueAfterFailure = false
+        let app = application(language: "en")
+        app.launchArguments += [
+            "-lite_research_consent", "YES",
+            "-lite_consent_version", "2026-10-16.1",
+            "-lite_consent_origin", "https://woundai-lite-candidate-421209514056.asia-east1.run.app",
+            "-lite_research_notice_version", "old-notice"
+        ]
+        app.launch()
+        let gate = app.buttons["Settings and data withdrawal"]
+        let settings = gate.waitForExistence(timeout: 2) ? gate : app.tabBars.buttons["Settings"]
+        XCTAssertTrue(settings.isHittable)
+        XCTAssertFalse(app.staticTexts["lite.research.consent.title"].exists)
+        settings.tap()
+        let notice = app.staticTexts["lite.research.noticeNeedsReview"]
+        for _ in 0..<8 where !notice.isHittable { app.swipeUp() }
+        XCTAssertTrue(notice.isHittable)
+        XCTAssertTrue(notice.label.hasPrefix("Research uploads are paused."))
+        XCTAssertEqual(app.switches["lite.research.toggle"].firstMatch.value as? String, "0")
+        attach(app, "paused-research-on-upgrade")
+    }
+
+    // A partially visible Form row can be hittable while its switch sits under
+    // the floating tab bar. Scroll its center into the viewport before tapping.
+    @MainActor private func tapResearchSwitch(_ row: XCUIElement, in app: XCUIApplication) {
+        let middle = app.frame.midY
+        let margin = app.frame.height * 0.24
+        for _ in 0..<6 {
+            let y = row.frame.midY
+            if abs(y - middle) <= margin { break }
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            let distance: CGFloat = y > middle ? -140 : 140
+            start.press(forDuration: 0.12, thenDragTo: start.withOffset(CGVector(dx: 0, dy: distance)))
+        }
+        let control = row.switches.firstMatch
+        if control.exists && control.isHittable {
+            control.tap()
+        } else {
+            row.coordinate(withNormalizedOffset: CGVector(dx: 0.91, dy: 0.5)).tap()
+        }
+    }
+
     @MainActor func testEnglishResearchDisclosureDeclineKeepsUploadsOffAfterRelaunch() throws {
         try verifyResearchDecline(language: "en")
     }
@@ -33,7 +122,7 @@ final class NativeEntryUITests: XCTestCase {
         reveal(toggle)
         XCTAssertEqual(toggle.value as? String, "0", "The isolated simulator must begin with research uploads off")
         XCTAssertTrue(toggle.isEnabled, "Use a fresh simulator; do not reset an existing withdrawal to exercise first consent")
-        toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.91, dy: 0.5)).tap()
+        tapResearchSwitch(toggle, in: app)
         let title = app.staticTexts["lite.research.consent.title"]
         XCTAssertTrue(title.waitForExistence(timeout: 5))
         #if LITE_QA_ORDINARY
@@ -571,7 +660,9 @@ final class NativeEntryUITests: XCTestCase {
         let app = application()
         func openSettings() {
             app.launch()
-            app.buttons["設定與資料撤回"].tap()
+            let gate = app.buttons["設定與資料撤回"]
+            let settings = gate.waitForExistence(timeout: 2) ? gate : app.tabBars.buttons["設定"]
+            settings.tap()
             XCTAssertTrue(app.navigationBars["設定"].waitForExistence(timeout: 5))
         }
         func reveal(_ element: XCUIElement) {
@@ -585,7 +676,7 @@ final class NativeEntryUITests: XCTestCase {
         }
         func toggle() {
             reveal(research)
-            research.coordinate(withNormalizedOffset: CGVector(dx: 0.91, dy: 0.5)).tap()
+            tapResearchSwitch(research, in: app)
         }
         openSettings()
         reveal(research)

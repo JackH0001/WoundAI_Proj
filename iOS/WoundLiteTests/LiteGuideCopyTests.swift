@@ -40,6 +40,7 @@ final class LiteGuideCopyTests: XCTestCase {
         let cases = ["take a picture": "camera", "focus": "camera", "depth missing": "area",
                      "correct boundary": "outline", "compare photos": "photos", "export PDF": "report",
                      "end tracking": "wounds", "stop research uploads": "research", "ＰＤＦ": "report",
+                     "join research": "research", "參加研究": "research",
                      "我要修邊": "outline", "撤回研究": "research", "關閉提醒": "reminder", "record reminder": "reminder"]
         for locale in [en, zh] {
             for personal in [false, true] {

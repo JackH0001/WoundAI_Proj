@@ -16,11 +16,10 @@ import AVFoundation
  - **品質不足就不給數字**：比值閘（表面/投影 >1.25）、攝距、傾角、覆蓋率——
    寧可請使用者重拍，也不給一個看起來煞有介事的錯數字。
 
- ## 輪廓來源（研究同意分流，2026-08-18 產品決策）
+ ## 圈選與研究參與
 
- - 同意研究上傳 → 雲端自動辨識（去識別影像＋深度幾何供精度研究與訓練）。
- - 不同意 → 完全離線：手動圈選，照片與深度不離開手機。
- - 本地端分割模型成熟後再考慮第三條路（見 docs/lite_backend_contract.md）。
+ 本機手動圈選可直接使用。研究上傳須由使用者在設定中閱讀說明並同意。
+ 含個人服務的組建另有雲端辨識入口，由個人服務的授權流程處理。
  */
 @main
 struct WoundLiteApp: App {
@@ -82,13 +81,13 @@ enum LitePrefs {
     static func reviewedChoice(_ choice: Bool?, notice: String?) -> Bool? {
         choice == true && notice != noticeVersion ? nil : choice
     }
-    /// nil＝還沒問過（首啟要問）；true/false＝使用者的選擇，設定頁可改。
     static var researchPausedForAccountDeletion: Bool {
         LiteAccountResearchPause.standard.blocks(AppSettings.backendURL())
     }
     static func pauseResearchForAccountDeletion() throws {
         try LiteAccountResearchPause.standard.pause(AppSettings.backendURL())
     }
+    /// nil means the current notice has no recorded choice. Research requires explicit acceptance in Settings.
     static var researchConsent: Bool? {
         get {
             guard !researchPausedForAccountDeletion, !LiteWithdrawalJournal.standard.blocksUploads else { return false }
@@ -155,7 +154,6 @@ struct LiteRootView: View {
         }
         await store.resumePendingRevisions()
     }
-    @State private var askConsent = false
     @State private var selectedTab: LiteRootTab = .measure
     @State private var savedRecordToOpen: String?
     /// Hardware gates new capture only; records and privacy controls stay accessible.
@@ -203,13 +201,6 @@ struct LiteRootView: View {
         .task { await LiteReminderModel.shared.refresh(); await resumeResearch() }
         .onChange(of: scenePhase) { _, value in if value == .active { Task { await LiteReminderModel.shared.refresh(); await resumeResearch() } } }
         .onReceive(retryTimer) { _ in if scenePhase == .active { Task { await resumeResearch() } } }
-        .onAppear { if lidarOK, LitePrefs.researchConsent == nil { askConsent = true } }
-        .fullScreenCover(isPresented: $askConsent) {
-            LiteConsentView { agreed in
-                LitePrefs.researchConsent = agreed
-                askConsent = false
-            }
-        }
     }
 
     private var lidarGate: some View {

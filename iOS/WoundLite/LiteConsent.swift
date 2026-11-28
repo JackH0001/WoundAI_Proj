@@ -269,6 +269,10 @@ struct LiteSettingsView: View {
                     } else if withdrawal.blocksUploads {
                         Text(copy.text("研究上傳已因撤回停用。請查看下方「資料與撤回」狀態；重試查核不會重新開啟研究上傳。"))
                             .font(.footnote).foregroundStyle(.secondary)
+                    } else if storedChoice == true && LitePrefs.researchConsent == nil {
+                        Text(copy.text("研究上傳已暫停。若要繼續，請開啟上方開關，閱讀並同意目前的研究說明。"))
+                            .font(.footnote).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("lite.research.noticeNeedsReview")
                     }
                 }
                 if !LiteNativeBuild.includesService && consent && !withdrawal.blocksUploads && !LitePrefs.researchPausedForAccountDeletion {
@@ -376,7 +380,7 @@ struct LiteSettingsView: View {
             .sheet(isPresented: $reviewingResearchChoice) {
                 LiteConsentView { agreed in
                     reviewingResearchChoice = false
-                    if agreed && !withdrawal.busy { LitePrefs.researchConsent = true }
+                    if !agreed || !withdrawal.busy { LitePrefs.researchConsent = agreed }
                 }
             }
             .sheet(isPresented: $reviewRenewedConsent, onDismiss: submitConfirmedRenewal) {
