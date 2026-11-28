@@ -967,6 +967,12 @@ struct LiteMeasureView: View {
     @State private var saveTarget: LiteWoundSaveTarget?
     @State private var showSaveConfirmation = false
     @State private var saveNotice: String?
+    @State private var blockedSave: (image: UIImage, target: LiteWoundSaveTarget, generation: Int?, limit: LiteWoundSlotLimit?)?
+    private enum SlotDestination: String, Identifiable {
+        case tracking, plus
+        var id: Self { self }
+    }
+    @State private var slotDestination: SlotDestination?
     @State private var confirmRetake = false
     private enum WoundCheck { case readingRoster, saving }
     @State private var woundCheck: WoundCheck?
@@ -1070,6 +1076,27 @@ struct LiteMeasureView: View {
             .task(id: nativeSession.map(ObjectIdentifier.init)) {
                 vm.attachNativeSession(nativeSession)
                 await vm.reloadDrafts(in: store)
+            }
+            .onChange(of: vm.image.map(ObjectIdentifier.init)) { _, _ in blockedSave = nil }
+            .onChange(of: scenePhase) { _, phase in
+                if phase != .active { blockedSave = nil }
+            }
+            .sheet(item: $slotDestination, onDismiss: { blockedSave = nil; roster = nil }) { destination in
+                switch destination {
+                case .tracking:
+                    LiteTrackingManager(store: store, session: nativeSession)
+                case .plus:
+                    if let nativeSession {
+                        NavigationStack {
+                            LiteNativePurchaseView(session: nativeSession)
+                                .toolbar {
+                                    ToolbarItem(placement: .confirmationAction) {
+                                        Button(copy.text("返回這次拍攝")) { slotDestination = nil }
+                                    }
+                                }
+                        }
+                    }
+                }
             }
             .sheet(isPresented: $vm.showRecognitionAccount, onDismiss: {
                 Task { await vm.recognitionAccountDismissed() }
@@ -1292,6 +1319,7 @@ struct LiteMeasureView: View {
             if let nativeSession {
                 Button(copy.text(woundCheck == .readingRoster ? "正在讀取追蹤名單…" : "核對帳戶正在追蹤的傷口")) {
                     guard woundCheck == nil else { return }
+                    blockedSave = nil
                     woundCheck = .readingRoster
                     Task { @MainActor in
                         defer { woundCheck = nil }
@@ -1306,6 +1334,15 @@ struct LiteMeasureView: View {
             Text(copy.text("追蹤同一處傷口時，請選擇原有傷口；不同傷口的紀錄會分開顯示。"))
                 .font(.caption).foregroundStyle(.secondary)
             if let error = store.storageError { Text(copy.message(error)).font(.footnote).foregroundStyle(.orange) }
+            if let blockedSave, vm.savedId == nil, blockedSave.image === vm.image, blockedSave.target == target {
+                if let nativeSession {
+                    LiteWoundSlotActions(session: nativeSession, generation: blockedSave.generation, limit: blockedSave.limit) {
+                        slotDestination = .tracking
+                    } plus: { slotDestination = .plus }
+                } else {
+                    LiteWoundSlotControls { slotDestination = .tracking }
+                }
+            }
             if let saveNotice { Text(roster?.summary == saveNotice ? copy.history.roster(roster) : copy.message(saveNotice)).font(.footnote).foregroundStyle(.orange) }
             Button {
                 guard woundCheck == nil, let target = currentSaveTarget else { return }
@@ -1352,28 +1389,51 @@ struct LiteMeasureView: View {
         }
         guard woundCheck == nil else { return }
         woundCheck = .saving
+        blockedSave = nil
         saveNotice = nil
         let draftID = vm.draft?.id
         let image = vm.image
         let accountGeneration = nativeSession?.identity.generation
+        let account = nativeSession?.purchaseObservationAccount
+        let checkedAt = nativeSession?.identity.now()
+        let purchaseRevision = nativeSession?.purchases.confirmedUpdates
         let owner = availableGroups.first(where: { $0.id == target.woundID })?.account
         Task { @MainActor in
             defer { woundCheck = nil }
+            var fullRoster: LiteWoundRoster?
+            var hitLocalLimit = false
             do {
                 let id = target.woundID.isEmpty
                     ? try LiteWoundRoster.newID(for: draftID ?? UUID().uuidString) : target.woundID
-                let permit = try await nativeSession?.woundPermit(id: id, owner: owner)
+                let permit = try await nativeSession?.woundPermit(id: id, owner: owner) { fullRoster = $0 }
                 guard nativeSession?.identity.generation == accountGeneration, vm.image === image,
                       vm.draft?.id == draftID, currentSaveTarget == target,
                       !store.needsReload, !vm.busy, vm.savedId == nil else { throw LiteWoundTrackingError.changed }
                 guard store.maySave(to: id, permit: permit) else {
-                    if permit == nil { throw LiteWoundTrackingError.full(1) }
+                    if permit == nil {
+                        hitLocalLimit = true
+                        throw LiteWoundTrackingError.full(1)
+                    }
                     throw LiteWoundTrackingError.changed
                 }
                 persistConfirmed(target, permit: permit)
             } catch {
                 let failure = (error as? LiteWoundTrackingError) ?? .unavailable
-                if case .unavailable = failure {
+                if case .full = failure, target.woundID.isEmpty, let image {
+                    var limit: LiteWoundSlotLimit?
+                    if let nativeSession, let checkedAt, let purchaseRevision {
+                        limit = await nativeSession.confirmedSlotLimit(for: fullRoster, account: account,
+                                                             checkedAt: checkedAt, purchaseRevision: purchaseRevision)
+                    }
+                    guard measureVisible, scenePhase == .active, vm.image === image, vm.draft?.id == draftID,
+                          currentSaveTarget == target, vm.savedId == nil,
+                          nativeSession?.identity.generation == accountGeneration else { return }
+                    if hitLocalLimit || limit != nil {
+                        blockedSave = (image, target, accountGeneration, limit)
+                    } else {
+                        saveNotice = "暫時無法確認追蹤名額。這次拍攝仍在，可稍後再按「存入紀錄」。"
+                    }
+                } else if case .unavailable = failure {
                     saveNotice = "暫時無法確認追蹤名額。這次拍攝仍在，可稍後再按「存入紀錄」。"
                 } else {
                     saveNotice = failure.localizedDescription
@@ -1400,6 +1460,58 @@ struct LiteMeasureView: View {
         Task { @MainActor in
             if let committedDraft { await vm.markDraftSaved(committedDraft, in: store) }
             await vm.reloadDrafts(in: store)
+        }
+    }
+}
+
+private struct LiteWoundSlotControls: View {
+    @Environment(\.locale) private var locale
+    let manage: () -> Void
+    var plus: (() -> Void)? = nil
+
+    var body: some View {
+        let copy = LiteCaptureCopy(locale: locale)
+        Text(copy.text("請管理目前追蹤的傷口以騰出名額，再回來存入這次拍攝。")).font(.footnote)
+        Button(copy.history.text("管理追蹤傷口"), action: manage)
+            .accessibilityIdentifier("lite.capture.manageWounds")
+        if let plus {
+            Button(copy.text("查看 Plus：同時追蹤最多 5 處傷口"), action: plus)
+                .accessibilityIdentifier("lite.capture.woundPlus")
+        }
+    }
+}
+
+/// Invalidate both actions when the original login or its verified limit changes.
+private struct LiteWoundSlotActions: View {
+    @ObservedObject private var session: LiteNativeSession
+    @ObservedObject private var identity: LiteAccountIdentityStore
+    @ObservedObject private var purchases: LiteNativePurchaseStore
+    let generation: Int?
+    let limit: LiteWoundSlotLimit?
+    let manage: () -> Void
+    let plus: () -> Void
+
+    init(session: LiteNativeSession, generation: Int?, limit: LiteWoundSlotLimit?,
+         manage: @escaping () -> Void, plus: @escaping () -> Void) {
+        self.session = session
+        identity = session.identity
+        purchases = session.purchases
+        self.generation = generation
+        self.limit = limit
+        self.manage = manage
+        self.plus = plus
+    }
+
+    private var current: Bool {
+        identity.generation == generation && (limit?.isCurrent(in: session) ?? (session.purchaseObservationAccount == nil))
+    }
+
+    var body: some View {
+        TimelineView(.explicit([Date.now] + (limit.map { [$0.deadline] } ?? []))) { _ in
+            if current {
+                LiteWoundSlotControls(manage: { if current { manage() } },
+                                      plus: limit?.canGainSlotWithPlus == true ? { if current { plus() } } : nil)
+            }
         }
     }
 }

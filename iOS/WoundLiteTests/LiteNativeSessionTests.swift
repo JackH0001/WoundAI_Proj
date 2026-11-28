@@ -78,7 +78,8 @@ private actor SessionWire: LiteAuthenticatedTransport {
     func setLoginAccount(_ hash: String) { loginAccount = hash }
     var afterContext: (@Sendable () async -> Void)?
     var beforeInstallation: (@Sendable () async -> Void)?
-    var activeWounds = [String](), woundRevision = 0
+    var activeWounds = [String](), woundRevision = 0, woundLimit = 5
+    func useWoundLimit(_ limit: Int) { woundLimit = limit }
     var afterWoundSnapshot: (@Sendable () async -> Void)?
     var beforeServiceStatus: (@MainActor @Sendable () async -> Void)?
     let golden: [String: Any]
@@ -155,12 +156,19 @@ private actor SessionWire: LiteAuthenticatedTransport {
             if action != "status" {
                 XCTAssertEqual(body["revision"] as? Int, woundRevision)
                 let wound = try XCTUnwrap(body["wound_id"] as? String)
-                if action == "open", !activeWounds.contains(wound) { activeWounds.append(wound); woundRevision += 1 }
-                if action == "finish", activeWounds.contains(wound) { activeWounds.removeAll { $0 == wound }; woundRevision += 1 }
                 decision = "confirmed"
+                if action == "open", !activeWounds.contains(wound) {
+                    if activeWounds.count >= woundLimit {
+                        code = 409
+                        decision = "limit"
+                    } else {
+                        activeWounds.append(wound); woundRevision += 1
+                    }
+                }
+                if action == "finish", activeWounds.contains(wound) { activeWounds.removeAll { $0 == wound }; woundRevision += 1 }
             }
             result = ["schema":"lite.wounds/1", "account_sha256":sessionHash,"revision":woundRevision,
-                      "limit":5,"active":activeWounds]
+                      "limit":woundLimit,"active":activeWounds]
             if let decision { result["decision"] = decision }
             if action == "status", let callback = afterWoundSnapshot {
                 afterWoundSnapshot = nil
@@ -386,6 +394,113 @@ private actor SessionWire: LiteAuthenticatedTransport {
         XCTAssertFalse(LiteNativeBuild.includesService)
     }
     #endif
+    private func observeCurrentSlotAccount(_ session: LiteNativeSession) async throws {
+        let observer = Task { await session.trackPurchaseAccess(foreground: true) }
+        defer { observer.cancel() }
+        for _ in 0..<100 where session.purchaseObservationAccount == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNotNil(session.purchaseObservationAccount)
+    }
+
+    func testFreeSecondWoundOfferExpiresWithOriginalLoginAndPreservesSameCapture() async throws {
+        let wire = try SessionWire(), path = captureFiles()
+        defer { try? FileManager.default.removeItem(at: path) }
+        let files = LiteCaptureDraftStore(directory: path)
+        var now = Date(timeIntervalSince1970: Double(sessionTime))
+        let session = try LiteNativeSession(origin: origin, transport: wire, identityProvider: SessionApple(),
+            purchaseProvider: SessionStoreKit(), journal: SessionJournal(), captures: files,
+            register: { await wire.register() }, now: { now })
+        await session.checkExistingRegistration()
+        await session.identity.signIn()
+        try await observeCurrentSlotAccount(session)
+        let signedIn = try XCTUnwrap(session.purchaseObservationAccount)
+        await wire.useWoundLimit(1)
+        let firstID = UUID().uuidString
+        _ = try await session.woundPermit(id: firstID, owner: nil)
+        let draft = try await captureFixture(wire, in: files)
+        let store = LiteStore(fileURL: path.appendingPathComponent("records.json"))
+        let vm = LiteMeasureVM(native: session)
+        await vm.restoreDraft(draft.id, in: store)
+        let target = try LiteWoundRoster.newID(for: draft.id)
+        var roster: LiteWoundRoster?
+        do {
+            _ = try await session.woundPermit(id: target, owner: nil) { roster = $0 }
+            XCTFail("The second wound was accepted on a one-slot account")
+        } catch LiteWoundTrackingError.full(let limit) { XCTAssertEqual(limit, 1) }
+        XCTAssertEqual(roster?.active.count, 1)
+        let checkedAt = now
+        let offered = await session.confirmedSlotLimit(for: roster, account: signedIn, checkedAt: checkedAt, purchaseRevision: 0)
+        let offer = try XCTUnwrap(offered)
+        XCTAssertTrue(offer.isCurrent(in: session)); XCTAssertTrue(offer.canGainSlotWithPlus)
+        now = checkedAt.addingTimeInterval(300)
+        XCTAssertFalse(offer.isCurrent(in: session))
+        let late = await session.confirmedSlotLimit(for: roster, account: signedIn, checkedAt: checkedAt, purchaseRevision: 0)
+        XCTAssertNil(late)
+        now = checkedAt.addingTimeInterval(880)
+        let recent = await session.confirmedSlotLimit(for: roster, account: signedIn, checkedAt: now, purchaseRevision: 0)
+        let short = try XCTUnwrap(recent)
+        now = checkedAt.addingTimeInterval(900)
+        XCTAssertFalse(short.isCurrent(in: session))
+        XCTAssertEqual(vm.draft, draft); XCTAssertTrue(store.records.isEmpty)
+        let savedDraft = try await files.load(draft.id)
+        XCTAssertEqual(savedDraft, draft)
+        let calls = await wire.counts()
+        XCTAssertNil(calls["purchase/confirm"]); XCTAssertNil(calls["service/prepare"])
+    }
+
+    func testFullPlusAndFiveRetainedAfterDowngradeDoNotOfferAnotherSlot() async throws {
+        let wire = try SessionWire(), session = try runtime(wire, SessionJournal())
+        await session.checkExistingRegistration()
+        await session.identity.signIn()
+        try await observeCurrentSlotAccount(session)
+        let account = try XCTUnwrap(session.purchaseObservationAccount)
+        for _ in 0..<5 { _ = try await session.woundPermit(id: UUID().uuidString, owner: nil) }
+        for limit in [5, 1] {
+            await wire.useWoundLimit(limit)
+            var roster: LiteWoundRoster?
+            do {
+                _ = try await session.woundPermit(id: UUID().uuidString, owner: nil) { roster = $0 }
+                XCTFail("Sixth wound was accepted")
+            } catch LiteWoundTrackingError.full(let n) { XCTAssertEqual(n, limit) }
+            XCTAssertEqual(roster?.active.count, 5)
+            let offer = await session.confirmedSlotLimit(for: roster, account: account, checkedAt: session.identity.now(), purchaseRevision: 0)
+            let confirmed = try XCTUnwrap(offer)
+            XCTAssertTrue(confirmed.isCurrent(in: session)); XCTAssertFalse(confirmed.canGainSlotWithPlus)
+        }
+    }
+
+    func testUnverifiedOrChangedWoundAccountCannotAdvertiseOldCapacity() async throws {
+        let wire = try SessionWire(), session = try runtime(wire, SessionJournal())
+        let checkedAt = session.identity.now()
+        var roster: LiteWoundRoster?
+        let local = try await session.woundPermit(id: UUID().uuidString, owner: nil) { roster = $0 }
+        XCTAssertNil(local); XCTAssertNil(roster)
+        await session.checkExistingRegistration()
+        await session.identity.signIn()
+        try await observeCurrentSlotAccount(session)
+        let original = try XCTUnwrap(session.purchaseObservationAccount)
+        await wire.useWoundLimit(1)
+        _ = try await session.woundPermit(id: UUID().uuidString, owner: nil)
+        do { _ = try await session.woundPermit(id: UUID().uuidString, owner: nil) { roster = $0 }; XCTFail("full account") }
+        catch LiteWoundTrackingError.full {}
+        let offered = await session.confirmedSlotLimit(for: roster, account: original, checkedAt: checkedAt, purchaseRevision: 0)
+        let offer = try XCTUnwrap(offered)
+        await session.identity.signOut()
+        await wire.setLoginAccount(String(repeating: "b", count: 64))
+        await session.identity.signIn()
+        try await observeCurrentSlotAccount(session)
+        XCTAssertFalse(offer.isCurrent(in: session))
+        let old = await session.confirmedSlotLimit(for: roster, account: original, checkedAt: checkedAt, purchaseRevision: 0)
+        XCTAssertNil(old)
+        let other = await session.confirmedSlotLimit(for: roster, account: session.purchaseObservationAccount, checkedAt: checkedAt, purchaseRevision: 0)
+        XCTAssertNil(other)
+        await wire.failStatus()
+        var offlineRoster: LiteWoundRoster?
+        do { _ = try await session.woundPermit(id: UUID().uuidString, owner: nil) { offlineRoster = $0 }; XCTFail("offline status") }
+        catch { XCTAssertNil(offlineRoster) }
+    }
+
     func testTrackingUsesOriginalAccountAndDoesNotSilentlyReopenRemoteEnd() async throws {
         let wire = try SessionWire()
         let session = try runtime(wire, SessionJournal())

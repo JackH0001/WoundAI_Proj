@@ -166,3 +166,5 @@
 "正在讀取追蹤名單…" = "Reading your tracked wounds…";
 "正在確認傷口名額並存入紀錄…" = "Checking your wound limit and saving…";
 "暫時無法確認追蹤名額。這次拍攝仍在，可稍後再按「存入紀錄」。" = "Your capture is still here. Your wound limit could not be checked. Tap “Save record” to try again.";
+"請管理目前追蹤的傷口以騰出名額，再回來存入這次拍攝。" = "Manage the wounds you track to free a slot, then return to save this capture.";
+"查看 Plus：同時追蹤最多 5 處傷口" = "View Plus: track up to 5 wounds at a time";

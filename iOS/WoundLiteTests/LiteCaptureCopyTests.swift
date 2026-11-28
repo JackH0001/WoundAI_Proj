@@ -15,13 +15,21 @@ import SwiftUI
             UIColor.orange.setFill(); ctx.fill(CGRect(x: 0, y: 0, width: 16, height: 16))
         }
     }
+    func testFullWoundActionsExplainTheReturnPathAndFiveSlotsInBothLanguages() {
+        let next = "請管理目前追蹤的傷口以騰出名額，再回來存入這次拍攝。"
+        let offer = "查看 Plus：同時追蹤最多 5 處傷口"
+        XCTAssertEqual(zh.text(next), next)
+        XCTAssertEqual(zh.text(offer), offer)
+        XCTAssertEqual(en.text(next), "Manage the wounds you track to free a slot, then return to save this capture.")
+        XCTAssertEqual(en.text(offer), "View Plus: track up to 5 wounds at a time")
+    }
     func testPairedResourcesPreservePlaceholdersAndChinese() throws {
         func table(_ language: String) throws -> [String:String] {
             let url = try XCTUnwrap(Bundle.main.url(forResource: "LiteCapture", withExtension: "strings", subdirectory: nil, localization: language))
             return try XCTUnwrap(PropertyListSerialization.propertyList(from: Data(contentsOf: url), format: nil) as? [String:String])
         }
         let a = try table("en"), b = try table("zh-Hant")
-        XCTAssertEqual(a.count, 167); XCTAssertEqual(Set(a.keys), Set(b.keys))
+        XCTAssertEqual(a.count, 169); XCTAssertEqual(Set(a.keys), Set(b.keys))
         for (key, value) in a {
             XCTAssertEqual(b[key],key); XCTAssertFalse(value.isEmpty)
             XCTAssertEqual(key.components(separatedBy: "%@").count,value.components(separatedBy: "%@").count)

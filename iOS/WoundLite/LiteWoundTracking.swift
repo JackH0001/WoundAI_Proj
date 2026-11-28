@@ -85,10 +85,23 @@ struct LiteWoundRoster: Decodable {
   }
 }
 
+/// A full roster can offer more slots only to the same, still signed-in account.
+struct LiteWoundSlotLimit {
+  let canGainSlotWithPlus: Bool
+  let account: LiteNativeSession.PurchaseAccount
+  let deadline: Date
+  let purchaseRevision: Int
+
+  @MainActor func isCurrent(in session: LiteNativeSession) -> Bool {
+    account == session.purchaseObservationAccount && session.identity.now() < deadline
+      && purchaseRevision == session.purchases.confirmedUpdates
+  }
+}
+
 extension LiteNativeSession {
   private func woundRequest(
     _ context: LiteDeletionContext, action: String, wound: String? = nil,
-    revision: Int? = nil
+    revision: Int? = nil, onLimit: ((LiteWoundRoster) -> Void)? = nil
   ) async throws -> LiteWoundRoster {
     try context.validate()
     let start = identity.generation
@@ -114,7 +127,11 @@ extension LiteNativeSession {
     }
     try roster.validate(account: context.account)
     if response.statusCode == 409 {
-      if roster.decision == "limit" { throw LiteWoundTrackingError.full(roster.limit) }
+      if action == "open", let wound, roster.decision == "limit",
+        !roster.active.contains(wound), roster.active.count >= roster.limit {
+        onLimit?(roster)
+        throw LiteWoundTrackingError.full(roster.limit)
+      }
       throw LiteWoundTrackingError.changed
     }
     guard action == "status" ? roster.decision == nil : roster.decision == "confirmed" else {
@@ -129,7 +146,8 @@ extension LiteNativeSession {
   }
 
   /// Previously bound groups cannot be silently reopened by a stale handset.
-  func woundPermit(id: String, owner: String?, resume: Bool = false) async throws
+  func woundPermit(id: String, owner: String?, resume: Bool = false,
+                   onLimit: ((LiteWoundRoster) -> Void)? = nil) async throws
     -> LiteWoundPermit?
   {
     guard let context = try await trackingContext() else {
@@ -143,17 +161,33 @@ extension LiteNativeSession {
     let status = try await woundRequest(context, action: "status")
     if status.active.contains(wire) {
       guard status.active.prefix(status.limit).contains(wire) else {
+        onLimit?(status)
         throw LiteWoundTrackingError.full(status.limit)
       }
       return LiteWoundPermit(id: id, account: context.account)
     }
     if owner != nil, !resume { throw LiteWoundTrackingError.ended }
     let result = try await woundRequest(
-      context, action: "open", wound: wire, revision: status.revision)
+      context, action: "open", wound: wire, revision: status.revision, onLimit: onLimit)
     guard result.active.prefix(result.limit).contains(wire) else {
       throw LiteWoundTrackingError.changed
     }
     return LiteWoundPermit(id: id, account: context.account)
+  }
+
+  /// Keep both the capacity notice and its actions scoped to the login used to save.
+  func confirmedSlotLimit(for roster: LiteWoundRoster?, account: PurchaseAccount?,
+                          checkedAt: Date, purchaseRevision: Int) async -> LiteWoundSlotLimit? {
+    guard let roster, roster.active.count >= roster.limit, checkedAt <= identity.now(),
+          let account, account == purchaseObservationAccount,
+          let context = try? await identity.savedResearchContext(),
+          context.account == roster.account_sha256,
+          let login = await identity.dispatchSession(for: context.installation),
+          login.account_sha256 == context.account, login.app_account_token == account.token else { return nil }
+    let deadline = min(checkedAt.addingTimeInterval(300), Date(timeIntervalSince1970: Double(login.expires_at)))
+    let limit = LiteWoundSlotLimit(canGainSlotWithPlus: roster.decision == "limit" && roster.limit == 1 && roster.active.count < 5,
+                                   account: account, deadline: deadline, purchaseRevision: purchaseRevision)
+    return limit.isCurrent(in: self) ? limit : nil
   }
 
   func finishTracking(_ group: LiteWoundGroup) async throws -> String? {
